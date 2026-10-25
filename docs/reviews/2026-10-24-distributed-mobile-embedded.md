@@ -2124,3 +2124,35 @@ work. Dispatch already recorded before a later failed check retains conservative
 unknown evidence; it is not erased. No schema or HTTP/FFI changes are introduced.
 The broader parameter/memory read audit, scoped runtime/SDK integration and original
 distributed/mobile/embedded matrix remain open.
+
+
+### DME113 — Step preparation outlived its initiating claim
+
+Three regressions failed against the preceding core: preparation started a
+credential lookup after transition to Waiting; template I/O lost ownership but
+continued to credential lookup; and deferred fallback resolved credentials using
+a stale evaluation. Each observed one secret lookup where zero was expected.
+
+Both flat and tree execution now pass the original evaluation nonce through
+preparation and deferred fallback. Preparation checks the running tenant claim
+at entry, after template and sandbox waits, and before returning. Credential
+resolution checks ownership before and after each lookup and before publishing
+results. Ownership errors remain infrastructure errors, including in deferred
+fallback, rather than becoming user credential failures. A refreshed instance
+cannot substitute a successor's nonce for the initiating evaluation's nonce.
+Expansion uses a temporary JSON value, preserving the original parameters when
+any reference or ownership check fails.
+
+All nineteen preparation contracts passed, including native/encrypted SQLite
+and required isolated Postgres. They cover the three reproduced cases, complete
+nested resolution, partial-resolution rollback, claim loss during a lookup,
+transient ownership-read recovery and successor-token substitution. The full
+library suites passed 2,091 engine, 533 mobile and 232 storage tests. Workspace
+all-target lint with warnings denied, formatting, documentation and diff checks
+passed. Hosted checks must pass on the exact submitted commit before merge.
+
+These are admission checks, not an atomic credential-read transaction or forced
+interruption of already admitted I/O. Legacy credential lookup scope and
+credential-error retry policy are unchanged. Broader parameter snapshots, memory
+reads, scoped runtime/SDK integration and the original distributed/mobile/
+embedded matrix remain open. No schema or HTTP/FFI changes are introduced.

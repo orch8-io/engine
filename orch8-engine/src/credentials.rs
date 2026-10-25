@@ -182,6 +182,70 @@ pub async fn resolve_in_value(
     Ok(())
 }
 
+/// Keep ownership failures distinct from credential/reference failures so the
+/// caller cannot convert a lost evaluation into a user step failure.
+#[derive(Debug)]
+pub(crate) enum ClaimedResolutionError {
+    Ownership(crate::error::EngineError),
+    Credential(StepError),
+}
+
+pub(crate) async fn resolve_claimed_in_value(
+    storage: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    claim: crate::control::ExecutionClaim,
+    value: &mut Value,
+) -> Result<(), ClaimedResolutionError> {
+    claim
+        .verify(storage, tenant)
+        .await
+        .map_err(ClaimedResolutionError::Ownership)?;
+    let mut resolved = value.clone();
+    resolve_claimed_walk(storage, tenant, claim, &mut resolved).await?;
+    claim
+        .verify(storage, tenant)
+        .await
+        .map_err(ClaimedResolutionError::Ownership)?;
+    *value = resolved;
+    Ok(())
+}
+
+async fn resolve_claimed_walk(
+    storage: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    claim: crate::control::ExecutionClaim,
+    value: &mut Value,
+) -> Result<(), ClaimedResolutionError> {
+    match value {
+        Value::String(reference) if reference.starts_with(SCHEME) => {
+            claim
+                .verify(storage, tenant)
+                .await
+                .map_err(ClaimedResolutionError::Ownership)?;
+            let result = resolve_string(storage, tenant.as_str(), reference).await;
+            claim
+                .verify(storage, tenant)
+                .await
+                .map_err(ClaimedResolutionError::Ownership)?;
+            if let Some(resolved) = result.map_err(ClaimedResolutionError::Credential)? {
+                *value = resolved;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                Box::pin(resolve_claimed_walk(storage, tenant, claim, value)).await?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                Box::pin(resolve_claimed_walk(storage, tenant, claim, value)).await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Resolve a single string. Returns `Ok(None)` if it isn't a `credentials://`
 /// reference (caller should leave the value as-is).
 async fn resolve_string(

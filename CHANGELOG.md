@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Claimed step preparation
+
+- Preserve the evaluation's original claim through template preparation and
+  deferred credential fallback. Recheck ownership across preparation waits and
+  credential lookups, and propagate ownership failures as infrastructure errors.
+- Expand credentials into a temporary value and publish parameters only after
+  complete resolution and a final ownership check. Failed preparation no longer
+  leaves partially expanded credentials in the caller's parameters.
+
 ### Claimed handler entry
 
 - Revalidate the running tenant claim before creating effect ownership metadata

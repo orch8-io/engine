@@ -173,16 +173,22 @@ impl PreparedStep {
         &mut self,
         storage: &dyn StorageBackend,
         instance: &TaskInstance,
-    ) -> Result<(), StepError> {
+        claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), PrepareError> {
         if !self.credentials_deferred {
             return Ok(());
         }
-        crate::credentials::resolve_in_value(
+        crate::credentials::resolve_claimed_in_value(
             storage,
-            instance.tenant_id.as_str(),
+            &instance.tenant_id,
+            crate::control::ExecutionClaim {
+                instance_id: instance.id,
+                token: claim_token,
+            },
             &mut self.resolved_params,
         )
-        .await?;
+        .await
+        .map_err(PrepareError::from)?;
         self.credentials_deferred = false;
         Ok(())
     }
@@ -200,6 +206,17 @@ pub(crate) enum PrepareError {
     /// The step breaks the sub-tenant sandbox ([`crate::embed_sandbox`]) —
     /// fail the step without dispatching it.
     Sandbox(String),
+}
+
+impl From<crate::credentials::ClaimedResolutionError> for PrepareError {
+    fn from(error: crate::credentials::ClaimedResolutionError) -> Self {
+        match error {
+            crate::credentials::ClaimedResolutionError::Ownership(error) => Self::Infra(error),
+            crate::credentials::ClaimedResolutionError::Credential(error) => {
+                Self::Credential(error)
+            }
+        }
+    }
 }
 
 impl PrepareError {
@@ -232,7 +249,16 @@ pub(crate) async fn prepare_step(
     outputs: &OutputsSnapshot,
     defer_credentials: bool,
     sandbox: &crate::embed_sandbox::SandboxPolicy,
+    claim_token: chrono::DateTime<chrono::Utc>,
 ) -> Result<PreparedStep, PrepareError> {
+    let claim = crate::control::ExecutionClaim {
+        instance_id: instance.id,
+        token: claim_token,
+    };
+    claim
+        .verify(storage, &instance.tenant_id)
+        .await
+        .map_err(PrepareError::Infra)?;
     // Context snapshot — reads only `instance.context` + `context_access`, so
     // it is built before template resolution. An error here is infrastructural.
     let step_context = context_for_step(storage, instance, step_def)
@@ -241,15 +267,19 @@ pub(crate) async fn prepare_step(
 
     // Templates first: an author can write `{{context.data.cred_id}}` that
     // resolves to a `credentials://…` ref the next pass then substitutes.
-    let mut resolved_params = match super::param_resolve::resolve_templates_in_params(
+    let templates = super::param_resolve::resolve_templates_in_params(
         storage,
         instance,
         &step_context,
         &step_def.params,
         outputs,
     )
-    .await
-    {
+    .await;
+    claim
+        .verify(storage, &instance.tenant_id)
+        .await
+        .map_err(PrepareError::Infra)?;
+    let mut resolved_params = match templates {
         Ok(p) => p,
         Err(tpl_err) => {
             tracing::error!(
@@ -268,9 +298,14 @@ pub(crate) async fn prepare_step(
     // only run allowlisted handlers and never resolves credentials. Checked on
     // the *resolved* params (a template can mint a `credentials://` ref) and
     // before any credential is expanded, whatever the stored sequence says.
-    if crate::embed_sandbox::is_sandboxed(storage, instance)
+    let sandboxed = crate::embed_sandbox::is_sandboxed(storage, instance)
         .await
-        .map_err(PrepareError::Infra)?
+        .map_err(PrepareError::Infra)?;
+    claim
+        .verify(storage, &instance.tenant_id)
+        .await
+        .map_err(PrepareError::Infra)?;
+    if sandboxed
         && let Err(reason) = crate::embed_sandbox::check_step(step_def, &resolved_params, sandbox)
     {
         tracing::warn!(
@@ -287,21 +322,26 @@ pub(crate) async fn prepare_step(
     // Hard-placed steps keep the references for the executor instead.
     let credentials_deferred = defer_credentials && carries_credentials;
     if !credentials_deferred
-        && let Err(step_err) = crate::credentials::resolve_in_value(
+        && carries_credentials
+        && let Err(error) = crate::credentials::resolve_claimed_in_value(
             storage,
-            instance.tenant_id.as_str(),
+            &instance.tenant_id,
+            claim,
             &mut resolved_params,
         )
         .await
     {
-        tracing::warn!(
-            instance_id = %instance.id,
-            block_id = %step_def.id,
-            error = ?step_err,
-            "failed to resolve credentials for step"
-        );
-        return Err(PrepareError::Credential(step_err));
+        let error = PrepareError::from(error);
+        if let PrepareError::Credential(ref step_error) = error {
+            tracing::warn!(instance_id = %instance.id, block_id = %step_def.id,
+                    error = ?step_error, "failed to resolve credentials for step");
+        }
+        return Err(error);
     }
+    claim
+        .verify(storage, &instance.tenant_id)
+        .await
+        .map_err(PrepareError::Infra)?;
 
     // Cache key template (never fails — falls back to the literal key).
     let resolved_cache_key = step_def.cache_key.as_ref().map(|ck| {
@@ -579,6 +619,7 @@ pub(crate) async fn execute_step_node_with_clock(
         outputs,
         defer_credentials,
         handlers.embed_sandbox(),
+        claim_token,
     )
     .await
     {
@@ -635,19 +676,24 @@ pub(crate) async fn execute_step_node_with_clock(
     // A fallback handler may not be hard-placed: resolve anything deferred.
     if prepared.credentials_deferred
         && !crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?
-        && prepared
-            .resolve_deferred_credentials(storage.as_ref(), instance)
-            .await
-            .is_err()
     {
-        evaluator::persist_node_state(
-            storage.as_ref(),
-            node,
-            orch8_types::execution::NodeState::Failed,
-            Some(claim_token),
-        )
-        .await?;
-        return Ok(false);
+        match prepared
+            .resolve_deferred_credentials(storage.as_ref(), instance, claim_token)
+            .await
+        {
+            Ok(()) => {}
+            Err(PrepareError::Infra(error)) => return Err(error),
+            Err(_) => {
+                evaluator::persist_node_state(
+                    storage.as_ref(),
+                    node,
+                    orch8_types::execution::NodeState::Failed,
+                    Some(claim_token),
+                )
+                .await?;
+                return Ok(false);
+            }
+        }
     }
     let PreparedStep {
         step_context,
@@ -1941,3 +1987,6 @@ mod tests {
         assert_eq!(arr[2]["existing"], "c");
     }
 }
+
+#[cfg(test)]
+mod preparation_claim_tests;
