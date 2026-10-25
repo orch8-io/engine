@@ -242,7 +242,15 @@ requirement. Keep the implementation in the current runtime and storage modules;
 no extra service, broker, or deployment is required.
 
 The internal private sync caller and durable request admission are implemented.
-Next carry immutable owners through actual instance materialization, handler and
-builtin dispatch, recovery, listeners and every execution write.
+An internal native router now selects immutable account/catalog/epoch bindings
+from durable running claims and retains process-local physical permits through
+host destruction (two globally, one per stable account). Eight contracts cover
+four scopes, colliding databases, retirement/reopen and independent pools.
+Registration caps are counts; retired bindings stay charged until hub teardown.
+This is not yet wired into production execution. Next implement account-close
+and shutdown cleanup with bounded foreign-reference destruction, then carry
+owners through actual materialization, builtin/read boundaries, recovery,
+listeners and every execution write. Other callback classes and independent
+processes still need shared-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open
 until their complete runtime and SDK evidence exists.

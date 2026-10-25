@@ -1854,3 +1854,36 @@ host code or echoing raw native inputs/resolved credentials; host mocks remain
 available when realistic output shapes are required.
 These checks apply to native callback registration; scoped routing and the rest of
 the original runtime/SDK completion matrix remain open.
+
+
+### DME106 — Frozen native owner routing and physical admission (internal)
+
+The internal catalog router resolves a running native claim to its durable
+account/catalog/epoch proof before selecting an immutable handler binding. It
+requires the executor's exact backend identity, accepts configured decorators,
+and refuses legacy fallback. Identical names in four account/catalog combinations
+route to distinct host objects through the real step registry and effect ledger.
+A foreign database with a colliding, independently valid claim cannot dispatch.
+
+Scoped native invocations share a process-local limit of two physical calls and
+one per stable account, across hubs, pools and login epochs. The owned permit
+covers queued work, claim verification, durable effect admission, detached host
+execution and final foreign-object destruction. Controlled tests show retirement,
+caller cancellation and hub recreation cannot reclaim a live slot; another
+account can progress. Retirement while queued prevents host entry.
+
+Registration counts are bounded at 256 per hub, 64 per account and 32 per catalog.
+Retired bindings remain resident and charged until hub teardown. These limits do
+not bound opaque host-object bytes. Explicit account-close/shutdown detach and
+bounded destruction of idle foreign references remain necessary before production
+integration. The runtime constructor is trusted to pair the mobile store with the
+executor backend; arbitrary decorator internals are not inspected.
+
+Validation passed 522 mobile library tests, eight scoped callback contracts,
+21 existing native-handler tests, and workspace/all-target Clippy with warnings
+denied. Contracts include decorator preflight failure, immutable binding refusal,
+global saturation, foreign destruction and registration limits across reopen.
+No production scoped materializer or public SDK API is introduced. This budget
+covers scoped native callbacks only; other callback classes, initial routing SQL,
+independent processes, scoped builtin/read boundaries, listeners and recovery
+remain open under ADR-0002. Hosted checks must pass on the submitted commit.

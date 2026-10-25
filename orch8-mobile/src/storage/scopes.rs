@@ -45,13 +45,13 @@ async fn require_reconciled(
     Ok((version, digest))
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct AccountScope {
     id: String,
     epoch: i64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub(crate) struct CatalogScope {
     account: AccountScope,
     id: String,
@@ -60,6 +60,12 @@ pub(crate) struct CatalogScope {
 impl CatalogScope {
     pub(crate) fn account_id(&self) -> &str {
         &self.account.id
+    }
+    pub(crate) fn catalog_id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) fn epoch(&self) -> i64 {
+        self.account.epoch
     }
 }
 
@@ -139,6 +145,33 @@ async fn write_metadata_in(
 }
 
 impl MobileStorage {
+    /// Resolve only a proven running scoped request, in one `SQLite` snapshot.
+    /// The native entry boundary revalidates the claim after routing/queueing.
+    pub(crate) async fn catalog_callback_scope(
+        &self,
+        id: orch8_types::ids::InstanceId,
+        tenant: &orch8_types::ids::TenantId,
+        token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<CatalogScope, StorageError> {
+        let owner: Option<(String,String,i64)> = sqlx::query_as(
+            "SELECT r.account_id,r.catalog_id,r.owner_epoch FROM mobile_catalog_run_requests r
+             JOIN task_instances i ON i.id=r.id JOIN mobile_accounts a ON a.id=r.account_id
+             WHERE i.id=?1 AND i.tenant_id=?2 AND i.state='running' AND i.claimed_at=?3
+             AND i.tenant_id='mobile-account-' || r.account_id AND i.namespace='catalog-' || r.catalog_id
+             AND i.sequence_id=r.selected_sequence_id AND r.state='prepared'
+             AND a.active=1 AND a.epoch=r.owner_epoch"
+        ).bind(id.to_string()).bind(tenant.as_str()).bind(token.to_rfc3339()).fetch_optional(self.pool()).await?;
+        let (account_id, id, epoch) =
+            owner.ok_or_else(|| invalid("scoped native callback is not authorized"))?;
+        Ok(CatalogScope {
+            account: AccountScope {
+                id: account_id,
+                epoch,
+            },
+            id,
+        })
+    }
+
     /// Reuse an active account, or reopen a retired account with a new epoch.
     /// Identity changes require a separate explicit migration, not token refresh.
     pub(crate) async fn open_account_scope(

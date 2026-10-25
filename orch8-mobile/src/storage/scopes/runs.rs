@@ -271,3 +271,6 @@ impl MobileStorage {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod callback_tests;
