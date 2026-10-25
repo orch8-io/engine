@@ -50,6 +50,7 @@ mod federation;
 mod helpers;
 mod instances;
 mod kv_state;
+mod memory;
 mod misc;
 mod mobile_execution;
 mod mobile_sync;
@@ -139,6 +140,7 @@ pub const BUNDLED_SCHEMA_VERSION: i64 = schema::SCHEMA_VERSION;
 pub struct SqliteStorage {
     recovery_owner: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<ownership::Owner>>>>,
     closing: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
+    memory_database: Option<std::sync::Arc<memory::MemoryDatabase>>,
     pub(crate) pool: SqlitePool,
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
     /// methods return `Unsupported`.
@@ -258,14 +260,13 @@ impl SqliteStorage {
             // fires when a task_instances row is deleted. Must match file mode.
             .foreign_keys(true);
 
-        let pool = pool_options(1) // SQLite in-memory requires single connection
-            .connect_with(opts)
-            .await
-            .map_err(|e| StorageError::Connection(e.to_string()))?;
+        let (pool, memory_database) =
+            memory::connect(pool_options(1), opts, "sqlite::memory:").await?;
 
         let storage = Self {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
             closing: std::sync::Mutex::new(None),
+            memory_database,
             pool,
             artifact_store: None,
         };
@@ -275,7 +276,8 @@ impl SqliteStorage {
 
     /// Create a file-backed SQLite storage with WAL mode for concurrent reads.
     pub async fn file(path: &str) -> Result<Self, StorageError> {
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{path}"))
+        let uri = format!("sqlite:{path}");
+        let opts = SqliteConnectOptions::from_str(&uri)
             .map_err(|e| StorageError::Connection(e.to_string()))?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -284,14 +286,12 @@ impl SqliteStorage {
             .foreign_keys(true);
         let opts = space_reclaiming(opts);
 
-        let pool = pool_options(8)
-            .connect_with(opts)
-            .await
-            .map_err(|e| StorageError::Connection(e.to_string()))?;
+        let (pool, memory_database) = memory::connect(pool_options(8), opts, &uri).await?;
 
         let storage = Self {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
             closing: std::sync::Mutex::new(None),
+            memory_database,
             pool,
             artifact_store: None,
         };
@@ -315,7 +315,8 @@ impl SqliteStorage {
     /// tolerates this: server commands are redelivered, claims are journaled
     /// idempotently, and sync cursors only move forward after success.
     pub async fn file_mobile(path: &str) -> Result<Self, StorageError> {
-        let opts = SqliteConnectOptions::from_str(&format!("sqlite:{path}"))
+        let uri = format!("sqlite:{path}");
+        let opts = SqliteConnectOptions::from_str(&uri)
             .map_err(|e| StorageError::Connection(e.to_string()))?
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
@@ -324,15 +325,17 @@ impl SqliteStorage {
             .foreign_keys(true);
         let opts = space_reclaiming(opts);
 
-        let pool = pool_options(5)
-            .idle_timeout(Duration::from_secs(30))
-            .connect_with(opts)
-            .await
-            .map_err(|e| StorageError::Connection(e.to_string()))?;
+        let (pool, memory_database) = memory::connect(
+            pool_options(5).idle_timeout(Duration::from_secs(30)),
+            opts,
+            &uri,
+        )
+        .await?;
 
         let storage = Self {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
             closing: std::sync::Mutex::new(None),
+            memory_database,
             pool,
             artifact_store: None,
         };
@@ -389,6 +392,7 @@ impl SqliteStorage {
             artifact_store: None,
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(Some(owner))),
             closing: std::sync::Mutex::new(None),
+            memory_database: None,
         };
         storage.create_tables().await?;
         Ok(storage)
@@ -409,10 +413,14 @@ impl SqliteStorage {
                 let (completion, observer) = tokio::sync::watch::channel(false);
                 let pool = self.pool.clone();
                 let owner = self.recovery_owner.clone();
+                let memory_database = self.memory_database.clone();
                 // One independently owned close per pool. Dropping any waiter
                 // cannot cancel draining or its physical ownership barrier.
                 tokio::spawn(async move {
                     pool.close().await;
+                    if let Some(memory_database) = memory_database {
+                        memory_database.close().await;
+                    }
                     let retired = owner
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3988,6 +3996,7 @@ mod tests {
         let storage = SqliteStorage {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
             closing: std::sync::Mutex::new(None),
+            memory_database: None,
             pool,
             artifact_store: None,
         };
