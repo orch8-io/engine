@@ -36,6 +36,36 @@ private func refused(_ operation: () throws -> Void) throws {
     do { try operation() } catch { return }
     throw Failure(message: "operation unexpectedly accepted")
 }
+private final class SnapshotProbe: NSObject, CatalogSnapshotObserver, @unchecked Sendable {
+    private let runId: String
+    private let accountId: String
+    private let catalogId: String
+    private let expectShutdown: Bool
+    private let finished: @Sendable (Result<Bool, Error>) -> Void
+    init(run: Orch8CatalogRun, expectShutdown: Bool, finished: @escaping @Sendable (Result<Bool, Error>) -> Void) {
+        runId = run.instanceId; accountId = run.accountId; catalogId = run.catalogId
+        self.expectShutdown = expectShutdown; self.finished = finished
+    }
+    func onSnapshot(snapshot: CatalogRunSnapshot?) {
+        if let snapshot, snapshot.instanceId != runId || snapshot.accountId != accountId || snapshot.catalogId != catalogId {
+            finished(.failure(Failure(message: "observer crossed run ownership")))
+        }
+    }
+    func onError(error: Orch8Exception) { finished(.success(expectShutdown && error.kind == .shutdown)) }
+    func onComplete() { finished(.success(!expectShutdown)) }
+}
+private func checkObservation(_ run: Orch8CatalogRun, expectShutdown: Bool = false) throws {
+    var subscription: CatalogSnapshotSubscription?
+    defer { subscription?.close() }
+    let accepted: Bool = try wait { done in
+        do {
+            subscription = try run.subscribeSnapshots(observer: SnapshotProbe(run: run, expectShutdown: expectShutdown, finished: done),
+                pollIntervalMs: 100)
+        } catch { done(.failure(error)) }
+    }
+    try check(accepted, "Swift subscription did not report the expected completion/error")
+}
+
 private final class Echo: NSObject, Orch8CatalogStepHandler, @unchecked Sendable {
     private let lock = NSLock()
     private var contexts: [CatalogCallbackContext] = []
@@ -120,6 +150,7 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
             let completed = try advance(engine, run, .completed)
             let data = try JSONSerialization.jsonObject(with: Data(completed.dataJson.utf8)) as! [String: Any]
             try check(data["left"] as? String == "yes" && data["right"] as? String == "yes", "approval data mismatch")
+            try checkObservation(run)
             let page: CatalogRunPage = try object { catalog.history(cursor: nil, limit: 1, completionHandler: $0) }
             try check(page.items.count == 1 && page.next == nil, "history mismatch")
         }
@@ -134,6 +165,7 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         let catalog = retained[0].0
         try catalog.closeView()
         try refused { let _: CatalogRunPage = try object { catalog.history(cursor: nil, limit: 1, completionHandler: $0) } }
+        try checkObservation(retained[0].1, expectShutdown: true)
         print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, history and close fences passed")
     }
 }

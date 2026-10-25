@@ -218,6 +218,16 @@ collection when the screen leaves or a prepared request is abandoned. Account
 retirement and close fences propagate their typed errors. Poll intervals must
 be finite and positive for both scoped and legacy observers.
 
+Swift uses `run.subscribeSnapshots(observer:pollIntervalMs:)`, returning a
+`CatalogSnapshotSubscription` to close when its screen leaves. Implement
+`CatalogSnapshotObserver.onSnapshot`, `onError` and `onComplete`; callbacks run on
+the IO dispatcher, so dispatch UI changes to the main thread. Ordinary errors
+are delivered through `onError`, and closing a subscription cancels its task
+without closing the run or cancelling durable work. A previously accepted host
+callback may finish. The scoped raw `Flow` method is available in shared Kotlin
+and hidden from Objective-C/Swift: Kotlin's raw `Flow.collect` export only
+converts cancellation errors and can abort the process on ordinary exceptions.
+
 `close()` disposes one object, so a run survives disposal of its parent views.
 `closeView()` explicitly fences that view and its descendants. `account.retire()`
 durably retires its epoch across catalogs. None of these operations deletes

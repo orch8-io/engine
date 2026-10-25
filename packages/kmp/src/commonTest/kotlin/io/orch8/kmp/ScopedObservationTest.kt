@@ -119,12 +119,66 @@ class ScopedObservationTest {
     }
 
     @Test
+    fun subscriptionCompletesOnceAndCloseBeforeSchedulingStartsNoRead() = runTest {
+        val backend = ObservedRunBackend()
+        backend.next = { backend.snapshot(InstanceState.COMPLETED) }
+        val run = Orch8CatalogRun(backend, StandardTestDispatcher(testScheduler))
+        var completed = 0
+        var emitted = 0
+        val observer = object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) { emitted++ }
+            override fun onError(error: Orch8Exception) = error("unexpected error")
+            override fun onComplete() { completed++ }
+        }
+        val cancelled = run.subscribeSnapshots(observer, 100)
+        cancelled.close(); cancelled.close(); runCurrent()
+        assertEquals(0, backend.reads)
+        val active = run.subscribeSnapshots(observer, 100)
+        runCurrent()
+        assertEquals(1, emitted)
+        assertEquals(1, completed)
+        active.close()
+        advanceTimeBy(1000); runCurrent()
+        assertEquals(1, backend.reads)
+    }
+
+    @Test
+    fun subscriptionReportsClosedViewAndQuarantinesBrokenErrorCallbacks() = runTest {
+        val backend = ObservedRunBackend()
+        val run = Orch8CatalogRun(backend, StandardTestDispatcher(testScheduler))
+        val errors = mutableListOf<Orch8ErrorKind>()
+        var snapshots = 0
+        val subscription = run.subscribeSnapshots(object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) { snapshots++ }
+            override fun onError(error: Orch8Exception) { errors += error.kind; error("broken error callback") }
+            override fun onComplete() = error("unexpected completion")
+        }, 100)
+        runCurrent()
+        run.closeView()
+        advanceTimeBy(100); runCurrent()
+        assertEquals(listOf(Orch8ErrorKind.SHUTDOWN), errors)
+        assertEquals(1, snapshots)
+        advanceTimeBy(1000); runCurrent()
+        assertEquals(1, backend.reads)
+        subscription.close()
+    }
+
+    @Test
     fun invalidIntervalsNeverReachTheBackend() = runTest {
         val backend = ObservedRunBackend()
         val run = Orch8CatalogRun(backend, StandardTestDispatcher(testScheduler))
         for (interval in listOf(Duration.ZERO, (-1).milliseconds, Duration.INFINITE)) {
             assertFailsWith<IllegalArgumentException> { run.observeSnapshots(interval).first() }
         }
+        val observer = object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) = error("unexpected snapshot")
+            override fun onError(error: Orch8Exception) = error("unexpected callback")
+            override fun onComplete() = error("unexpected completion")
+        }
+        for (interval in listOf(0L, -1L, Long.MAX_VALUE)) {
+            assertFailsWith<IllegalArgumentException> { run.subscribeSnapshots(observer, interval) }
+        }
+        runCurrent()
         assertEquals(0, backend.reads)
     }
 }

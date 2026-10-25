@@ -6,6 +6,8 @@ import io.orch8.kmp.internal.CatalogCursorBackend
 import io.orch8.kmp.internal.CatalogRunBackend
 import io.orch8.kmp.internal.BlockingCatalogStepHandler
 import io.orch8.kmp.internal.runHandlerBlocking
+import kotlin.native.HiddenFromObjC
+import kotlin.experimental.ExperimentalObjCRefinement
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
@@ -133,7 +135,8 @@ class Orch8CatalogRun internal constructor(private val backend: CatalogRunBacken
      * Every poll rechecks native ownership. Closing/retiring the view propagates
      * its typed error. The flow retains this view, never the root engine.
      */
-    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    @OptIn(ExperimentalObjCRefinement::class)
+    @HiddenFromObjC
     fun observeSnapshots(pollInterval: Duration = 500.milliseconds): Flow<CatalogRunSnapshot?> = flow {
         require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
         while (true) {
@@ -143,6 +146,14 @@ class Orch8CatalogRun internal constructor(private val backend: CatalogRunBacken
             delay(pollInterval)
         }
     }.distinctUntilChanged()
+
+    /** Swift-safe callbacks on the IO dispatcher; close the subscription when its UI leaves. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun subscribeSnapshots(observer: CatalogSnapshotObserver, pollIntervalMs: Long = 500): CatalogSnapshotSubscription {
+        val interval = pollIntervalMs.milliseconds
+        require(interval.isFinite() && interval.isPositive()) { "pollIntervalMs must be finite and greater than zero" }
+        return subscribeCatalogSnapshots(this, observer, interval, io)
+    }
 
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun cancel(): InstanceState? = withContext(io) { backend.cancel() }

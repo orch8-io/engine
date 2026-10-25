@@ -3330,3 +3330,36 @@ updated framework. Actual iOS framework compilation and Swift bridge typecheck,
 actionlint, documentation and whitespace checks pass. CI now runs the common
 Kotlin/Native tests before linking its host framework. Production Rust and
 bindings are unchanged in this slice.
+
+### DME142 — Give Swift a safe lifetime and error boundary for scoped observation
+
+An actual Swift/Kotlin/Native/Rust subprocess reproduced a process abort when
+collecting the raw scoped Flow after closing its view. The generated Flow.collect
+bridge converts only CancellationException; an ordinary typed Shutdown exception
+is fatal at that foreign boundary. Annotating the flow factory cannot fix the
+separate collection boundary.
+
+Shared Kotlin keeps `observeSnapshots()`. Swift now has
+`subscribeSnapshots(observer, pollIntervalMs)` and an explicitly cancellable
+subscription. The raw scoped Flow is hidden from Objective-C exports. Snapshot,
+error and completion callbacks stay within the typed observer protocol; broken
+error callbacks cannot become unhandled native coroutine exceptions. Each
+subscription owns and cancels its own task, clears its observer reference on
+close/completion/error, and retains no root engine. Closing a subscription does
+not invalidate a run or cancel durable work; an already accepted callback may
+finish. The API accepts milliseconds directly, avoiding Kotlin Duration's ABI
+representation in Swift calls.
+
+Common tests cover completion, cancellation before scheduling, view closure and
+throwing error callbacks. The real native host fixture now checks all four
+terminal subscriptions and a closed-view error delivered to Swift without a
+process abort. Native push listeners and the pre-existing raw legacy Flow Swift
+exports still need their own supported observation boundary; this slice does
+not claim that broader interop work is complete.
+
+Final local validation: 84 common/JVM and 75 Kotlin/Native common tests pass,
+with no failures or skips, including invalid millisecond intervals and overflow
+before scheduling. The real Swift/Rust host fixture passes terminal and closed
+subscriptions without an abort. The iOS framework/Swift bridge typecheck, docs
+and whitespace checks pass. The generated header exposes the callback
+subscription and omits the raw scoped Flow.
