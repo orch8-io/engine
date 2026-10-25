@@ -603,6 +603,7 @@ pub fn step_context(
     let context: ExecutionContext =
         serde_json::from_value(task.context.clone()).unwrap_or_default();
     StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id: InstanceId::from_uuid(task.instance_id),
         tenant_id,

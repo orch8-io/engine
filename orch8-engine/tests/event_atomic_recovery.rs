@@ -223,6 +223,7 @@ async fn repark_registration_cannot_overwrite_a_concurrent_partial_match() {
         .unwrap();
     let pause = f.faults.on("upsert_event_wait_claimed").times(1).pause();
     let context = StepContext {
+        effect_admission: None,
         claim_token: parent.claimed_at,
         instance_id: f.id,
         tenant_id: parent.tenant_id,

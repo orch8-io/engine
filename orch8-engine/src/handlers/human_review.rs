@@ -190,6 +190,7 @@ mod tests {
     #[tokio::test]
     async fn returns_review_context() {
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("T"),
@@ -214,6 +215,7 @@ mod tests {
     #[tokio::test]
     async fn defaults_when_minimal_params() {
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("T"),
@@ -241,6 +243,7 @@ mod tests {
             auto_decide: None,
         };
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("T"),
@@ -283,6 +286,7 @@ mod tests {
             auto_decide: None,
         };
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("T"),

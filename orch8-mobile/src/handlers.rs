@@ -44,11 +44,16 @@ pub(crate) fn register_foreign_handler(
     stragglers: Arc<Stragglers>,
 ) {
     let handler_name = name.to_string();
-    registry.register(name, move |ctx: StepContext| {
+    registry.register_with_deferred_effect_admission(name, move |ctx: StepContext| {
         let handler = Arc::clone(&handler);
         let name = handler_name.clone();
         let stragglers = Arc::clone(&stragglers);
         async move {
+            if ctx.is_dry_run() {
+                return Ok(serde_json::json!({
+                    "dry_run": true, "handler": name, "would": "invoke registered handler",
+                }));
+            }
             // MC-06: a timed-out native call cannot be interrupted. A retry
             // dispatched by the local scheduler must not run concurrently with
             // that straggler (double side effects), so refuse to start and let
@@ -69,7 +74,14 @@ pub(crate) fn register_foreign_handler(
                 tenant_id: ctx.tenant_id.clone(),
                 token,
             });
-            let mut call = NativeInvocation::spawn(handler, name.clone(), input, stragglers, claim);
+            let mut call = NativeInvocation::spawn(
+                handler,
+                name.clone(),
+                input,
+                stragglers,
+                claim,
+                ctx.effect_admission,
+            );
 
             let result = match tokio::time::timeout(timeout, call.result()).await {
                 Ok(joined) => joined.map_err(|e| StepError::Permanent {
@@ -148,6 +160,7 @@ mod tests {
 
     async fn context(params: Value) -> StepContext {
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("mobile"),

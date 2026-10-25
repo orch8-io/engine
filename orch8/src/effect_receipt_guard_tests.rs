@@ -22,6 +22,7 @@ const TENANT: &str = "tenant_1";
 
 fn step(storage: Arc<dyn StorageBackend>, instance_id: InstanceId, dry_run: bool) -> StepContext {
     StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id,
         tenant_id: TenantId::unchecked(TENANT),

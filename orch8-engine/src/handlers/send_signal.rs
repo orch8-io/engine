@@ -144,6 +144,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: caller.id,
             tenant_id: caller.tenant_id.clone(),

@@ -266,6 +266,7 @@ async fn run_abort_compensation(
         }
     };
     let step_ctx = crate::handlers::StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id: instance.id,
         tenant_id: instance.tenant_id.clone(),

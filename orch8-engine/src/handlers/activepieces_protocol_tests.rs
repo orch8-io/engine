@@ -65,6 +65,7 @@ async fn context(params: Value, dry_run: bool) -> StepContext {
     let mut execution_context = ExecutionContext::default();
     execution_context.runtime.dry_run = dry_run;
     StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id: InstanceId::new(),
         tenant_id: TenantId::unchecked("tenant-a"),

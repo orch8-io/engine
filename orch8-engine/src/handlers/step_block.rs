@@ -1110,6 +1110,7 @@ where
     Fut: std::future::Future<Output = Result<serde_json::Value, StepError>>,
 {
     let ctx = super::StepContext {
+        effect_admission: None,
         claim_token: Some(claim_token),
         instance_id: instance.id,
         tenant_id: instance.tenant_id.clone(),

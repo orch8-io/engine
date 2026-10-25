@@ -291,10 +291,13 @@ async fn run_step_core(
         }
     })?;
 
-    let mut effect_guard = if exec.context.runtime.dry_run {
+    let deferred_effect = handlers.defers_effect_admission(&exec.handler_name);
+    let mut effect_guard = if exec.context.runtime.dry_run
+        || (!deferred_effect && !crate::release_diff::handler_has_side_effects(&exec.handler_name))
+    {
         None
     } else {
-        crate::effect_guard::EffectGuard::begin(
+        let mut guard = crate::effect_guard::EffectGuard::prepare(
             storage.as_ref(),
             &exec.tenant_id,
             exec.instance_id,
@@ -303,7 +306,19 @@ async fn run_step_core(
             &exec.params,
             exec.attempt,
         )
-        .await?
+        .await?;
+        if !deferred_effect && let Some(guard) = &mut guard {
+            guard.dispatch().await?;
+        }
+        guard
+    };
+
+    let effect_admission = if deferred_effect {
+        effect_guard
+            .as_ref()
+            .map(|guard| guard.admission(Arc::clone(storage)))
+    } else {
+        None
     };
 
     let instance_id = exec.instance_id;
@@ -327,6 +342,7 @@ async fn run_step_core(
     );
 
     let step_ctx = StepContext {
+        effect_admission: effect_admission.clone(),
         claim_token,
         instance_id,
         tenant_id: exec.tenant_id,
@@ -341,7 +357,13 @@ async fn run_step_core(
     let handler_fut = handler(step_ctx).instrument(step_span);
     let result = if let Some(dur) = timeout {
         let Ok(result) = tokio::time::timeout(dur, handler_fut).await else {
-            if let Some(guard) = effect_guard.take() {
+            if let Some(mut guard) = effect_guard.take() {
+                if effect_admission
+                    .as_ref()
+                    .is_some_and(crate::effect_guard::EffectAdmission::is_admitted)
+                {
+                    guard.refresh().await?;
+                }
                 guard.mark_unknown().await?;
             }
             return Err(EngineError::StepTimeout {
@@ -354,6 +376,16 @@ async fn run_step_core(
         handler_fut.await
     };
 
+    if let Some(admission) = &effect_admission {
+        if let Some(error) = admission.take_failure() {
+            return Err(error);
+        }
+        if admission.is_admitted()
+            && let Some(guard) = &mut effect_guard
+        {
+            guard.refresh().await?;
+        }
+    }
     match result {
         Ok(output) => {
             if let Some(guard) = effect_guard.take() {

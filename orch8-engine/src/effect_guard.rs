@@ -15,10 +15,65 @@ use orch8_types::continuity_advanced::{InvariantRule, WorkflowInvariant};
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use uuid::Uuid;
 
 use crate::dataflow::hex_sha256;
 use crate::error::EngineError;
+
+/// Single-use capability to move a prepared native effect across the durable
+/// dispatch boundary. Its fields are private and it is never deserialized.
+#[derive(Clone)]
+pub struct EffectAdmission {
+    inner: Arc<Admission>,
+}
+
+struct Admission {
+    storage: Arc<dyn StorageBackend>,
+    receipt: EffectReceipt,
+    started: AtomicBool,
+    admitted: AtomicBool,
+    failure: Mutex<Option<EngineError>>,
+}
+
+impl EffectAdmission {
+    /// Call only after native preflight/cancellation checks and before host code.
+    /// Once this starts, interruption is an ambiguous durable dispatch window.
+    pub async fn admit(&self) -> Result<(), orch8_types::error::StepError> {
+        if self.inner.started.swap(true, Ordering::AcqRel) {
+            return Err(orch8_types::error::StepError::ClaimLost);
+        }
+        let mut guard = EffectGuard {
+            storage: self.inner.storage.as_ref(),
+            receipt: self.inner.receipt.clone(),
+        };
+        if let Err(error) = guard.dispatch().await {
+            *self
+                .inner
+                .failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+            return Err(orch8_types::error::StepError::ClaimLost);
+        }
+        self.inner.admitted.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn is_admitted(&self) -> bool {
+        self.inner.admitted.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn take_failure(&self) -> Option<EngineError> {
+        self.inner
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
 
 pub(crate) struct EffectGuard<'a> {
     storage: &'a dyn StorageBackend,
@@ -38,6 +93,32 @@ impl<'a> EffectGuard<'a> {
         if !crate::release_diff::handler_has_side_effects(handler) {
             return Ok(None);
         }
+        let Some(mut guard) = Self::prepare(
+            storage,
+            tenant_id,
+            instance_id,
+            block_id,
+            handler,
+            params,
+            attempt,
+        )
+        .await?
+        else {
+            return Ok(None);
+        };
+        guard.dispatch().await?;
+        Ok(Some(guard))
+    }
+
+    pub(crate) async fn prepare(
+        storage: &'a dyn StorageBackend,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        handler: &str,
+        params: &Value,
+        attempt: u32,
+    ) -> Result<Option<Self>, EngineError> {
         let execution = ensure_effect_scope(storage, tenant_id, instance_id).await?;
 
         if let Some(mut unresolved) = storage
@@ -103,8 +184,36 @@ impl<'a> EffectGuard<'a> {
             EffectState::Prepared => {}
             _ => return Err(blocked(&guard.receipt)),
         }
-        guard.dispatch().await?;
         Ok(Some(guard))
+    }
+
+    pub(crate) fn admission(&self, storage: Arc<dyn StorageBackend>) -> EffectAdmission {
+        EffectAdmission {
+            inner: Arc::new(Admission {
+                storage,
+                receipt: self.receipt.clone(),
+                started: AtomicBool::new(false),
+                admitted: AtomicBool::new(false),
+                failure: Mutex::new(None),
+            }),
+        }
+    }
+
+    pub(crate) async fn refresh(&mut self) -> Result<(), EngineError> {
+        let current = self
+            .storage
+            .get_effect_receipt(&self.receipt.tenant_id, self.receipt.id)
+            .await?
+            .ok_or_else(|| {
+                EngineError::InvalidConfig("native effect receipt disappeared".into())
+            })?;
+        if !same_effect_identity(&current, &self.receipt) {
+            return Err(EngineError::InvalidConfig(
+                "native effect identity changed".into(),
+            ));
+        }
+        self.receipt = current;
+        Ok(())
     }
 
     /// Deterministic id of this attempt's receipt. External worker tasks
@@ -119,10 +228,14 @@ impl<'a> EffectGuard<'a> {
     }
 
     pub(crate) async fn mark_unknown(mut self) -> Result<(), EngineError> {
+        // Native work cancelled before durable admission is still safely prepared.
+        if self.receipt.state == EffectState::Prepared {
+            return Ok(());
+        }
         self.advance(EffectState::Unknown).await
     }
 
-    async fn dispatch(&mut self) -> Result<(), EngineError> {
+    pub(crate) async fn dispatch(&mut self) -> Result<(), EngineError> {
         let guards = load_effect_commit_guards(self.storage, &self.receipt).await?;
         if guards.is_empty() {
             return self.advance(EffectState::Dispatched).await;
@@ -1104,5 +1217,179 @@ mod tests {
                 .count(),
             1
         );
+    }
+    fn native_execution(instance: &orch8_types::instance::TaskInstance) -> StepExecParams {
+        StepExecParams {
+            claim_token: None,
+            instance_id: instance.id,
+            tenant_id: instance.tenant_id.clone(),
+            block_id: BlockId::new("native"),
+            handler_name: "native".into(),
+            params: serde_json::json!({}),
+            context: ExecutionContext::default(),
+            attempt: 0,
+            timeout: None,
+            externalize_threshold: 0,
+            wait_for_input: None,
+            cache_key: None,
+            output_schema: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unadmitted_caller_cannot_settle_another_callers_native_dispatch() {
+        let (storage, instance) = ordinary_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let first_entered = Arc::new(tokio::sync::Notify::new());
+        let first_release = Arc::new(tokio::sync::Notify::new());
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut handlers = HandlerRegistry::new();
+        let (first_ready, first_gate, second_ready, second_gate, call_count) = (
+            first_entered.clone(),
+            first_release.clone(),
+            second_entered.clone(),
+            second_release.clone(),
+            calls.clone(),
+        );
+        handlers.register_with_deferred_effect_admission("native", move |ctx| {
+            let (first_ready, first_gate, second_ready, second_gate, call_count) = (
+                first_ready.clone(),
+                first_gate.clone(),
+                second_ready.clone(),
+                second_gate.clone(),
+                call_count.clone(),
+            );
+            async move {
+                if call_count.fetch_add(1, Ordering::SeqCst) == 0 {
+                    first_ready.notify_one();
+                    first_gate.notified().await;
+                    Err(orch8_types::error::StepError::Retryable {
+                        message: "preflight failed before admission".into(),
+                        details: None,
+                    })
+                } else {
+                    ctx.effect_admission.as_ref().unwrap().admit().await?;
+                    second_ready.notify_one();
+                    second_gate.notified().await;
+                    Ok(serde_json::json!({}))
+                }
+            }
+        });
+        let handlers = Arc::new(handlers);
+        let exec = native_execution(&instance);
+        let test_storage = storage.clone();
+        let test_handlers = handlers.clone();
+        let first =
+            tokio::spawn(
+                async move { execute_step_dry(&test_storage, &test_handlers, exec).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(5), first_entered.notified())
+            .await
+            .unwrap();
+        let exec = native_execution(&instance);
+        let test_storage = storage.clone();
+        let test_handlers = handlers.clone();
+        let second =
+            tokio::spawn(
+                async move { execute_step_dry(&test_storage, &test_handlers, exec).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(5), second_entered.notified())
+            .await
+            .unwrap();
+        first_release.notify_one();
+        assert!(first.await.unwrap().is_err());
+        let execution = storage
+            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let receipts = storage
+            .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].state, EffectState::Dispatched);
+        second_release.notify_one();
+        second.await.unwrap().unwrap();
+        assert_eq!(
+            storage
+                .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
+                .await
+                .unwrap()[0]
+                .state,
+            EffectState::Committed
+        );
+    }
+    #[tokio::test]
+    async fn cloned_native_admission_is_single_use() {
+        let (storage, instance) = ordinary_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let guard = EffectGuard::prepare(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("native"),
+            "native",
+            &serde_json::json!({}),
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let admission = guard.admission(storage.clone());
+        let clone = admission.clone();
+        admission.admit().await.unwrap();
+        assert!(matches!(
+            clone.admit().await,
+            Err(orch8_types::error::StepError::ClaimLost)
+        ));
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, guard.receipt.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Dispatched
+        );
+    }
+
+    #[tokio::test]
+    async fn native_mock_uses_normal_guard_without_calling_native_adapter() {
+        let (storage, instance) = ordinary_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let n = calls.clone();
+        let mut handlers = HandlerRegistry::new();
+        handlers.register_with_deferred_effect_admission("native", move |_ctx| {
+            n.fetch_add(1, Ordering::SeqCst);
+            async { Ok(serde_json::json!({"real":true})) }
+        });
+        handlers.set_mock("native", serde_json::json!({"mock":true}));
+        let result = execute_step_dry(
+            &storage,
+            &handlers,
+            StepExecParams {
+                claim_token: None,
+                instance_id: instance.id,
+                tenant_id: instance.tenant_id.clone(),
+                block_id: BlockId::new("native"),
+                handler_name: "native".into(),
+                params: serde_json::json!({}),
+                context: ExecutionContext::default(),
+                attempt: 0,
+                timeout: None,
+                externalize_threshold: 0,
+                wait_for_input: None,
+                cache_key: None,
+                output_schema: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.output, serde_json::json!({"mock":true}));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

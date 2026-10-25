@@ -182,6 +182,7 @@ fn mk_step_ctx(
     params: serde_json::Value,
 ) -> StepContext {
     StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id: caller.id,
         tenant_id: caller.tenant_id.clone(),
@@ -2003,6 +2004,7 @@ async fn handler_99_self_modify_valid() {
     })))
     .unwrap();
     let ctx = StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id: InstanceId::new(),
         tenant_id: TenantId::unchecked("t"),
@@ -2024,6 +2026,7 @@ async fn handler_100_self_modify_missing_blocks() {
     let registry = make_registry();
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let ctx = StepContext {
+        effect_admission: None,
         claim_token: None,
         instance_id: InstanceId::new(),
         tenant_id: TenantId::unchecked("t"),

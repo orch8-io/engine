@@ -1166,6 +1166,7 @@ mod tests {
                 .unwrap(),
         );
         let mut ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: orch8_types::ids::InstanceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
@@ -1194,6 +1195,7 @@ mod tests {
                 .unwrap(),
         );
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: orch8_types::ids::InstanceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t1"),
@@ -1408,6 +1410,7 @@ mod tests {
                 .unwrap(),
         );
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: orch8_types::ids::InstanceId::new(),
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
@@ -1629,6 +1632,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: orch8_types::ids::TenantId::unchecked("t"),
@@ -2441,6 +2445,7 @@ mod tests {
         params: Value,
     ) -> StepContext {
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: orch8_types::ids::TenantId::unchecked(tenant),
