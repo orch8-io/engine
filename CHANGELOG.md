@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Contextual scoped handler policy
+
+- Select each scoped step's native override or permitted builtin together with
+  its effect-admission policy. A catalog's native builtin-name override cannot
+  change another catalog's builtin behavior or inherit an ambient legacy callback.
+- Carry weak selected binding identity through preparation so shutdown can release
+  callbacks, and keep pure selection fixed if a native binding is added later.
+  Production mobile registry creation/rebuilds attach the resolver; public scoped
+  materialization and SDK APIs remain under development.
+
 ### Owned scoped callback retirement
 
 - Connect scoped host-reference cleanup to mobile engine shutdown and final drop.

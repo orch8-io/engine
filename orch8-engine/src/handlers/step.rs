@@ -217,6 +217,15 @@ async fn run_step_core(
     mode: StepMode,
 ) -> Result<BlockOutput, EngineError> {
     let claim_token = exec.claim_token;
+    let selection = handlers
+        .resolve_contextual(super::HandlerLookup {
+            storage,
+            instance_id: exec.instance_id,
+            tenant_id: &exec.tenant_id,
+            claim_token,
+            name: &exec.handler_name,
+        })
+        .await?;
     let memoized = if exec.attempt > 0 {
         if let Some(token) = claim_token {
             match storage
@@ -326,18 +335,12 @@ async fn run_step_core(
         });
     }
 
-    let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
-        let names = handlers.handler_names();
-        let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &names);
-        match suggestion {
-            Some(s) => {
-                EngineError::HandlerNotFound(format!("{} (did you mean: {s}?)", exec.handler_name))
-            }
-            None => EngineError::HandlerNotFound(exec.handler_name.clone()),
-        }
-    })?;
-
-    let deferred_effect = handlers.defers_effect_admission(&exec.handler_name);
+    let selection = match selection {
+        Some(selected) => selected,
+        None => handlers.resolve_global(&exec.handler_name)?,
+    };
+    let handler = selection.handler();
+    let deferred_effect = selection.deferred();
     let mut effect_guard = if exec.context.runtime.dry_run
         || (!deferred_effect && !crate::release_diff::handler_has_side_effects(&exec.handler_name))
     {

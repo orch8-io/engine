@@ -2569,3 +2569,48 @@ Arbitrary non-returning host code keeps its physical charges. Other callback
 classes, full scoped materialization/builtin/read/recovery/listener ownership,
 actual scoped SDK/platform cases, legacy migration and independent-process
 resource limits remain open. ADR S1-S12 and the overall review are not complete.
+
+
+### DME126 — Scoped native overrides need contextual effect policy
+
+A four-scope regression failed against DME125: registering native `noop` in the
+shared internal registry made another catalog's ordinary builtin unavailable.
+Global name registration also cannot express that the native override requires
+deferred effect admission while the other catalog's builtin remains pure.
+Scoped execution must not inherit a legacy runtime-global callback as fallback.
+
+The core now supports an optional trusted contextual resolver. Its result carries
+the selected function and deferred-admission policy together. Contextual selection
+runs before memoized/cache returns and durable effect preparation. Registries
+without a resolver preserve their existing lookup/memoization order. Direct
+`get()` remains an explicitly unscoped API; this hook is used by the ordinary
+core step executor, not every independent cleanup/escalation/remote entry point.
+
+Mobile registry construction and rebuilds attach a weak scoped resolver. A
+registered-account tenant requires the same backend, running claim and frozen
+request/account/catalog/epoch proof. Native selection captures weak binding
+identity, which is checked again at invocation. Builtin selection captures an
+independent trusted allowlist snapshot, never the ambient registry's native or
+mock replacement. A later native registration cannot change an already selected
+pure call into an effectful call. Missing/disabled handlers fail before creating
+effect evidence; local stop and retired ownership cannot fall back to legacy.
+
+Focused regressions cover native/pure `noop` across two accounts and two catalogs,
+ambient legacy callbacks and disabled builtins, binding changes after selection,
+and close during suspended effect preparation. The latter proves accepted host
+references are released while only weak selected identity remains and the
+undispatched receipt stays Prepared. An actual MobileEngine constructor/rebuild
+regression covers legacy registration and builtin enablement. Validation passed
+2,114 engine library tests, 567 mobile unit tests and 109 mobile integration/
+example/coverage tests, plus workspace/all-target Clippy with warnings denied.
+Fresh UniFFI bindings and the rebuilt macOS native library passed all 32 Swift
+wrapper tests with strict concurrency and warnings denied. Formatting, docs and
+SDK packaging checks passed. Hosted CI must pass the exact candidate before merge.
+
+This connects contextual policy to production registry lifecycle; it does not
+create production scoped instances or expose SDK handles. Materialization,
+parameter/credential ownership before this boundary, independently dispatched
+hooks/remote work, reads, listeners, children/delegation, migration and complete
+SDK/platform contracts remain rollout gates. Native-capacity backpressure and
+native-preflight infrastructure classification still require real scheduler
+coverage without business retry policies. ADR S1-S12 remain open.

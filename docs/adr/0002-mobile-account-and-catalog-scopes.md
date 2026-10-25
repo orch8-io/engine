@@ -259,7 +259,7 @@ Production legacy host registrations now retain the runtime cancellation token
 through queued physical admission and database preflight. The internal scoped
 router requires an explicit runtime token and refuses local admission after stop
 without retiring its durable account. A second router for that account remains
-usable. This still does not wire scoped routing into production execution.
+usable. This does not materialize scoped runs.
 Scoped reference retirement is now connected to production engine shutdown and
 final drop. Two process-owned workers share the existing physical account/process
 budget with callbacks; accepted registration permits bound their pending work.
@@ -269,6 +269,16 @@ account. Pending registration references live in the registry, so shutdown can
 release them without waiting for storage and reject late publication. Weak epoch
 fences also close the retirement/preflight overlap. Callback and cleanup permits
 cover panic payload disposal and Apple autorelease-pool draining.
+
+Production registry construction and rebuilds now attach contextual selection.
+The ordinary core step executor resolves the frozen owner before cache/effect
+admission, selecting both a function and its effect policy. A native `noop`
+override in one catalog leaves another catalog's builtin pure. Scoped fallback
+uses an independent permitted builtin snapshot and cannot inherit an ambient
+legacy native callback. Selected native identity is weak and rechecked at entry,
+so suspended preparation does not pin accepted foreign references after close.
+Independent hooks/remote dispatch and earlier credential preparation still need
+scope-aware integration; this resolver alone is not a complete execution boundary.
 
 This does not create production scoped instances or expose scoped SDK handles.
 Next carry frozen owners through actual materialization, remaining builtin/read
