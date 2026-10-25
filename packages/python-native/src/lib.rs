@@ -161,9 +161,16 @@ impl DurableEngine {
     #[pyo3(signature = (id, timeout_secs=None))]
     fn run(&self, py: Python<'_>, id: String, timeout_secs: Option<f64>) -> PyResult<String> {
         let timeout = timeout_secs
-            .map(|secs| Duration::try_from_secs_f64(secs.max(0.0)))
-            .transpose()
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            .map(|secs| {
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err(PyValueError::new_err(
+                        "timeout must be finite and nonnegative",
+                    ));
+                }
+                Duration::try_from_secs_f64(secs)
+                    .map_err(|error| PyValueError::new_err(format!("invalid timeout: {error}")))
+            })
+            .transpose()?;
         self.block_on(py, move |inner| {
             Box::pin(async move { inner.run(&id, timeout).await })
         })

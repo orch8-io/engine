@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native run preflight
+
+- Reject malformed targets and unrepresentable run deadlines before lazy engine
+  initialization. Check target existence, terminal state and budget before each
+  pass so invalid or exhausted calls cannot dispatch unrelated queued work.
+- Validate Node timeout milliseconds and Python timeout seconds before execution;
+  zero observes the current snapshot without starting a pass. In-flight scheduler
+  passes are not yet bounded by the run deadline.
+
 ### Native callback finalization
 
 - Release replaced callbacks, cached engines and unused registrations outside
