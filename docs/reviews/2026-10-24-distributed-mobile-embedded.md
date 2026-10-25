@@ -3121,3 +3121,47 @@ pass. All five committed binding copies match fresh native generation; all 33
 strict-concurrency Swift tests pass against the rebuilt macOS library, including
 both parallel answer orders on both file-backed and memory engines. Hosted CI
 remains pending; the broader scoped SDK rollout remains open.
+
+### DME138 — Scoped history must include durable requests without hydrating private data
+
+The legacy global instance list cannot represent an account/catalog history:
+queued requests have no native instance yet, and native garbage collection can
+remove a completed instance while its durable request/materialization receipt
+remains. A scoped list must not adopt an unrelated row with a colliding ID or
+parse another owner's private workflow context while projecting metadata.
+
+Add bounded, owner-indexed keyset pages over durable catalog run requests. Each
+page checks the active account/session and catalog in the same read transaction,
+retains the original execution epoch, and excludes future-epoch rows. Cursors are
+bound to the account, catalog and session; they provide pagination, never
+authorization. The projection selects no request input or execution context.
+A native state is returned only with a materialization receipt and the complete
+native identity predicate shared with scoped get/cancel/step completion. Missing
+or inconsistent native evidence reports `Unavailable`, without guessing an
+execution outcome or allowing rematerialization. Pagination is a live keyset
+view, not a snapshot across pages or a durable event stream.
+
+The runtime history view retains only a weak runtime reference while idle.
+Local view close and runtime shutdown cancel a pending read, including pool
+acquisition, release its temporary runtime reference, and do not retire an
+account. A deterministic pool-exhaustion test first reproduced a two-second
+close timeout; the cancellation fix makes both local close and shutdown settle
+without releasing any held database connection.
+
+Eight focused tests exercise two accounts with two catalogs each, actual queued,
+live, cancelled and garbage-collected runs, cursor/session boundaries, empty and
+exact-size pages, future epochs, corrupt private input/context, inconsistent
+native identity and missing receipts. An independent administrative file pool
+retires/reopens the account while the first pool's read is waiting; the stale
+read is rejected when it obtains a connection. This is not a second executing
+engine or proof of independent recovery ownership.
+
+This delivers the private storage/runtime history primitive. Public scoped
+SDK handles, listeners, authenticated reporting, compact durable outcomes after
+native GC and the remaining ADR S1–S12 matrix remain open.
+
+Validation passes: 637 mobile unit tests, 109 mobile integration tests, all 252
+storage unit tests and workspace/all-target Clippy with warnings denied. The
+eight focused history tests pass again after the explicit-unit-pattern lint fix.
+Formatting, documentation and SDK packaging checks also pass. No public FFI
+surface or generated binding changes in this slice.

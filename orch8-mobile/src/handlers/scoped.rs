@@ -41,6 +41,7 @@ pub(super) fn storage_error(error: orch8_types::error::StorageError) -> StepErro
 
 pub(crate) mod access;
 pub(crate) mod context;
+pub(crate) mod history;
 mod lifecycle;
 pub(crate) mod lifetime;
 pub(crate) mod materialize;

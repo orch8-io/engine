@@ -11,6 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, sqlite::SqliteRow};
 
+pub(crate) mod history;
 pub(crate) mod materialize;
 
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
