@@ -40,6 +40,23 @@ struct Admission {
 }
 
 impl EffectAdmission {
+    /// Read the prepared effect's identity only for its original invocation.
+    /// Reading neither admits dispatch nor consumes the transition capability.
+    pub fn effect_id_for(
+        &self,
+        tenant: &TenantId,
+        instance: InstanceId,
+        block: &BlockId,
+        attempt: u32,
+    ) -> Option<EffectId> {
+        let receipt = &self.inner.receipt;
+        (receipt.tenant_id == *tenant
+            && receipt.instance_id == instance
+            && receipt.block_id == *block
+            && receipt.attempt == attempt)
+            .then_some(receipt.id)
+    }
+
     /// Call only after native preflight/cancellation checks and before host code.
     /// Once this starts, interruption is an ambiguous durable dispatch window.
     pub async fn admit(&self) -> Result<(), orch8_types::error::StepError> {
@@ -1347,6 +1364,75 @@ mod tests {
             EffectState::Committed
         );
     }
+    #[tokio::test]
+    async fn native_callback_identity_is_bound_to_the_original_effect_without_admitting_it() {
+        let (storage, instance) = ordinary_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let block = BlockId::new("native");
+        let guard = EffectGuard::prepare(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &block,
+            "native",
+            &serde_json::json!({}),
+            2,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let admission = guard.admission(storage.clone());
+        assert_eq!(
+            admission.effect_id_for(&instance.tenant_id, instance.id, &block, 2),
+            Some(guard.receipt.id)
+        );
+        for (tenant, id, candidate_block, attempt) in [
+            (
+                TenantId::unchecked("foreign"),
+                instance.id,
+                block.clone(),
+                2,
+            ),
+            (
+                instance.tenant_id.clone(),
+                InstanceId::new(),
+                block.clone(),
+                2,
+            ),
+            (
+                instance.tenant_id.clone(),
+                instance.id,
+                BlockId::new("foreign"),
+                2,
+            ),
+            (instance.tenant_id.clone(), instance.id, block, 3),
+        ] {
+            assert_eq!(
+                admission.effect_id_for(&tenant, id, &candidate_block, attempt),
+                None
+            );
+        }
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, guard.receipt.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Prepared
+        );
+        admission.admit().await.unwrap();
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, guard.receipt.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Dispatched
+        );
+    }
+
     #[tokio::test]
     async fn cloned_native_admission_is_single_use() {
         let (storage, instance) = ordinary_storage().await;

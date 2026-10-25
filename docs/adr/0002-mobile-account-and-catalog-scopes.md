@@ -333,3 +333,10 @@ across native-history GC; old unverified payloads require a surviving legacy
 instance. This does not provide catalog-authenticated reporting or scoped public
 reads/listeners. Those operations still require immutable account/catalog/epoch
 ownership before public scope handles can be exported.
+
+The internal native callback path now carries immutable originating account,
+catalog, execution epoch, run, block, business attempt and durable effect identity
+(DME134), independently of input JSON. Production scoped bindings require this
+contextual interface. Real scheduler tests share one callback across four scopes
+and exercise retirement/reopen during a live callback. The public foreign context
+contract and SDK handle/read/lifecycle/listener surfaces remain open.

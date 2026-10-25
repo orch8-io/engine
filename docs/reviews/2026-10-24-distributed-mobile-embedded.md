@@ -2918,3 +2918,49 @@ paths, real HTTP replay of old outbox rows, owner corruption and retirement,
 mismatched metadata, encrypted signals and late results, two-pool writer
 contention, unavailable authority storage, native-history GC and idempotent old
 outbox upgrades. All 44 reporter tests also passed as a focused suite.
+
+### DME134 — Native callbacks need trusted immutable originating context
+
+Scoped routing alone selected the right callback object but the existing
+`execute(name,input)` interface gave a shared callback no trusted account,
+catalog, run or effect identity. Workflow JSON and the currently selected UI
+account cannot supply that authority.
+
+The internal contextual callback path now supplies a separate immutable record
+containing the frozen account/catalog IDs, original account execution epoch,
+run ID, block, business attempt and durable effect ID. Its fields are private
+and it is not deserialized from input. The effect capability projects an ID only
+when its tenant/run/block/attempt match the original invocation; reading this
+projection does not dispatch or consume it. Native claim, expiry, dispatch and
+post-dispatch checks still run in the existing physically owned invocation path.
+
+Production scoped registration requires the contextual trait. The previous
+context-free scoped adapter exists only in test builds for older storage,
+admission and lifetime fixtures. Legacy global host callbacks retain their
+existing interface. Callback context holds ordinary immutable metadata rather
+than an engine/runtime/handler reference that could create an ownership cycle.
+The invocation adapter and accepted binding follow the existing foreign object
+release path before physical callback and registration capacity returns. Missing
+or mismatched effect authority fails before independently cloning the accepted
+foreign reference out of the registry.
+
+Real scheduler regressions register one callback object under identical names
+in two accounts × two catalogs. Forged ownership and attempt fields remain in
+ordinary input but cannot override the separately delivered owner; each delivered
+effect ID matches its actual committed ledger row. A held callback retains its
+old context through retirement/reopen, cannot publish its late result, and a new
+run receives the new epoch and a distinct effect. A running claim alone cannot
+invoke a contextual callback without durable effect admission. Core effect tests
+also prove mismatched identity projections leave a prepared capability usable
+for its original invocation.
+
+This is internal native runtime functionality. It does not claim a public
+UniFFI/Swift/Kotlin context contract, account/catalog/run SDK handles, scoped
+read/lifecycle/listener completion, catalog-authenticated reporting, or S1–S12
+completion. Those remain delivery requirements rather than optional follow-ups.
+
+Local validation passed all 612 mobile unit tests, 109 integration checks, all
+14 core effect-guard tests, and workspace/all-target Clippy with warnings denied.
+Fresh generation from the rebuilt native library matches all five committed
+mobile binding copies. These binding checks prove compatibility of the existing
+exported SDK surface, not completion of the new scoped foreign callback API.

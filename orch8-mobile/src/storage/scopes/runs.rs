@@ -308,3 +308,6 @@ mod materialize_edge_tests;
 
 #[cfg(test)]
 mod expiry_tests;
+
+#[cfg(test)]
+mod context_tests;

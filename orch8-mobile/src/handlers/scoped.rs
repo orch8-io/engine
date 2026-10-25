@@ -39,6 +39,7 @@ pub(super) fn storage_error(error: orch8_types::error::StorageError) -> StepErro
     }
 }
 
+pub(crate) mod context;
 mod lifecycle;
 pub(crate) mod lifetime;
 pub(crate) mod materialize;
@@ -85,7 +86,7 @@ impl NativeCapacity {
 
 pub(super) struct Binding {
     // Foreign object drops before its plain metadata; never under the map lock.
-    handler: Arc<dyn StepHandler>,
+    handler: context::BoundHandler,
     pub(super) lifetime: Arc<lifetime::Lifetime>,
     scope: CatalogScope,
     name: String,
@@ -235,11 +236,41 @@ impl CatalogHandlers {
             .clone()
     }
 
+    // Existing storage/admission fixtures can ignore callback metadata. The
+    // production scoped registration path always uses the contextual trait.
+    #[cfg(test)]
     pub(crate) async fn bind(
         &self,
         scope: &CatalogScope,
         name: &str,
         handler: Arc<dyn StepHandler>,
+        timeout: Duration,
+    ) -> Result<(), StepError> {
+        self.bind_owned(scope, name, context::BoundHandler::Legacy(handler), timeout)
+            .await
+    }
+
+    pub(crate) async fn bind_contextual(
+        &self,
+        scope: &CatalogScope,
+        name: &str,
+        handler: Arc<dyn context::CatalogStepHandler>,
+        timeout: Duration,
+    ) -> Result<(), StepError> {
+        self.bind_owned(
+            scope,
+            name,
+            context::BoundHandler::Contextual(handler),
+            timeout,
+        )
+        .await
+    }
+
+    async fn bind_owned(
+        &self,
+        scope: &CatalogScope,
+        name: &str,
+        handler: context::BoundHandler,
         timeout: Duration,
     ) -> Result<(), StepError> {
         if self.stop.is_cancelled()
@@ -324,7 +355,7 @@ impl CatalogHandlers {
             .catalog_callback_scope(ctx.instance_id, &ctx.tenant_id, token)
             .await
             .map_err(storage_error)?;
-        let (binding, permits) = {
+        let (binding, permits, handler) = {
             let bindings = lock(&self.bindings);
             if self.stop.is_cancelled() {
                 return Err(StepError::ClaimLost);
@@ -341,6 +372,9 @@ impl CatalogHandlers {
                     serde_json::json!({ "dry_run": true, "handler": name, "would": "invoke registered handler" }),
                 );
             }
+            // A missing effect proof must fail while the registry still owns
+            // the foreign reference, before any independently held clone.
+            let handler = binding.handler.for_invocation(&scope, &ctx)?;
             let permits = Some(self.capacity.reserve(&scope).map_err(|error| {
                 ctx.effect_admission.as_ref().map_or(error, |admission| {
                     admission.reject_preflight(orch8_engine::error::EngineError::AdmissionBusy {
@@ -348,7 +382,7 @@ impl CatalogHandlers {
                     })
                 })
             })?);
-            (binding.clone(), permits)
+            (binding.clone(), permits, handler)
         };
         let tracking_key = format!(
             "{}/{}/{}/{}",
@@ -360,7 +394,7 @@ impl CatalogHandlers {
         invoke_foreign_handler(
             ctx,
             Callback {
-                handler: binding.handler.clone(),
+                handler,
                 name: binding.name.clone(),
                 timeout: binding.timeout,
                 stragglers: binding.stragglers.clone(),
