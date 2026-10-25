@@ -2478,3 +2478,35 @@ This is a local callback admission fix. Bounded destruction on account/runtime
 close, production scoped materialization, builtin/read/recovery/listener ownership,
 other callback classes and independent-process resource limits remain open.
 ADR-0002 S1-S12 and the full review matrix are not complete.
+
+
+### DME124 — Replacing scoped routers multiplied registration allowances
+
+Four regressions failed on the preceding implementation. Sibling routers sharing
+physical-call admission could each acquire another catalog/account/process-sized
+set of registered host references. A new login epoch also bypassed the old
+router's charges. A replacement could fill a catalog while an old registered
+host destructor was still physically held. The 256/64/32 counts were enforced
+only by each router's own live/retiring map.
+
+Registration now also reserves process-owned permits: 256 globally, 64 per stable
+account, 32 per account/catalog pair. Keys omit the login epoch. Global admission
+precedes gate-map allocation, and weak owner records are pruned under a short
+mutex; pending reservations and retained bindings bound those maps. The binding
+declares its permit after the foreign reference, retaining charges through final
+engine-owned reference release, physical callbacks and host destruction. Existing
+local map limits remain conservative while explicit retirement is in progress.
+Failed nested reservations roll back through ordinary owned-permit destruction.
+
+Seven contracts cover catalog/account/process replacement, retired/reopened
+accounts, a held foreign destructor, concurrent last-slot admission, repeated
+refusal without leaked account/global charges, and the default shared router
+constructor. All 547 mobile unit tests and 109 integration/example/coverage tests
+passed with their required loopback services. Workspace/all-target Clippy with
+warnings denied passed. Hosted CI remains required before merge.
+
+These are count bounds for engine-owned scoped registrations, not total host
+heap/caller allocation bounds. They do not route arbitrary foreign destruction
+through bounded cleanup, expose public scoped execution, or prove cross-process
+callback capacity. Bounded account/runtime close and all remaining ADR/runtime/SDK
+gates stay open. The broader review is still in progress.

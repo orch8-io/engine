@@ -38,15 +38,19 @@ fn storage_error(error: orch8_types::error::StorageError) -> StepError {
     }
 }
 
+mod registrations;
+
 struct NativeCapacity {
     global: Arc<Semaphore>,
     accounts: Mutex<HashMap<String, Weak<Semaphore>>>,
+    registrations: registrations::Capacity,
 }
 impl NativeCapacity {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             global: Arc::new(Semaphore::new(2)),
             accounts: Mutex::new(HashMap::new()),
+            registrations: registrations::Capacity::new(),
         })
     }
     fn shared() -> Arc<Self> {
@@ -100,6 +104,7 @@ pub(super) struct Binding {
     name: String,
     timeout: Duration,
     stragglers: Arc<Stragglers>,
+    _registration: registrations::Permit,
 }
 
 type BindingKey = (CatalogScope, String);
@@ -152,6 +157,16 @@ impl CatalogHandlers {
         owner
     }
     #[cfg(test)]
+    pub(crate) fn sibling(&self) -> Arc<Self> {
+        let mut owner = Self::new(
+            self.storage.clone(),
+            self.backend.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        Arc::get_mut(&mut owner).unwrap().capacity = self.capacity.clone();
+        owner
+    }
+    #[cfg(test)]
     pub(crate) fn account_gate(&self, scope: &CatalogScope) -> Option<Arc<Semaphore>> {
         self.capacity
             .accounts
@@ -197,12 +212,12 @@ impl CatalogHandlers {
             return Err(unavailable());
         }
         // Retired entries stay charged; cleanup is explicit runtime integration.
-        if bindings.keys().count() >= 256
+        if bindings.keys().count() >= registrations::GLOBAL_LIMIT
             || bindings
                 .keys()
                 .filter(|(owner, _)| owner.account_id() == scope.account_id())
                 .count()
-                >= 64
+                >= registrations::ACCOUNT_LIMIT
             || bindings
                 .keys()
                 .filter(|(owner, _)| {
@@ -210,10 +225,11 @@ impl CatalogHandlers {
                         && owner.account_id() == scope.account_id()
                 })
                 .count()
-                >= 32
+                >= registrations::CATALOG_LIMIT
         {
             return Err(busy());
         }
+        let registration = self.capacity.registrations.reserve(scope)?;
         bindings.live.insert(
             key,
             Arc::new(Binding {
@@ -222,6 +238,7 @@ impl CatalogHandlers {
                 name: name.into(),
                 timeout,
                 stragglers: Arc::new(Stragglers::default()),
+                _registration: registration,
             }),
         );
         Ok(())

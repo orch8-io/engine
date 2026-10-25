@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Shared scoped handler registration limits
+
+- Retain process, stable-account and catalog registration charges across router
+  replacement and login epochs. Bindings keep their permits through final
+  engine-owned host-reference destruction; another router cannot reclaim them.
+- Refuse excess registrations without leaking other scope allowances, and return
+  capacity after physical cleanup. This is an internal scoped-router foundation;
+  public scoped runtime and SDK integration remain under development.
+
 ### Mobile runtime callback shutdown
 
 - Carry local runtime cancellation through retained registries, queued native
