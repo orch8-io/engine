@@ -196,8 +196,8 @@ impl PreparedStep {
 
 /// Why [`prepare_step`] could not produce a [`PreparedStep`].
 pub(crate) enum PrepareError {
-    /// Infrastructure error building the context snapshot — propagate as a hard
-    /// error (`?`), do not fail the step.
+    /// Infrastructure or ownership error during preparation — propagate to
+    /// scheduler recovery instead of failing this node.
     Infra(EngineError),
     /// A user template failed to resolve — fail the step.
     Template(EngineError),
@@ -211,7 +211,7 @@ pub(crate) enum PrepareError {
 impl From<crate::credentials::ClaimedResolutionError> for PrepareError {
     fn from(error: crate::credentials::ClaimedResolutionError) -> Self {
         match error {
-            crate::credentials::ClaimedResolutionError::Ownership(error) => Self::Infra(error),
+            crate::credentials::ClaimedResolutionError::Infrastructure(error) => Self::Infra(error),
             crate::credentials::ClaimedResolutionError::Credential(error) => {
                 Self::Credential(error)
             }

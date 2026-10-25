@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Credential storage recovery
+
+- Preserve typed storage failures through claimed credential preparation and
+  deferred fallback. Transient lookup outages now use bounded scheduler
+  infrastructure recovery without requiring a handler retry policy or entering
+  the handler. Invalid credential references still fail as authoring errors.
+- Keep trusted legacy resolver error classification and credential lookup scopes
+  unchanged. Failed expansion still preserves the original parameters.
+
 ### Native callback diagnostics
 
 - Stop copying non-JSON native callback output into warning logs. Preserve the

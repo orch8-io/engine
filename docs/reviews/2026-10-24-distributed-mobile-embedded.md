@@ -2178,3 +2178,35 @@ handles the same concurrent first-callsite registration race as the existing
 engine span-capture regression: only an empty capture permits rebuilding tracing
 interest and making one fresh mock invocation. A captured payload fails the
 assertion. Hosted CI must pass on the submitted commit before merge.
+
+
+### DME115 — Transient credential storage failures permanently failed workflows
+
+Four real-scheduler regressions failed against the preceding implementation:
+flat and parallel-tree executions on plain/encrypted SQLite became Failed after
+one injected transient credential lookup error. No handler ran. The resolver had
+converted the storage cause to StepError::Retryable, but preparation callers
+handled all credential errors as user failures before reaching handler retry
+policy. The existing resolver-only retryability test did not cover this boundary.
+
+Lookup and expansion now preserve a typed storage cause internally. Claimed
+preparation propagates it as EngineError::Storage through its infrastructure
+branch, including deferred fallback, so the existing scheduler's bounded
+infrastructure recovery applies. No handler retry policy is required. Genuine
+missing/disabled/malformed credential references retain their authoring-failure
+classification. The trusted legacy resolver uses the same lookup implementation
+and keeps its existing StepError classification. Lookup authority, including the
+legacy global credential fallback, does not change.
+
+All 31 preparation contracts passed with required isolated PostgreSQL, including
+plain/encrypted SQLite/Postgres. New contracts exercise actual scheduler
+rescheduling and eventual completion in flat and tree paths, no dispatch during
+the outage, unchanged failed-expansion parameters, deferred retry recovery,
+permanent storage classification and missing-reference classification. The
+isolated Postgres container was removed. Full library validation passed 2,103 engine, 534 mobile and 232 storage tests.
+Workspace/all-target lint with warnings denied, formatting, documentation and
+diff checks passed. Hosted checks must pass before merge.
+
+This fixes preparation-stage database recovery, not an external provider's
+credential rejection, cross-catalog credential policy, or the broader remaining
+parameter/memory, scoped integration and runtime matrix audits.
