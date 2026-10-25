@@ -38,6 +38,79 @@ impl NativeClaim {
     }
 }
 
+pub(super) struct NativeOwnership {
+    pub(super) claim: Option<NativeClaim>,
+    pub(super) effect_admission: Option<orch8_engine::handlers::EffectAdmission>,
+    pub(super) tracking_key: String,
+    pub(super) _permits: Option<super::scoped::NativePermit>,
+    pub(super) binding: Option<Arc<super::scoped::Binding>>,
+}
+
+// Declaration order matters: foreign references are released before quarantine
+// ends and before physical capacity is returned. No foreign drop runs under a lock.
+struct PhysicalCall {
+    handler: Arc<dyn StepHandler>,
+    _binding: Option<Arc<super::scoped::Binding>>,
+    finish: FinishOnDrop,
+    ownership: NativeOwnership,
+}
+
+impl PhysicalCall {
+    fn run(
+        self,
+        name: String,
+        input: String,
+        runtime: tokio::runtime::Handle,
+    ) -> Result<String, StepError> {
+        let claim = &self.ownership.claim;
+        let effect_admission = &self.ownership.effect_admission;
+        let entry = &self.finish.0;
+        // Borrow the proof for verification: its owner/backend must remain
+        // captured until physical native completion, even after detach.
+        if let Some(claim) = claim {
+            runtime.block_on(claim.verify())?;
+        }
+        // Cancellation may arrive while the database preflight is pending.
+        // Check at host admission, after that await, before any native code.
+        if entry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .detached
+        {
+            return Err(StepError::ClaimLost);
+        }
+        if let Some(admission) = effect_admission {
+            runtime.block_on(admission.admit())?;
+            // The durable dispatch itself can wait on storage. Recheck the
+            // claim/cancellation afterward; this window stays conservative.
+            if let Some(claim) = claim {
+                runtime.block_on(claim.verify())?;
+            }
+            if entry
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detached
+            {
+                return Err(StepError::ClaimLost);
+            }
+        }
+        self.handler
+            .execute(name, input)
+            .map_err(|error| match error {
+                HandlerError::Retryable { message } => StepError::Retryable {
+                    message,
+                    details: None,
+                },
+                HandlerError::Permanent { message } => StepError::Permanent {
+                    message,
+                    details: None,
+                },
+            })
+    }
+}
+
 pub(super) struct NativeInvocation {
     call: JoinHandle<Result<String, StepError>>,
     completion: Arc<Completion>,
@@ -79,61 +152,22 @@ impl NativeInvocation {
         name: String,
         input: String,
         stragglers: Arc<Stragglers>,
-        claim: Option<NativeClaim>,
-        effect_admission: Option<orch8_engine::handlers::EffectAdmission>,
+        mut ownership: NativeOwnership,
     ) -> Self {
         let completion = Arc::new(Completion {
             state: Mutex::new(State::default()),
             stragglers,
-            name: name.clone(),
+            name: ownership.tracking_key.clone(),
         });
         let finish = FinishOnDrop(Arc::clone(&completion));
         let runtime = tokio::runtime::Handle::current();
-        let entry = Arc::clone(&completion);
-        let call = tokio::task::spawn_blocking(move || {
-            let _finish = finish;
-            // Borrow the proof for verification: its owner/backend must remain
-            // captured until physical native completion, even after detach.
-            if let Some(claim) = &claim {
-                runtime.block_on(claim.verify())?;
-            }
-            // Cancellation may arrive while the database preflight is pending.
-            // Check at host admission, after that await, before any native code.
-            if entry
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .detached
-            {
-                return Err(StepError::ClaimLost);
-            }
-            if let Some(admission) = &effect_admission {
-                runtime.block_on(admission.admit())?;
-                // The durable dispatch itself can wait on storage. Recheck the
-                // claim/cancellation afterward; this window stays conservative.
-                if let Some(claim) = &claim {
-                    runtime.block_on(claim.verify())?;
-                }
-                if entry
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .detached
-                {
-                    return Err(StepError::ClaimLost);
-                }
-            }
-            handler.execute(name, input).map_err(|error| match error {
-                HandlerError::Retryable { message } => StepError::Retryable {
-                    message,
-                    details: None,
-                },
-                HandlerError::Permanent { message } => StepError::Permanent {
-                    message,
-                    details: None,
-                },
-            })
-        });
+        let physical = PhysicalCall {
+            handler,
+            _binding: ownership.binding.take(),
+            finish,
+            ownership,
+        };
+        let call = tokio::task::spawn_blocking(move || physical.run(name, input, runtime));
         Self { call, completion }
     }
 
@@ -200,8 +234,13 @@ mod tests {
                 "queued".into(),
                 "{}".into(),
                 Arc::clone(&stragglers),
-                None,
-                None,
+                NativeOwnership {
+                    claim: None,
+                    effect_admission: None,
+                    tracking_key: "queued".into(),
+                    _permits: None,
+                    binding: None,
+                },
             );
             drop(call);
             release_tx.send(()).unwrap();

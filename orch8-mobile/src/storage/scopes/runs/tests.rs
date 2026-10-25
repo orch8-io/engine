@@ -2,7 +2,7 @@ use super::*;
 use orch8_storage::{InstanceStore, SequenceStore, sqlite::SqliteStorage};
 use std::sync::Arc;
 
-fn limits() -> CatalogRunLimits {
+pub(super) fn limits() -> CatalogRunLimits {
     CatalogRunLimits {
         global_records: 16,
         account_records: 8,
@@ -12,7 +12,7 @@ fn limits() -> CatalogRunLimits {
         catalog_input_bytes: 256 * 1024,
     }
 }
-fn request<'a>(key: Option<&'a str>, input: &'a str) -> CatalogRunRequest<'a> {
+pub(super) fn request<'a>(key: Option<&'a str>, input: &'a str) -> CatalogRunRequest<'a> {
     CatalogRunRequest {
         workflow: "flow",
         version: None,
@@ -27,11 +27,11 @@ fn body(version: i32) -> String {
     serde_json::json!({"id":"11111111-1111-4111-8111-111111111111","tenant_id":"remote","namespace":"remote","name":"flow","version":version,"blocks":[],"created_at":"2026-01-01T00:00:00Z"}).to_string()
 }
 
-async fn fixture() -> (Arc<MobileStorage>, Arc<SqliteStorage>) {
+pub(super) async fn fixture() -> (Arc<MobileStorage>, Arc<SqliteStorage>) {
     let sqlite = Arc::new(SqliteStorage::in_memory().await.unwrap());
     (Arc::new(MobileStorage::new(Arc::clone(&sqlite))), sqlite)
 }
-async fn scope(storage: &MobileStorage, account: &str, catalog: &str) -> CatalogScope {
+pub(super) async fn scope(storage: &MobileStorage, account: &str, catalog: &str) -> CatalogScope {
     let owner = storage
         .open_account_scope(account, "issuer", account)
         .await
@@ -701,7 +701,7 @@ async fn staging_cleanup_does_not_erase_an_id_that_has_materialized_elsewhere() 
 
 // Test-only stand-in for future materialization. No production scoped API emits
 // native instances yet: handler/builtin ownership must be installed first.
-async fn native_fixture(
+pub(super) async fn native_fixture(
     sqlite: &SqliteStorage,
     run: &CatalogRun,
 ) -> orch8_types::instance::TaskInstance {

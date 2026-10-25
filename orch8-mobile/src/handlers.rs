@@ -11,7 +11,20 @@ use crate::error::HandlerError;
 use crate::stragglers::{Stragglers, device_timeout_error};
 
 mod invocation;
-use invocation::{NativeClaim, NativeInvocation};
+use invocation::{NativeClaim, NativeInvocation, NativeOwnership};
+// Internal scoped dispatcher; public scoped execution is still gated.
+#[allow(dead_code)]
+pub(crate) mod scoped;
+
+struct Callback {
+    handler: Arc<dyn StepHandler>,
+    name: String,
+    timeout: Duration,
+    stragglers: Arc<Stragglers>,
+    tracking_key: String,
+    permits: Option<scoped::NativePermit>,
+    binding: Option<Arc<scoped::Binding>>,
+}
 
 /// Callback interface for host-registered step handlers.
 /// Implementations live in Swift/Kotlin and are called by the engine during tick execution.
@@ -45,70 +58,95 @@ pub(crate) fn register_foreign_handler(
 ) {
     let handler_name = name.to_string();
     registry.register_with_deferred_effect_admission(name, move |ctx: StepContext| {
-        let handler = Arc::clone(&handler);
-        let name = handler_name.clone();
-        let stragglers = Arc::clone(&stragglers);
-        async move {
-            if ctx.is_dry_run() {
-                return Ok(serde_json::json!({
-                    "dry_run": true, "handler": name, "would": "invoke registered handler",
-                }));
-            }
-            // MC-06: a timed-out native call cannot be interrupted. A retry
-            // dispatched by the local scheduler must not run concurrently with
-            // that straggler (double side effects), so refuse to start and let
-            // the engine's retry policy come back after it has returned.
-            if stragglers.blocks(&name) {
-                return Err(StepError::Retryable {
-                    message: format!(
-                        "handler '{name}' is still running from a previous unfinished attempt"
-                    ),
-                    details: None,
-                });
-            }
-            let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
-
-            let claim = ctx.claim_token.map(|token| NativeClaim {
-                storage: Arc::clone(&ctx.storage),
-                instance_id: ctx.instance_id,
-                tenant_id: ctx.tenant_id.clone(),
-                token,
-            });
-            let mut call = NativeInvocation::spawn(
-                handler,
-                name.clone(),
-                input,
-                stragglers,
-                claim,
-                ctx.effect_admission,
-            );
-
-            let result = match tokio::time::timeout(timeout, call.result()).await {
-                Ok(joined) => joined.map_err(|e| StepError::Permanent {
-                    message: format!("handler task panicked: {e}"),
-                    details: None,
-                }),
-                Err(_elapsed) => {
-                    warn!(handler = %name, "handler timed out; tracking any live native call");
-                    return Err(device_timeout_error(format!(
-                        "handler '{name}' timed out after {}ms",
-                        timeout.as_millis()
-                    )));
-                }
-            };
-
-            match result {
-                Ok(Ok(output_json)) => {
-                    let value: Value = serde_json::from_str(&output_json).unwrap_or_else(|_| {
-                        warn!(output = %output_json, "handler returned non-JSON string, wrapping");
-                        Value::String(output_json)
-                    });
-                    Ok(value)
-                }
-                Ok(Err(error)) | Err(error) => Err(error),
-            }
-        }
+        invoke_foreign_handler(
+            ctx,
+            Callback {
+                handler: Arc::clone(&handler),
+                name: handler_name.clone(),
+                timeout,
+                stragglers: Arc::clone(&stragglers),
+                tracking_key: handler_name.clone(),
+                permits: None,
+                binding: None,
+            },
+        )
     });
+}
+
+async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<Value, StepError> {
+    let Callback {
+        handler,
+        name,
+        timeout,
+        stragglers,
+        tracking_key,
+        permits,
+        binding,
+    } = callback;
+
+    if ctx.is_dry_run() {
+        return Ok(serde_json::json!({
+            "dry_run": true, "handler": name, "would": "invoke registered handler",
+        }));
+    }
+    // MC-06: a timed-out native call cannot be interrupted. A retry
+    // dispatched by the local scheduler must not run concurrently with
+    // that straggler (double side effects), so refuse to start and let
+    // the engine's retry policy come back after it has returned.
+    if stragglers.blocks(&tracking_key) {
+        return Err(StepError::Retryable {
+            message: format!(
+                "handler '{name}' is still running from a previous unfinished attempt"
+            ),
+            details: None,
+        });
+    }
+    let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
+
+    let claim = ctx.claim_token.map(|token| NativeClaim {
+        storage: Arc::clone(&ctx.storage),
+        instance_id: ctx.instance_id,
+        tenant_id: ctx.tenant_id.clone(),
+        token,
+    });
+    let mut call = NativeInvocation::spawn(
+        handler,
+        name.clone(),
+        input,
+        stragglers,
+        NativeOwnership {
+            claim,
+            effect_admission: ctx.effect_admission,
+            tracking_key,
+            _permits: permits,
+            binding,
+        },
+    );
+
+    let result = match tokio::time::timeout(timeout, call.result()).await {
+        Ok(joined) => joined.map_err(|e| StepError::Permanent {
+            message: format!("handler task panicked: {e}"),
+            details: None,
+        }),
+        Err(_elapsed) => {
+            warn!(handler = %name, "handler timed out; tracking any live native call");
+            return Err(device_timeout_error(format!(
+                "handler '{name}' timed out after {}ms",
+                timeout.as_millis()
+            )));
+        }
+    };
+
+    match result {
+        Ok(Ok(output_json)) => {
+            let value: Value = serde_json::from_str(&output_json).unwrap_or_else(|_| {
+                warn!(output = %output_json, "handler returned non-JSON string, wrapping");
+                Value::String(output_json)
+            });
+            Ok(value)
+        }
+        Ok(Err(error)) | Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
