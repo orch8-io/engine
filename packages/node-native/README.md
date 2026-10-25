@@ -86,9 +86,17 @@ isolated in-memory dry run of built-in handlers) are still exported.
   up on the first call after reopening the file; call `start()` again with the
   same `idempotencyKey` (or keep the id) and `run()` it.
 - **Idempotency keys** make `start()` safe to repeat across restarts.
-- **One process per database file.** The engine assumes it is the file's only
-  owner (that is what makes immediate crash recovery safe). Do not open the
-  same file from two processes; use `orch8-server` with Postgres for that.
+- **One native owner per database file.** Initialization takes a nonblocking
+  operating-system lock before crash recovery. A second handle or process is
+  refused while that owner is live; retry after closing the first handle.
+  Close releases the lock after its SQLite pool closes. Dropping an engine with
+  a live owned pass retains authority until that pass ends. In-memory engines
+  are independent. Use `orch8-server` with Postgres for shared execution.
+- A persistent zero-byte `.orch8-owner` companion file holds the advisory lock.
+  Keep it beside the database and do not delete, replace or rename either file
+  while an engine is live. Symlink paths resolve to the same companion; Unix
+  hard-linked databases are refused. Other filesystem aliases and filesystems
+  without working advisory locks are outside the supported ownership contract.
 - `run()` ticks the whole engine, so other due instances progress too.
 
 ## Build

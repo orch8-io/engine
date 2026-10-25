@@ -28,6 +28,21 @@ def effects(tmp: str) -> list:
 
 
 class DurableRestartTest(unittest.TestCase):
+    def test_a_second_handle_cannot_open_a_live_database_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "app.db")
+            first, second = Engine(path), Engine(path)
+            workflow = {"name": "owner", "blocks": [{"type": "step", "id": "one", "handler": "noop"}]}
+            try:
+                first.deploy(workflow)
+                with self.assertRaisesRegex(Exception, "owned"):
+                    second.deploy(workflow)
+                first.close()
+                second.deploy(workflow)
+            finally:
+                first.close()
+                second.close()
+
     def test_run_deadline_returns_before_its_physical_callback(self):
         code = """
 import threading

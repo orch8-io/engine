@@ -95,6 +95,7 @@ impl Passes {
         target: InstanceId,
         allow_new: bool,
         deadline: Option<Instant>,
+        database: Option<Arc<super::database::Owner>>,
     ) -> Result<Option<Arc<Pass>>, String> {
         let mut state = super::lock(&self.state);
         if state.stopped {
@@ -122,7 +123,12 @@ impl Passes {
             stopped: stopped.clone(),
         });
         let executor = engine.clone();
-        let mut work = tokio::spawn(async move { executor.tick_once().await.map_err(super::err) });
+        let mut work = tokio::spawn(async move {
+            // Dropping the native object cannot surrender recovery authority
+            // while its detached pass still has live database work.
+            let _database = database;
+            executor.tick_once().await.map_err(super::err)
+        });
         // This coordinator owns the join even if every run waiter disappears.
         // Neither caller timeout nor cancellation releases pass capacity.
         tokio::spawn(async move {

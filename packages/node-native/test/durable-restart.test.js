@@ -31,6 +31,22 @@ function runWorker(dir, mode) {
 
 const effects = (dir) => readFileSync(join(dir, 'effects.log'), 'utf8').trim().split('\n')
 
+test('a second native handle cannot open a live database owner', withDir(async (dir) => {
+  const path = join(dir, 'app.db')
+  const first = await Engine.open(path)
+  const second = await Engine.open(path)
+  const workflow = { name: 'owner', blocks: [{ type: 'step', id: 'one', handler: 'noop' }] }
+  try {
+    await first.deploy(workflow)
+    await assert.rejects(second.deploy(workflow), /owned/)
+    await first.close()
+    await second.deploy(workflow)
+  } finally {
+    await first.close()
+    await second.close()
+  }
+}))
+
 test('run deadline returns while its host callback remains owned', withDir(async (dir) => {
   const engine = await Engine.open(join(dir, 'app.db'))
   let enter, release, run, entryTimer, waitTimer

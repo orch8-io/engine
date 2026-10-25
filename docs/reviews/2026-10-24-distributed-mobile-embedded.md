@@ -2398,3 +2398,36 @@ physical foreign callback capacity across step timeouts and engines. Callback
 queue fairness, process-wide physical limits, explicit account/catalog runtime
 integration, and the broader review matrix remain open. No production scoped
 SDK handle, schema change, or complete real-time API deadline is claimed.
+
+
+### DME122 — Multiple native owners could run immediate crash recovery
+
+Two baseline regressions admitted a second native handle to an existing SQLite
+file, including while the first owner held a running host callback. The native
+runner uses a zero stale threshold for immediate crash recovery, so this overlap
+violates its required exclusive recovery authority even within one process.
+
+Initialization now reserves a nonblocking operating-system lock before opening
+SQLite, freezing registrations or running recovery. Owned initialization retains
+its reservation through build I/O even if its observer is cancelled; successful observed builds transfer it to the native owner.
+Close releases it only after the shared storage pool closes. A detached scheduler
+pass also retains the reservation, so dropping the native object does not make
+live database work look abandoned. This does not retire any durable account.
+
+The lock uses a stable canonical-path companion; locking the SQLite data file
+itself conflicted with the actual macOS SQLite VFS and was rejected during
+validation. The companion is never unlinked automatically. Symlink aliases share
+it; Unix hard-linked databases fail closed. Deleting/renaming live files, other
+filesystem aliases and filesystems lacking advisory lock support remain outside
+the supported ownership contract. This is exclusive execution, not a shared
+multi-process SQLite scheduler or proof of all platform runtime behavior.
+
+Ownership contracts cover overlap/refusal and retry, a live original claim,
+independent-process exclusion, symlinks and hard-link refusal, object drop with a
+live pass, independent memory databases, failed-initialization release, and
+cancelled-build observation without surrendering the live reservation.
+The full facade suite passed 191 test results plus three documentation tests.
+Actual macOS arm64 addons passed all six Node and eight Python runtime tests;
+workspace/all-target lint with warnings denied passed. Formatting, docs and diff
+checks passed. Hosted CI must pass before merge. Process-wide physical callback
+limits, scoped account/catalog runtime integration and the remaining review matrix stay open.

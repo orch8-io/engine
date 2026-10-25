@@ -26,6 +26,7 @@ use orch8::{
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
+pub(crate) mod database;
 mod passes;
 
 /// Future returned by a host handler invocation.
@@ -57,6 +58,7 @@ pub struct DurableEngine {
     sequences: Mutex<HashMap<String, Vec<Deployed>>>,
     closed: Arc<AtomicBool>,
     passes: passes::Passes,
+    database: Mutex<Option<Arc<database::Owner>>>,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -86,6 +88,7 @@ impl DurableEngine {
             sequences: Mutex::new(HashMap::new()),
             closed: Arc::new(AtomicBool::new(false)),
             passes: passes::Passes::new(pass_limit),
+            database: Mutex::new(None),
         }
     }
 
@@ -132,6 +135,9 @@ impl DurableEngine {
         if let Some(engine) = cached.as_ref() {
             return Ok(engine.clone());
         }
+        // Refuse a second owner before opening SQLite or running recovery.
+        // The owned build retains this reservation through cancellation.
+        let database = database::Owner::acquire(&self.path)?;
         let handlers = {
             let mut handlers = lock(&self.handlers);
             handlers.frozen = true;
@@ -147,7 +153,8 @@ impl DurableEngine {
         for (name, invoke) in handlers {
             builder = builder.handler(&name, owned_host_handler(invoke, self.closed.clone()));
         }
-        let engine = builder.build().await.map_err(err)?;
+        let (engine, database) = database::initialize(database, builder.build()).await?;
+        *lock(&self.database) = database;
         *cached = Some(engine.clone());
         // The cached engine now owns the callbacks. A second copy would
         // unnecessarily retain host resources after the engine is closed.
@@ -157,6 +164,7 @@ impl DurableEngine {
         let closed = self.closed.load(Ordering::Acquire);
         if closed {
             engine.close().await;
+            self.release_database();
             let retired = cached.take();
             drop(cached);
             drop(retired);
@@ -291,9 +299,13 @@ impl DurableEngine {
                 return self.snapshot(&engine, id).await;
             }
             let allow_new = instance.state != InstanceState::Running;
-            let Some(pass) = self
-                .passes
-                .acquire(engine.clone(), id, allow_new, deadline)?
+            let Some(pass) = self.passes.acquire(
+                engine.clone(),
+                id,
+                allow_new,
+                deadline,
+                lock(&self.database).clone(),
+            )?
             else {
                 return self.snapshot(&engine, id).await;
             };
@@ -372,6 +384,12 @@ impl DurableEngine {
             .map_err(err)
     }
 
+    fn release_database(&self) {
+        if let Some(owner) = lock(&self.database).take() {
+            owner.release();
+        }
+    }
+
     /// Stop accepting calls and release the database. Idempotent.
     pub async fn close(&self) {
         self.closed.store(true, Ordering::Release);
@@ -380,6 +398,7 @@ impl DurableEngine {
         if let Some(engine) = cached.as_ref() {
             engine.close().await;
         }
+        self.release_database();
         // Retain ownership until close completes so cancellation can retry.
         let retired_engine = cached.take();
         drop(cached);

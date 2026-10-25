@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native database recovery ownership
+
+- Take an operating-system ownership lock before opening a native SQLite engine
+  or recovering running instances. Refuse overlapping handles/processes and
+  permit retry after close; keep ownership with live passes after object drop.
+- Resolve symlink aliases, refuse Unix hard-linked databases, preserve crash
+  restart behavior, and retain a stable advisory-lock companion beside the DB.
+
 ### Owned native scheduler passes
 
 - Let Node and Python run deadlines return a durable snapshot while retaining
