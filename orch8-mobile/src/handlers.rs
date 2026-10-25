@@ -11,7 +11,7 @@ use crate::error::HandlerError;
 use crate::stragglers::{Stragglers, device_timeout_error};
 
 mod invocation;
-use invocation::NativeInvocation;
+use invocation::{NativeClaim, NativeInvocation};
 
 /// Callback interface for host-registered step handlers.
 /// Implementations live in Swift/Kotlin and are called by the engine during tick execution.
@@ -63,11 +63,18 @@ pub(crate) fn register_foreign_handler(
             }
             let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
 
-            let mut call = NativeInvocation::spawn(handler, name.clone(), input, stragglers);
+            let claim = ctx.claim_token.map(|token| NativeClaim {
+                storage: Arc::clone(&ctx.storage),
+                instance_id: ctx.instance_id,
+                tenant_id: ctx.tenant_id.clone(),
+                token,
+            });
+            let mut call = NativeInvocation::spawn(handler, name.clone(), input, stragglers, claim);
 
             let result = match tokio::time::timeout(timeout, call.result()).await {
-                Ok(joined) => joined.map_err(|e| HandlerError::Permanent {
+                Ok(joined) => joined.map_err(|e| StepError::Permanent {
                     message: format!("handler task panicked: {e}"),
+                    details: None,
                 }),
                 Err(_elapsed) => {
                     warn!(handler = %name, "handler timed out; tracking any live native call");
@@ -86,16 +93,7 @@ pub(crate) fn register_foreign_handler(
                     });
                     Ok(value)
                 }
-                Ok(Err(HandlerError::Retryable { message }))
-                | Err(HandlerError::Retryable { message }) => Err(StepError::Retryable {
-                    message,
-                    details: None,
-                }),
-                Ok(Err(HandlerError::Permanent { message }))
-                | Err(HandlerError::Permanent { message }) => Err(StepError::Permanent {
-                    message,
-                    details: None,
-                }),
+                Ok(Err(error)) | Err(error) => Err(error),
             }
         }
     });
@@ -458,3 +456,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod claim_entry_tests;

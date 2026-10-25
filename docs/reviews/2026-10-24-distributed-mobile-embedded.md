@@ -1760,3 +1760,61 @@ start API is introduced. Handler/native callback ownership, scoped reads and
 builtins, child/delegation provenance, listeners, signals/SLA/recovery sweeps and
 complete resource accounting still require integration before scoped execution
 can be exposed. Preserve all ADR-0002 gates and the original review matrix.
+
+### DME103 — Queued native handlers entered without revalidating their claim (fixed)
+
+A real blocking-queue regression reproduced a host callback entering after its
+source instance returned to `scheduled`. The native invocation previously retained
+only handler/name/input, so waiting in the blocking pool discarded the original
+scheduler claim as an admission condition.
+
+Native invocations now retain immutable instance/tenant/token/storage context and
+verify it on the blocking thread immediately before host admission. The required
+`InstanceStore::verify_instance_claim` read checks one exact running claim and
+tenant. SQLite additionally applies the frozen request/account-epoch predicate;
+Postgres checks its native running claim. Encrypted and fault-injecting decorators
+explicitly delegate. This differs from heartbeat: a retained token on a completed
+or waiting instance must not authorize new host entry, and verification does not
+renew or modify the lease. Custom Rust storage implementors must implement this
+new required method; it has no permissive default. No HTTP/FFI interface changes.
+
+Cancellation or timeout while the database preflight is pending marks the physical
+invocation detached. A second admission check then prevents host entry; quarantine
+remains until the blocking closure actually settles. A clean direct-handler retry
+works after settlement. Failed database checks never invoke native code, preserve transient
+versus permanent error classes and do not include database error details. Invalid
+claims return `ClaimLost`, avoiding a fabricated permanent workflow failure.
+
+A separate weak-reference regression caught the claim/backend being dropped after
+preflight while detached host work was still live. Verification now borrows the
+owned proof; the blocking closure retains it through physical completion and then
+releases it. This preserves context without retaining the backend after settlement.
+
+Focused checks pass for valid claims, every non-running state, replaced tokens,
+missing sources, tenant mismatch, cancelled/timed-out verification, storage
+failures and clean retry. A real scoped request/native fixture verifies retirement
+and reopen while queued both prevent host entry. Final validation passed all 508
+mobile library tests, 231 storage library tests, the four native backend-contract
+variants (plain/encrypted SQLite/Postgres on an isolated required Postgres), and
+workspace/all-target Clippy with warnings denied. Formatting, documentation and
+diff checks passed. Hosted checks must pass on the submitted commit before merging.
+
+This is an entry preflight, not an atomic external-side-effect transaction or
+forced native cancellation. Claims can change after admission; in-flight native
+work retains its physical ownership and claim-bound result writes remain fenced.
+Scoped handler-object routing, per-account physical fairness, public SDK handles
+and the other ADR-0002 gates still require integration before scoped rollout.
+
+
+### Next recovery review — Durable effect dispatch versus physical native admission
+
+The direct-handler retry test does not prove complete workflow re-dispatch.
+`EffectGuard::begin` currently records `Dispatched` before calling the handler,
+while native claim verification and blocking-queue admission occur afterward.
+The core `ClaimLost` result preserves that receipt; unresolved lookup can therefore
+block the same attempt even when the native preflight proved no host entry occurred.
+Review this boundary with real scheduler/effect-ledger regressions, including
+cancellation before entry, ambiguous physical completion and cross-attempt recovery.
+Do not delete unresolved evidence or infer safe replay from elapsed time or a
+retryable error. Connect durable dispatch classification to actual admission before
+claiming automatic workflow recovery. This remains part of the original goal.

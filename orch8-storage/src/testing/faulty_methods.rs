@@ -77,7 +77,8 @@ fault_impl! {
         async fn count_running_by_concurrency_keys(&self, keys: &[(&str, &str)]) -> Result<HashMap<(String, String), i64>, StorageError>;
         async fn concurrency_position(&self, instance_id: InstanceId, concurrency_key: &str) -> Result<i64, StorageError>;
         async fn recover_stale_instances(&self, stale_threshold: Duration) -> Result<u64, StorageError>;
-        async fn heartbeat_instance(&self, instance_id: InstanceId, claimed_at: DateTime<Utc>) -> Result<InstanceLease, StorageError>;
+        async fn verify_instance_claim(&self, instance_id: InstanceId, tenant_id: &TenantId, claimed_at: DateTime<Utc>) -> Result<bool, StorageError>;
+    async fn heartbeat_instance(&self, instance_id: InstanceId, claimed_at: DateTime<Utc>) -> Result<InstanceLease, StorageError>;
         async fn get_child_instances(&self, parent_instance_id: InstanceId) -> Result<Vec<TaskInstance>, StorageError>;
         async fn get_child_for_activation(&self, parent_instance_id: InstanceId, block_id: &str, activation: &str) -> Result<Option<TaskInstance>, StorageError>;
         async fn get_child_for_adoption(&self, parent_instance_id: InstanceId, block_id: &str, activation_suffix: &str) -> Result<Option<TaskInstance>, StorageError>;

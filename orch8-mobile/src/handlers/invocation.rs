@@ -5,9 +5,41 @@ use std::sync::{Arc, Mutex};
 use tokio::task::{JoinError, JoinHandle};
 
 use super::{HandlerError, StepHandler, Stragglers};
+use orch8_types::{
+    error::StepError,
+    ids::{InstanceId, TenantId},
+};
+
+pub(super) struct NativeClaim {
+    pub(super) storage: Arc<dyn orch8_storage::StorageBackend>,
+    pub(super) instance_id: InstanceId,
+    pub(super) tenant_id: TenantId,
+    pub(super) token: chrono::DateTime<chrono::Utc>,
+}
+
+impl NativeClaim {
+    async fn verify(&self) -> Result<(), StepError> {
+        match self
+            .storage
+            .verify_instance_claim(self.instance_id, &self.tenant_id, self.token)
+            .await
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(StepError::ClaimLost),
+            Err(error) if error.is_transient() => Err(StepError::Retryable {
+                message: "native callback claim verification unavailable".into(),
+                details: None,
+            }),
+            Err(_) => Err(StepError::Permanent {
+                message: "native callback claim verification failed".into(),
+                details: None,
+            }),
+        }
+    }
+}
 
 pub(super) struct NativeInvocation {
-    call: JoinHandle<Result<String, HandlerError>>,
+    call: JoinHandle<Result<String, StepError>>,
     completion: Arc<Completion>,
 }
 
@@ -47,6 +79,7 @@ impl NativeInvocation {
         name: String,
         input: String,
         stragglers: Arc<Stragglers>,
+        claim: Option<NativeClaim>,
     ) -> Self {
         let completion = Arc::new(Completion {
             state: Mutex::new(State::default()),
@@ -54,14 +87,40 @@ impl NativeInvocation {
             name: name.clone(),
         });
         let finish = FinishOnDrop(Arc::clone(&completion));
+        let runtime = tokio::runtime::Handle::current();
+        let entry = Arc::clone(&completion);
         let call = tokio::task::spawn_blocking(move || {
             let _finish = finish;
-            handler.execute(name, input)
+            // Borrow the proof for verification: its owner/backend must remain
+            // captured until physical native completion, even after detach.
+            if let Some(claim) = &claim {
+                runtime.block_on(claim.verify())?;
+            }
+            // Cancellation may arrive while the database preflight is pending.
+            // Check at host admission, after that await, before any native code.
+            if entry
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detached
+            {
+                return Err(StepError::ClaimLost);
+            }
+            handler.execute(name, input).map_err(|error| match error {
+                HandlerError::Retryable { message } => StepError::Retryable {
+                    message,
+                    details: None,
+                },
+                HandlerError::Permanent { message } => StepError::Permanent {
+                    message,
+                    details: None,
+                },
+            })
         });
         Self { call, completion }
     }
 
-    pub(super) async fn result(&mut self) -> Result<Result<String, HandlerError>, JoinError> {
+    pub(super) async fn result(&mut self) -> Result<Result<String, StepError>, JoinError> {
         (&mut self.call).await
     }
 }
@@ -124,6 +183,7 @@ mod tests {
                 "queued".into(),
                 "{}".into(),
                 Arc::clone(&stragglers),
+                None,
             );
             drop(call);
             release_tx.send(()).unwrap();

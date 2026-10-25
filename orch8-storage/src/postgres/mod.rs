@@ -985,6 +985,17 @@ impl crate::InstanceStore for PostgresStorage {
         misc::recover_stale_instances(self, stale_threshold).await
     }
 
+    async fn verify_instance_claim(
+        &self,
+        instance_id: InstanceId,
+        tenant_id: &TenantId,
+        claimed_at: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=$1 AND tenant_id=$2 AND state='running' AND claimed_at=$3)")
+        .bind(instance_id.into_uuid()).bind(tenant_id.as_str()).bind(claimed_at)
+        .fetch_one(&self.pool).await.map_err(Into::into)
+    }
+
     async fn heartbeat_instance(
         &self,
         instance_id: InstanceId,
