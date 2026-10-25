@@ -2964,3 +2964,18 @@ Local validation passed all 612 mobile unit tests, 109 integration checks, all
 Fresh generation from the rebuilt native library matches all five committed
 mobile binding copies. These binding checks prove compatibility of the existing
 exported SDK surface, not completion of the new scoped foreign callback API.
+
+The first DME134 hosted unit run exposed a pre-existing synchronization race in
+`retired_cleanup_retains_capacity_and_registration_charges_until_host_drop`.
+All three new contextual callback tests passed in that run. The old cleanup
+fixture dropped its observer, then treated an available physical semaphore slot
+as proof that registration was ready. The retirement job releases that slot
+before its priority token and completion metadata finish settling, so a correct
+registration refusal could race the fixture's immediate rebind assertion.
+
+The fixture now reattaches to the already-running owned cleanup receipt after
+dropping its first observer. It waits for full completion before rebinding and
+still asserts the blocked destructor's physical/registration charges, another
+account's progress, observer independence and late cleanup's epoch isolation.
+No runtime admission or cleanup invariant was relaxed. The repaired case passed
+50 consecutive scheduling stress runs before the full suite was repeated.
