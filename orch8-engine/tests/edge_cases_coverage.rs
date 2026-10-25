@@ -991,14 +991,27 @@ async fn step_timeout_triggers_retryable_error() {
 // 39. step_timeout_zero_fails_immediately
 #[tokio::test]
 async fn step_timeout_zero_fails_immediately() {
-    // Step with 0ms timeout; the handler should complete if noop is fast enough.
-    // In practice noop is synchronous so it still completes.
-    let (storage, seq, inst) = setup(vec![mk_step_with_timeout("s1", "noop", 0)]).await;
-    let reg = registry();
-    drive(&storage, &reg, inst.id, &seq).await;
+    // A ready noop can race the zero deadline, including its asynchronous
+    // claim verification. A permanently pending handler makes the timeout
+    // contract deterministic without relying on scheduler speed or sleeps.
+    // Cancelling a SQLite query may recycle its connection. Use a file here
+    // so that this deadline test does not also depend on in-memory connection
+    // lifetime (a separate storage contract).
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("zero-timeout.db");
+    let storage: Arc<dyn StorageBackend> =
+        Arc::new(SqliteStorage::file(path.to_str().unwrap()).await.unwrap());
+    let seq = mk_sequence(vec![mk_step_with_timeout("s1", "never_ready", 0)]);
+    storage.create_sequence(&seq).await.unwrap();
+    let inst = mk_instance(seq.id);
+    storage.create_instance(&inst).await.unwrap();
+    let mut reg = registry();
+    reg.register("never_ready", |_ctx| Box::pin(std::future::pending()));
+    tokio::time::timeout(Duration::from_secs(5), drive(&storage, &reg, inst.id, &seq))
+        .await
+        .expect("zero timeout must not wait for the handler to become ready");
     let tree = storage.get_execution_tree(inst.id).await.unwrap();
-    // noop is instant, completes even with 0 timeout in test env.
-    assert_eq!(node_state(&tree, "s1"), NodeState::Completed);
+    assert_eq!(node_state(&tree, "s1"), NodeState::Failed);
 }
 
 // 40. cascading_failures_parallel_all_fail
