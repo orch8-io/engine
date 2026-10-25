@@ -5,6 +5,7 @@ framework_dir="${1:?pass directory containing native-host Orch8Kmp.framework}"
 ffi_headers="${2:?pass generated Swift FFI headers directory}"
 native_dir="${3:?pass current native host library directory}"
 fixture_dir="${4:?pass exported scoped fixture directory}"
+mkdir -p "$repo_root/target"
 work_dir="$(mktemp -d "$repo_root/target/kmp-scoped-host.XXXXXX")"
 trap 'rm -rf "$work_dir"' EXIT
 mkdir -p "$work_dir/ffi"

@@ -3292,7 +3292,11 @@ The actual macOS native framework/Swift/Rust flow, actual iOS simulator framewor
 build and Swift bridge typecheck pass; strict Swift concurrency and warnings as
 errors are enabled. Mobile all-target Clippy, Rust formatting, actionlint, docs,
 SDK packaging and whitespace checks pass. Android source-cohort compilation is
-configured in CI and awaits that PR run; no Android device execution is claimed.
+passed in CI against this commit’s AAR (job 121310376983); no Android device
+execution is claimed. The first native-host CI run exposed a missing root
+`target/` directory in a fresh artifact-only checkout. The harness now creates
+its work parent explicitly. A clean-root reproduction fails before this fix and
+passes the real four-workflow Swift/Kotlin/Rust flow afterward.
 
 ### DME141 — Observe owned KMP runs without a polling spin or read queue
 
