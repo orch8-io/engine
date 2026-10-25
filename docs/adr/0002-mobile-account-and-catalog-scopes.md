@@ -260,10 +260,21 @@ through queued physical admission and database preflight. The internal scoped
 router requires an explicit runtime token and refuses local admission after stop
 without retiring its durable account. A second router for that account remains
 usable. This still does not wire scoped routing into production execution.
-Next wire account-close and shutdown lifecycle ownership to the bounded cleanup
-primitive, then carry owners through actual materialization, remaining builtin/read
-boundaries, recovery,
-listeners and every execution write. Other callback classes and independent
-processes still need shared-bound evidence.
+Scoped reference retirement is now connected to production engine shutdown and
+final drop. Two process-owned workers share the existing physical account/process
+budget with callbacks; accepted registration permits bound their pending work.
+Observers and the caller's Tokio runtime do not own cleanup. Confirmed retired
+epochs can enqueue once behind live work; local stop preserves the durable
+account. Pending registration references live in the registry, so shutdown can
+release them without waiting for storage and reject late publication. Weak epoch
+fences also close the retirement/preflight overlap. Callback and cleanup permits
+cover panic payload disposal and Apple autorelease-pool draining.
+
+This does not create production scoped instances or expose scoped SDK handles.
+Next carry frozen owners through actual materialization, remaining builtin/read
+boundaries, background recovery and listeners. Verify admission backpressure and
+infrastructure failure semantics through real scheduler execution, not only
+adapter calls. Other callback classes and independent processes still need their
+resource-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open
 until their complete runtime and SDK evidence exists.

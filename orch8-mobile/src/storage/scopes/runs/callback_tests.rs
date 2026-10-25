@@ -62,7 +62,7 @@ fn held() -> (
         release,
     )
 }
-async fn running(
+pub(super) async fn running(
     storage: &MobileStorage,
     sqlite: &Arc<SqliteStorage>,
     scope: &CatalogScope,
@@ -110,7 +110,7 @@ fn exec(ctx: &StepContext) -> StepExecParams {
         output_schema: None,
     }
 }
-fn make_registry(hub: &Arc<CatalogHandlers>) -> HandlerRegistry {
+pub(super) fn make_registry(hub: &Arc<CatalogHandlers>) -> HandlerRegistry {
     let mut registry = HandlerRegistry::new();
     hub.register(&mut registry, "same");
     registry
@@ -310,6 +310,9 @@ async fn live_account_slots_survive_retirement_reopen_and_independent_pools() {
     assert_eq!(fresh_calls.load(Ordering::SeqCst), 1);
     assert_eq!(bob_calls.load(Ordering::SeqCst), 1);
     assert_eq!(other_calls.load(Ordering::SeqCst), 0);
+    for receipt in hub.close().into_iter().chain(successor.close()) {
+        receipt.await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -784,7 +787,11 @@ async fn host_drop_panic_does_not_strand_other_retired_bindings_or_capacity() {
 
 #[test]
 fn queued_retirement_keeps_cleanup_owned_after_runtime_shutdown() {
-    struct DropSignal(std::sync::mpsc::Sender<()>);
+    struct DropSignal(
+        std::sync::mpsc::Sender<()>,
+        Mutex<std::sync::mpsc::Receiver<()>>,
+        std::sync::mpsc::Sender<()>,
+    );
     impl StepHandler for DropSignal {
         fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
             panic!("retired handler cannot execute")
@@ -793,6 +800,8 @@ fn queued_retirement_keeps_cleanup_owned_after_runtime_shutdown() {
     impl Drop for DropSignal {
         fn drop(&mut self) {
             let _ = self.0.send(());
+            let _ = self.1.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            let _ = self.2.send(());
         }
     }
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -804,33 +813,29 @@ fn queued_retirement_keeps_cleanup_owned_after_runtime_shutdown() {
     let (storage, sqlite) = runtime.block_on(fixture());
     let hub = CatalogHandlers::isolated(storage.clone(), sqlite);
     let owner = runtime.block_on(scope(&storage, "alice", "one"));
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
     let (dropped, observed) = std::sync::mpsc::channel();
     runtime
         .block_on(hub.bind(
             &owner,
             "idle",
-            Arc::new(DropSignal(dropped)),
+            Arc::new(DropSignal(entered, Mutex::new(held), dropped)),
             Duration::from_secs(5),
         ))
         .unwrap();
     runtime
         .block_on(storage.retire_account_scope(&owner.account))
         .unwrap();
-    let (started, entered) = std::sync::mpsc::channel();
-    let (release, held) = std::sync::mpsc::channel();
-    runtime.spawn_blocking(move || {
-        started.send(()).unwrap();
-        let _ = held.recv_timeout(Duration::from_secs(10));
-    });
-    entered.recv_timeout(Duration::from_secs(5)).unwrap();
     let receiver = runtime.block_on(hub.release_retired(&owner)).unwrap();
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
     let gate = hub.account_gate(&owner).unwrap();
     assert_eq!(gate.available_permits(), 0);
     drop(receiver);
     runtime.shutdown_background();
     release.send(()).unwrap();
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
-    // The cleanup frame needs no async runtime/registry lock for its drop path.
+    // Physical destruction is owned by the retirement executor, not Tokio.
 }
 
 #[tokio::test]

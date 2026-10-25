@@ -286,3 +286,6 @@ mod entry_tests;
 
 #[cfg(test)]
 mod registration_tests;
+
+#[cfg(test)]
+mod retirement_tests;
