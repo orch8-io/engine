@@ -3363,3 +3363,12 @@ before scheduling. The real Swift/Rust host fixture passes terminal and closed
 subscriptions without an abort. The iOS framework/Swift bridge typecheck, docs
 and whitespace checks pass. The generated header exposes the callback
 subscription and omits the raw scoped Flow.
+
+The final artifact-only CI host run also exposed Cargo's absolute debug dylib
+install name (job 121316494872). The downloaded library linked successfully but
+its loader still searched the absent producer `target/debug/deps` directory.
+The host harness now normalizes and ad-hoc signs a private copy with an
+`@rpath` install name; it preserves the input artifact and links/runs only that
+copy. An isolated library with an intentionally nonexistent producer path
+reproduces the loader abort before this fix and passes the real four-scope Swift
+workflow/subscription fixture afterward. The source library checksum is unchanged.
