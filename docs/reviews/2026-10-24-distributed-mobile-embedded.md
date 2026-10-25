@@ -2210,3 +2210,28 @@ diff checks passed. Hosted checks must pass before merge.
 This fixes preparation-stage database recovery, not an external provider's
 credential rejection, cross-catalog credential policy, or the broader remaining
 parameter/memory, scoped integration and runtime matrix audits.
+
+
+### DME116 — Device-return E2E signed noncanonical whole-second timestamps
+
+PR #302's E2E job rejected the hand-signed device-return capsule with a canonical
+manifest hash conflict. Forcing the fixture's JavaScript timestamps to an exact
+second reproduced the same HTTP 409 locally against the current server.
+JavaScript emitted .000Z; typed Rust UTC serialization emitted Z. The fixture
+hashed a representation different from the verifier's canonical typed manifest.
+Its manually resealed checkpoint carried the same timestamp-format risk.
+
+Normalize the fixture's typed checkpoint and manifest timestamps before hashing,
+and deliberately use whole seconds so this formerly intermittent boundary runs
+every time. The production verifier and signing protocol remain unchanged.
+Document that host CapsuleSigner implementations sign the Rust-supplied digest,
+while separate manual manifest construction must match typed canonical JSON.
+No equivalent manual hashing implementation was found in the in-repository
+Swift/KMP/RN/Flutter wrappers; this is not proof of full platform parity.
+
+The focused regression first failed with HTTP 409, then passed. All 18 portable
+continuity E2Es passed with fresh SQLite and all 18 passed with required isolated
+Postgres, using freshly built current server and CLI binaries. The isolated
+Postgres container was removed. E2E TypeScript typechecking passed. This corrects
+the test producer; it does not weaken signature, payload-hash or ownership checks.
+The broader runtime, scoped integration and platform audit remains open.

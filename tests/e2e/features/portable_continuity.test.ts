@@ -74,6 +74,12 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+// Capsule metadata is hashed after typed Rust deserialization. Chrono's UTC
+// representation omits an all-zero fraction; Date.toISOString always adds .000.
+function capsuleTimestamp(milliseconds: number): string {
+  return new Date(milliseconds).toISOString().replace(/\.000Z$/, "Z");
+}
+
 function capsuleAad(
   tenantId: string,
   continuityId: string,
@@ -803,7 +809,9 @@ describe("Portable Continuity", () => {
       capsuleAad(tenantId, execution.continuity_id, 0, destinationRuntimeId),
     );
     portablePayload.checkpoint.instance_id = destinationInstanceId;
-    portablePayload.checkpoint.created_at = new Date().toISOString();
+    // Keep the previously intermittent whole-second signing edge deterministic.
+    const deviceReturnTime = Math.floor(Date.now() / 1_000) * 1_000;
+    portablePayload.checkpoint.created_at = capsuleTimestamp(deviceReturnTime);
     const returnKey = randomBytes(32);
     const returnPayload = sealCapsule(
       portablePayload,
@@ -828,8 +836,8 @@ describe("Portable Continuity", () => {
         sha256: createHash("sha256").update(returnPayload).digest("hex"),
         bytes: returnPayload.length,
       },
-      issued_at: new Date().toISOString(),
-      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      issued_at: capsuleTimestamp(deviceReturnTime),
+      expires_at: capsuleTimestamp(deviceReturnTime + 60_000),
       signing_key_id: "device-secure-key",
       encryption_key_id: "destination-transfer-v1",
     };
