@@ -891,7 +891,9 @@ pub(crate) async fn execute_step_node_with_clock(
         .map_err(|e| e.normalize_timeout_as_retryable(instance.id));
     match result {
         Err(e @ EngineError::ClaimLost { .. }) => Err(e),
-        Err(e) if e.is_transient_storage() => Err(e),
+        Err(e) if e.is_transient_storage() || matches!(e, EngineError::AdmissionBusy { .. }) => {
+            Err(e)
+        }
         Ok(output) => {
             if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
                 cb.record_success(

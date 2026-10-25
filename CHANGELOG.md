@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native admission recovery
+
+- Reschedule scoped native capacity contention without consuming workflow retries
+  or the bounded storage-failure budget. Keep the original Prepared effect and
+  attempt until physical capacity returns.
+- Preserve infrastructure recovery for transient native claim checks before
+  dispatch. Preflight rejection consumes the opaque admission capability and
+  cannot commit an ignored rejection or relabel an already-started dispatch.
+
 ### Contextual scoped handler policy
 
 - Select each scoped step's native override or permitted builtin together with

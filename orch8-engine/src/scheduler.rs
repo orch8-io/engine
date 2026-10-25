@@ -718,6 +718,25 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                         tracing::warn!(%instance_id, %error, "failed to hand back stopped claim");
                     }
                 }
+                Ok(Err(EngineError::AdmissionBusy { .. })) => {
+                    transient_retries::clear(&storage, instance_id);
+                    // Physical contention is normal flow control, not a failed
+                    // host attempt or a recurring infrastructure fault. A stuck
+                    // callback retains its charge; waiting work remains durable.
+                    let fire_at = clock_outer.now() + chrono::Duration::milliseconds(250);
+                    if let Err(error) = storage
+                        .conditional_update_claimed_instance_state(
+                            instance_id,
+                            claim_token,
+                            InstanceState::Running,
+                            InstanceState::Scheduled,
+                            Some(fire_at),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%instance_id, %error, "failed to reschedule occupied native admission");
+                    }
+                }
                 Ok(Err(e)) if e.is_transient_storage() => {
                     // A transient storage failure (connection loss, pool
                     // exhaustion, DB failover) is NOT a processing failure —
@@ -3798,7 +3817,9 @@ async fn process_instance_tree(
         // reach `process_tick`'s transient arm and be rescheduled with
         // backoff, not fail the instance permanently.
         Err(e @ EngineError::ClaimLost { .. }) => return Err(e),
-        Err(e) if e.is_transient_storage() => return Err(e),
+        Err(e) if e.is_transient_storage() || matches!(e, EngineError::AdmissionBusy { .. }) => {
+            return Err(e);
+        }
         Err(e) => {
             handle_tree_eval_error(ctx, instance, sequence, &e).await?;
         }

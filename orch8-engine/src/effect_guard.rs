@@ -62,6 +62,25 @@ impl EffectAdmission {
         Ok(())
     }
 
+    /// Refuse an owned preflight before dispatch while preserving its typed
+    /// scheduler outcome. Consumes this capability: later admission is refused.
+    /// Once dispatch has started, rejection cannot relabel its ambiguous outcome.
+    pub fn reject_preflight(&self, error: EngineError) -> orch8_types::error::StepError {
+        if self
+            .inner
+            .started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            *self
+                .inner
+                .failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
+        }
+        orch8_types::error::StepError::ClaimLost
+    }
+
     pub(crate) fn is_admitted(&self) -> bool {
         self.inner.admitted.load(Ordering::Acquire)
     }
@@ -1397,5 +1416,73 @@ mod tests {
         .unwrap();
         assert_eq!(result.output, serde_json::json!({"mock":true}));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn preflight_rejection_consumes_admission_and_cannot_commit_ignored_control_error() {
+        let (storage, instance) = ordinary_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let mut handlers = HandlerRegistry::new();
+        handlers.register_with_deferred_effect_admission("native", |ctx| async move {
+            let admission = ctx.effect_admission.unwrap();
+            assert!(matches!(
+                admission.reject_preflight(EngineError::AdmissionBusy {
+                    instance_id: ctx.instance_id,
+                }),
+                orch8_types::error::StepError::ClaimLost
+            ));
+            assert!(matches!(
+                admission.admit().await,
+                Err(orch8_types::error::StepError::ClaimLost)
+            ));
+            // Even a buggy adapter ignoring the control error cannot commit it.
+            Ok(serde_json::json!({"ignored":true}))
+        });
+        assert!(matches!(
+            execute_step_dry(&storage, &handlers, native_execution(&instance)).await,
+            Err(EngineError::AdmissionBusy { .. })
+        ));
+        let ledger = storage
+            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let rows = storage
+            .list_effect_receipts(&instance.tenant_id, ledger.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, EffectState::Prepared);
+    }
+
+    #[tokio::test]
+    async fn preflight_rejection_cannot_relabel_started_dispatch() {
+        let (storage, instance) = ordinary_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let exec = native_execution(&instance);
+        let mut guard = EffectGuard::prepare(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &exec.block_id,
+            "native",
+            &exec.params,
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let admission = guard.admission(storage.clone());
+        admission.admit().await.unwrap();
+        assert!(matches!(
+            admission.reject_preflight(EngineError::AdmissionBusy {
+                instance_id: instance.id
+            }),
+            orch8_types::error::StepError::ClaimLost
+        ));
+        assert!(admission.take_failure().is_none());
+        assert!(admission.is_admitted());
+        guard.refresh().await.unwrap();
+        assert_eq!(guard.receipt.state, EffectState::Dispatched);
     }
 }
