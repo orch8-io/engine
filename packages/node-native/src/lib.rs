@@ -120,8 +120,18 @@ impl NativeDurableEngine {
     }
 
     #[napi]
-    pub async fn run(&self, id: String, timeout_ms: Option<u32>) -> napi::Result<String> {
-        let timeout = timeout_ms.map(|ms| Duration::from_millis(u64::from(ms)));
+    pub async fn run(&self, id: String, timeout_ms: Option<f64>) -> napi::Result<String> {
+        let timeout = timeout_ms
+            .map(|ms| {
+                if !ms.is_finite() || ms < 0.0 || ms.fract() != 0.0 || ms > f64::from(u32::MAX) {
+                    return Err(napi::Error::new(
+                        Status::InvalidArg,
+                        "timeoutMs must be a finite nonnegative integer at most 4294967295",
+                    ));
+                }
+                Ok(Duration::from_millis(ms as u64))
+            })
+            .transpose()?;
         self.inner.run(&id, timeout).await.map_err(to_napi)
     }
 

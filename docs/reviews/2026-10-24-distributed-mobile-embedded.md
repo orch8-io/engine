@@ -2300,3 +2300,36 @@ This removes lifecycle-lock deadlocks. Arbitrary host destruction can still bloc
 its own calling thread, and queued physical host admission, general callback
 resource bounds, full platform parity and scoped SDK/runtime integration remain
 open. The original distributed/mobile/embedded matrix is not complete.
+
+
+### DME119 — Native run dispatched work before validating its target or budget
+
+Five Rust regressions failed against the preceding shared runner: a missing
+valid ID dispatched another queued workflow; a completed target dispatched a new
+workflow; zero budget entered a host callback; malformed IDs initialized and
+froze handler registration; and Duration::MAX panicked when added to Instant.
+Actual baseline addons also failed new timeout validation tests: Node accepted a
+negative budget, while Python clamped negative/NaN input into zero and could
+still execute the pending handler. The staged baseline addon hashes matched the
+recorded artifacts from the preceding fix.
+
+The runner parses IDs and checks deadline representability before initialization,
+then reads the tenant-authorized target and checks terminal state and remaining
+budget before every scheduler pass. Zero returns a snapshot without scheduling.
+Waiting and paused targets still get a pass to process queued continuation
+signals. Node accepts finite integral milliseconds in its existing u32 range;
+Python accepts finite, nonnegative seconds with checked Duration conversion.
+No callback envelope, schema or SDK method shape changes are introduced.
+
+All seven run contracts passed, including concurrent same-target callers and
+actual human-input continuation from Waiting. The complete facade suite passed
+169 test results plus three documentation tests, and workspace/all-target lint
+with warnings denied passed. Actual macOS arm64 addons passed all four Node and
+five Python runtime tests. Formatting (including both standalone binding crates),
+documentation and diff checks passed. Hosted CI must pass before merge.
+
+The original deadline can still be exceeded by an already-running scheduler
+pass. A complete logical run deadline needs owned pass/callback supervision and
+bounded physical continuation; that work remains open, along with queued native
+admission, global callback bounds, scoped runtime/SDK integration and the broader
+review matrix. This preflight fix does not claim a complete timeout solution.

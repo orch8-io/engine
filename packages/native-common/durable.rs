@@ -251,10 +251,23 @@ impl DurableEngine {
     /// cancelled, paused or waiting (for a signal/event), or `timeout`
     /// elapses. Returns the snapshot JSON either way.
     pub async fn run(&self, id: &str, timeout: Option<Duration>) -> Result<String, String> {
-        let engine = self.engine().await?;
         let id = parse_instance_id(id)?;
-        let deadline = timeout.map(|t| Instant::now() + t);
+        let now = Instant::now();
+        let deadline = timeout
+            .map(|duration| {
+                now.checked_add(duration)
+                    .ok_or_else(|| "run timeout is too large for the monotonic clock".to_string())
+            })
+            .transpose()?;
+        let engine = self.engine().await?;
         loop {
+            // Validate the target and budget before a pass can dispatch other
+            // queued instances. Waiting/paused targets still need a pass to
+            // process queued signals; terminal targets cannot resume.
+            let instance = engine.get_instance(id).await.map_err(err)?;
+            if instance.state.is_terminal() || deadline.is_some_and(|d| Instant::now() >= d) {
+                return self.snapshot(&engine, id).await;
+            }
             let tick = engine.tick_once().await.map_err(err)?;
             let instance = engine.get_instance(id).await.map_err(err)?;
             let settled = instance.state.is_terminal()

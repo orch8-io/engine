@@ -28,6 +28,27 @@ def effects(tmp: str) -> list:
 
 
 class DurableRestartTest(unittest.TestCase):
+    def test_run_preflight_rejects_invalid_timeouts_without_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = Engine.open(os.path.join(tmp, "app.db"))
+            calls = []
+            engine.handler("host", lambda ctx: calls.append(ctx["attempt"]) or True)
+            engine.deploy({"name": "preflight", "blocks": [
+                {"type": "step", "id": "work", "handler": "host"}]})
+            instance = engine.start("preflight")
+            try:
+                for timeout in [-1, float("nan"), float("inf"), -float("inf")]:
+                    with self.subTest(timeout=timeout):
+                        with self.assertRaisesRegex(ValueError, "timeout"):
+                            engine.run(instance, timeout=timeout)
+                self.assertEqual(calls, [])
+                self.assertEqual(engine.run(instance, timeout=0)["state"], "scheduled")
+                self.assertEqual(calls, [])
+                self.assertEqual(engine.run(instance, timeout=2)["state"], "completed")
+                self.assertEqual(calls, [0])
+            finally:
+                engine.close()
+
     def test_handler_replacement_allows_reentrant_finalizer(self):
         code = """
 from orch8_engine import Engine

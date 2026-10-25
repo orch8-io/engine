@@ -31,6 +31,26 @@ function runWorker(dir, mode) {
 
 const effects = (dir) => readFileSync(join(dir, 'effects.log'), 'utf8').trim().split('\n')
 
+test('run preflight rejects invalid budgets and zero does not dispatch', withDir(async (dir) => {
+  const engine = await Engine.open(join(dir, 'app.db'))
+  const calls = []
+  engine.handler('host', (ctx) => { calls.push(ctx.attempt); return true })
+  try {
+    await engine.deploy({ name: 'preflight', blocks: [{ type: 'step', id: 'work', handler: 'host' }] })
+    const instance = await engine.start('preflight')
+    for (const timeoutMs of [-1, NaN, Infinity, -Infinity, 0.5, 2 ** 32]) {
+      await assert.rejects(engine.run(instance, { timeoutMs }), /timeout/)
+    }
+    assert.deepEqual(calls, [])
+    assert.equal((await engine.run(instance, { timeoutMs: 0 })).state, 'scheduled')
+    assert.deepEqual(calls, [])
+    assert.equal((await engine.run(instance, { timeoutMs: 2000 })).state, 'completed')
+    assert.deepEqual(calls, [0])
+  } finally {
+    await engine.close()
+  }
+}))
+
 test(
   'a 3-step flow resumes in a new process after a hard kill between steps',
   withDir((dir) => {

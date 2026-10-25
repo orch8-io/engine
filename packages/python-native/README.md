@@ -35,6 +35,11 @@ the Rust runtime works; Python handlers acquire it when executing Python code.
 | `engine.signal(id, name, payload=None)`                                 | `pause`, `resume`, `cancel`, `update_context`, or a custom signal.                                                                                                                              |
 | `engine.close()`                                                        | Stop the engine and release the file.                                                                                                                                                           |
 
+`timeout` must be finite, nonnegative seconds and fit the monotonic clock.
+Zero returns the current snapshot without starting a scheduling pass. A missing
+or terminal target cannot dispatch other queued workflows. The current timeout
+checks run between passes; a pass already in progress is not interrupted.
+
 Handlers receive a dict `{"params", "data", "outputs", "instance_id",
 "step_id", "attempt"}` and return any JSON-serializable value. `async def`
 handlers work too (each call runs in its own event loop). Handlers run on an

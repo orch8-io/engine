@@ -41,6 +41,11 @@ A runnable 3-step example with a simulated crash is in
 | `await engine.signal(id, name, payload?)`                         | `pause`, `resume`, `cancel`, `update_context`, or a custom signal (e.g. for `wait_for_input`).                                                                                                                  |
 | `await engine.close()`                                            | Stop the engine and release the file.                                                                                                                                                                           |
 
+`timeoutMs` is a finite integer from 0 through 4,294,967,295. Zero returns
+the current snapshot without starting a scheduling pass. A missing or terminal
+target cannot dispatch other queued workflows. The current timeout checks run
+between passes; a pass already in progress is not interrupted.
+
 Handlers receive `{ params, data, outputs, instanceId, stepId, attempt }`:
 `params` are the step's params with `{{ ... }}` templates resolved, `data` is
 the instance's `context.data`, and `outputs` holds every completed step's output
