@@ -526,6 +526,7 @@ fault_impl! {
 fault_impl! {
     [INVARIANT_STORE_METHODS] impl InvariantStore {
         async fn create_workflow_invariant(&self, invariant: &WorkflowInvariant) -> Result<(), StorageError>;
+        async fn list_effect_commit_guards(&self, tenant_id: &TenantId, sequence_id: SequenceId, sequence_version: i32, kind: orch8_types::continuity::EffectKind, limit: u32) -> Result<Vec<WorkflowInvariant>, StorageError>;
         async fn list_workflow_invariants(&self, tenant_id: &TenantId, sequence_id: SequenceId, sequence_version: i32, limit: u32) -> Result<Vec<WorkflowInvariant>, StorageError>;
         async fn append_invariant_result(&self, tenant_id: &TenantId, result: &InvariantResult) -> Result<bool, StorageError>;
         async fn list_invariant_results(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<InvariantResult>, StorageError>;

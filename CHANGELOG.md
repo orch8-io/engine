@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Synchronous effect-guard discovery
+
+- Apply policy scope and effect-kind filters in storage before limiting invariant
+  results. A configured synchronous at-most-once guard can no longer be hidden
+  behind 10,000 earlier unrelated invariants.
+- Add required Rust `InvariantStore::list_effect_commit_guards`, including native,
+  encrypted and fault wrappers. Custom backends must filter before limiting.
+  Ordinary per-attempt retry policy, public invariant listing, schema versions
+  and HTTP/FFI signatures remain unchanged.
+
 ### Agent checkpoint ownership and recovery
 
 - Fence agent checkpoint loads, saves and deletion with the initiating claim.

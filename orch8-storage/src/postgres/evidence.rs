@@ -53,6 +53,36 @@ impl crate::InvariantStore for PostgresStorage {
         Ok(())
     }
 
+    async fn list_effect_commit_guards(
+        &self,
+        tenant_id: &TenantId,
+        sequence_id: SequenceId,
+        sequence_version: i32,
+        kind: orch8_types::continuity::EffectKind,
+        limit: u32,
+    ) -> Result<Vec<WorkflowInvariant>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record FROM workflow_invariants
+             WHERE tenant_id = $1 AND sequence_id = $2 AND enabled
+               AND (sequence_version IS NULL OR sequence_version = $3)
+               AND record->>'commit_guard' = 'true'
+               AND record->'rule'->>'type' = 'effect_at_most_once'
+               AND record->'rule'->>'kind' = $4
+             ORDER BY created_at, id LIMIT $5",
+        )
+        .bind(tenant_id.as_str())
+        .bind(sequence_id.into_uuid())
+        .bind(sequence_version)
+        .bind(state_name(kind)?)
+        .bind(i64::from(limit.min(10_000)))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
     async fn list_workflow_invariants(
         &self,
         tenant_id: &TenantId,
