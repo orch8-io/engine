@@ -279,8 +279,17 @@ impl Fixture {
             .await
     }
     fn publish(&self, subject: &str, catalog: &str, present: bool, required: &[&str]) -> i64 {
+        self.publish_definition(subject, catalog, present, required, &definition())
+    }
+    fn publish_definition(
+        &self,
+        subject: &str,
+        catalog: &str,
+        present: bool,
+        required: &[&str],
+        body: &str,
+    ) -> i64 {
         let prefix = format!("/catalog/{subject}/{catalog}");
-        let body = definition();
         let entries = if present {
             vec![ManifestSequence {
                 name: "flow".into(),
@@ -1184,4 +1193,249 @@ async fn accepted_withdrawal_fences_new_admission_before_removal_reconciliation(
             .await
             .is_err()
     );
+}
+
+#[test]
+fn public_sdk_sync_authenticates_four_catalogs_before_private_content_and_dispatches_their_runs() {
+    use crate::{
+        MobileAccountIdentity, MobileCatalogRunRequest, MobileEngine, MobileEngineConfig,
+        TokenProvider,
+    };
+    struct Token(String);
+    impl TokenProvider for Token {
+        fn current_token(&self) -> String {
+            self.0.clone()
+        }
+        fn refresh_token(&self) -> Result<String, MobileError> {
+            Ok(self.0.clone())
+        }
+    }
+    let engine = MobileEngine::new(
+        ":memory:".into(),
+        MobileEngineConfig {
+            telemetry_enabled: false,
+            operation_timeout_ms: 3000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let fixture = engine
+        .runtime
+        .block_on(Fixture::with_storage(engine.sqlite.clone()));
+    let mut retained = Vec::new();
+    for subject in ["alice", "bob"] {
+        let account = engine
+            .clone()
+            .open_account(MobileAccountIdentity {
+                account_key: subject.into(),
+                issuer: "issuer".into(),
+                subject: subject.into(),
+            })
+            .unwrap();
+        for catalog_name in ["one", "two"] {
+            let (_, scope) = engine
+                .runtime
+                .block_on(fixture.scope(subject, catalog_name));
+            let syncer = engine.runtime.block_on(fixture.syncer(&scope));
+            let catalog = crate::scoped_sdk::catalog_for_transport_test(&account, scope, syncer);
+            let mut body: Value = serde_json::from_str(&definition()).unwrap();
+            body["blocks"] = json!([{"type":"step","id":"work","handler":"noop","params":{}}]);
+            fixture.publish_definition(subject, catalog_name, true, &[], &body.to_string());
+            assert_eq!(
+                catalog
+                    .sync(Arc::new(Token(format!("{subject}/v1"))))
+                    .unwrap()
+                    .added,
+                1
+            );
+            let before = fixture.server.recorded().len();
+            let wrong = if subject == "alice" { "bob" } else { "alice" };
+            assert!(
+                catalog
+                    .sync(Arc::new(Token(format!("{wrong}/v1"))))
+                    .is_err()
+            );
+            let requests = fixture.server.recorded();
+            assert_eq!(requests.len(), before + 1);
+            assert_eq!(requests[before].path, "/identity");
+            let run = catalog
+                .prepare_run(MobileCatalogRunRequest {
+                    workflow: "flow".into(),
+                    version: None,
+                    input_json: "{}".into(),
+                    operation_key: "same-key".into(),
+                })
+                .unwrap();
+            run.start().unwrap();
+            for _ in 0..30 {
+                engine.tick_once().unwrap();
+                if run.snapshot().unwrap().unwrap().state == crate::InstanceStateKind::Completed {
+                    break;
+                }
+            }
+            assert_eq!(
+                run.snapshot().unwrap().unwrap().state,
+                crate::InstanceStateKind::Completed
+            );
+            assert_eq!(
+                catalog.history(None, 8).unwrap().items[0].instance_id,
+                run.instance_id()
+            );
+            retained.push((account.clone(), catalog, run));
+        }
+    }
+    assert_eq!(retained.len(), 4);
+    engine.shutdown();
+}
+
+mod sdk_token_test_support {
+    use crate::{MobileError, TokenProvider};
+    use std::sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    pub(super) struct Gate(pub(super) Arc<(Mutex<bool>, Condvar)>);
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let (lock, wake) = &*self.0;
+            *lock.lock().unwrap() = true;
+            wake.notify_all();
+        }
+    }
+    pub(super) struct Blocked {
+        pub(super) gate: Arc<(Mutex<bool>, Condvar)>,
+        pub(super) entered: std::sync::mpsc::Sender<()>,
+        pub(super) block_drop: bool,
+    }
+    impl Blocked {
+        fn wait(&self) {
+            let _ = self.entered.send(());
+            let (lock, wake) = &*self.gate;
+            let mut ready = lock.lock().unwrap();
+            while !*ready {
+                ready = wake.wait(ready).unwrap();
+            }
+        }
+    }
+    impl Drop for Blocked {
+        fn drop(&mut self) {
+            if self.block_drop {
+                self.wait();
+            }
+        }
+    }
+    impl TokenProvider for Blocked {
+        fn current_token(&self) -> String {
+            if !self.block_drop {
+                self.wait();
+            }
+            "alice/v1".into()
+        }
+        fn refresh_token(&self) -> Result<String, MobileError> {
+            Ok("alice/v1".into())
+        }
+    }
+    pub(super) struct Token {
+        pub(super) value: &'static str,
+        pub(super) calls: Arc<AtomicUsize>,
+    }
+    impl TokenProvider for Token {
+        fn current_token(&self) -> String {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.value.into()
+        }
+        fn refresh_token(&self) -> Result<String, MobileError> {
+            Ok(self.value.into())
+        }
+    }
+}
+
+#[test]
+fn public_sdk_hung_token_keeps_its_account_charge_across_close_and_reopen_while_another_account_syncs()
+ {
+    use crate::{MobileAccountIdentity, MobileEngine, MobileEngineConfig};
+    use sdk_token_test_support::{Blocked, Gate, Token};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for block_drop in [false, true] {
+        let engine = MobileEngine::new(
+            ":memory:".into(),
+            MobileEngineConfig {
+                telemetry_enabled: false,
+                operation_timeout_ms: 3000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let fixture = engine
+            .runtime
+            .block_on(Fixture::with_storage(engine.sqlite.clone()));
+        let identity = |name: &str| MobileAccountIdentity {
+            account_key: name.into(),
+            issuer: "issuer".into(),
+            subject: name.into(),
+        };
+        let alice = engine.clone().open_account(identity("alice")).unwrap();
+        let (_, scope) = engine.runtime.block_on(fixture.scope("alice", "one"));
+        let catalog = crate::scoped_sdk::catalog_for_transport_test(
+            &alice,
+            scope.clone(),
+            engine.runtime.block_on(fixture.syncer(&scope)),
+        );
+        fixture.publish("alice", "one", true, &[]);
+        let gate = Gate(Arc::new((Mutex::new(false), std::sync::Condvar::new())));
+        let (entered, active) = std::sync::mpsc::channel();
+        let (done, result) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn({
+            let catalog = catalog.clone();
+            let gate = gate.0.clone();
+            move || {
+                done.send(catalog.sync(Arc::new(Blocked {
+                    gate,
+                    entered,
+                    block_drop,
+                })))
+                .unwrap();
+            }
+        });
+        active.recv_timeout(Duration::from_secs(3)).unwrap();
+        catalog.close_view();
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Err(MobileError::Shutdown)
+        ));
+        caller.join().unwrap();
+        alice.retire().unwrap();
+        let fresh = engine.clone().open_account(identity("alice")).unwrap();
+        let (_, scope) = engine.runtime.block_on(fixture.scope("alice", "one"));
+        let reopened = crate::scoped_sdk::catalog_for_transport_test(
+            &fresh,
+            scope.clone(),
+            engine.runtime.block_on(fixture.syncer(&scope)),
+        );
+        let alice_calls = Arc::new(AtomicUsize::new(0));
+        let retry = reopened.sync(Arc::new(Token {
+            value: "alice/v2",
+            calls: alice_calls.clone(),
+        }));
+        let bob = engine.clone().open_account(identity("bob")).unwrap();
+        let (_, scope) = engine.runtime.block_on(fixture.scope("bob", "one"));
+        let other = crate::scoped_sdk::catalog_for_transport_test(
+            &bob,
+            scope.clone(),
+            engine.runtime.block_on(fixture.syncer(&scope)),
+        );
+        fixture.publish("bob", "one", true, &[]);
+        let bob_result = other.sync(Arc::new(Token {
+            value: "bob/v1",
+            calls: Arc::new(AtomicUsize::new(0)),
+        }));
+        drop(gate);
+        assert!(
+            matches!(retry, Err(MobileError::ResourceLimit { .. })),
+            "old physical token call must retain account admission"
+        );
+        assert_eq!(alice_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(bob_result.unwrap().added, 1);
+        engine.shutdown();
+    }
 }

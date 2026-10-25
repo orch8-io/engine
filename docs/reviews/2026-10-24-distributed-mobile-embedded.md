@@ -3165,3 +3165,73 @@ storage unit tests and workspace/all-target Clippy with warnings denied. The
 eight focused history tests pass again after the explicit-unit-pattern lint fix.
 Formatting, documentation and SDK packaging checks also pass. No public FFI
 surface or generated binding changes in this slice.
+
+### DME139 — Expose an explicit-owner native SDK without losing physical admission
+
+The ownership primitives now have a public Rust/UniFFI facade: account, catalog
+and run objects, typed immutable-at-delivery callback identity, signed sync,
+durable request preparation, materialization, owned snapshots/cancellation,
+versioned waiting-step answers and bounded metadata history. Swift and Kotlin
+bindings are generated from the same rebuilt native library. The development
+contract and current rollout limits are documented in
+[the scoped native SDK guide](../SDK_SCOPED_NATIVE.md).
+
+The host supplies its trusted issuer/subject when opening an account. Signed sync
+still independently verifies that principal and catalog before private downloads.
+It uses the operation's provider and one shared per-engine coordinator, never an
+ambient selected account. Handler routing returns the original execution epoch,
+run, block, attempt and effect ID even when input JSON forges ownership fields.
+Public snapshots revalidate the owned instance/version after reading its tree;
+real waiting step nodes identify parallel approvals. Answers retain the backend's
+single owner/version/pending-step transaction. No unsigned install or raw scope
+constructor is exported.
+
+Three real integration regressions were reproduced and fixed in this slice:
+
+- Dropping a temporary account/catalog view implicitly cancelled an already
+  issued run view. The regression failed with Shutdown. Issued children now
+  survive temporary parent disposal, while explicit `close_view` still fences
+  descendants and never retires durable work. Views retain weak engine owners.
+- Cancelling sync freed its account slot before a blocked token getter finished.
+  Retiring/reopening the same account could then enter another getter and consume
+  the other shared token slot. Sync admission now follows both the logical task
+  and the physical provider reference through destruction. A blocked getter or
+  destructor keeps the old account charge; another account can sync. The lease
+  holds no runtime, so it does not create an engine ownership cycle.
+- Exporting `close()` collided with UniFFI's generated Kotlin AutoCloseable
+  implementation. Kotlin 2.1.0 produced six conflicting-overload errors across
+  the three handle classes. The explicit view operation is now `close_view`
+  (`closeView` in Swift/Kotlin). Kotlin `close()` disposes only its native object;
+  it does not retire the account or invalidate issued children.
+
+Explicit account retirement owns its SQL/registry cleanup independently of the
+calling observer, fences only its original epoch, and detaches accepted handlers
+across every catalog. Running foreign code and its references retain physical
+charges until they settle. Request preparation returns a durable handle before
+dispatch, uses a mandatory idempotency key, and retains bounded history/effect
+receipts after native GC. A missing native state makes no execution-outcome claim.
+
+The signed public sync integration test uses the existing controlled loopback
+transport fixture; production objects always construct validated public-HTTPS
+transport and have no insecure configuration or injected synchronizer field.
+It verifies four account/catalog combinations through actual signed manifests,
+refuses a wrong principal before any content request, then starts their real
+workflows. Separate public execution tests verify callback identity/effect IDs,
+legacy/foreign read exclusion and parallel approvals in both orders on file and
+memory engines. Other tests cover close during pool exhaustion, retirement across
+catalogs, stale cursors/replies and disposal of temporary parent views.
+
+This delivers the development native facade. Common KMP/RN/Flutter scoped
+facades, change observation/listeners, public account credential management,
+authenticated reporting, scoped workers/delegation, paired published artifacts
+and the remaining ADR S1–S12 matrix are open. Host-JVM/macOS evidence is not an
+Android-device or iOS-simulator claim. No release is published.
+
+Validation passes: the full mobile suite has 646 unit tests and 109 integration
+tests; all nine new public API regressions pass again after the exported close
+operation is renamed. Workspace/all-target Clippy passes with warnings denied.
+All 36 committed Swift tests pass against the final rebuilt macOS library with
+strict concurrency and warnings as errors. Kotlin 2.1.0 compiles the generated
+binding and two committed JVM native tests, which both pass against the same
+library. Fresh generation matches all five binding copies; formatting, docs,
+SDK packaging and whitespace checks pass.

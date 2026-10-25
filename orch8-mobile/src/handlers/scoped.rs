@@ -144,6 +144,9 @@ pub(crate) struct CatalogHandlers {
     >,
 }
 impl CatalogHandlers {
+    pub(crate) fn mobile_storage(&self) -> Arc<MobileStorage> {
+        self.storage.clone()
+    }
     /// Trusted runtime supplies the same backend used by its step executor.
     /// Decorators are allowed, but a context from another backend is refused.
     #[cfg(test)]

@@ -6,6 +6,17 @@ use super::{
 use std::sync::Weak;
 
 impl CatalogHandlers {
+    /// Called by the independently owned SDK retirement job after the durable
+    /// account retirement commits. Detach every catalog in that exact epoch.
+    pub(crate) fn close_account_after_retirement(&self, account_id: &str, epoch: i64) {
+        let scope = lock(&self.bindings)
+            .keys()
+            .find(|(scope, _)| scope.account_id() == account_id && scope.epoch() == epoch)
+            .map(|(scope, _)| scope.clone());
+        if let Some(scope) = scope {
+            drop(self.detach_epoch(&scope, None));
+        }
+    }
     /// Local runtime stop never retires the shared durable account epoch.
     pub(crate) fn shutdown(&self) {
         drop(self.close());

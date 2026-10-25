@@ -25,6 +25,7 @@ mod node;
 mod notifier;
 mod privacy;
 mod runtime;
+mod scoped_sdk;
 #[cfg(test)]
 mod shutdown_tests;
 mod storage;
@@ -68,6 +69,7 @@ pub use crate::error::{HandlerError, MobileError, SyncError, TokenProvider};
 pub use crate::handlers::{EngineListener, StepHandler};
 pub use crate::node::{NodeCapabilities, NodeConnectivity, NodeRegistration};
 pub use crate::privacy::{DisclosureSurface, PrivacyError, ProtectedFieldBoundary};
+pub use crate::scoped_sdk::*;
 pub use crate::sync::{RootKey, SyncResult};
 pub use crate::telemetry::{DeviceContext, FlushResult, TelemetryEventRecord};
 pub use crate::worker::{WorkerOptions, WorkerStats, WorkerWindowResult};
@@ -221,6 +223,7 @@ pub struct MobileEngine {
     sqlite: Arc<orch8_storage::sqlite::SqliteStorage>,
     storage_close_started: AtomicBool,
     catalog_handlers: Arc<handlers::scoped::CatalogHandlers>,
+    catalog_sync: Arc<sync::catalog::CatalogSyncCoordinator>,
     handlers: StdRwLock<Arc<HandlerRegistry>>,
     config: MobileEngineConfig,
     scheduler_config: orch8_types::config::SchedulerConfig,
@@ -528,6 +531,7 @@ impl MobileEngine {
             storage_close_started: AtomicBool::new(false),
             storage,
             catalog_handlers,
+            catalog_sync: sync::catalog::CatalogSyncCoordinator::new(),
             handlers: StdRwLock::new(Arc::new(registry)),
             config,
             scheduler_config,

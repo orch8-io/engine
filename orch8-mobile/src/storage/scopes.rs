@@ -59,6 +59,15 @@ pub(crate) struct CatalogScope {
     id: String,
 }
 
+impl AccountScope {
+    pub(crate) fn account_id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) fn epoch(&self) -> i64 {
+        self.epoch
+    }
+}
+
 impl CatalogScope {
     pub(crate) fn account_id(&self) -> &str {
         &self.account.id

@@ -245,63 +245,70 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD0
-typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod0)(uint64_t, RustBuffer* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod0)(uint64_t, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD1
-typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod1)(uint64_t, RustBuffer* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod1)(uint64_t, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CAPSULE_SIGNER_METHOD2
-typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod2)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceCapsuleSignerMethod2)(uint64_t, RustBuffer, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TOKEN_PROVIDER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TOKEN_PROVIDER_METHOD0
-typedef void (*UniffiCallbackInterfaceTokenProviderMethod0)(uint64_t, RustBuffer* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTokenProviderMethod0)(uint64_t, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_TOKEN_PROVIDER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_TOKEN_PROVIDER_METHOD1
-typedef void (*UniffiCallbackInterfaceTokenProviderMethod1)(uint64_t, RustBuffer* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceTokenProviderMethod1)(uint64_t, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ENGINE_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ENGINE_LISTENER_METHOD0
-typedef void (*UniffiCallbackInterfaceEngineListenerMethod0)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceEngineListenerMethod0)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ENGINE_LISTENER_METHOD1
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ENGINE_LISTENER_METHOD1
-typedef void (*UniffiCallbackInterfaceEngineListenerMethod1)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceEngineListenerMethod1)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_ENGINE_LISTENER_METHOD2
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_ENGINE_LISTENER_METHOD2
-typedef void (*UniffiCallbackInterfaceEngineListenerMethod2)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceEngineListenerMethod2)(uint64_t, RustBuffer, RustBuffer, RustBuffer, void* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
 #endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_STEP_HANDLER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_STEP_HANDLER_METHOD0
-typedef void (*UniffiCallbackInterfaceStepHandlerMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull, 
+typedef void (*UniffiCallbackInterfaceStepHandlerMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_MOBILE_CATALOG_STEP_HANDLER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_MOBILE_CATALOG_STEP_HANDLER_METHOD0
+typedef void (*UniffiCallbackInterfaceMobileCatalogStepHandlerMethod0)(uint64_t, RustBuffer, RustBuffer, RustBuffer, RustBuffer* _Nonnull,
         RustCallStatus *_Nonnull uniffiCallStatus
     );
 
@@ -345,6 +352,15 @@ typedef struct UniffiVTableCallbackInterfaceStepHandler {
     UniffiCallbackInterfaceClone _Nonnull uniffiClone;
     UniffiCallbackInterfaceStepHandlerMethod0 _Nonnull execute;
 } UniffiVTableCallbackInterfaceStepHandler;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MOBILE_CATALOG_STEP_HANDLER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_MOBILE_CATALOG_STEP_HANDLER
+typedef struct UniffiVTableCallbackInterfaceMobileCatalogStepHandler {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceMobileCatalogStepHandlerMethod0 _Nonnull execute;
+} UniffiVTableCallbackInterfaceMobileCatalogStepHandler;
 
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILEENGINE
@@ -577,6 +593,11 @@ void uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(uint64_t ptr,
 RustBuffer uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_OPEN_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEENGINE_OPEN_ACCOUNT
+uint64_t uniffi_orch8_mobile_fn_method_mobileengine_open_account(uint64_t ptr, RustBuffer identity, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_CAPSULESIGNER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_CAPSULESIGNER
 uint64_t uniffi_orch8_mobile_fn_clone_capsulesigner(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -680,6 +701,186 @@ void uniffi_orch8_mobile_fn_init_callback_vtable_stephandler(const UniffiVTableC
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_STEPHANDLER_EXECUTE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_STEPHANDLER_EXECUTE
 RustBuffer uniffi_orch8_mobile_fn_method_stephandler_execute(uint64_t ptr, RustBuffer step_name, RustBuffer input, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOGHISTORYCURSOR
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOGHISTORYCURSOR
+uint64_t uniffi_orch8_mobile_fn_clone_mobilecataloghistorycursor(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOGHISTORYCURSOR
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOGHISTORYCURSOR
+void uniffi_orch8_mobile_fn_free_mobilecataloghistorycursor(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOGSTEPHANDLER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOGSTEPHANDLER
+uint64_t uniffi_orch8_mobile_fn_clone_mobilecatalogstephandler(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOGSTEPHANDLER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOGSTEPHANDLER
+void uniffi_orch8_mobile_fn_free_mobilecatalogstephandler(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_INIT_CALLBACK_VTABLE_MOBILECATALOGSTEPHANDLER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_INIT_CALLBACK_VTABLE_MOBILECATALOGSTEPHANDLER
+void uniffi_orch8_mobile_fn_init_callback_vtable_mobilecatalogstephandler(const UniffiVTableCallbackInterfaceMobileCatalogStepHandler* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGSTEPHANDLER_EXECUTE
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGSTEPHANDLER_EXECUTE
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogstephandler_execute(uint64_t ptr, RustBuffer context, RustBuffer step_name, RustBuffer input, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILEACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILEACCOUNT
+uint64_t uniffi_orch8_mobile_fn_clone_mobileaccount(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILEACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILEACCOUNT
+void uniffi_orch8_mobile_fn_free_mobileaccount(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_ACCOUNT_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_ACCOUNT_ID
+RustBuffer uniffi_orch8_mobile_fn_method_mobileaccount_account_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_CLOSE_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_CLOSE_VIEW
+void uniffi_orch8_mobile_fn_method_mobileaccount_close_view(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_OPEN_CATALOG
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_OPEN_CATALOG
+uint64_t uniffi_orch8_mobile_fn_method_mobileaccount_open_catalog(uint64_t ptr, RustBuffer configuration, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_RETIRE
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_RETIRE
+void uniffi_orch8_mobile_fn_method_mobileaccount_retire(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_SESSION_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILEACCOUNT_SESSION_EPOCH
+int64_t uniffi_orch8_mobile_fn_method_mobileaccount_session_epoch(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOG
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOG
+uint64_t uniffi_orch8_mobile_fn_clone_mobilecatalog(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOG
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOG
+void uniffi_orch8_mobile_fn_free_mobilecatalog(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_ACCOUNT_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_ACCOUNT_ID
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalog_account_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_CATALOG_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_CATALOG_ID
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalog_catalog_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_CLOSE_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_CLOSE_VIEW
+void uniffi_orch8_mobile_fn_method_mobilecatalog_close_view(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_HISTORY
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalog_history(uint64_t ptr, RustBuffer cursor, uint32_t limit, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_PREPARE_RUN
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_PREPARE_RUN
+uint64_t uniffi_orch8_mobile_fn_method_mobilecatalog_prepare_run(uint64_t ptr, RustBuffer request, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_REGISTER_HANDLER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_REGISTER_HANDLER
+void uniffi_orch8_mobile_fn_method_mobilecatalog_register_handler(uint64_t ptr, RustBuffer name, uint64_t handler, uint64_t timeout_ms, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_RUN
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_RUN
+uint64_t uniffi_orch8_mobile_fn_method_mobilecatalog_run(uint64_t ptr, RustBuffer instance_id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_SESSION_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_SESSION_EPOCH
+int64_t uniffi_orch8_mobile_fn_method_mobilecatalog_session_epoch(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_SYNC
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOG_SYNC
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalog_sync(uint64_t ptr, uint64_t token_provider, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOGRUN
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_CLONE_MOBILECATALOGRUN
+uint64_t uniffi_orch8_mobile_fn_clone_mobilecatalogrun(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOGRUN
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FREE_MOBILECATALOGRUN
+void uniffi_orch8_mobile_fn_free_mobilecatalogrun(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_ACCOUNT_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_ACCOUNT_ID
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogrun_account_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_CANCEL
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogrun_cancel(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_CATALOG_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_CATALOG_ID
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogrun_catalog_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_CLOSE_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_CLOSE_VIEW
+void uniffi_orch8_mobile_fn_method_mobilecatalogrun_close_view(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_COMPLETE_STEP
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_COMPLETE_STEP
+int8_t uniffi_orch8_mobile_fn_method_mobilecatalogrun_complete_step(uint64_t ptr, RustBuffer expected_updated_at, RustBuffer step_name, RustBuffer output_json, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_FORGET_CANCELLED_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_FORGET_CANCELLED_REQUEST
+int8_t uniffi_orch8_mobile_fn_method_mobilecatalogrun_forget_cancelled_request(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_INSTANCE_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_INSTANCE_ID
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogrun_instance_id(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_SESSION_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_SESSION_EPOCH
+int64_t uniffi_orch8_mobile_fn_method_mobilecatalogrun_session_epoch(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_SNAPSHOT
+RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogrun_snapshot(uint64_t ptr, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_START
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_METHOD_MOBILECATALOGRUN_START
+void uniffi_orch8_mobile_fn_method_mobilecatalogrun_start(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_RUSTBUFFER_ALLOC
@@ -945,13 +1146,13 @@ void ffi_orch8_mobile_rust_future_complete_void(uint64_t handle, RustCallStatus 
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ACTIVATE_CONTINUITY_CAPSULE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ACTIVATE_CONTINUITY_CAPSULE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ACTIVE_INSTANCES
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ACTIVE_INSTANCES
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_active_instances(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_BEGIN_TOKEN_PROVIDER_INSTALLATION
@@ -963,7 +1164,7 @@ uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_begin_token_provider_i
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_CANCEL_INSTANCE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_CANCEL_INSTANCE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_CANCEL_TOKEN_PROVIDER_INSTALLATION
@@ -981,288 +1182,444 @@ uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_COMPLETE_TOKEN_PROVIDER_INSTALLATION
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_COMPLETE_TOKEN_PROVIDER_INSTALLATION
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_complete_token_provider_installation(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_DELEGATE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_DELEGATE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_delegate(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_DELEGATION_STATS
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_DELEGATION_STATS
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_delegation_stats(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_DELEGATION_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_DELEGATION_STATUS
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_delegation_status(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ENABLE_BUILTIN
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ENABLE_BUILTIN
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_EXPORT_CONTINUITY_CAPSULE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_EXPORT_CONTINUITY_CAPSULE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_FLUSH_TELEMETRY
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_FLUSH_TELEMETRY
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_GET_INSTANCE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_GET_INSTANCE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_get_instance(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_IMPORT_CONTINUITY_CAPSULE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_IMPORT_CONTINUITY_CAPSULE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LIST_DELEGATIONS
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LIST_DELEGATIONS
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LOAD_SEQUENCE_FROM_JSON
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LOAD_SEQUENCE_FROM_JSON
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LOAD_SEQUENCES_FROM_URL
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LOAD_SEQUENCES_FROM_URL
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LOADED_SEQUENCES
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_LOADED_SEQUENCES
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_NODE_RUNTIME_ID
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_NODE_RUNTIME_ID
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_node_runtime_id(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ON_PUSH_RECEIVED
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ON_PUSH_RECEIVED
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ON_PUSH_WAKE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ON_PUSH_WAKE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_on_push_wake(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_PAUSE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_PAUSE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_pause(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_REGISTER_HANDLER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_REGISTER_HANDLER
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_register_handler(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_REGISTER_NODE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_REGISTER_NODE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_register_node(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_REPORT_POWER_STATE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_REPORT_POWER_STATE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_RESUME
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_RESUME
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_resume(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_RUN_UNTIL_IDLE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_RUN_UNTIL_IDLE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_RUN_WORKER_WINDOW
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_RUN_WORKER_WINDOW
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_run_worker_window(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_DEVICE_CONTEXT
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_DEVICE_CONTEXT
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_LISTENER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_LISTENER
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_set_listener(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_TOKEN_PROVIDER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SET_TOKEN_PROVIDER
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SHUTDOWN
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SHUTDOWN
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_shutdown(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_START
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_START
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_start(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_START_DELEGATION
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_START_DELEGATION
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_start_delegation(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_START_WORKER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_START_WORKER
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_start_worker(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_STOP_DELEGATION
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_STOP_DELEGATION
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_stop_delegation(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_STOP_WORKER
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_STOP_WORKER
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SYNC
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_SYNC
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_sync(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_TICK_ONCE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_TICK_ONCE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_tick_once(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_UNREGISTER_NODE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_UNREGISTER_NODE
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_unregister_node(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_UPDATE_NODE_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_UPDATE_NODE_STATUS
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_update_node_status(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_WORKER_STATS
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_WORKER_STATS
 uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_OPEN_ACCOUNT
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_OPEN_ACCOUNT
+uint16_t uniffi_orch8_mobile_checksum_method_mobileengine_open_account(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_KEY_ID
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_KEY_ID
 uint16_t uniffi_orch8_mobile_checksum_method_capsulesigner_key_id(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_PUBLIC_KEY_BASE64
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_PUBLIC_KEY_BASE64
 uint16_t uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_SIGN_MANIFEST_SHA256
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_CAPSULESIGNER_SIGN_MANIFEST_SHA256
 uint16_t uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_TOKENPROVIDER_CURRENT_TOKEN
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_TOKENPROVIDER_CURRENT_TOKEN
 uint16_t uniffi_orch8_mobile_checksum_method_tokenprovider_current_token(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_TOKENPROVIDER_REFRESH_TOKEN
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_TOKENPROVIDER_REFRESH_TOKEN
 uint16_t uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_ENGINELISTENER_ON_INSTANCE_COMPLETED
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_ENGINELISTENER_ON_INSTANCE_COMPLETED
 uint16_t uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_ENGINELISTENER_ON_INSTANCE_FAILED
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_ENGINELISTENER_ON_INSTANCE_FAILED
 uint16_t uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_failed(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_ENGINELISTENER_ON_STEP_PENDING
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_ENGINELISTENER_ON_STEP_PENDING
 uint16_t uniffi_orch8_mobile_checksum_method_enginelistener_on_step_pending(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_STEPHANDLER_EXECUTE
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_STEPHANDLER_EXECUTE
 uint16_t uniffi_orch8_mobile_checksum_method_stephandler_execute(void
-    
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGSTEPHANDLER_EXECUTE
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGSTEPHANDLER_EXECUTE
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogstephandler_execute(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_ACCOUNT_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_ACCOUNT_ID
+uint16_t uniffi_orch8_mobile_checksum_method_mobileaccount_account_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_CLOSE_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_CLOSE_VIEW
+uint16_t uniffi_orch8_mobile_checksum_method_mobileaccount_close_view(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_OPEN_CATALOG
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_OPEN_CATALOG
+uint16_t uniffi_orch8_mobile_checksum_method_mobileaccount_open_catalog(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_RETIRE
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_RETIRE
+uint16_t uniffi_orch8_mobile_checksum_method_mobileaccount_retire(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_SESSION_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEACCOUNT_SESSION_EPOCH
+uint16_t uniffi_orch8_mobile_checksum_method_mobileaccount_session_epoch(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_ACCOUNT_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_ACCOUNT_ID
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_account_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_CATALOG_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_CATALOG_ID
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_catalog_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_CLOSE_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_CLOSE_VIEW
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_close_view(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_HISTORY
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_HISTORY
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_history(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_PREPARE_RUN
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_PREPARE_RUN
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_prepare_run(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_REGISTER_HANDLER
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_REGISTER_HANDLER
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_register_handler(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_RUN
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_RUN
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_run(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_SESSION_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_SESSION_EPOCH
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_session_epoch(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_SYNC
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOG_SYNC
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalog_sync(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_ACCOUNT_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_ACCOUNT_ID
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_account_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_CANCEL
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_CANCEL
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_cancel(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_CATALOG_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_CATALOG_ID
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_catalog_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_CLOSE_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_CLOSE_VIEW
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_close_view(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_COMPLETE_STEP
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_COMPLETE_STEP
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_complete_step(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_FORGET_CANCELLED_REQUEST
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_FORGET_CANCELLED_REQUEST
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_forget_cancelled_request(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_INSTANCE_ID
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_INSTANCE_ID
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_instance_id(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_SESSION_EPOCH
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_SESSION_EPOCH
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_session_epoch(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_SNAPSHOT
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_SNAPSHOT
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_snapshot(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_START
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILECATALOGRUN_START
+uint16_t uniffi_orch8_mobile_checksum_method_mobilecatalogrun_start(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_CONSTRUCTOR_MOBILEENGINE_NEW
 #define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_CONSTRUCTOR_MOBILEENGINE_NEW
 uint16_t uniffi_orch8_mobile_checksum_constructor_mobileengine_new(void
-    
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_UNIFFI_CONTRACT_VERSION
 #define UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_UNIFFI_CONTRACT_VERSION
 uint32_t ffi_orch8_mobile_uniffi_contract_version(void
-    
+
 );
 #endif
