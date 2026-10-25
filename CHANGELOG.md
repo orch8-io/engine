@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native callback diagnostics
+
+- Stop copying non-JSON native callback output into warning logs. Preserve the
+  original string returned to the workflow and retain the static warning.
+
 ### Claimed step preparation
 
 - Preserve the evaluation's original claim through template preparation and

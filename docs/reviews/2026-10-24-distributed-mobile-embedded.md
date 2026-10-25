@@ -2156,3 +2156,25 @@ interruption of already admitted I/O. Legacy credential lookup scope and
 credential-error retry policy are unchanged. Broader parameter snapshots, memory
 reads, scoped runtime/SDK integration and the original distributed/mobile/
 embedded matrix remain open. No schema or HTTP/FFI changes are introduced.
+
+
+### DME114 — Non-JSON native callback output leaked into diagnostics
+
+A captured-subscriber regression reproduced a private callback-output canary in
+the native adapter's warning fields. Native callbacks can return arbitrary text,
+so this logging path copied workflow data into diagnostic sinks without a
+separate logging decision by the host.
+
+The warning now contains only its static message. Workflow behavior remains
+compatible: valid JSON is parsed and non-JSON output is returned as the original
+string. The regression requires both the warning and unchanged returned output,
+while rejecting the canary anywhere in the captured event fields. This fix
+covers the shared adapter used by ordinary and scoped native callbacks; it does
+not claim a complete diagnostic-data audit of all runtime paths.
+
+Validation passed all 534 mobile library tests, workspace/all-target Clippy with
+warnings denied, formatting, documentation and diff checks. The diagnostic test
+handles the same concurrent first-callsite registration race as the existing
+engine span-capture regression: only an empty capture permits rebuilding tracing
+interest and making one fresh mock invocation. A captured payload fails the
+assertion. Hosted CI must pass on the submitted commit before merge.
