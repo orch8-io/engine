@@ -39,6 +39,7 @@ fault_impl! {
         async fn create_instances_batch_admitted(&self, instances: &[TaskInstance], limits: &std::collections::HashMap<TenantId, u64>) -> Result<u64, StorageError>;
         async fn create_instance_externalized(&self, instance: &TaskInstance, threshold_bytes: u32) -> Result<(), StorageError>;
         async fn create_instances_batch_externalized(&self, instances: &[TaskInstance], threshold_bytes: u32) -> Result<u64, StorageError>;
+        async fn get_instance_for_caller(&self, caller: InstanceId, tenant: &TenantId, target: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn claim_due_instances(&self, now: DateTime<Utc>, limit: u32, max_per_tenant: u32) -> Result<Vec<TaskInstance>, StorageError>;
         async fn has_due_higher_priority(&self, now: DateTime<Utc>, priority: orch8_types::instance::Priority) -> Result<bool, StorageError>;
@@ -148,6 +149,7 @@ fault_impl! {
 fault_impl! {
     [SIGNAL_STORE_METHODS] impl SignalStore {
         async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError>;
+        async fn enqueue_signal_for_caller(&self, caller: InstanceId, tenant: &TenantId, signal: &Signal, claim_token: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
         async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError>;
         async fn get_pending_signals(&self, instance_id: InstanceId) -> Result<Vec<Signal>, StorageError>;
         async fn ingest_event(&self, envelope: &orch8_types::event_correlation::EventEnvelope) -> Result<bool, StorageError>;

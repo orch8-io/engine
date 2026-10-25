@@ -3,7 +3,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
-use orch8_types::ids::InstanceId;
+use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::signal::Signal;
 
@@ -84,6 +84,56 @@ pub(super) async fn enqueue_if_active(
 
     tx.commit().await?;
     Ok(())
+}
+
+pub(super) async fn enqueue_for_caller(
+    store: &PostgresStorage,
+    caller: InstanceId,
+    tenant: &TenantId,
+    signal: &Signal,
+    claim_token: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    // Deterministic ordering also permits reciprocal and self signals without
+    // locking caller/target rows in opposite orders.
+    sqlx::query("SELECT id FROM task_instances WHERE id = $1 OR id = $2 ORDER BY id FOR UPDATE")
+        .bind(caller.into_uuid())
+        .bind(signal.instance_id.into_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+    let row: Option<(String, String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT target.state, caller.state, caller.claimed_at FROM task_instances target JOIN task_instances caller ON caller.id = $1
+         WHERE target.id = $3 AND {}", super::instances::COORDINATION_ALLOWED
+    )))
+    .bind(caller.into_uuid())
+    .bind(tenant.as_str())
+    .bind(signal.instance_id.into_uuid())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((state, caller_state, claimed_at)) = row else {
+        return Err(StorageError::NotFound {
+            entity: "task_instance",
+            id: signal.instance_id.to_string(),
+        });
+    };
+    if claim_token.is_some_and(|token| caller_state != "running" || claimed_at != Some(token)) {
+        return Ok(false);
+    }
+    if InstanceState::from_str(&state)
+        .map_err(StorageError::Query)?
+        .is_terminal()
+    {
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instance".into(),
+            id: signal.instance_id.to_string(),
+        });
+    }
+    let signal_type = signal.signal_type.to_string();
+    bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal, &signal_type)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
 }
 
 pub(super) async fn get_pending(

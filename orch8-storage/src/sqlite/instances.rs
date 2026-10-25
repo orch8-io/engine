@@ -240,6 +240,25 @@ pub(super) async fn get(
     get_on(&mut conn, id).await
 }
 
+pub(super) async fn get_for_caller(
+    storage: &SqliteStorage,
+    caller: InstanceId,
+    tenant: &TenantId,
+    target: InstanceId,
+) -> Result<Option<TaskInstance>, StorageError> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT target.* FROM task_instances target JOIN task_instances caller ON caller.id = ?1
+         WHERE target.id = ?3 AND {}",
+        super::mobile_execution::coordination_predicate()
+    )))
+    .bind(caller.to_string())
+    .bind(tenant.as_str())
+    .bind(target.to_string())
+    .fetch_optional(&storage.pool)
+    .await?;
+    row.as_ref().map(row_to_instance).transpose()
+}
+
 pub(super) async fn get_on(
     conn: &mut sqlx::SqliteConnection,
     id: InstanceId,

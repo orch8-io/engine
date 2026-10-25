@@ -672,6 +672,15 @@ impl crate::InstanceStore for PostgresStorage {
         instances::create_batch_externalized(self, instances, threshold_bytes).await
     }
 
+    async fn get_instance_for_caller(
+        &self,
+        caller: InstanceId,
+        tenant: &TenantId,
+        target: InstanceId,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        instances::get_for_caller(self, caller, tenant, target).await
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         instances::get(self, id).await
     }
@@ -1418,6 +1427,16 @@ impl crate::OutputStore for PostgresStorage {
 impl crate::SignalStore for PostgresStorage {
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError> {
         signals::enqueue(self, signal).await
+    }
+
+    async fn enqueue_signal_for_caller(
+        &self,
+        caller: InstanceId,
+        tenant: &TenantId,
+        signal: &Signal,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        signals::enqueue_for_caller(self, caller, tenant, signal, claim_token).await
     }
 
     async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError> {
