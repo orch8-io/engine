@@ -128,6 +128,16 @@ admission context, current publication/capability policy and catalog boundaries
 for builtins. Core tenant/sub-tenant checks do not make a catalog namespace alone
 a security boundary. Public scoped start/dispatch remains gated on that work.
 
+SQLite execution storage now applies an additional frozen-request/account-epoch
+predicate to scheduler eligibility, claim-bound step writes, claimed state/outbox
+transitions and lease renewal. Registered account tenants require matching request
+provenance; relabelling a request's native tenant, catalog namespace or definition
+cannot bypass it. Checks serialize with retirement and filter candidates before
+batch limits. Test-only native fixtures verify this prerequisite across pools.
+It does not authorize handler dispatch or introduce production materialization.
+Scoped reads/builtins, callbacks, child/delegation provenance and background
+signal/SLA/recovery work still need their ownership boundaries before rollout.
+
 Use one SQLite database with explicit owner keys and scoped SDK handles. Shared
 runtime resources stay bounded across accounts. Scope-specific state is selected
 once when creating a handle and retained by every operation from that handle.

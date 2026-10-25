@@ -9,9 +9,7 @@ async fn begin(
     claim_token: DateTime<Utc>,
 ) -> Result<Option<sqlx::Transaction<'static, sqlx::Sqlite>>, StorageError> {
     let mut tx = super::helpers::begin_immediate(&store.pool).await?;
-    let held: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM task_instances WHERE id=?1 AND state='running' AND claimed_at=?2",
-    )
+    let held: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT id FROM task_instances WHERE id=?1 AND state='running' AND claimed_at=?2 AND {scope}", scope = super::mobile_execution::ALLOWED)))
     .bind(instance_id.to_string())
     .bind(super::helpers::ts(claim_token))
     .fetch_optional(&mut *tx)
