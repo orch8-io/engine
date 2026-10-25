@@ -13,6 +13,7 @@ use orch8_types::instance::InstanceState;
 
 // Internal persistence foundation; scoped execution and SDK handles are still
 // under development. Do not expose this as a complete scoped engine API.
+mod legacy_sync;
 pub(crate) mod manifest;
 #[allow(dead_code)]
 pub(crate) mod scopes;
@@ -459,11 +460,24 @@ impl MobileStorage {
     pub(crate) async fn list_terminal_instance_states(
         &self,
     ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+        self.terminal_instance_states(false).await
+    }
+
+    pub(crate) async fn list_sync_terminal_instance_states(
+        &self,
+    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
+        self.terminal_instance_states(true).await
+    }
+
+    async fn terminal_instance_states(
+        &self,
+        legacy_only: bool,
+    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
         let mut all = Vec::new();
         let mut after = String::new();
         loop {
             let page = self
-                .list_terminal_instance_states_page(&after, SCAN_PAGE)
+                .list_terminal_instance_states_page(&after, SCAN_PAGE, legacy_only)
                 .await?;
             let full = page.len() == SCAN_PAGE as usize;
             if let Some((id, _)) = page.last() {
@@ -480,16 +494,19 @@ impl MobileStorage {
         &self,
         after: &str,
         limit: u32,
+        legacy_only: bool,
     ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
-        let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, state FROM task_instances
-             WHERE state IN ('completed', 'failed', 'cancelled')
-               AND id > ?1
-             ORDER BY id
+        let rows: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT i.id, i.state FROM task_instances i
+             WHERE i.state IN ('completed', 'failed', 'cancelled')
+               AND i.id > ?1 AND (?3=0 OR ({}))
+             ORDER BY i.id
              LIMIT ?2",
-        )
+            legacy_sync::OWNER,
+        )))
         .bind(after)
         .bind(i64::from(limit))
+        .bind(legacy_only)
         .fetch_all(self.pool())
         .await?;
 
@@ -570,21 +587,23 @@ impl MobileStorage {
         let mut all = Vec::new();
         let mut after = String::new();
         loop {
-            let rows = sqlx::query_as::<_, SyncInstanceProjectionRow>(
-                "SELECT i.id, i.sequence_id, i.state,
+            let rows =
+                sqlx::query_as::<_, SyncInstanceProjectionRow>(sqlx::AssertSqlSafe(format!(
+                    "SELECT i.id, i.sequence_id, i.state,
                         CASE WHEN json_valid(i.context)
                              THEN json_extract(i.context, '$.runtime.current_step')
                         END AS current_step
                  FROM task_instances i
                  WHERE i.state IN ('scheduled', 'running', 'waiting')
-                   AND i.id > ?1
+                   AND i.id > ?1 AND ({})
                  ORDER BY i.id
                  LIMIT ?2",
-            )
-            .bind(&after)
-            .bind(i64::from(SCAN_PAGE))
-            .fetch_all(self.pool())
-            .await?;
+                    legacy_sync::OWNER,
+                )))
+                .bind(&after)
+                .bind(i64::from(SCAN_PAGE))
+                .fetch_all(self.pool())
+                .await?;
             let full = rows.len() == SCAN_PAGE as usize;
             if let Some(last) = rows.last() {
                 after.clone_from(&last.id);
@@ -606,13 +625,14 @@ impl MobileStorage {
     ) -> Result<Vec<SyncInstanceProjection>, StorageError> {
         let mut all = Vec::with_capacity(instance_ids.len());
         for chunk in instance_ids.chunks(SCAN_PAGE as usize) {
-            let mut query = sqlx::QueryBuilder::new(
+            let mut query = sqlx::QueryBuilder::new(format!(
                 "SELECT i.id, i.sequence_id, i.state,
                         CASE WHEN json_valid(i.context)
                              THEN json_extract(i.context, '$.runtime.current_step')
                         END AS current_step
-                 FROM task_instances i WHERE i.id IN (",
-            );
+                 FROM task_instances i WHERE ({}) AND i.id IN (",
+                legacy_sync::OWNER,
+            ));
             let mut ids = query.separated(",");
             for id in chunk {
                 ids.push_bind(id.to_string());
