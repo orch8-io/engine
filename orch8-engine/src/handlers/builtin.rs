@@ -1186,6 +1186,7 @@ mod tests {
     async fn test_ctx(params: Value) -> StepContext {
         let storage: Arc<dyn StorageBackend> = mk_test_storage().await;
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),
@@ -1332,6 +1333,7 @@ mod tests {
         let instance_id = InstanceId::new();
 
         let set_ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -1345,6 +1347,7 @@ mod tests {
         handle_set_state(set_ctx).await.unwrap();
 
         let get_ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -1365,6 +1368,7 @@ mod tests {
         let instance_id = InstanceId::new();
 
         let set_ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -1378,6 +1382,7 @@ mod tests {
         handle_set_state(set_ctx).await.unwrap();
 
         let del_ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -1392,6 +1397,7 @@ mod tests {
         assert_eq!(result["deleted"], true);
 
         let get_ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),
@@ -1512,6 +1518,7 @@ mod tests {
         let instance_id = InstanceId::new();
 
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: TenantId::unchecked("t"),

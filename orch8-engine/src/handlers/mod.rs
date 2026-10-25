@@ -35,7 +35,7 @@ pub mod util;
 pub mod wait_for_event;
 pub mod wasm_plugin;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -81,6 +81,8 @@ pub type StepHandler = Box<
         + Sync,
 >;
 
+pub use crate::effect_guard::EffectAdmission;
+
 /// Context passed to step handlers during execution.
 ///
 /// Cheaply cloneable — the `storage` handle is an `Arc`, `context` is an
@@ -89,6 +91,9 @@ pub type StepHandler = Box<
 /// are newtype wrappers / small JSON / POD.
 #[derive(Clone)]
 pub struct StepContext {
+    /// Opaque single-use durable effect admission for deferred native handlers.
+    /// Ordinary/direct contexts use None. Never synthesize this from JSON.
+    pub effect_admission: Option<EffectAdmission>,
     /// Original scheduler claim for ordinary step execution. Independent cleanup
     /// hooks, explicit direct calls and remote scratch stores use None.
     pub claim_token: Option<chrono::DateTime<chrono::Utc>>,
@@ -183,6 +188,7 @@ fn state_storage_error(error: &orch8_types::error::StorageError) -> StepError {
 /// name, it takes precedence over the real handler.
 pub struct HandlerRegistry {
     handlers: HashMap<Arc<str>, StepHandler>,
+    deferred_effect_handlers: HashSet<Arc<str>>,
     /// Mock overrides. When present, `get()` returns the mock instead of the real handler.
     mocks: HashMap<Arc<str>, StepHandler>,
     /// Optional circuit breaker registry. When present, step dispatch sites
@@ -201,6 +207,7 @@ impl HandlerRegistry {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            deferred_effect_handlers: HashSet::new(),
             mocks: HashMap::new(),
             circuit_breakers: None,
             embed_sandbox: Arc::new(crate::embed_sandbox::SandboxPolicy::default()),
@@ -240,8 +247,24 @@ impl HandlerRegistry {
         F: Fn(StepContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
     {
+        self.deferred_effect_handlers.remove(name);
         self.handlers
             .insert(Arc::from(name), Box::new(move |ctx| Box::pin(handler(ctx))));
+    }
+
+    /// Register a native handler that admits its opaque effect token immediately
+    /// before host entry. Returning success without admission fails closed.
+    pub fn register_with_deferred_effect_admission<F, Fut>(&mut self, name: &str, handler: F)
+    where
+        F: Fn(StepContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
+    {
+        self.register(name, handler);
+        self.deferred_effect_handlers.insert(Arc::from(name));
+    }
+
+    pub(crate) fn defers_effect_admission(&self, name: &str) -> bool {
+        !self.mocks.contains_key(name) && self.deferred_effect_handlers.contains(name)
     }
 
     /// Keep only the real handlers whose name satisfies `keep`. Embedded
@@ -249,6 +272,8 @@ impl HandlerRegistry {
     /// allow-listed subset.
     pub fn retain_handlers(&mut self, keep: impl Fn(&str) -> bool) {
         self.handlers.retain(|name, _| keep(name));
+        self.deferred_effect_handlers
+            .retain(|name| self.handlers.contains_key(name));
     }
 
     /// Look up a handler by name. Mocks take precedence over real handlers.
@@ -355,6 +380,7 @@ mod tests {
 
     fn mk_ctx(storage: Arc<dyn StorageBackend>) -> StepContext {
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),

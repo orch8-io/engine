@@ -80,6 +80,7 @@ impl NativeInvocation {
         input: String,
         stragglers: Arc<Stragglers>,
         claim: Option<NativeClaim>,
+        effect_admission: Option<orch8_engine::handlers::EffectAdmission>,
     ) -> Self {
         let completion = Arc::new(Completion {
             state: Mutex::new(State::default()),
@@ -105,6 +106,22 @@ impl NativeInvocation {
                 .detached
             {
                 return Err(StepError::ClaimLost);
+            }
+            if let Some(admission) = &effect_admission {
+                runtime.block_on(admission.admit())?;
+                // The durable dispatch itself can wait on storage. Recheck the
+                // claim/cancellation afterward; this window stays conservative.
+                if let Some(claim) = &claim {
+                    runtime.block_on(claim.verify())?;
+                }
+                if entry
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .detached
+                {
+                    return Err(StepError::ClaimLost);
+                }
             }
             handler.execute(name, input).map_err(|error| match error {
                 HandlerError::Retryable { message } => StepError::Retryable {
@@ -183,6 +200,7 @@ mod tests {
                 "queued".into(),
                 "{}".into(),
                 Arc::clone(&stragglers),
+                None,
                 None,
             );
             drop(call);

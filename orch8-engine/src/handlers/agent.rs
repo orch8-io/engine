@@ -1796,6 +1796,7 @@ mod net_tests {
             .await
             .unwrap();
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id,

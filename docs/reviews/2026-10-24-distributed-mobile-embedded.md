@@ -1806,15 +1806,51 @@ Scoped handler-object routing, per-account physical fairness, public SDK handles
 and the other ADR-0002 gates still require integration before scoped rollout.
 
 
-### Next recovery review — Durable effect dispatch versus physical native admission
+### DME104 — Native effect evidence preceded actual admission (implemented)
 
-The direct-handler retry test does not prove complete workflow re-dispatch.
-`EffectGuard::begin` currently records `Dispatched` before calling the handler,
-while native claim verification and blocking-queue admission occur afterward.
-The core `ClaimLost` result preserves that receipt; unresolved lookup can therefore
-block the same attempt even when the native preflight proved no host entry occurred.
-Review this boundary with real scheduler/effect-ledger regressions, including
-cancellation before entry, ambiguous physical completion and cross-attempt recovery.
-Do not delete unresolved evidence or infer safe replay from elapsed time or a
-retryable error. Connect durable dispatch classification to actual admission before
-claiming automatic workflow recovery. This remains part of the original goal.
+A real `execute_step_dry` regression cancelled a native callback during claim
+verification, proved no host call occurred, and then found the same attempt blocked
+by `EffectBlocked(Unknown)`. The core had already recorded `Dispatched` before
+invoking the native adapter.
+
+Native registration now explicitly selects deferred effect admission. The core
+prepares the immutable receipt and passes an opaque, non-deserializable single-use
+`EffectAdmission` capability in `StepContext`. The native blocking closure verifies
+the claim and cancellation first, then admits the durable dispatch, rechecks claim
+and cancellation after that storage boundary, and only then enters host code.
+Ordinary handlers and mocks retain their normal immediate guard behavior.
+
+Cancellation before admission leaves `Prepared`, so the real step executor can
+resume the same attempt and commit one receipt after one host call. An interrupted
+durable admission or admitted host failure remains conservative: existing
+`Dispatched`/`Unknown` evidence blocks unsafe replay. No unresolved evidence is
+deleted and no elapsed-time heuristic authorizes re-entry.
+
+Capabilities share one admission flag across clones. A caller that never admitted
+its own capability cannot refresh/settle another caller's receipt. A controlled
+overlap checks that an unadmitted failing caller leaves the admitted caller's
+receipt dispatched and permits its eventual commit. Typed admission failures are
+returned through the core rather than being flattened into a fabricated host
+failure. Native admission retains its owning backend through physical settlement.
+
+Rust adapters opting into deferred admission must honor the explicit admission
+contract. `StepContext` literal constructors need `effect_admission: None` unless
+the core supplies a capability. HTTP/FFI signatures and effect-state serialization
+are unchanged. Validation passed 514 mobile library tests, 2,067 engine library
+tests and four deferred-recovery backend-contract variants on plain/encrypted
+SQLite/Postgres with an isolated required Postgres. The overlap regression was
+rechecked after test-helper cleanup. Workspace/all-target Clippy with warnings
+denied, formatting, documentation and diff checks passed. Fault cases distinguish
+pre-commit storage failure (safe retry) from ambiguous commit (preserved unknown
+evidence). Hosted checks must pass on the submitted commit before merging.
+
+### DME105 — Native names and dry-run bypassed side-effect policy (fixed)
+
+Two regressions reproduced native execution under `runtime.dry_run` and missing
+effect evidence when a native callback replaced a pure builtin name such as
+`noop`. Native registration now forces an effect receipt regardless of the name's
+builtin classification. Dry-run returns a simulation envelope without entering
+host code or echoing raw native inputs/resolved credentials; host mocks remain
+available when realistic output shapes are required.
+These checks apply to native callback registration; scoped routing and the rest of
+the original runtime/SDK completion matrix remain open.

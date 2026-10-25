@@ -1005,6 +1005,7 @@ fn execution_scope_retirement_while_native_callback_is_queued_prevents_entry() {
                 .pop()
                 .unwrap();
             let ctx = orch8_engine::handlers::StepContext {
+                effect_admission: None,
                 claim_token: claim.claimed_at,
                 instance_id: run.id,
                 tenant_id: native.tenant_id,

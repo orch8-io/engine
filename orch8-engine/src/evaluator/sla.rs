@@ -105,6 +105,7 @@ pub(super) async fn check_sla_deadlines(
                     );
                 }
                 let step_ctx = crate::handlers::StepContext {
+                    effect_admission: None,
                     claim_token: None,
                     instance_id: instance.id,
                     tenant_id: instance.tenant_id.clone(),

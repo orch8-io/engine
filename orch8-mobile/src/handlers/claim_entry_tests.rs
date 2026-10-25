@@ -31,6 +31,7 @@ async fn claimed_context() -> (Arc<SqliteStorage>, StepContext) {
         .unwrap();
     let now = claimed.claimed_at.unwrap();
     let ctx = StepContext {
+        effect_admission: None,
         claim_token: Some(now),
         instance_id: instance.id,
         tenant_id: instance.tenant_id,
@@ -280,4 +281,270 @@ async fn detached_native_callback_retains_claim_backend_until_physical_completio
     })
     .await
     .unwrap();
+}
+
+fn execution(ctx: &StepContext) -> orch8_engine::handlers::step::StepExecParams {
+    orch8_engine::handlers::step::StepExecParams {
+        claim_token: ctx.claim_token,
+        instance_id: ctx.instance_id,
+        tenant_id: ctx.tenant_id.clone(),
+        block_id: ctx.block_id.clone(),
+        handler_name: "queued".into(),
+        params: ctx.params.clone(),
+        context: ctx.context.as_ref().clone(),
+        attempt: 0,
+        timeout: None,
+        externalize_threshold: 0,
+        wait_for_input: None,
+        cache_key: None,
+        output_schema: None,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_native_preflight_retries_through_the_real_effect_ledger() {
+    use orch8_engine::handlers::step::execute_step_dry;
+    use orch8_storage::testing::faulty::FaultStorage;
+    let (_sqlite, mut ctx) = claimed_context().await;
+    let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
+    ctx.storage = storage.clone();
+    let pause = faults.on("verify_instance_claim").times(1).pause();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stragglers = Arc::new(Stragglers::default());
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "queued",
+        Arc::new(Counter(calls.clone())),
+        Duration::from_secs(60),
+        stragglers.clone(),
+    );
+    let registry = Arc::new(registry);
+    let first = execution(&ctx);
+    let first_store = storage.clone();
+    let first_registry = registry.clone();
+    let task =
+        tokio::spawn(async move { execute_step_dry(&first_store, &first_registry, first).await });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered())
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    pause.release();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while stragglers.blocks("queued") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let retry = execute_step_dry(&storage, &registry, execution(&ctx)).await;
+    assert!(
+        retry.is_ok(),
+        "a callback proved unstarted must not be blocked by the effect ledger: {retry:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let ledger = storage
+        .get_continuity_execution_by_instance(&ctx.tenant_id, ctx.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let receipts = storage
+        .list_effect_receipts(&ctx.tenant_id, ledger.continuity_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].state,
+        orch8_types::continuity::EffectState::Committed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admitted_native_failure_preserves_unknown_evidence_and_blocks_same_attempt() {
+    use orch8_engine::{error::EngineError, handlers::step::execute_step_dry};
+    struct Failed(Arc<AtomicUsize>);
+    impl StepHandler for Failed {
+        fn execute(&self, _name: String, _input: String) -> Result<String, HandlerError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(HandlerError::Retryable {
+                message: "provider outcome is ambiguous".into(),
+            })
+        }
+    }
+    let (_sqlite, ctx) = claimed_context().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "queued",
+        Arc::new(Failed(calls.clone())),
+        Duration::from_secs(5),
+        Arc::new(Stragglers::default()),
+    );
+    assert!(matches!(
+        execute_step_dry(&ctx.storage, &registry, execution(&ctx)).await,
+        Err(EngineError::StepFailed { .. })
+    ));
+    assert!(matches!(
+        execute_step_dry(&ctx.storage, &registry, execution(&ctx)).await,
+        Err(EngineError::EffectBlocked {
+            state: orch8_types::continuity::EffectState::Unknown,
+            ..
+        })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn native_policy_builtin_name_override_still_has_effect_evidence() {
+    use orch8_engine::handlers::step::execute_step_dry;
+    let (_sqlite, ctx) = claimed_context().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "noop",
+        Arc::new(Counter(calls.clone())),
+        Duration::from_secs(5),
+        Arc::new(Stragglers::default()),
+    );
+    let mut exec = execution(&ctx);
+    exec.handler_name = "noop".into();
+    execute_step_dry(&ctx.storage, &registry, exec)
+        .await
+        .unwrap();
+    let ledger = ctx
+        .storage
+        .get_continuity_execution_by_instance(&ctx.tenant_id, ctx.instance_id)
+        .await
+        .unwrap()
+        .expect("native callbacks need effect evidence even under a builtin name");
+    assert_eq!(
+        ctx.storage
+            .list_effect_receipts(&ctx.tenant_id, ledger.continuity_id, 10)
+            .await
+            .unwrap()[0]
+            .state,
+        orch8_types::continuity::EffectState::Committed
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn native_policy_dry_run_never_enters_host() {
+    let (_sqlite, mut ctx) = claimed_context().await;
+    Arc::make_mut(&mut ctx.context).runtime.dry_run = true;
+    ctx.params = serde_json::json!({"credential": "DRY_RUN_SECRET"});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "queued",
+        Arc::new(Counter(calls.clone())),
+        Duration::from_secs(5),
+        Arc::new(Stragglers::default()),
+    );
+    let result = registry.get("queued").unwrap()(ctx).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(result["dry_run"], true);
+    assert!(!result.to_string().contains("DRY_RUN_SECRET"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancellation_during_durable_admission_keeps_uncertain_dispatch_evidence() {
+    use orch8_engine::{error::EngineError, handlers::step::execute_step_dry};
+    use orch8_storage::testing::faulty::FaultStorage;
+    let (_sqlite, mut ctx) = claimed_context().await;
+    let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
+    ctx.storage = storage.clone();
+    // First CAS prepares; second begins the durable dispatch window.
+    let pause = faults.on("cas_effect_receipt").nth(2).pause();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let stragglers = Arc::new(Stragglers::default());
+    let mut registry = HandlerRegistry::new();
+    register_foreign_handler(
+        &mut registry,
+        "queued",
+        Arc::new(Counter(calls.clone())),
+        Duration::from_secs(60),
+        stragglers.clone(),
+    );
+    let registry = Arc::new(registry);
+    let exec = execution(&ctx);
+    let s = storage.clone();
+    let h = registry.clone();
+    let first = tokio::spawn(async move { execute_step_dry(&s, &h, exec).await });
+    tokio::time::timeout(Duration::from_secs(5), pause.entered())
+        .await
+        .unwrap();
+    first.abort();
+    assert!(first.await.unwrap_err().is_cancelled());
+    pause.release();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while stragglers.blocks("queued") {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        execute_step_dry(&storage, &registry, execution(&ctx)).await,
+        Err(EngineError::EffectBlocked {
+            state: orch8_types::continuity::EffectState::Unknown,
+            ..
+        })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_admission_storage_failures_preserve_type_and_commit_ambiguity() {
+    use orch8_engine::{error::EngineError, handlers::step::execute_step_dry};
+    use orch8_storage::testing::faulty::FaultStorage;
+    for ambiguous in [false, true] {
+        let (_sqlite, mut ctx) = claimed_context().await;
+        let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
+        ctx.storage = storage.clone();
+        if ambiguous {
+            faults.on("cas_effect_receipt").nth(2).fail_after_commit(
+                orch8_types::error::StorageError::Connection("ambiguous native admission".into()),
+            );
+        } else {
+            faults.on("cas_effect_receipt").nth(2).fail_transient();
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = HandlerRegistry::new();
+        register_foreign_handler(
+            &mut registry,
+            "queued",
+            Arc::new(Counter(calls.clone())),
+            Duration::from_secs(5),
+            Arc::new(Stragglers::default()),
+        );
+        let error = execute_step_dry(&storage, &registry, execution(&ctx))
+            .await
+            .unwrap_err();
+        assert!(
+            error.is_transient_storage(),
+            "admission must preserve the core storage error: {error:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let retry = execute_step_dry(&storage, &registry, execution(&ctx)).await;
+        if ambiguous {
+            assert!(matches!(
+                retry,
+                Err(EngineError::EffectBlocked {
+                    state: orch8_types::continuity::EffectState::Unknown,
+                    ..
+                })
+            ));
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        } else {
+            retry.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
 }

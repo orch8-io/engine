@@ -2086,6 +2086,7 @@ async fn run_cleanup_hooks(
             continue;
         };
         let step_ctx = crate::handlers::StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: instance.id,
             tenant_id: instance.tenant_id.clone(),
@@ -2762,6 +2763,7 @@ pub(crate) async fn handle_deadline_breach(
             );
         }
         let step_ctx = crate::handlers::StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id,
             tenant_id: instance.tenant_id.clone(),

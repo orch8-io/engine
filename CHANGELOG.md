@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Durable native effect admission
+
+- Keep native effect receipts prepared while callbacks are queued or checking
+  their claims. Move durable dispatch to native admission so a callback cancelled
+  before entry can retry through the real effect ledger. Preserve uncertain
+  dispatch/host outcomes instead of silently clearing evidence.
+- Add opaque single-use `EffectAdmission` and explicit deferred native-handler
+  registration. Rust `StepContext` literal constructors must initialize the new
+  `effect_admission` field to `None`; runtime adapters must admit supplied tokens
+  before host entry. Ordinary handlers and mocks retain their guard behavior.
+- Track native effects even when callbacks replace pure builtin names, and suppress
+  native host entry during workflow dry-run. HTTP/FFI signatures are unchanged.
+
 ### Native callback claim admission
 
 - Revalidate queued mobile native handlers against the original running instance,

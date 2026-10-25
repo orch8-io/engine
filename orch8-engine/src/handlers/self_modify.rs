@@ -93,6 +93,7 @@ mod tests {
         storage: Arc<dyn orch8_storage::StorageBackend>,
     ) -> StepContext {
         StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: InstanceId::new(),
             tenant_id: TenantId::unchecked("t"),

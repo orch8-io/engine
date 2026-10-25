@@ -659,6 +659,7 @@ mod tests {
             .await
             .unwrap();
         let ctx = StepContext {
+            effect_admission: None,
             claim_token: None,
             instance_id: instance.id,
             tenant_id: tenant,
