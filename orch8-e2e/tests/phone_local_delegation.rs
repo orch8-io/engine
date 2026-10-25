@@ -539,6 +539,28 @@ fn i_phone_killed_while_parked_resumes_once() {
     }
 }
 
+// Dropping an in-process fixture is not an OS process exit: native SQLite
+// workers can still be settling after the engine's nonblocking Drop. Wait for
+// their actual ownership release before simulating the next app launch. Never
+// unlink the companion or bypass the production recovery fence.
+fn drop_phone_and_wait(phone: Phone) {
+    let companion = format!("{}.orch8-owner", phone.db_path);
+    drop(phone);
+    wait_for(
+        "the stopped phone's physical database ownership",
+        LONG,
+        || {
+            let lease = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&companion)
+                .ok()?;
+            lease.try_lock().ok()?;
+            Some(())
+        },
+    );
+}
+
 fn run_kills(backend: &Backend) {
     let cloud = Cloud::start(backend, |_| {});
     let backend = cloud.backend;
@@ -570,7 +592,7 @@ fn run_kills(backend: &Backend) {
     let local = phone.start_local("photo-flow", &json!({}));
     phone.wait_local_state(&local, InstanceStateKind::Waiting, LONG);
     phone.wait_delegation("preparing", LONG);
-    drop(phone);
+    drop_phone_and_wait(phone);
 
     // Launch 2: online, the journal is picked up and placed. Kill while
     // parked.
@@ -583,7 +605,7 @@ fn run_kills(backend: &Backend) {
         "{backend}"
     );
     let delegation_id = delegated.delegation_id;
-    drop(phone);
+    drop_phone_and_wait(phone);
 
     // The desktop claims, runs and reports while the app is dead.
     desktop.serve_one();

@@ -318,3 +318,10 @@ work. Other admission/infrastructure boundaries, callback classes and independen
 processes still need their resource-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open
 until their complete runtime and SDK evidence exists.
+
+
+The internal runtime now also fences scoped expiry at handler/native admission
+(DME129) and acquires exclusive persisted recovery ownership before startup
+(DME130). Logical shutdown preserves accounts and durable claims; pending native
+SQLite work retains the recovery lease until physical close. These internal
+boundaries do not complete the public lifecycle or independent-process matrix.

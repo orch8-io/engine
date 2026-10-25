@@ -218,6 +218,8 @@ pub struct InstanceState_ {
 pub struct MobileEngine {
     // --- Core engine state ---
     storage: Arc<dyn StorageBackend>,
+    sqlite: Arc<orch8_storage::sqlite::SqliteStorage>,
+    storage_close_started: AtomicBool,
     catalog_handlers: Arc<handlers::scoped::CatalogHandlers>,
     handlers: StdRwLock<Arc<HandlerRegistry>>,
     config: MobileEngineConfig,
@@ -259,6 +261,16 @@ pub struct MobileEngine {
 }
 
 impl MobileEngine {
+    fn request_storage_close(&self) -> Option<tokio::task::JoinHandle<()>> {
+        if self.storage_close_started.swap(true, Ordering::AcqRel) {
+            return None;
+        }
+        let sqlite = self.sqlite.clone();
+        Some(self.runtime.handle().spawn(async move {
+            sqlite.close().await;
+        }))
+    }
+
     /// Internal explicit-owner execution entry; public scoped SDK rollout is gated
     /// on the remaining scoped read/lifecycle/worker surfaces.
     #[allow(dead_code)] // Internal entry until the complete scoped SDK surface is ready.
@@ -297,6 +309,7 @@ impl Drop for MobileEngine {
         // outlive the engine. Durable account retirement is a separate action.
         self.cancel.cancel();
         self.catalog_handlers.shutdown();
+        self.request_storage_close();
     }
 }
 
@@ -408,7 +421,7 @@ impl MobileEngine {
             .map_err(|e| MobileError::Engine { message: e })?;
 
         let (storage, sqlite) = rt.block_on(async {
-            let s = orch8_storage::sqlite::SqliteStorage::file_mobile(&db_path)
+            let s = orch8_storage::sqlite::SqliteStorage::file_mobile_owned(&db_path)
                 .await
                 .map_err(MobileError::from)?;
             let arc = Arc::new(s);
@@ -511,6 +524,8 @@ impl MobileEngine {
             &config.sdk_version,
         );
         let engine = Arc::new(Self {
+            sqlite,
+            storage_close_started: AtomicBool::new(false),
             storage,
             catalog_handlers,
             handlers: StdRwLock::new(Arc::new(registry)),
@@ -1180,6 +1195,9 @@ impl MobileEngine {
     }
 
     /// Shut down the engine.
+    /// Stop local work and request database closure. Synchronous callers wait
+    /// at most `operation_timeout_ms`; pending physical I/O retains recovery
+    /// ownership until it settles, so an immediate reopen may report busy.
     pub fn shutdown(&self) {
         info!("mobile engine shutting down");
         self.cancel.cancel();
@@ -1212,6 +1230,20 @@ impl MobileEngine {
             slot.readvertise.cancel();
         }
         drop((retired_provider, retired_listener, retired_handlers));
+        if let Some(close) = self.request_storage_close() {
+            // Synchronous SDK callers observe settled closure. Reentrant async
+            // callers must not block a runtime needed by an outstanding query;
+            // the owned close continues and a new opener remains fenced.
+            if tokio::runtime::Handle::try_current().is_err() {
+                self.runtime.block_on(async {
+                    let _ = tokio::time::timeout(
+                        Duration::from_millis(self.config.operation_timeout_ms),
+                        close,
+                    )
+                    .await;
+                });
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2608,6 +2640,45 @@ mod tests {
         let completed = listener.completed.lock().unwrap();
         assert_eq!(completed.len(), 1, "expected one completion event");
         assert_eq!(completed[0].0, id);
+    }
+
+    #[test]
+    fn second_mobile_engine_cannot_recover_a_live_owners_claim() {
+        let (engine, directory) = make_engine_with_noop();
+        let id = engine.start("tick-seq".into(), "{}".into(), None).unwrap();
+        let id = parse_instance_id(&id).unwrap();
+        let claim = engine
+            .runtime
+            .block_on(engine.storage.claim_due_instances(chrono::Utc::now(), 1, 0))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(claim.id, id);
+        let second = MobileEngine::new(
+            directory
+                .path()
+                .join("engine.db")
+                .to_string_lossy()
+                .into_owned(),
+            MobileEngineConfig::default(),
+        );
+        let refused = second.is_err();
+        let observed = engine
+            .runtime
+            .block_on(engine.storage.get_instance(id))
+            .unwrap()
+            .unwrap();
+        if let Ok(second) = second {
+            second.shutdown();
+        }
+        engine.shutdown();
+        assert!(
+            refused,
+            "second engine opened and changed a live claim from {:?} to {:?}",
+            claim.claimed_at, observed.claimed_at
+        );
+        assert_eq!(observed.state, InstanceState::Running);
+        assert_eq!(observed.claimed_at, claim.claimed_at);
     }
 
     #[test]

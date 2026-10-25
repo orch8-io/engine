@@ -57,6 +57,7 @@ byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:sha2", "dep:base64", "dep:z
 orch8-storage = { path = ".", features = ["test-util"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 criterion.workspace = true
+tempfile.workspace = true
 
 [[bench]]
 name = "storage_bench"

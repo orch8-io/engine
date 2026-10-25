@@ -171,13 +171,16 @@ jobs:
         run: |
           cargo run -p orch8-mobile --features bindgen --bin uniffi-bindgen -- \
             generate --library target/debug/liborch8_mobile.dylib \
-            --language swift --out-dir bindings/swift
+            --language swift --out-dir bindings/swift --no-format
 
       - name: Generate Kotlin bindings
         run: |
           cargo run -p orch8-mobile --features bindgen --bin uniffi-bindgen -- \
             generate --library target/debug/liborch8_mobile.dylib \
-            --language kotlin --out-dir bindings/kotlin
+            --language kotlin --out-dir bindings/kotlin --no-format
+
+      - name: Verify committed mobile bindings
+        run: python3 scripts/check-mobile-bindings.py bindings
 
       - name: Upload bindings
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

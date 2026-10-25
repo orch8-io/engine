@@ -1,4 +1,5 @@
 use super::*;
+use orch8_storage::InstanceStore;
 use std::sync::atomic::AtomicUsize;
 
 fn engine() -> (Arc<MobileEngine>, tempfile::TempDir) {
@@ -493,7 +494,7 @@ fn native_claim(engine: &MobileEngine) -> orch8_engine::handlers::StepContext {
 
 #[test]
 fn shutdown_fences_a_retained_native_registry_with_a_live_durable_claim() {
-    let (engine, _directory) = engine();
+    let (engine, directory) = engine();
     let calls = Arc::new(AtomicUsize::new(0));
     engine
         .register_handler("native".into(), Arc::new(CountedStep(calls.clone())))
@@ -504,9 +505,15 @@ fn shutdown_fences_a_retained_native_registry_with_a_live_durable_claim() {
     let result = engine
         .runtime
         .block_on(registry.get("native").unwrap()(context.clone()));
+    let inspector = engine
+        .runtime
+        .block_on(orch8_storage::sqlite::SqliteStorage::file_mobile(
+            directory.path().join("shutdown.db").to_str().unwrap(),
+        ))
+        .unwrap();
     let claim_live = engine
         .runtime
-        .block_on(context.storage.verify_instance_claim(
+        .block_on(inspector.verify_instance_claim(
             context.instance_id,
             &context.tenant_id,
             context.claim_token.unwrap(),
@@ -632,5 +639,55 @@ fn shutdown_preserves_the_result_of_an_already_entered_native_callback() {
             .unwrap()
             .unwrap(),
         serde_json::json!({"settled":true})
+    );
+}
+
+#[test]
+fn shutdown_deadline_does_not_release_an_unsettled_database_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .join("close-deadline.db")
+        .to_string_lossy()
+        .into_owned();
+    let engine = MobileEngine::new(
+        path.clone(),
+        MobileEngineConfig {
+            operation_timeout_ms: 20,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let connection = engine
+        .runtime
+        .block_on(engine.sqlite.pool().acquire())
+        .unwrap();
+    let closer = engine.clone();
+    let (started, ready) = std::sync::mpsc::channel();
+    let (completed, done) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        closer.shutdown();
+        completed.send(()).unwrap();
+    });
+    ready
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let returned = done
+        .recv_timeout(std::time::Duration::from_millis(300))
+        .is_ok();
+    let refused = MobileEngine::new(path.clone(), MobileEngineConfig::default()).is_err();
+    engine.runtime.block_on(connection.close()).unwrap();
+    thread.join().unwrap();
+    engine.runtime.block_on(engine.sqlite.close());
+    let next = MobileEngine::new(path, MobileEngineConfig::default()).unwrap();
+    next.shutdown();
+    assert!(
+        returned,
+        "shutdown ignored its configured deadline while a database lease was held"
+    );
+    assert!(
+        refused,
+        "shutdown returned recovery authority before the outstanding connection settled"
     );
 }

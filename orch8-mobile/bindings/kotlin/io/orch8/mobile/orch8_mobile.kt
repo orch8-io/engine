@@ -17,20 +17,20 @@ package io.orch8.mobile
 // compile the Rust component. The easiest way to ensure this is to bundle the Kotlin
 // helpers directly inline like we're doing here.
 
-import com.sun.jna.Callback
-import com.sun.jna.IntegerType
 import com.sun.jna.Library
+import com.sun.jna.IntegerType
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
+import com.sun.jna.Callback
 import com.sun.jna.ptr.*
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
 // A rust-owned buffer is represented by its capacity, its current length, and a
@@ -44,41 +44,29 @@ open class RustBuffer : Structure() {
     // Note: `capacity` and `len` are actually `ULong` values, but JVM only supports signed values.
     // When dealing with these fields, make sure to call `toULong()`.
     @JvmField var capacity: Long = 0
-
     @JvmField var len: Long = 0
-
     @JvmField var data: Pointer? = null
 
-    class ByValue :
-        RustBuffer(),
-        Structure.ByValue
+    class ByValue: RustBuffer(), Structure.ByValue
+    class ByReference: RustBuffer(), Structure.ByReference
 
-    class ByReference :
-        RustBuffer(),
-        Structure.ByReference
-
-    internal fun setValue(other: RustBuffer) {
+   internal fun setValue(other: RustBuffer) {
         capacity = other.capacity
         len = other.len
         data = other.data
     }
 
     companion object {
-        internal fun alloc(size: ULong = 0UL) =
-            uniffiRustCall { status ->
-                // Note: need to convert the size to a `Long` value to make this work with JVM.
-                UniffiLib.ffi_orch8_mobile_rustbuffer_alloc(size.toLong(), status)
-            }.also {
-                if (it.data == null) {
-                    throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=$size)")
-                }
-            }
+        internal fun alloc(size: ULong = 0UL) = uniffiRustCall() { status ->
+            // Note: need to convert the size to a `Long` value to make this work with JVM.
+            UniffiLib.ffi_orch8_mobile_rustbuffer_alloc(size.toLong(), status)
+        }.also {
+            if(it.data == null) {
+               throw RuntimeException("RustBuffer.alloc() returned null data pointer (size=${size})")
+           }
+        }
 
-        internal fun create(
-            capacity: ULong,
-            len: ULong,
-            data: Pointer?,
-        ): RustBuffer.ByValue {
+        internal fun create(capacity: ULong, len: ULong, data: Pointer?): RustBuffer.ByValue {
             var buf = RustBuffer.ByValue()
             buf.capacity = capacity.toLong()
             buf.len = len.toLong()
@@ -86,10 +74,9 @@ open class RustBuffer : Structure() {
             return buf
         }
 
-        internal fun free(buf: RustBuffer.ByValue) =
-            uniffiRustCall { status ->
-                UniffiLib.ffi_orch8_mobile_rustbuffer_free(buf, status)
-            }
+        internal fun free(buf: RustBuffer.ByValue) = uniffiRustCall() { status ->
+            UniffiLib.ffi_orch8_mobile_rustbuffer_free(buf, status)
+        }
     }
 
     @Suppress("TooGenericExceptionThrown")
@@ -108,12 +95,9 @@ open class RustBuffer : Structure() {
 @Structure.FieldOrder("len", "data")
 internal open class ForeignBytes : Structure() {
     @JvmField var len: Int = 0
-
     @JvmField var data: Pointer? = null
 
-    class ByValue :
-        ForeignBytes(),
-        Structure.ByValue
+    class ByValue : ForeignBytes(), Structure.ByValue
 }
 
 // Converter for `&[u8]` / `[ByRef] bytes` arguments.
@@ -136,13 +120,7 @@ internal object FfiConverterByRefBytes : FfiConverter<java.nio.ByteBuffer, Forei
         fb.len = remaining
         // Zero-length direct buffers: skip getDirectBufferPointer (platform-variable behavior)
         // and pass null. The Rust side treats (null, 0) as &[].
-        fb.data =
-            if (remaining == 0) {
-                null
-            } else {
-                com.sun.jna.Native
-                    .getDirectBufferPointer(value)
-            }
+        fb.data = if (remaining == 0) null else com.sun.jna.Native.getDirectBufferPointer(value)
         return fb
     }
 
@@ -150,24 +128,14 @@ internal object FfiConverterByRefBytes : FfiConverter<java.nio.ByteBuffer, Forei
         error("ByRef bytes cannot be lifted: zero-copy &[u8] only flows foreign->Rust")
 
     override fun read(buf: java.nio.ByteBuffer): java.nio.ByteBuffer =
-        error(
-            "ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.",
-        )
+        error("ByRef bytes cannot be read from a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
 
-    override fun write(
-        value: java.nio.ByteBuffer,
-        buf: java.nio.ByteBuffer,
-    ): Unit =
-        error(
-            "ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.",
-        )
+    override fun write(value: java.nio.ByteBuffer, buf: java.nio.ByteBuffer): Unit =
+        error("ByRef bytes cannot be written to a buffer: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
 
     override fun allocationSize(value: java.nio.ByteBuffer): ULong =
-        error(
-            "ByRef bytes have no RustBuffer allocation size: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.",
-        )
+        error("ByRef bytes have no RustBuffer allocation size: zero-copy &[u8] is only supported in argument position, not nested in records/options/etc.")
 }
-
 /**
  * The FfiConverter interface handles converter types to and from the FFI
  *
@@ -197,10 +165,7 @@ public interface FfiConverter<KotlinType, FfiType> {
     fun allocationSize(value: KotlinType): ULong
 
     // Write a Kotlin type to a `ByteBuffer`
-    fun write(
-        value: KotlinType,
-        buf: ByteBuffer,
-    )
+    fun write(value: KotlinType, buf: ByteBuffer)
 
     // Lower a value into a `RustBuffer`
     //
@@ -211,10 +176,9 @@ public interface FfiConverter<KotlinType, FfiType> {
     fun lowerIntoRustBuffer(value: KotlinType): RustBuffer.ByValue {
         val rbuf = RustBuffer.alloc(allocationSize(value))
         try {
-            val bbuf =
-                rbuf.data!!.getByteBuffer(0, rbuf.capacity).also {
-                    it.order(ByteOrder.BIG_ENDIAN)
-                }
+            val bbuf = rbuf.data!!.getByteBuffer(0, rbuf.capacity).also {
+                it.order(ByteOrder.BIG_ENDIAN)
+            }
             write(value, bbuf)
             rbuf.writeField("len", bbuf.position().toLong())
             return rbuf
@@ -231,11 +195,11 @@ public interface FfiConverter<KotlinType, FfiType> {
     fun liftFromRustBuffer(rbuf: RustBuffer.ByValue): KotlinType {
         val byteBuf = rbuf.asByteBuffer()!!
         try {
-            val item = read(byteBuf)
-            if (byteBuf.hasRemaining()) {
-                throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
-            }
-            return item
+           val item = read(byteBuf)
+           if (byteBuf.hasRemaining()) {
+               throw RuntimeException("junk remaining in buffer after lifting, something is very wrong!!")
+           }
+           return item
         } finally {
             RustBuffer.free(rbuf)
         }
@@ -247,9 +211,8 @@ public interface FfiConverter<KotlinType, FfiType> {
  *
  * @suppress
  */
-public interface FfiConverterRustBuffer<KotlinType> : FfiConverter<KotlinType, RustBuffer.ByValue> {
+public interface FfiConverterRustBuffer<KotlinType>: FfiConverter<KotlinType, RustBuffer.ByValue> {
     override fun lift(value: RustBuffer.ByValue) = liftFromRustBuffer(value)
-
     override fun lower(value: KotlinType) = lowerIntoRustBuffer(value)
 }
 // A handful of classes and functions to support the generated data structures.
@@ -262,24 +225,24 @@ internal const val UNIFFI_CALL_UNEXPECTED_ERROR = 2.toByte()
 @Structure.FieldOrder("code", "error_buf")
 internal open class UniffiRustCallStatus : Structure() {
     @JvmField var code: Byte = 0
-
     @JvmField var error_buf: RustBuffer.ByValue = RustBuffer.ByValue()
 
-    class ByValue :
-        UniffiRustCallStatus(),
-        Structure.ByValue
+    class ByValue: UniffiRustCallStatus(), Structure.ByValue
 
-    fun isSuccess(): Boolean = code == UNIFFI_CALL_SUCCESS
+    fun isSuccess(): Boolean {
+        return code == UNIFFI_CALL_SUCCESS
+    }
 
-    fun isError(): Boolean = code == UNIFFI_CALL_ERROR
+    fun isError(): Boolean {
+        return code == UNIFFI_CALL_ERROR
+    }
 
-    fun isPanic(): Boolean = code == UNIFFI_CALL_UNEXPECTED_ERROR
+    fun isPanic(): Boolean {
+        return code == UNIFFI_CALL_UNEXPECTED_ERROR
+    }
 
     companion object {
-        fun create(
-            code: Byte,
-            errorBuf: RustBuffer.ByValue,
-        ): UniffiRustCallStatus.ByValue {
+        fun create(code: Byte, errorBuf: RustBuffer.ByValue): UniffiRustCallStatus.ByValue {
             val callStatus = UniffiRustCallStatus.ByValue()
             callStatus.code = code
             callStatus.error_buf = errorBuf
@@ -288,9 +251,7 @@ internal open class UniffiRustCallStatus : Structure() {
     }
 }
 
-class InternalException(
-    message: String,
-) : kotlin.Exception(message)
+class InternalException(message: String) : kotlin.Exception(message)
 
 /**
  * Each top-level error class has a companion object that can lift the error from the call status's rust buffer
@@ -298,7 +259,7 @@ class InternalException(
  * @suppress
  */
 interface UniffiRustCallStatusErrorHandler<E> {
-    fun lift(error_buf: RustBuffer.ByValue): E
+    fun lift(error_buf: RustBuffer.ByValue): E;
 }
 
 // Helpers for calling Rust
@@ -306,10 +267,7 @@ interface UniffiRustCallStatusErrorHandler<E> {
 // synchronize itself
 
 // Call a rust function that returns a Result<>.  Pass in the Error class companion that corresponds to the Err
-private inline fun <U, E : kotlin.Exception> uniffiRustCallWithError(
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
-    callback: (UniffiRustCallStatus) -> U,
-): U {
+private inline fun <U, E: kotlin.Exception> uniffiRustCallWithError(errorHandler: UniffiRustCallStatusErrorHandler<E>, callback: (UniffiRustCallStatus) -> U): U {
     var status = UniffiRustCallStatus()
     val return_value = callback(status)
     uniffiCheckCallStatus(errorHandler, status)
@@ -317,10 +275,7 @@ private inline fun <U, E : kotlin.Exception> uniffiRustCallWithError(
 }
 
 // Check UniffiRustCallStatus and throw an error if the call wasn't successful
-private fun <E : kotlin.Exception> uniffiCheckCallStatus(
-    errorHandler: UniffiRustCallStatusErrorHandler<E>,
-    status: UniffiRustCallStatus,
-) {
+private fun<E: kotlin.Exception> uniffiCheckCallStatus(errorHandler: UniffiRustCallStatusErrorHandler<E>, status: UniffiRustCallStatus) {
     if (status.isSuccess()) {
         return
     } else if (status.isError()) {
@@ -344,7 +299,7 @@ private fun <E : kotlin.Exception> uniffiCheckCallStatus(
  *
  * @suppress
  */
-object UniffiNullRustCallStatusErrorHandler : UniffiRustCallStatusErrorHandler<InternalException> {
+object UniffiNullRustCallStatusErrorHandler: UniffiRustCallStatusErrorHandler<InternalException> {
     override fun lift(error_buf: RustBuffer.ByValue): InternalException {
         RustBuffer.free(error_buf)
         return InternalException("Unexpected CALL_ERROR")
@@ -352,53 +307,43 @@ object UniffiNullRustCallStatusErrorHandler : UniffiRustCallStatusErrorHandler<I
 }
 
 // Call a rust function that returns a plain value
-private inline fun <U> uniffiRustCall(callback: (UniffiRustCallStatus) -> U): U =
-    uniffiRustCallWithError(UniffiNullRustCallStatusErrorHandler, callback)
+private inline fun <U> uniffiRustCall(callback: (UniffiRustCallStatus) -> U): U {
+    return uniffiRustCallWithError(UniffiNullRustCallStatusErrorHandler, callback)
+}
 
-internal inline fun <T> uniffiTraitInterfaceCall(
+internal inline fun<T> uniffiTraitInterfaceCall(
     callStatus: UniffiRustCallStatus,
     makeCall: () -> T,
     writeReturn: (T) -> Unit,
 ) {
     try {
         writeReturn(makeCall())
-    } catch (e: kotlin.Exception) {
-        val err =
-            try {
-                e.stackTraceToString()
-            } catch (_: Throwable) {
-                ""
-            }
+    } catch(e: kotlin.Exception) {
+        val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
         callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
         callStatus.error_buf = FfiConverterString.lower(err)
     }
 }
 
-internal inline fun <T, reified E : Throwable> uniffiTraitInterfaceCallWithError(
+internal inline fun<T, reified E: Throwable> uniffiTraitInterfaceCallWithError(
     callStatus: UniffiRustCallStatus,
     makeCall: () -> T,
     writeReturn: (T) -> Unit,
-    lowerError: (E) -> RustBuffer.ByValue,
+    lowerError: (E) -> RustBuffer.ByValue
 ) {
     try {
         writeReturn(makeCall())
-    } catch (e: kotlin.Exception) {
+    } catch(e: kotlin.Exception) {
         if (e is E) {
             callStatus.code = UNIFFI_CALL_ERROR
             callStatus.error_buf = lowerError(e)
         } else {
-            val err =
-                try {
-                    e.stackTraceToString()
-                } catch (_: Throwable) {
-                    ""
-                }
+            val err = try { e.stackTraceToString() } catch(_: Throwable) { "" }
             callStatus.code = UNIFFI_CALL_UNEXPECTED_ERROR
             callStatus.error_buf = FfiConverterString.lower(err)
         }
     }
 }
-
 // Initial value and increment amount for handles.
 // These ensure that Kotlin-generated handles always have the lowest bit set
 private const val UNIFFI_HANDLEMAP_INITIAL = 1.toLong()
@@ -407,13 +352,10 @@ private const val UNIFFI_HANDLEMAP_DELTA = 2.toLong()
 // Map handles to objects
 //
 // This is used pass an opaque 64-bit handle representing a foreign object to the Rust code.
-internal class UniffiHandleMap<T : Any> {
+internal class UniffiHandleMap<T: Any> {
     private val map = ConcurrentHashMap<Long, T>()
-
     // Start
-    private val counter =
-        java.util.concurrent.atomic
-            .AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
+    private val counter = java.util.concurrent.atomic.AtomicLong(UNIFFI_HANDLEMAP_INITIAL)
 
     val size: Int
         get() = map.size
@@ -432,10 +374,14 @@ internal class UniffiHandleMap<T : Any> {
     }
 
     // Get an object from the handle map
-    fun get(handle: Long): T = map.get(handle) ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
+    fun get(handle: Long): T {
+        return map.get(handle) ?: throw InternalException("UniffiHandleMap.get: Invalid handle")
+    }
 
     // Remove an entry from the handlemap and get the Kotlin object back
-    fun remove(handle: Long): T = map.remove(handle) ?: throw InternalException("UniffiHandleMap: Invalid handle")
+    fun remove(handle: Long): T {
+        return map.remove(handle) ?: throw InternalException("UniffiHandleMap: Invalid handle")
+    }
 }
 
 // Contains loading, initialization code,
@@ -451,24 +397,18 @@ private fun findLibraryName(componentName: String): String {
 
 // Define FFI callback types
 internal interface UniffiRustFutureContinuationCallback : com.sun.jna.Callback {
-    fun callback(
-        `data`: Long,
-        `pollResult`: Byte,
-    )
+    fun callback(`data`: Long,`pollResult`: Byte,)
 }
-
 internal interface UniffiForeignFutureDroppedCallback : com.sun.jna.Callback {
-    fun callback(`handle`: Long)
+    fun callback(`handle`: Long,)
 }
-
 internal interface UniffiCallbackInterfaceFree : com.sun.jna.Callback {
-    fun callback(`handle`: Long)
+    fun callback(`handle`: Long,)
 }
-
 internal interface UniffiCallbackInterfaceClone : com.sun.jna.Callback {
-    fun callback(`handle`: Long): Long
+    fun callback(`handle`: Long,)
+    : Long
 }
-
 @Structure.FieldOrder("handle", "free")
 internal open class UniffiForeignFutureDroppedCallbackStruct(
     @JvmField internal var `handle`: Long = 0.toLong(),
@@ -477,15 +417,14 @@ internal open class UniffiForeignFutureDroppedCallbackStruct(
     class UniffiByValue(
         `handle`: Long = 0.toLong(),
         `free`: UniffiForeignFutureDroppedCallback? = null,
-    ) : UniffiForeignFutureDroppedCallbackStruct(`handle`, `free`),
-        Structure.ByValue
+    ): UniffiForeignFutureDroppedCallbackStruct(`handle`,`free`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureDroppedCallbackStruct) {
         `handle` = other.`handle`
         `free` = other.`free`
     }
-}
 
+}
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
@@ -494,22 +433,17 @@ internal open class UniffiForeignFutureResultU8(
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU8(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU8(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteU8 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultU8.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU8.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI8(
     @JvmField internal var `returnValue`: Byte = 0.toByte(),
@@ -518,22 +452,17 @@ internal open class UniffiForeignFutureResultI8(
     class UniffiByValue(
         `returnValue`: Byte = 0.toByte(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI8(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI8(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI8) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteI8 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultI8.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI8.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
@@ -542,22 +471,17 @@ internal open class UniffiForeignFutureResultU16(
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU16(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU16(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteU16 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultU16.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU16.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI16(
     @JvmField internal var `returnValue`: Short = 0.toShort(),
@@ -566,22 +490,17 @@ internal open class UniffiForeignFutureResultI16(
     class UniffiByValue(
         `returnValue`: Short = 0.toShort(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI16(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI16(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI16) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteI16 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultI16.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI16.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU32(
     @JvmField internal var `returnValue`: Int = 0,
@@ -590,22 +509,17 @@ internal open class UniffiForeignFutureResultU32(
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteU32 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultU32.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI32(
     @JvmField internal var `returnValue`: Int = 0,
@@ -614,22 +528,17 @@ internal open class UniffiForeignFutureResultI32(
     class UniffiByValue(
         `returnValue`: Int = 0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteI32 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultI32.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultU64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
@@ -638,22 +547,17 @@ internal open class UniffiForeignFutureResultU64(
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultU64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultU64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultU64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteU64 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultU64.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultU64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultI64(
     @JvmField internal var `returnValue`: Long = 0.toLong(),
@@ -662,22 +566,17 @@ internal open class UniffiForeignFutureResultI64(
     class UniffiByValue(
         `returnValue`: Long = 0.toLong(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultI64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultI64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultI64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteI64 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultI64.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultI64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultF32(
     @JvmField internal var `returnValue`: Float = 0.0f,
@@ -686,22 +585,17 @@ internal open class UniffiForeignFutureResultF32(
     class UniffiByValue(
         `returnValue`: Float = 0.0f,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultF32(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultF32(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF32) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteF32 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultF32.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF32.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultF64(
     @JvmField internal var `returnValue`: Double = 0.0,
@@ -710,22 +604,17 @@ internal open class UniffiForeignFutureResultF64(
     class UniffiByValue(
         `returnValue`: Double = 0.0,
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultF64(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultF64(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultF64) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteF64 : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultF64.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultF64.UniffiByValue,)
 }
-
 @Structure.FieldOrder("returnValue", "callStatus")
 internal open class UniffiForeignFutureResultRustBuffer(
     @JvmField internal var `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
@@ -734,125 +623,60 @@ internal open class UniffiForeignFutureResultRustBuffer(
     class UniffiByValue(
         `returnValue`: RustBuffer.ByValue = RustBuffer.ByValue(),
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultRustBuffer(`returnValue`, `callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultRustBuffer(`returnValue`,`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultRustBuffer) {
         `returnValue` = other.`returnValue`
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteRustBuffer : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultRustBuffer.UniffiByValue,)
 }
-
 @Structure.FieldOrder("callStatus")
 internal open class UniffiForeignFutureResultVoid(
     @JvmField internal var `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
 ) : Structure() {
     class UniffiByValue(
         `callStatus`: UniffiRustCallStatus.ByValue = UniffiRustCallStatus.ByValue(),
-    ) : UniffiForeignFutureResultVoid(`callStatus`),
-        Structure.ByValue
+    ): UniffiForeignFutureResultVoid(`callStatus`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
+   internal fun uniffiSetValue(other: UniffiForeignFutureResultVoid) {
         `callStatus` = other.`callStatus`
     }
-}
 
+}
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
-    fun callback(
-        `callbackData`: Long,
-        `result`: UniffiForeignFutureResultVoid.UniffiByValue,
-    )
+    fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
-
 internal interface UniffiCallbackInterfaceCapsuleSignerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `uniffiOutReturn`: RustBuffer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceCapsuleSignerMethod1 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `uniffiOutReturn`: RustBuffer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceCapsuleSignerMethod2 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `digest`: RustBuffer.ByValue,
-        `uniffiOutReturn`: RustBuffer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`digest`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceTokenProviderMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `uniffiOutReturn`: RustBuffer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceTokenProviderMethod1 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `uniffiOutReturn`: RustBuffer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceEngineListenerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `output`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`instanceId`: RustBuffer.ByValue,`output`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceEngineListenerMethod1 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `error`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`instanceId`: RustBuffer.ByValue,`error`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceEngineListenerMethod2 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `stepName`: RustBuffer.ByValue,
-        `handler`: RustBuffer.ByValue,
-        `uniffiOutReturn`: Pointer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`instanceId`: RustBuffer.ByValue,`stepName`: RustBuffer.ByValue,`handler`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 internal interface UniffiCallbackInterfaceStepHandlerMethod0 : com.sun.jna.Callback {
-    fun callback(
-        `uniffiHandle`: Long,
-        `stepName`: RustBuffer.ByValue,
-        `input`: RustBuffer.ByValue,
-        `uniffiOutReturn`: RustBuffer,
-        uniffiCallStatus: UniffiRustCallStatus,
-    )
+    fun callback(`uniffiHandle`: Long,`stepName`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
 }
-
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "keyId", "publicKeyBase64", "signManifestSha256")
 internal open class UniffiVTableCallbackInterfaceCapsuleSigner(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -867,18 +691,17 @@ internal open class UniffiVTableCallbackInterfaceCapsuleSigner(
         `keyId`: UniffiCallbackInterfaceCapsuleSignerMethod0? = null,
         `publicKeyBase64`: UniffiCallbackInterfaceCapsuleSignerMethod1? = null,
         `signManifestSha256`: UniffiCallbackInterfaceCapsuleSignerMethod2? = null,
-    ) : UniffiVTableCallbackInterfaceCapsuleSigner(`uniffiFree`, `uniffiClone`, `keyId`, `publicKeyBase64`, `signManifestSha256`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceCapsuleSigner(`uniffiFree`,`uniffiClone`,`keyId`,`publicKeyBase64`,`signManifestSha256`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCapsuleSigner) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceCapsuleSigner) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `keyId` = other.`keyId`
         `publicKeyBase64` = other.`publicKeyBase64`
         `signManifestSha256` = other.`signManifestSha256`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "currentToken", "refreshToken")
 internal open class UniffiVTableCallbackInterfaceTokenProvider(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -891,17 +714,16 @@ internal open class UniffiVTableCallbackInterfaceTokenProvider(
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `currentToken`: UniffiCallbackInterfaceTokenProviderMethod0? = null,
         `refreshToken`: UniffiCallbackInterfaceTokenProviderMethod1? = null,
-    ) : UniffiVTableCallbackInterfaceTokenProvider(`uniffiFree`, `uniffiClone`, `currentToken`, `refreshToken`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceTokenProvider(`uniffiFree`,`uniffiClone`,`currentToken`,`refreshToken`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceTokenProvider) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceTokenProvider) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `currentToken` = other.`currentToken`
         `refreshToken` = other.`refreshToken`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "onInstanceCompleted", "onInstanceFailed", "onStepPending")
 internal open class UniffiVTableCallbackInterfaceEngineListener(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -916,24 +738,17 @@ internal open class UniffiVTableCallbackInterfaceEngineListener(
         `onInstanceCompleted`: UniffiCallbackInterfaceEngineListenerMethod0? = null,
         `onInstanceFailed`: UniffiCallbackInterfaceEngineListenerMethod1? = null,
         `onStepPending`: UniffiCallbackInterfaceEngineListenerMethod2? = null,
-    ) : UniffiVTableCallbackInterfaceEngineListener(
-            `uniffiFree`,
-            `uniffiClone`,
-            `onInstanceCompleted`,
-            `onInstanceFailed`,
-            `onStepPending`,
-        ),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceEngineListener(`uniffiFree`,`uniffiClone`,`onInstanceCompleted`,`onInstanceFailed`,`onStepPending`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceEngineListener) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceEngineListener) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `onInstanceCompleted` = other.`onInstanceCompleted`
         `onInstanceFailed` = other.`onInstanceFailed`
         `onStepPending` = other.`onStepPending`
     }
-}
 
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "execute")
 internal open class UniffiVTableCallbackInterfaceStepHandler(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -944,14 +759,14 @@ internal open class UniffiVTableCallbackInterfaceStepHandler(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
         `uniffiClone`: UniffiCallbackInterfaceClone? = null,
         `execute`: UniffiCallbackInterfaceStepHandlerMethod0? = null,
-    ) : UniffiVTableCallbackInterfaceStepHandler(`uniffiFree`, `uniffiClone`, `execute`),
-        Structure.ByValue
+    ): UniffiVTableCallbackInterfaceStepHandler(`uniffiFree`,`uniffiClone`,`execute`,), Structure.ByValue
 
-    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceStepHandler) {
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceStepHandler) {
         `uniffiFree` = other.`uniffiFree`
         `uniffiClone` = other.`uniffiClone`
         `execute` = other.`execute`
     }
+
 }
 
 // A JNA Library to expose the extern-C FFI definitions.
@@ -978,121 +793,125 @@ internal object IntegrityCheckingUniffiLib {
     }
 
     internal fun ensureInitialized() = Unit
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_active_instances(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_begin_token_provider_installation(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_cancel_token_provider_installation(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_token_provider_installation(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegate(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegation_stats(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegation_status(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_get_instance(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_node_runtime_id(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_on_push_wake(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_pause(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_register_handler(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_register_node(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_resume(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_run_worker_window(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_listener(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_shutdown(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_delegation(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_worker(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_delegation(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_sync(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_tick_once(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_unregister_node(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_update_node_status(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_capsulesigner_key_id(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_tokenprovider_current_token(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_failed(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_enginelistener_on_step_pending(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_stephandler_execute(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_constructor_mobileengine_new(
+    ): Int
+    external fun ffi_orch8_mobile_uniffi_contract_version(
+    ): Int
 
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule(): Int
 
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_active_instances(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_begin_token_provider_installation(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_cancel_instance(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_cancel_token_provider_installation(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_step(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_complete_token_provider_installation(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegate(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegation_stats(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_delegation_status(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_enable_builtin(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_export_continuity_capsule(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_flush_telemetry(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_get_instance(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_load_sequences_from_url(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_loaded_sequences(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_node_runtime_id(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_on_push_received(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_on_push_wake(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_pause(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_register_handler(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_register_node(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_report_power_state(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_resume(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_run_until_idle(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_run_worker_window(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_device_context(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_listener(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_shutdown(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_delegation(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_start_worker(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_delegation(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_stop_worker(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_sync(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_tick_once(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_unregister_node(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_update_node_status(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_capsulesigner_key_id(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_capsulesigner_public_key_base64(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_capsulesigner_sign_manifest_sha256(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_tokenprovider_current_token(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_tokenprovider_refresh_token(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_completed(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_enginelistener_on_instance_failed(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_enginelistener_on_step_pending(): Int
-
-    external fun uniffi_orch8_mobile_checksum_method_stephandler_execute(): Int
-
-    external fun uniffi_orch8_mobile_checksum_constructor_mobileengine_new(): Int
-
-    external fun ffi_orch8_mobile_uniffi_contract_version(): Int
 }
 
 internal object UniffiLib {
+
     // The Cleaner for the whole library
     internal val CLEANER: UniffiCleaner by lazy {
         UniffiCleaner.create()
     }
+
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "orch8_mobile"))
@@ -1100,592 +919,250 @@ internal object UniffiLib {
         uniffiCallbackInterfaceEngineListener.register(this)
         uniffiCallbackInterfaceStepHandler.register(this)
         uniffiCallbackInterfaceTokenProvider.register(this)
+
     }
 
     internal fun ensureInitialized() = Unit
-
-    external fun uniffi_orch8_mobile_fn_clone_mobileengine(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_clone_mobileengine(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun uniffi_orch8_mobile_fn_free_mobileengine(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_free_mobileengine(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_constructor_mobileengine_new(
-        `dbPath`: RustBuffer.ByValue,
-        `config`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_constructor_mobileengine_new(`dbPath`: RustBuffer.ByValue,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_activate_continuity_capsule(
-        `ptr`: Long,
-        `capsuleId`: RustBuffer.ByValue,
-        `destinationRuntimeId`: RustBuffer.ByValue,
-        `destinationInstanceId`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_activate_continuity_capsule(`ptr`: Long,`capsuleId`: RustBuffer.ByValue,`destinationRuntimeId`: RustBuffer.ByValue,`destinationInstanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_active_instances(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_active_instances(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(
-        `ptr`: Long,
-        `provider`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(`ptr`: Long,`provider`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_cancel_instance(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_cancel_instance(`ptr`: Long,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(
-        `ptr`: Long,
-        `installationId`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(`ptr`: Long,`installationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_complete_step(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `stepName`: RustBuffer.ByValue,
-        `output`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_complete_step(`ptr`: Long,`instanceId`: RustBuffer.ByValue,`stepName`: RustBuffer.ByValue,`output`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(
-        `ptr`: Long,
-        `installationId`: RustBuffer.ByValue,
-        `token`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(`ptr`: Long,`installationId`: RustBuffer.ByValue,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegate(
-        `ptr`: Long,
-        `request`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegate(`ptr`: Long,`request`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(
-        `ptr`: Long,
-        `delegationId`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(`ptr`: Long,`delegationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
-        `ptr`: Long,
-        `name`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(`ptr`: Long,`name`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `destinationRuntimeId`: RustBuffer.ByValue,
-        `payloadKeyBase64`: RustBuffer.ByValue,
-        `expiresInSeconds`: Int,
-        `signer`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(`ptr`: Long,`instanceId`: RustBuffer.ByValue,`destinationRuntimeId`: RustBuffer.ByValue,`payloadKeyBase64`: RustBuffer.ByValue,`expiresInSeconds`: Int,`signer`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_flush_telemetry(
-        `ptr`: Long,
-        `endpointUrl`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_flush_telemetry(`ptr`: Long,`endpointUrl`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_get_instance(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_get_instance(`ptr`: Long,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_import_continuity_capsule(
-        `ptr`: Long,
-        `capsuleJson`: RustBuffer.ByValue,
-        `payloadBase64`: RustBuffer.ByValue,
-        `payloadKeyBase64`: RustBuffer.ByValue,
-        `destinationRuntimeId`: RustBuffer.ByValue,
-        `destinationInstanceId`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_import_continuity_capsule(`ptr`: Long,`capsuleJson`: RustBuffer.ByValue,`payloadBase64`: RustBuffer.ByValue,`payloadKeyBase64`: RustBuffer.ByValue,`destinationRuntimeId`: RustBuffer.ByValue,`destinationInstanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_load_sequence_from_json(
-        `ptr`: Long,
-        `json`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_load_sequence_from_json(`ptr`: Long,`json`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_load_sequences_from_url(
-        `ptr`: Long,
-        `url`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_load_sequences_from_url(`ptr`: Long,`url`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Int
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_loaded_sequences(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_loaded_sequences(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_on_push_received(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_on_push_received(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(
-        `ptr`: Long,
-        `envelopeJson`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(`ptr`: Long,`envelopeJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_pause(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_pause(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_register_handler(
-        `ptr`: Long,
-        `name`: RustBuffer.ByValue,
-        `handler`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_register_handler(`ptr`: Long,`name`: RustBuffer.ByValue,`handler`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_register_node(
-        `ptr`: Long,
-        `capabilities`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_register_node(`ptr`: Long,`capabilities`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_report_power_state(
-        `ptr`: Long,
-        `state`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_report_power_state(`ptr`: Long,`state`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_resume(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_resume(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
-        `ptr`: Long,
-        `maxTicks`: Int,
-        `timeBudgetMs`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(`ptr`: Long,`maxTicks`: Int,`timeBudgetMs`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(
-        `ptr`: Long,
-        `timeBudgetMs`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(`ptr`: Long,`timeBudgetMs`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_device_context(
-        `ptr`: Long,
-        `ctx`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_device_context(`ptr`: Long,`ctx`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_listener(
-        `ptr`: Long,
-        `listener`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_listener(`ptr`: Long,`listener`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
-        `ptr`: Long,
-        `provider`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(`ptr`: Long,`provider`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_shutdown(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_shutdown(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_start(
-        `ptr`: Long,
-        `sequenceName`: RustBuffer.ByValue,
-        `input`: RustBuffer.ByValue,
-        `dedupKey`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_start(`ptr`: Long,`sequenceName`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,`dedupKey`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(
-        `ptr`: Long,
-        `options`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(`ptr`: Long,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
-        `ptr`: Long,
-        `options`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_start_worker(`ptr`: Long,`options`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_sync(
-        `ptr`: Long,
-        `manifestUrl`: RustBuffer.ByValue,
-        `tokenProvider`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_sync(`ptr`: Long,`manifestUrl`: RustBuffer.ByValue,`tokenProvider`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_tick_once(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_tick_once(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(
-        `ptr`: Long,
-        `connectivity`: RustBuffer.ByValue,
-        `batteryPercent`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(`ptr`: Long,`connectivity`: RustBuffer.ByValue,`batteryPercent`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_clone_capsulesigner(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_clone_capsulesigner(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun uniffi_orch8_mobile_fn_free_capsulesigner(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_free_capsulesigner(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_init_callback_vtable_capsulesigner(`vtable`: UniffiVTableCallbackInterfaceCapsuleSigner): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_capsulesigner_key_id(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_init_callback_vtable_capsulesigner(`vtable`: UniffiVTableCallbackInterfaceCapsuleSigner,
+    ): Unit
+    external fun uniffi_orch8_mobile_fn_method_capsulesigner_key_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_capsulesigner_public_key_base64(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_capsulesigner_public_key_base64(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_capsulesigner_sign_manifest_sha256(
-        `ptr`: Long,
-        `digest`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_capsulesigner_sign_manifest_sha256(`ptr`: Long,`digest`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_clone_tokenprovider(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_clone_tokenprovider(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun uniffi_orch8_mobile_fn_free_tokenprovider(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_free_tokenprovider(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_init_callback_vtable_tokenprovider(`vtable`: UniffiVTableCallbackInterfaceTokenProvider): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_tokenprovider_current_token(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_init_callback_vtable_tokenprovider(`vtable`: UniffiVTableCallbackInterfaceTokenProvider,
+    ): Unit
+    external fun uniffi_orch8_mobile_fn_method_tokenprovider_current_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_method_tokenprovider_refresh_token(
-        `ptr`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_tokenprovider_refresh_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun uniffi_orch8_mobile_fn_clone_enginelistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_clone_enginelistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun uniffi_orch8_mobile_fn_free_enginelistener(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_free_enginelistener(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_init_callback_vtable_enginelistener(`vtable`: UniffiVTableCallbackInterfaceEngineListener): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_enginelistener_on_instance_completed(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `output`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_init_callback_vtable_enginelistener(`vtable`: UniffiVTableCallbackInterfaceEngineListener,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_enginelistener_on_instance_failed(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `error`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_enginelistener_on_instance_completed(`ptr`: Long,`instanceId`: RustBuffer.ByValue,`output`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_enginelistener_on_step_pending(
-        `ptr`: Long,
-        `instanceId`: RustBuffer.ByValue,
-        `stepName`: RustBuffer.ByValue,
-        `handler`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_enginelistener_on_instance_failed(`ptr`: Long,`instanceId`: RustBuffer.ByValue,`error`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_clone_stephandler(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_enginelistener_on_step_pending(`ptr`: Long,`instanceId`: RustBuffer.ByValue,`stepName`: RustBuffer.ByValue,`handler`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Unit
+    external fun uniffi_orch8_mobile_fn_clone_stephandler(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun uniffi_orch8_mobile_fn_free_stephandler(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_free_stephandler(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun uniffi_orch8_mobile_fn_init_callback_vtable_stephandler(`vtable`: UniffiVTableCallbackInterfaceStepHandler): Unit
-
-    external fun uniffi_orch8_mobile_fn_method_stephandler_execute(
-        `ptr`: Long,
-        `stepName`: RustBuffer.ByValue,
-        `input`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-
-    external fun ffi_orch8_mobile_rustbuffer_alloc(
-        `size`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-
-    external fun ffi_orch8_mobile_rustbuffer_from_bytes(
-        `bytes`: ForeignBytes.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): RustBuffer.ByValue
-
-    external fun ffi_orch8_mobile_rustbuffer_free(
-        `buf`: RustBuffer.ByValue,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_init_callback_vtable_stephandler(`vtable`: UniffiVTableCallbackInterfaceStepHandler,
     ): Unit
-
-    external fun ffi_orch8_mobile_rustbuffer_reserve(
-        `buf`: RustBuffer.ByValue,
-        `additional`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_orch8_mobile_fn_method_stephandler_execute(`ptr`: Long,`stepName`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun ffi_orch8_mobile_rust_future_poll_u8(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun ffi_orch8_mobile_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun ffi_orch8_mobile_rustbuffer_free(`buf`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_u8(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_u8(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_u8(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rustbuffer_reserve(`buf`: RustBuffer.ByValue,`additional`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun ffi_orch8_mobile_rust_future_poll_u8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_cancel_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_u8(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_u8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
-
-    external fun ffi_orch8_mobile_rust_future_poll_i8(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_i8(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_i8(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_i8(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_i8(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_i8(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_i8(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Byte
-
-    external fun ffi_orch8_mobile_rust_future_poll_u16(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_u16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_u16(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_u16(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_u16(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_u16(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_u16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
-
-    external fun ffi_orch8_mobile_rust_future_poll_i16(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_i16(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_i16(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_i16(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_i16(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_i16(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_i16(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Short
-
-    external fun ffi_orch8_mobile_rust_future_poll_u32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_u32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_u32(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_u32(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_u32(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_u32(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_u32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
-
-    external fun ffi_orch8_mobile_rust_future_poll_i32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_i32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_i32(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_i32(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_i32(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_i32(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_i32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Int
-
-    external fun ffi_orch8_mobile_rust_future_poll_u64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_u64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_u64(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_u64(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_u64(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_u64(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_u64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun ffi_orch8_mobile_rust_future_poll_i64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_i64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_i64(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_i64(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_i64(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_i64(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_i64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Long
-
-    external fun ffi_orch8_mobile_rust_future_poll_f32(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_f32(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_f32(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_f32(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_f32(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_f32(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_f32(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Float
-
-    external fun ffi_orch8_mobile_rust_future_poll_f64(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_f64(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_f64(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_f64(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_f64(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_f64(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_f64(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Double
-
-    external fun ffi_orch8_mobile_rust_future_poll_rust_buffer(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_rust_buffer(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
     ): Unit
-
-    external fun ffi_orch8_mobile_rust_future_cancel_rust_buffer(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_free_rust_buffer(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_rust_buffer(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
+    external fun ffi_orch8_mobile_rust_future_cancel_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_rust_buffer(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_rust_buffer(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
-
-    external fun ffi_orch8_mobile_rust_future_poll_void(
-        `handle`: Long,
-        `callback`: UniffiRustFutureContinuationCallback,
-        `callbackData`: Long,
+    external fun ffi_orch8_mobile_rust_future_poll_void(`handle`: Long,`callback`: UniffiRustFutureContinuationCallback,`callbackData`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_cancel_void(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_free_void(`handle`: Long,
+    ): Unit
+    external fun ffi_orch8_mobile_rust_future_complete_void(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
 
-    external fun ffi_orch8_mobile_rust_future_cancel_void(`handle`: Long): Unit
 
-    external fun ffi_orch8_mobile_rust_future_free_void(`handle`: Long): Unit
-
-    external fun ffi_orch8_mobile_rust_future_complete_void(
-        `handle`: Long,
-        uniffi_out_err: UniffiRustCallStatus,
-    ): Unit
 }
 
 private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
@@ -1697,7 +1174,6 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI contract version mismatch: try cleaning and rebuilding your project")
     }
 }
-
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule() and 0xFFFF) != 961) {
@@ -1796,7 +1272,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider() and 0xFFFF) != 808) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() and 0xFFFF) != 65418) {
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() and 0xFFFF) != 38962) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_start() and 0xFFFF) != 15754) {
@@ -1875,6 +1351,7 @@ public fun uniffiEnsureInitialized() {
 
 // Public interface members begin here.
 
+
 // Interface implemented by anything that can contain an object reference.
 //
 // Such types expose a `destroy()` method that must be called to cleanly
@@ -1885,15 +1362,11 @@ public fun uniffiEnsureInitialized() {
 // helper method to execute a block and destroy the object at the end.
 interface Disposable {
     fun destroy()
-
     companion object {
         fun destroy(vararg args: Any?) {
             for (arg in args) {
                 when (arg) {
-                    is Disposable -> {
-                        arg.destroy()
-                    }
-
+                    is Disposable -> arg.destroy()
                     is ArrayList<*> -> {
                         for (idx in arg.indices) {
                             val element = arg[idx]
@@ -1902,7 +1375,6 @@ interface Disposable {
                             }
                         }
                     }
-
                     is Map<*, *> -> {
                         for (element in arg.values) {
                             if (element is Disposable) {
@@ -1910,7 +1382,6 @@ interface Disposable {
                             }
                         }
                     }
-
                     is Iterable<*> -> {
                         for (element in arg) {
                             if (element is Disposable) {
@@ -1955,11 +1426,9 @@ object UniffiWithHandle
  *
  * @suppress
  * */
-object NoHandle // Magic number for the Rust proxy to call using the same mechanism as every other method,
-
+object NoHandle// Magic number for the Rust proxy to call using the same mechanism as every other method,
 // to free the callback once it's dropped by Rust.
 internal const val IDX_CALLBACK_FREE = 0
-
 // Callback return codes
 internal const val UNIFFI_CALLBACK_SUCCESS = 0
 internal const val UNIFFI_CALLBACK_ERROR = 1
@@ -1968,14 +1437,16 @@ internal const val UNIFFI_CALLBACK_UNEXPECTED_ERROR = 2
 /**
  * @suppress
  */
-public abstract class FfiConverterCallbackInterface<CallbackInterface : Any> : FfiConverter<CallbackInterface, Long> {
+public abstract class FfiConverterCallbackInterface<CallbackInterface: Any>: FfiConverter<CallbackInterface, Long> {
     internal val handleMap = UniffiHandleMap<CallbackInterface>()
 
     internal fun drop(handle: Long) {
         handleMap.remove(handle)
     }
 
-    override fun lift(value: Long): CallbackInterface = handleMap.get(value)
+    override fun lift(value: Long): CallbackInterface {
+        return handleMap.get(value)
+    }
 
     override fun read(buf: ByteBuffer) = lift(buf.getLong())
 
@@ -1983,14 +1454,10 @@ public abstract class FfiConverterCallbackInterface<CallbackInterface : Any> : F
 
     override fun allocationSize(value: CallbackInterface) = 8UL
 
-    override fun write(
-        value: CallbackInterface,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: CallbackInterface, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
-
 /**
  * The cleaner interface for Object finalization code to run.
  * This is the entry point to any implementation that we're using.
@@ -2006,24 +1473,17 @@ interface UniffiCleaner {
         fun clean()
     }
 
-    fun register(
-        value: Any,
-        cleanUpTask: Runnable,
-    ): UniffiCleaner.Cleanable
+    fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable
 
     companion object
 }
 
 // The fallback Jna cleaner, which is available for both Android, and the JVM.
 private class UniffiJnaCleaner : UniffiCleaner {
-    private val cleaner =
-        com.sun.jna.internal.Cleaner
-            .getCleaner()
+    private val cleaner = com.sun.jna.internal.Cleaner.getCleaner()
 
-    override fun register(
-        value: Any,
-        cleanUpTask: Runnable,
-    ): UniffiCleaner.Cleanable = UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
+    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
+        UniffiJnaCleanable(cleaner.register(value, cleanUpTask))
 }
 
 private class UniffiJnaCleanable(
@@ -2031,6 +1491,7 @@ private class UniffiJnaCleanable(
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
 }
+
 
 // We decide at uniffi binding generation time whether we were
 // using Android or not.
@@ -2050,18 +1511,14 @@ private fun UniffiCleaner.Companion.create(): UniffiCleaner =
     }
 
 private class JavaLangRefCleaner : UniffiCleaner {
-    val cleaner =
-        java.lang.ref.Cleaner
-            .create()
+    val cleaner = java.lang.ref.Cleaner.create()
 
-    override fun register(
-        value: Any,
-        cleanUpTask: Runnable,
-    ): UniffiCleaner.Cleanable = JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
+    override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
+        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
 }
 
 private class JavaLangRefCleanable(
-    val cleanable: java.lang.ref.Cleaner.Cleanable,
+    val cleanable: java.lang.ref.Cleaner.Cleanable
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
 }
@@ -2069,21 +1526,26 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
-public object FfiConverterUByte : FfiConverter<UByte, Byte> {
-    override fun lift(value: Byte): UByte = value.toUByte()
+public object FfiConverterUByte: FfiConverter<UByte, Byte> {
+    override fun lift(value: Byte): UByte {
+        return value.toUByte()
+    }
 
-    fun lift(value: Int): UByte = value.toUByte()
+    fun lift(value: Int): UByte {
+        return value.toUByte()
+    }
 
-    override fun read(buf: ByteBuffer): UByte = lift(buf.get())
+    override fun read(buf: ByteBuffer): UByte {
+        return lift(buf.get())
+    }
 
-    override fun lower(value: UByte): Byte = value.toByte()
+    override fun lower(value: UByte): Byte {
+        return value.toByte()
+    }
 
     override fun allocationSize(value: UByte) = 1UL
 
-    override fun write(
-        value: UByte,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: UByte, buf: ByteBuffer) {
         buf.put(value.toByte())
     }
 }
@@ -2091,19 +1553,22 @@ public object FfiConverterUByte : FfiConverter<UByte, Byte> {
 /**
  * @suppress
  */
-public object FfiConverterUInt : FfiConverter<UInt, Int> {
-    override fun lift(value: Int): UInt = value.toUInt()
+public object FfiConverterUInt: FfiConverter<UInt, Int> {
+    override fun lift(value: Int): UInt {
+        return value.toUInt()
+    }
 
-    override fun read(buf: ByteBuffer): UInt = lift(buf.getInt())
+    override fun read(buf: ByteBuffer): UInt {
+        return lift(buf.getInt())
+    }
 
-    override fun lower(value: UInt): Int = value.toInt()
+    override fun lower(value: UInt): Int {
+        return value.toInt()
+    }
 
     override fun allocationSize(value: UInt) = 4UL
 
-    override fun write(
-        value: UInt,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: UInt, buf: ByteBuffer) {
         buf.putInt(value.toInt())
     }
 }
@@ -2111,19 +1576,22 @@ public object FfiConverterUInt : FfiConverter<UInt, Int> {
 /**
  * @suppress
  */
-public object FfiConverterInt : FfiConverter<Int, Int> {
-    override fun lift(value: Int): Int = value
+public object FfiConverterInt: FfiConverter<Int, Int> {
+    override fun lift(value: Int): Int {
+        return value
+    }
 
-    override fun read(buf: ByteBuffer): Int = buf.getInt()
+    override fun read(buf: ByteBuffer): Int {
+        return buf.getInt()
+    }
 
-    override fun lower(value: Int): Int = value
+    override fun lower(value: Int): Int {
+        return value
+    }
 
     override fun allocationSize(value: Int) = 4UL
 
-    override fun write(
-        value: Int,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: Int, buf: ByteBuffer) {
         buf.putInt(value)
     }
 }
@@ -2131,19 +1599,22 @@ public object FfiConverterInt : FfiConverter<Int, Int> {
 /**
  * @suppress
  */
-public object FfiConverterULong : FfiConverter<ULong, Long> {
-    override fun lift(value: Long): ULong = value.toULong()
+public object FfiConverterULong: FfiConverter<ULong, Long> {
+    override fun lift(value: Long): ULong {
+        return value.toULong()
+    }
 
-    override fun read(buf: ByteBuffer): ULong = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): ULong {
+        return lift(buf.getLong())
+    }
 
-    override fun lower(value: ULong): Long = value.toLong()
+    override fun lower(value: ULong): Long {
+        return value.toLong()
+    }
 
     override fun allocationSize(value: ULong) = 8UL
 
-    override fun write(
-        value: ULong,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: ULong, buf: ByteBuffer) {
         buf.putLong(value.toLong())
     }
 }
@@ -2151,19 +1622,22 @@ public object FfiConverterULong : FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
-public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
-    override fun lift(value: Byte): Boolean = value.toInt() != 0
+public object FfiConverterBoolean: FfiConverter<Boolean, Byte> {
+    override fun lift(value: Byte): Boolean {
+        return value.toInt() != 0
+    }
 
-    override fun read(buf: ByteBuffer): Boolean = lift(buf.get())
+    override fun read(buf: ByteBuffer): Boolean {
+        return lift(buf.get())
+    }
 
-    override fun lower(value: Boolean): Byte = if (value) 1.toByte() else 0.toByte()
+    override fun lower(value: Boolean): Byte {
+        return if (value) 1.toByte() else 0.toByte()
+    }
 
     override fun allocationSize(value: Boolean) = 1UL
 
-    override fun write(
-        value: Boolean,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: Boolean, buf: ByteBuffer) {
         buf.put(lower(value))
     }
 }
@@ -2171,7 +1645,7 @@ public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
 /**
  * @suppress
  */
-public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
+public object FfiConverterString: FfiConverter<String, RustBuffer.ByValue> {
     // Note: we don't inherit from FfiConverterRustBuffer, because we use a
     // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
     // store our length and avoid writing it out to the buffer.
@@ -2218,15 +1692,13 @@ public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
         return sizeForLength + sizeForString
     }
 
-    override fun write(
-        value: String,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: String, buf: ByteBuffer) {
         val byteBuf = toUtf8(value)
         buf.putInt(byteBuf.limit())
         buf.put(byteBuf)
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -2322,7 +1794,9 @@ public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 public interface CapsuleSigner {
+
     /**
      * Stable identifier of the host-managed signing key.
      */
@@ -2341,14 +1815,13 @@ public interface CapsuleSigner {
     companion object
 }
 
-open class CapsuleSignerImpl :
-    Disposable,
-    AutoCloseable,
-    CapsuleSigner {
+open class CapsuleSignerImpl: Disposable, AutoCloseable, CapsuleSigner
+{
+
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -2405,7 +1878,7 @@ open class CapsuleSignerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -2419,13 +1892,11 @@ open class CapsuleSignerImpl :
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(
-        private val handle: Long,
-    ) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_orch8_mobile_fn_free_capsulesigner(handle, status)
@@ -2438,134 +1909,140 @@ open class CapsuleSignerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_orch8_mobile_fn_clone_capsulesigner(handle, status)
         }
     }
 
+
     /**
      * Stable identifier of the host-managed signing key.
-     */
-    override fun `keyId`(): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_capsulesigner_key_id(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `keyId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_capsulesigner_key_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Base64 raw 32-byte Ed25519 public key registered for this runtime.
-     */
-    override fun `publicKeyBase64`(): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_capsulesigner_public_key_base64(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `publicKeyBase64`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_capsulesigner_public_key_base64(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Sign the ASCII SHA-256 digest with a non-exportable host key.
      */
-    @Throws(MobileException::class)
-    override fun `signManifestSha256`(`digest`: kotlin.String): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_capsulesigner_sign_manifest_sha256(
-                        it,
-                        FfiConverterString.lower(`digest`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `signManifestSha256`(`digest`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_capsulesigner_sign_manifest_sha256(
+        it,
+
+        FfiConverterString.lower(`digest`),_status)
+}
+    }
+    )
+    }
+
+
+
+
+
+
+
+
 
     /**
      * @suppress
      */
     companion object
+
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceCapsuleSigner {
-    internal object `keyId` : UniffiCallbackInterfaceCapsuleSignerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `keyId`: UniffiCallbackInterfaceCapsuleSignerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCapsuleSigner.handleMap.get(uniffiHandle)
-            val makeCall = { uniffiObj.`keyId`() }
+            val makeCall = { ->
+                uniffiObj.`keyId`(
+                )
+            }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-
-    internal object `publicKeyBase64` : UniffiCallbackInterfaceCapsuleSignerMethod1 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `publicKeyBase64`: UniffiCallbackInterfaceCapsuleSignerMethod1 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCapsuleSigner.handleMap.get(uniffiHandle)
-            val makeCall = { uniffiObj.`publicKeyBase64`() }
+            val makeCall = { ->
+                uniffiObj.`publicKeyBase64`(
+                )
+            }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-
-    internal object `signManifestSha256` : UniffiCallbackInterfaceCapsuleSignerMethod2 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `digest`: RustBuffer.ByValue,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `signManifestSha256`: UniffiCallbackInterfaceCapsuleSignerMethod2 {
+        override fun callback(`uniffiHandle`: Long,`digest`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeCapsuleSigner.handleMap.get(uniffiHandle)
-            val makeCall = {  uniffiObj.`signManifestSha256`(
-                FfiConverterString.lift(`digest`),
-            )
+            val makeCall = { ->
+                uniffiObj.`signManifestSha256`(
+                    FfiConverterString.lift(`digest`),
+                )
             }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
                 writeReturn,
-                { e: MobileException -> FfiConverterTypeMobileError.lower(e) },
+                { e: MobileException -> FfiConverterTypeMobileError.lower(e) }
             )
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeCapsuleSigner.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeCapsuleSigner.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeCapsuleSigner.handleMap.clone(handle)
+        }
     }
 
-    internal var vtable =
-        UniffiVTableCallbackInterfaceCapsuleSigner.UniffiByValue(
-            uniffiFree,
-            uniffiClone,
-            `keyId`,
-            `publicKeyBase64`,
-            `signManifestSha256`,
-        )
+    internal var vtable = UniffiVTableCallbackInterfaceCapsuleSigner.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `keyId`,
+        `publicKeyBase64`,
+        `signManifestSha256`,
+    )
 
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
@@ -2577,17 +2054,17 @@ internal object uniffiCallbackInterfaceCapsuleSigner {
 /**
  * @suppress
  */
-public object FfiConverterTypeCapsuleSigner : FfiConverter<CapsuleSigner, Long> {
+public object FfiConverterTypeCapsuleSigner: FfiConverter<CapsuleSigner, Long> {
     internal val handleMap = UniffiHandleMap<CapsuleSigner>()
 
     override fun lower(value: CapsuleSigner): Long {
         if (value is CapsuleSignerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): CapsuleSigner {
@@ -2601,17 +2078,17 @@ public object FfiConverterTypeCapsuleSigner : FfiConverter<CapsuleSigner, Long> 
         }
     }
 
-    override fun read(buf: ByteBuffer): CapsuleSigner = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): CapsuleSigner {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: CapsuleSigner) = 8UL
 
-    override fun write(
-        value: CapsuleSigner,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: CapsuleSigner, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -2707,26 +2184,18 @@ public object FfiConverterTypeCapsuleSigner : FfiConverter<CapsuleSigner, Long> 
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 /**
  * Callback interface for engine lifecycle events.
  * The host app receives notifications when instances complete, fail, or have pending steps.
  */
 public interface EngineListener {
-    fun `onInstanceCompleted`(
-        `instanceId`: kotlin.String,
-        `output`: kotlin.String,
-    )
 
-    fun `onInstanceFailed`(
-        `instanceId`: kotlin.String,
-        `error`: kotlin.String,
-    )
+    fun `onInstanceCompleted`(`instanceId`: kotlin.String, `output`: kotlin.String)
 
-    fun `onStepPending`(
-        `instanceId`: kotlin.String,
-        `stepName`: kotlin.String,
-        `handler`: kotlin.String,
-    )
+    fun `onInstanceFailed`(`instanceId`: kotlin.String, `error`: kotlin.String)
+
+    fun `onStepPending`(`instanceId`: kotlin.String, `stepName`: kotlin.String, `handler`: kotlin.String)
 
     companion object
 }
@@ -2735,14 +2204,13 @@ public interface EngineListener {
  * Callback interface for engine lifecycle events.
  * The host app receives notifications when instances complete, fail, or have pending steps.
  */
-open class EngineListenerImpl :
-    Disposable,
-    AutoCloseable,
-    EngineListener {
+open class EngineListenerImpl: Disposable, AutoCloseable, EngineListener
+{
+
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -2799,7 +2267,7 @@ open class EngineListenerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -2813,13 +2281,11 @@ open class EngineListenerImpl :
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(
-        private val handle: Long,
-    ) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_orch8_mobile_fn_free_enginelistener(handle, status)
@@ -2832,142 +2298,134 @@ open class EngineListenerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_orch8_mobile_fn_clone_enginelistener(handle, status)
         }
     }
 
-    override fun `onInstanceCompleted`(
-        `instanceId`: kotlin.String,
-        `output`: kotlin.String,
-    ) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_enginelistener_on_instance_completed(
-                it,
-                FfiConverterString.lower(`instanceId`),
-                FfiConverterString.lower(`output`),
-                _status,
-            )
-        }
+    override fun `onInstanceCompleted`(`instanceId`: kotlin.String, `output`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_enginelistener_on_instance_completed(
+        it,
+
+        FfiConverterString.lower(`instanceId`),
+        FfiConverterString.lower(`output`),_status)
+}
     }
 
-    override fun `onInstanceFailed`(
-        `instanceId`: kotlin.String,
-        `error`: kotlin.String,
-    ) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_enginelistener_on_instance_failed(
-                it,
-                FfiConverterString.lower(`instanceId`),
-                FfiConverterString.lower(`error`),
-                _status,
-            )
-        }
+
+
+    override fun `onInstanceFailed`(`instanceId`: kotlin.String, `error`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_enginelistener_on_instance_failed(
+        it,
+
+        FfiConverterString.lower(`instanceId`),
+        FfiConverterString.lower(`error`),_status)
+}
     }
 
-    override fun `onStepPending`(
-        `instanceId`: kotlin.String,
-        `stepName`: kotlin.String,
-        `handler`: kotlin.String,
-    ) = callWithHandle {
-        uniffiRustCall { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_enginelistener_on_step_pending(
-                it,
-                FfiConverterString.lower(`instanceId`),
-                FfiConverterString.lower(`stepName`),
-                FfiConverterString.lower(`handler`),
-                _status,
-            )
-        }
+
+
+    override fun `onStepPending`(`instanceId`: kotlin.String, `stepName`: kotlin.String, `handler`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_enginelistener_on_step_pending(
+        it,
+
+        FfiConverterString.lower(`instanceId`),
+        FfiConverterString.lower(`stepName`),
+        FfiConverterString.lower(`handler`),_status)
+}
     }
+
+
+
+
+
+
+
+
+
 
     /**
      * @suppress
      */
     companion object
+
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceEngineListener {
-    internal object `onInstanceCompleted` : UniffiCallbackInterfaceEngineListenerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `instanceId`: RustBuffer.ByValue,
-            `output`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `onInstanceCompleted`: UniffiCallbackInterfaceEngineListenerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`instanceId`: RustBuffer.ByValue,`output`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
-            val makeCall = {  uniffiObj.`onInstanceCompleted`(
-                FfiConverterString.lift(`instanceId`),
-                FfiConverterString.lift(`output`),
-            )
+            val makeCall = { ->
+                uniffiObj.`onInstanceCompleted`(
+                    FfiConverterString.lift(`instanceId`),
+                    FfiConverterString.lift(`output`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onInstanceFailed`: UniffiCallbackInterfaceEngineListenerMethod1 {
+        override fun callback(`uniffiHandle`: Long,`instanceId`: RustBuffer.ByValue,`error`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onInstanceFailed`(
+                    FfiConverterString.lift(`instanceId`),
+                    FfiConverterString.lift(`error`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
+        }
+    }
+    internal object `onStepPending`: UniffiCallbackInterfaceEngineListenerMethod2 {
+        override fun callback(`uniffiHandle`: Long,`instanceId`: RustBuffer.ByValue,`stepName`: RustBuffer.ByValue,`handler`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`onStepPending`(
+                    FfiConverterString.lift(`instanceId`),
+                    FfiConverterString.lift(`stepName`),
+                    FfiConverterString.lift(`handler`),
+                )
             }
             val writeReturn = { _: Unit -> Unit }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
 
-    internal object `onInstanceFailed` : UniffiCallbackInterfaceEngineListenerMethod1 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `instanceId`: RustBuffer.ByValue,
-            `error`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
-            val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
-            val makeCall = {  uniffiObj.`onInstanceFailed`(
-                FfiConverterString.lift(`instanceId`),
-                FfiConverterString.lift(`error`),
-            )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object `onStepPending` : UniffiCallbackInterfaceEngineListenerMethod2 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `instanceId`: RustBuffer.ByValue,
-            `stepName`: RustBuffer.ByValue,
-            `handler`: RustBuffer.ByValue,
-            `uniffiOutReturn`: Pointer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
-            val uniffiObj = FfiConverterTypeEngineListener.handleMap.get(uniffiHandle)
-            val makeCall = {  uniffiObj.`onStepPending`(
-                FfiConverterString.lift(`instanceId`),
-                FfiConverterString.lift(`stepName`),
-                FfiConverterString.lift(`handler`),
-            )
-            }
-            val writeReturn = { _: Unit -> Unit }
-            uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
-        }
-    }
-
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeEngineListener.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeEngineListener.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeEngineListener.handleMap.clone(handle)
+        }
     }
 
-    internal var vtable =
-        UniffiVTableCallbackInterfaceEngineListener.UniffiByValue(
-            uniffiFree,
-            uniffiClone,
-            `onInstanceCompleted`,
-            `onInstanceFailed`,
-            `onStepPending`,
-        )
+    internal var vtable = UniffiVTableCallbackInterfaceEngineListener.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `onInstanceCompleted`,
+        `onInstanceFailed`,
+        `onStepPending`,
+    )
 
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
@@ -2979,17 +2437,17 @@ internal object uniffiCallbackInterfaceEngineListener {
 /**
  * @suppress
  */
-public object FfiConverterTypeEngineListener : FfiConverter<EngineListener, Long> {
+public object FfiConverterTypeEngineListener: FfiConverter<EngineListener, Long> {
     internal val handleMap = UniffiHandleMap<EngineListener>()
 
     override fun lower(value: EngineListener): Long {
         if (value is EngineListenerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): EngineListener {
@@ -3003,17 +2461,17 @@ public object FfiConverterTypeEngineListener : FfiConverter<EngineListener, Long
         }
     }
 
-    override fun read(buf: ByteBuffer): EngineListener = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): EngineListener {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: EngineListener) = 8UL
 
-    override fun write(
-        value: EngineListener,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: EngineListener, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -3109,6 +2567,7 @@ public object FfiConverterTypeEngineListener : FfiConverter<EngineListener, Long
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 /**
  * The mobile workflow engine. Opaque handle for the host app.
  *
@@ -3119,16 +2578,13 @@ public object FfiConverterTypeEngineListener : FfiConverter<EngineListener, Long
  * - `telemetry::TelemetryManager` — event recording and flushing
  */
 public interface MobileEngineInterface {
+
     /**
      * Activate a previously imported capsule after the control plane has
      * accepted its handoff. Ownership is advanced locally before scheduling,
      * so a crash can delay execution but cannot run an unowned effect.
      */
-    fun `activateContinuityCapsule`(
-        `capsuleId`: kotlin.String,
-        `destinationRuntimeId`: kotlin.String,
-        `destinationInstanceId`: kotlin.String,
-    )
+    fun `activateContinuityCapsule`(`capsuleId`: kotlin.String, `destinationRuntimeId`: kotlin.String, `destinationInstanceId`: kotlin.String)
 
     /**
      * List all non-terminal instances.
@@ -3156,21 +2612,14 @@ public interface MobileEngineInterface {
     /**
      * Complete a step that transitioned to Waiting state.
      */
-    fun `completeStep`(
-        `instanceId`: kotlin.String,
-        `stepName`: kotlin.String,
-        `output`: kotlin.String,
-    )
+    fun `completeStep`(`instanceId`: kotlin.String, `stepName`: kotlin.String, `output`: kotlin.String)
 
     /**
      * Publish an initial token only for its reserved owner. Returns false for
      * superseded/cancelled tickets or blank tokens. Repeated completion cannot
      * overwrite a token already refreshed by this same provider owner.
      */
-    fun `completeTokenProviderInstallation`(
-        `installationId`: kotlin.String,
-        `token`: kotlin.String,
-    ): kotlin.Boolean
+    fun `completeTokenProviderInstallation`(`installationId`: kotlin.String, `token`: kotlin.String): kotlin.Boolean
 
     /**
      * Explicitly delegate a server-side sub-sequence on behalf of a local
@@ -3201,13 +2650,7 @@ public interface MobileEngineInterface {
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
      */
-    fun `exportContinuityCapsule`(
-        `instanceId`: kotlin.String,
-        `destinationRuntimeId`: kotlin.String,
-        `payloadKeyBase64`: kotlin.String,
-        `expiresInSeconds`: kotlin.UInt,
-        `signer`: CapsuleSigner,
-    ): ContinuityExportResult
+    fun `exportContinuityCapsule`(`instanceId`: kotlin.String, `destinationRuntimeId`: kotlin.String, `payloadKeyBase64`: kotlin.String, `expiresInSeconds`: kotlin.UInt, `signer`: CapsuleSigner): ContinuityExportResult
 
     /**
      * Flush buffered telemetry to the remote endpoint.
@@ -3226,13 +2669,7 @@ public interface MobileEngineInterface {
      * quarantine. The sequence referenced by the capsule must already be
      * loaded, and the destination-generated transfer key never persists.
      */
-    fun `importContinuityCapsule`(
-        `capsuleJson`: kotlin.String,
-        `payloadBase64`: kotlin.String,
-        `payloadKeyBase64`: kotlin.String,
-        `destinationRuntimeId`: kotlin.String,
-        `destinationInstanceId`: kotlin.String,
-    ): ContinuityImportResult
+    fun `importContinuityCapsule`(`capsuleJson`: kotlin.String, `payloadBase64`: kotlin.String, `payloadKeyBase64`: kotlin.String, `destinationRuntimeId`: kotlin.String, `destinationInstanceId`: kotlin.String): ContinuityImportResult
 
     /**
      * Every journaled delegation, oldest first.
@@ -3294,10 +2731,7 @@ public interface MobileEngineInterface {
     /**
      * Register a native step handler. Must be called before `resume()`.
      */
-    fun `registerHandler`(
-        `name`: kotlin.String,
-        `handler`: StepHandler,
-    )
+    fun `registerHandler`(`name`: kotlin.String, `handler`: StepHandler)
 
     /**
      * Join the distributed runtime mesh: registers the device
@@ -3333,10 +2767,7 @@ public interface MobileEngineInterface {
      * host remains responsible for registering and completing the native
      * `BGTaskScheduler`/`WorkManager` job.
      */
-    fun `runUntilIdle`(
-        `maxTicks`: kotlin.UInt,
-        `timeBudgetMs`: kotlin.ULong,
-    ): BackgroundRunResult
+    fun `runUntilIdle`(`maxTicks`: kotlin.UInt, `timeBudgetMs`: kotlin.ULong): BackgroundRunResult
 
     /**
      * Run the worker for an OS-granted background window (`BGTask` /
@@ -3370,17 +2801,16 @@ public interface MobileEngineInterface {
 
     /**
      * Shut down the engine.
+     * Stop local work and request database closure. Synchronous callers wait
+     * at most `operation_timeout_ms`; pending physical I/O retains recovery
+     * ownership until it settles, so an immediate reopen may report busy.
      */
     fun `shutdown`()
 
     /**
      * Start a new workflow instance.
      */
-    fun `start`(
-        `sequenceName`: kotlin.String,
-        `input`: kotlin.String,
-        `dedupKey`: kotlin.String?,
-    ): kotlin.String
+    fun `start`(`sequenceName`: kotlin.String, `input`: kotlin.String, `dedupKey`: kotlin.String?): kotlin.String
 
     /**
      * Start delegating placed local steps: a step of a workflow running on
@@ -3420,10 +2850,7 @@ public interface MobileEngineInterface {
     /**
      * Sync sequences from the remote manifest.
      */
-    fun `sync`(
-        `manifestUrl`: kotlin.String,
-        `tokenProvider`: TokenProvider?,
-    ): SyncResult
+    fun `sync`(`manifestUrl`: kotlin.String, `tokenProvider`: TokenProvider?): SyncResult
 
     /**
      * Execute a single tick.
@@ -3440,10 +2867,7 @@ public interface MobileEngineInterface {
      * Update the liveness facts advertised by a registered node (battery,
      * connectivity) and push them to the control plane now.
      */
-    fun `updateNodeStatus`(
-        `connectivity`: NodeConnectivity?,
-        `batteryPercent`: kotlin.UByte?,
-    )
+    fun `updateNodeStatus`(`connectivity`: NodeConnectivity?, `batteryPercent`: kotlin.UByte?)
 
     /**
      * Counters for the remote worker (zeros when it is not running).
@@ -3462,14 +2886,13 @@ public interface MobileEngineInterface {
  * - `lifecycle::InstanceLifecycleManager` — instance CRUD and GC
  * - `telemetry::TelemetryManager` — event recording and flushing
  */
-open class MobileEngine :
-    Disposable,
-    AutoCloseable,
-    MobileEngineInterface {
+open class MobileEngine: Disposable, AutoCloseable, MobileEngineInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -3487,21 +2910,19 @@ open class MobileEngine :
         this.handle = 0
         this.cleanable = null
     }
-
     /**
      * Create a new mobile engine backed by a `SQLite` database at `db_path`.
      */
     constructor(`dbPath`: kotlin.String, `config`: MobileEngineConfig) :
-        this(
-            UniffiWithHandle,
-            uniffiRustCallWithError(MobileException) { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_constructor_mobileengine_new(
-                    FfiConverterString.lower(`dbPath`),
-                    FfiConverterTypeMobileEngineConfig.lower(`config`),
-                    _status,
-                )
-            },
-        )
+        this(UniffiWithHandle,
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_constructor_mobileengine_new(
+
+
+        FfiConverterString.lower(`dbPath`),
+        FfiConverterTypeMobileEngineConfig.lower(`config`),_status)
+}
+    )
 
     protected val handle: Long
     protected val cleanable: UniffiCleaner.Cleanable?
@@ -3541,7 +2962,7 @@ open class MobileEngine :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -3555,13 +2976,11 @@ open class MobileEngine :
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(
-        private val handle: Long,
-    ) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_orch8_mobile_fn_free_mobileengine(handle, status)
@@ -3574,337 +2993,339 @@ open class MobileEngine :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_orch8_mobile_fn_clone_mobileengine(handle, status)
         }
     }
+
 
     /**
      * Activate a previously imported capsule after the control plane has
      * accepted its handoff. Ownership is advanced locally before scheduling,
      * so a crash can delay execution but cannot run an unowned effect.
      */
-    @Throws(MobileException::class)
-    override fun `activateContinuityCapsule`(
-        `capsuleId`: kotlin.String,
-        `destinationRuntimeId`: kotlin.String,
-        `destinationInstanceId`: kotlin.String,
-    ) = callWithHandle {
-        uniffiRustCallWithError(MobileException) { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_activate_continuity_capsule(
-                it,
-                FfiConverterString.lower(`capsuleId`),
-                FfiConverterString.lower(`destinationRuntimeId`),
-                FfiConverterString.lower(`destinationInstanceId`),
-                _status,
-            )
-        }
+    @Throws(MobileException::class)override fun `activateContinuityCapsule`(`capsuleId`: kotlin.String, `destinationRuntimeId`: kotlin.String, `destinationInstanceId`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_activate_continuity_capsule(
+        it,
+
+        FfiConverterString.lower(`capsuleId`),
+        FfiConverterString.lower(`destinationRuntimeId`),
+        FfiConverterString.lower(`destinationInstanceId`),_status)
+}
     }
+
+
+
 
     /**
      * List all non-terminal instances.
      */
-    @Throws(MobileException::class)
-    override fun `activeInstances`(): List<InstanceSummary> =
-        FfiConverterSequenceTypeInstanceSummary.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_active_instances(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `activeInstances`(): List<InstanceSummary> {
+            return FfiConverterSequenceTypeInstanceSummary.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_active_instances(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Reserve an authorization owner before starting an asynchronous initial
      * fetch. Clears prior credentials without invoking the provider getter.
      * Complete with this opaque ticket, or cancel it on failure/cancellation.
      */
-    @Throws(MobileException::class)
-    override fun `beginTokenProviderInstallation`(`provider`: TokenProvider): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(
-                        it,
-                        FfiConverterTypeTokenProvider.lower(`provider`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `beginTokenProviderInstallation`(`provider`: TokenProvider): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_begin_token_provider_installation(
+        it,
+
+        FfiConverterTypeTokenProvider.lower(`provider`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Cancel a running instance.
      */
-    @Throws(MobileException::class)
-    override fun `cancelInstance`(`instanceId`: kotlin.String) =
-        callWithHandle {
-            uniffiRustCallWithError(MobileException) { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_cancel_instance(
-                    it,
-                    FfiConverterString.lower(`instanceId`),
-                    _status,
-                )
-            }
-        }
+    @Throws(MobileException::class)override fun `cancelInstance`(`instanceId`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_cancel_instance(
+        it,
+
+        FfiConverterString.lower(`instanceId`),_status)
+}
+    }
+
+
+
 
     /**
      * Retire this owner on caller cancellation, even if completion just won a
      * race. A stale ticket cannot retire a newer provider. No anonymous fallback.
-     */
-    override fun `cancelTokenProviderInstallation`(`installationId`: kotlin.String): kotlin.Boolean =
-        FfiConverterBoolean.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(
-                        it,
-                        FfiConverterString.lower(`installationId`),
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `cancelTokenProviderInstallation`(`installationId`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_cancel_token_provider_installation(
+        it,
+
+        FfiConverterString.lower(`installationId`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Complete a step that transitioned to Waiting state.
      */
-    @Throws(MobileException::class)
-    override fun `completeStep`(
-        `instanceId`: kotlin.String,
-        `stepName`: kotlin.String,
-        `output`: kotlin.String,
-    ) = callWithHandle {
-        uniffiRustCallWithError(MobileException) { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_complete_step(
-                it,
-                FfiConverterString.lower(`instanceId`),
-                FfiConverterString.lower(`stepName`),
-                FfiConverterString.lower(`output`),
-                _status,
-            )
-        }
+    @Throws(MobileException::class)override fun `completeStep`(`instanceId`: kotlin.String, `stepName`: kotlin.String, `output`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_complete_step(
+        it,
+
+        FfiConverterString.lower(`instanceId`),
+        FfiConverterString.lower(`stepName`),
+        FfiConverterString.lower(`output`),_status)
+}
     }
+
+
+
 
     /**
      * Publish an initial token only for its reserved owner. Returns false for
      * superseded/cancelled tickets or blank tokens. Repeated completion cannot
      * overwrite a token already refreshed by this same provider owner.
      */
-    @Throws(MobileException::class)
-    override fun `completeTokenProviderInstallation`(
-        `installationId`: kotlin.String,
-        `token`: kotlin.String,
-    ): kotlin.Boolean =
-        FfiConverterBoolean.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(
-                        it,
-                        FfiConverterString.lower(`installationId`),
-                        FfiConverterString.lower(`token`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `completeTokenProviderInstallation`(`installationId`: kotlin.String, `token`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_complete_token_provider_installation(
+        it,
+
+        FfiConverterString.lower(`installationId`),
+        FfiConverterString.lower(`token`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Explicitly delegate a server-side sub-sequence on behalf of a local
      * instance, without parking any step. Returns the delegation id; read
      * the outcome with `delegation_status`. Requires `start_delegation`.
      */
-    @Throws(MobileException::class)
-    override fun `delegate`(`request`: DelegateRequest): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegate(
-                        it,
-                        FfiConverterTypeDelegateRequest.lower(`request`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `delegate`(`request`: DelegateRequest): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegate(
+        it,
+
+        FfiConverterTypeDelegateRequest.lower(`request`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Counters for the delegation pump (zeros when it is not running).
-     */
-    override fun `delegationStats`(): DelegationStats =
-        FfiConverterTypeDelegationStats.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `delegationStats`(): DelegationStats {
+            return FfiConverterTypeDelegationStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegation_stats(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * The locally journaled state of a delegation.
      */
-    @Throws(MobileException::class)
-    override fun `delegationStatus`(`delegationId`: kotlin.String): DelegationStatus =
-        FfiConverterTypeDelegationStatus.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(
-                        it,
-                        FfiConverterString.lower(`delegationId`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `delegationStatus`(`delegationId`: kotlin.String): DelegationStatus {
+            return FfiConverterTypeDelegationStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_delegation_status(
+        it,
+
+        FfiConverterString.lower(`delegationId`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
      * registered. Must be called before `resume()` / `start_worker()`.
      */
-    @Throws(MobileException::class)
-    override fun `enableBuiltin`(`name`: kotlin.String) =
-        callWithHandle {
-            uniffiRustCallWithError(MobileException) { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
-                    it,
-                    FfiConverterString.lower(`name`),
-                    _status,
-                )
-            }
-        }
+    @Throws(MobileException::class)override fun `enableBuiltin`(`name`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_enable_builtin(
+        it,
+
+        FfiConverterString.lower(`name`),_status)
+}
+    }
+
+
+
 
     /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
      */
-    @Throws(MobileException::class)
-    override fun `exportContinuityCapsule`(
-        `instanceId`: kotlin.String,
-        `destinationRuntimeId`: kotlin.String,
-        `payloadKeyBase64`: kotlin.String,
-        `expiresInSeconds`: kotlin.UInt,
-        `signer`: CapsuleSigner,
-    ): ContinuityExportResult =
-        FfiConverterTypeContinuityExportResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(
-                        it,
-                        FfiConverterString.lower(`instanceId`),
-                        FfiConverterString.lower(`destinationRuntimeId`),
-                        FfiConverterString.lower(`payloadKeyBase64`),
-                        FfiConverterUInt.lower(`expiresInSeconds`),
-                        FfiConverterTypeCapsuleSigner.lower(`signer`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `exportContinuityCapsule`(`instanceId`: kotlin.String, `destinationRuntimeId`: kotlin.String, `payloadKeyBase64`: kotlin.String, `expiresInSeconds`: kotlin.UInt, `signer`: CapsuleSigner): ContinuityExportResult {
+            return FfiConverterTypeContinuityExportResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_export_continuity_capsule(
+        it,
+
+        FfiConverterString.lower(`instanceId`),
+        FfiConverterString.lower(`destinationRuntimeId`),
+        FfiConverterString.lower(`payloadKeyBase64`),
+        FfiConverterUInt.lower(`expiresInSeconds`),
+        FfiConverterTypeCapsuleSigner.lower(`signer`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Flush buffered telemetry to the remote endpoint.
      *
      * The endpoint must be a public HTTPS URL on port 443 to limit SSRF risk.
      */
-    @Throws(MobileException::class)
-    override fun `flushTelemetry`(`endpointUrl`: kotlin.String): FlushResult =
-        FfiConverterTypeFlushResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_flush_telemetry(
-                        it,
-                        FfiConverterString.lower(`endpointUrl`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `flushTelemetry`(`endpointUrl`: kotlin.String): FlushResult {
+            return FfiConverterTypeFlushResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_flush_telemetry(
+        it,
+
+        FfiConverterString.lower(`endpointUrl`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Get the state of a specific instance.
      */
-    @Throws(MobileException::class)
-    override fun `getInstance`(`instanceId`: kotlin.String): InstanceState =
-        FfiConverterTypeInstanceState_.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_get_instance(
-                        it,
-                        FfiConverterString.lower(`instanceId`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `getInstance`(`instanceId`: kotlin.String): InstanceState {
+            return FfiConverterTypeInstanceState_.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_get_instance(
+        it,
+
+        FfiConverterString.lower(`instanceId`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Verify and import an encrypted portable capsule into paused local
      * quarantine. The sequence referenced by the capsule must already be
      * loaded, and the destination-generated transfer key never persists.
      */
-    @Throws(MobileException::class)
-    override fun `importContinuityCapsule`(
-        `capsuleJson`: kotlin.String,
-        `payloadBase64`: kotlin.String,
-        `payloadKeyBase64`: kotlin.String,
-        `destinationRuntimeId`: kotlin.String,
-        `destinationInstanceId`: kotlin.String,
-    ): ContinuityImportResult =
-        FfiConverterTypeContinuityImportResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_import_continuity_capsule(
-                        it,
-                        FfiConverterString.lower(`capsuleJson`),
-                        FfiConverterString.lower(`payloadBase64`),
-                        FfiConverterString.lower(`payloadKeyBase64`),
-                        FfiConverterString.lower(`destinationRuntimeId`),
-                        FfiConverterString.lower(`destinationInstanceId`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `importContinuityCapsule`(`capsuleJson`: kotlin.String, `payloadBase64`: kotlin.String, `payloadKeyBase64`: kotlin.String, `destinationRuntimeId`: kotlin.String, `destinationInstanceId`: kotlin.String): ContinuityImportResult {
+            return FfiConverterTypeContinuityImportResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_import_continuity_capsule(
+        it,
+
+        FfiConverterString.lower(`capsuleJson`),
+        FfiConverterString.lower(`payloadBase64`),
+        FfiConverterString.lower(`payloadKeyBase64`),
+        FfiConverterString.lower(`destinationRuntimeId`),
+        FfiConverterString.lower(`destinationInstanceId`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Every journaled delegation, oldest first.
      */
-    @Throws(MobileException::class)
-    override fun `listDelegations`(): List<DelegationStatus> =
-        FfiConverterSequenceTypeDelegationStatus.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `listDelegations`(): List<DelegationStatus> {
+            return FfiConverterSequenceTypeDelegationStatus.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Load a sequence directly from a JSON string, bypassing sync.
      */
-    @Throws(MobileException::class)
-    override fun `loadSequenceFromJson`(`json`: kotlin.String) =
-        callWithHandle {
-            uniffiRustCallWithError(MobileException) { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_load_sequence_from_json(
-                    it,
-                    FfiConverterString.lower(`json`),
-                    _status,
-                )
-            }
-        }
+    @Throws(MobileException::class)override fun `loadSequenceFromJson`(`json`: kotlin.String)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_load_sequence_from_json(
+        it,
+
+        FfiConverterString.lower(`json`),_status)
+}
+    }
+
+
+
 
     /**
      * Fetch and load sequences from a remote URL. The endpoint must return a
@@ -3915,68 +3336,73 @@ open class MobileEngine :
      * whenever `config.root_public_key` is set (production apps get signed
      * content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
      */
-    @Throws(MobileException::class)
-    override fun `loadSequencesFromUrl`(`url`: kotlin.String): kotlin.UInt =
-        FfiConverterUInt.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_load_sequences_from_url(
-                        it,
-                        FfiConverterString.lower(`url`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `loadSequencesFromUrl`(`url`: kotlin.String): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_load_sequences_from_url(
+        it,
+
+        FfiConverterString.lower(`url`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * List all sequences stored locally.
      */
-    @Throws(MobileException::class)
-    override fun `loadedSequences`(): List<SequenceInfo> =
-        FfiConverterSequenceTypeSequenceInfo.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_loaded_sequences(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `loadedSequences`(): List<SequenceInfo> {
+            return FfiConverterSequenceTypeSequenceInfo.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_loaded_sequences(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * This device's stable runtime id (a UUID persisted in the local
      * database). It is the `worker_id` for task leases and the target for
      * `$runtime.runtime_id` step placement.
      */
-    @Throws(MobileException::class)
-    override fun `nodeRuntimeId`(): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `nodeRuntimeId`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_node_runtime_id(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Notify the engine that a silent push notification was received.
      * Triggers an immediate sync cycle on the next tick and an immediate
      * worker poll.
-     */
-    override fun `onPushReceived`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_on_push_received(
-                    it,
-                    _status,
-                )
-            }
-        }
+     */override fun `onPushReceived`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_on_push_received(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
@@ -3985,52 +3411,55 @@ open class MobileEngine :
      * immediately and a sync is triggered. Pushes never carry task params:
      * the task arrives through a leased poll. Returns whether it was
      * accepted.
-     */
-    override fun `onPushWake`(`envelopeJson`: kotlin.String): kotlin.Boolean =
-        FfiConverterBoolean.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(
-                        it,
-                        FfiConverterString.lower(`envelopeJson`),
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `onPushWake`(`envelopeJson`: kotlin.String): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_on_push_wake(
+        it,
+
+        FfiConverterString.lower(`envelopeJson`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Pause the foreground tick loop. The remote worker stops claiming new
      * tasks and gives back any task claimed but not yet started; tasks that
      * are already executing run to completion while the process lives.
-     */
-    override fun `pause`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_pause(
-                    it,
-                    _status,
-                )
-            }
-        }
+     */override fun `pause`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_pause(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Register a native step handler. Must be called before `resume()`.
      */
-    @Throws(MobileException::class)
-    override fun `registerHandler`(
-        `name`: kotlin.String,
-        `handler`: StepHandler,
-    ) = callWithHandle {
-        uniffiRustCallWithError(MobileException) { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_register_handler(
-                it,
-                FfiConverterString.lower(`name`),
-                FfiConverterTypeStepHandler.lower(`handler`),
-                _status,
-            )
-        }
+    @Throws(MobileException::class)override fun `registerHandler`(`name`: kotlin.String, `handler`: StepHandler)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_register_handler(
+        it,
+
+        FfiConverterString.lower(`name`),
+        FfiConverterTypeStepHandler.lower(`handler`),_status)
+}
     }
+
+
+
 
     /**
      * Join the distributed runtime mesh: registers the device
@@ -4043,49 +3472,54 @@ open class MobileEngine :
      * updates the advertised facts. Also settles any remote task a previous
      * process left claimed.
      */
-    @Throws(MobileException::class)
-    override fun `registerNode`(`capabilities`: NodeCapabilities): NodeRegistration =
-        FfiConverterTypeNodeRegistration.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_register_node(
-                        it,
-                        FfiConverterTypeNodeCapabilities.lower(`capabilities`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `registerNode`(`capabilities`: NodeCapabilities): NodeRegistration {
+            return FfiConverterTypeNodeRegistration.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_register_node(
+        it,
+
+        FfiConverterTypeNodeCapabilities.lower(`capabilities`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
      * `CriticalBattery` = 4x interval.
-     */
-    override fun `reportPowerState`(`state`: PowerState) =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_report_power_state(
-                    it,
-                    FfiConverterTypePowerState.lower(`state`),
-                    _status,
-                )
-            }
-        }
+     */override fun `reportPowerState`(`state`: PowerState)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_report_power_state(
+        it,
+
+        FfiConverterTypePowerState.lower(`state`),_status)
+}
+    }
+
+
+
 
     /**
      * Start a foreground tick loop. Also lets the remote worker (if started)
      * claim tasks again.
-     */
-    override fun `resume`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_resume(
-                    it,
-                    _status,
-                )
-            }
-        }
+     */override fun `resume`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_resume(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Execute a bounded batch of ticks for an OS-granted background window.
@@ -4095,23 +3529,21 @@ open class MobileEngine :
      * host remains responsible for registering and completing the native
      * `BGTaskScheduler`/`WorkManager` job.
      */
-    @Throws(MobileException::class)
-    override fun `runUntilIdle`(
-        `maxTicks`: kotlin.UInt,
-        `timeBudgetMs`: kotlin.ULong,
-    ): BackgroundRunResult =
-        FfiConverterTypeBackgroundRunResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
-                        it,
-                        FfiConverterUInt.lower(`maxTicks`),
-                        FfiConverterULong.lower(`timeBudgetMs`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `runUntilIdle`(`maxTicks`: kotlin.UInt, `timeBudgetMs`: kotlin.ULong): BackgroundRunResult {
+            return FfiConverterTypeBackgroundRunResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_run_until_idle(
+        it,
+
+        FfiConverterUInt.lower(`maxTicks`),
+        FfiConverterULong.lower(`timeBudgetMs`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Run the worker for an OS-granted background window (`BGTask` /
@@ -4119,47 +3551,52 @@ open class MobileEngine :
      * until the queue is idle and nothing is in flight or `time_budget_ms`
      * elapses. Requires `start_worker`.
      */
-    @Throws(MobileException::class)
-    override fun `runWorkerWindow`(`timeBudgetMs`: kotlin.ULong): WorkerWindowResult =
-        FfiConverterTypeWorkerWindowResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(
-                        it,
-                        FfiConverterULong.lower(`timeBudgetMs`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `runWorkerWindow`(`timeBudgetMs`: kotlin.ULong): WorkerWindowResult {
+            return FfiConverterTypeWorkerWindowResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_run_worker_window(
+        it,
+
+        FfiConverterULong.lower(`timeBudgetMs`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Set device context for telemetry.
-     */
-    override fun `setDeviceContext`(`ctx`: DeviceContext) =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_device_context(
-                    it,
-                    FfiConverterTypeDeviceContext.lower(`ctx`),
-                    _status,
-                )
-            }
-        }
+     */override fun `setDeviceContext`(`ctx`: DeviceContext)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_device_context(
+        it,
+
+        FfiConverterTypeDeviceContext.lower(`ctx`),_status)
+}
+    }
+
+
+
 
     /**
      * Set the event listener for engine lifecycle events.
-     */
-    override fun `setListener`(`listener`: EngineListener) =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_listener(
-                    it,
-                    FfiConverterTypeEngineListener.lower(`listener`),
-                    _status,
-                )
-            }
-        }
+     */override fun `setListener`(`listener`: EngineListener)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_listener(
+        it,
+
+        FfiConverterTypeEngineListener.lower(`listener`),_status)
+}
+    }
+
+
+
 
     /**
      * Authenticate every control-plane call (node registration, worker
@@ -4170,53 +3607,57 @@ open class MobileEngine :
      * [`Self::node_runtime_id`]); `refresh_token` is called when the control
      * plane answers `401` (expired session) and the request is retried once.
      * Call it before `register_node`. Never ship an operator key in an app.
-     */
-    override fun `setTokenProvider`(`provider`: TokenProvider) =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
-                    it,
-                    FfiConverterTypeTokenProvider.lower(`provider`),
-                    _status,
-                )
-            }
-        }
+     */override fun `setTokenProvider`(`provider`: TokenProvider)
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_set_token_provider(
+        it,
+
+        FfiConverterTypeTokenProvider.lower(`provider`),_status)
+}
+    }
+
+
+
 
     /**
      * Shut down the engine.
-     */
-    override fun `shutdown`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_shutdown(
-                    it,
-                    _status,
-                )
-            }
-        }
+     * Stop local work and request database closure. Synchronous callers wait
+     * at most `operation_timeout_ms`; pending physical I/O retains recovery
+     * ownership until it settles, so an immediate reopen may report busy.
+     */override fun `shutdown`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_shutdown(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Start a new workflow instance.
      */
-    @Throws(MobileException::class)
-    override fun `start`(
-        `sequenceName`: kotlin.String,
-        `input`: kotlin.String,
-        `dedupKey`: kotlin.String?,
-    ): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start(
-                        it,
-                        FfiConverterString.lower(`sequenceName`),
-                        FfiConverterString.lower(`input`),
-                        FfiConverterOptionalString.lower(`dedupKey`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `start`(`sequenceName`: kotlin.String, `input`: kotlin.String, `dedupKey`: kotlin.String?): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start(
+        it,
+
+        FfiConverterString.lower(`sequenceName`),
+        FfiConverterString.lower(`input`),
+        FfiConverterOptionalString.lower(`dedupKey`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Start delegating placed local steps: a step of a workflow running on
@@ -4231,17 +3672,19 @@ open class MobileEngine :
      * and app kills: delegations are journaled locally and picked up again
      * by the next `start_delegation`.
      */
-    @Throws(MobileException::class)
-    override fun `startDelegation`(`options`: DelegationOptions) =
-        callWithHandle {
-            uniffiRustCallWithError(MobileException) { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(
-                    it,
-                    FfiConverterTypeDelegationOptions.lower(`options`),
-                    _status,
-                )
-            }
-        }
+    @Throws(MobileException::class)override fun `startDelegation`(`options`: DelegationOptions)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_delegation(
+        it,
+
+        FfiConverterTypeDelegationOptions.lower(`options`),_status)
+}
+    }
+
+
+
 
     /**
      * Start the remote worker loop: poll the control plane as this `mobile`
@@ -4249,156 +3692,176 @@ open class MobileEngine :
      * per the task lease, and complete / fail / release them. Requires
      * `register_node` first. Handlers must be registered before this call.
      */
-    @Throws(MobileException::class)
-    override fun `startWorker`(`options`: WorkerOptions) =
-        callWithHandle {
-            uniffiRustCallWithError(MobileException) { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
-                    it,
-                    FfiConverterTypeWorkerOptions.lower(`options`),
-                    _status,
-                )
-            }
-        }
+    @Throws(MobileException::class)override fun `startWorker`(`options`: WorkerOptions)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_start_worker(
+        it,
+
+        FfiConverterTypeWorkerOptions.lower(`options`),_status)
+}
+    }
+
+
+
 
     /**
      * Stop advancing delegations. Journaled delegations resume with the
      * next `start_delegation`.
-     */
-    override fun `stopDelegation`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(
-                    it,
-                    _status,
-                )
-            }
-        }
+     */override fun `stopDelegation`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_stop_delegation(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Stop claiming remote tasks. Tasks already executing finish and are
      * settled in the background.
-     */
-    override fun `stopWorker`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(
-                    it,
-                    _status,
-                )
-            }
-        }
+     */override fun `stopWorker`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_stop_worker(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Sync sequences from the remote manifest.
      */
-    @Throws(MobileException::class)
-    override fun `sync`(
-        `manifestUrl`: kotlin.String,
-        `tokenProvider`: TokenProvider?,
-    ): SyncResult =
-        FfiConverterTypeSyncResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_sync(
-                        it,
-                        FfiConverterString.lower(`manifestUrl`),
-                        FfiConverterOptionalTypeTokenProvider.lower(`tokenProvider`),
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `sync`(`manifestUrl`: kotlin.String, `tokenProvider`: TokenProvider?): SyncResult {
+            return FfiConverterTypeSyncResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_sync(
+        it,
+
+        FfiConverterString.lower(`manifestUrl`),
+        FfiConverterOptionalTypeTokenProvider.lower(`tokenProvider`),_status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Execute a single tick.
      */
-    @Throws(MobileException::class)
-    override fun `tickOnce`(): TickResult =
-        FfiConverterTypeTickResult.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_tick_once(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `tickOnce`(): TickResult {
+            return FfiConverterTypeTickResult.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_tick_once(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Leave the mesh: stops the worker, advertises the node as draining
      * (best effort), and stops the background re-advertisement.
-     */
-    override fun `unregisterNode`() =
-        callWithHandle {
-            uniffiRustCall { _status ->
-                UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(
-                    it,
-                    _status,
-                )
-            }
-        }
+     */override fun `unregisterNode`()
+        =
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_unregister_node(
+        it,
+        _status)
+}
+    }
+
+
+
 
     /**
      * Update the liveness facts advertised by a registered node (battery,
      * connectivity) and push them to the control plane now.
      */
-    @Throws(MobileException::class)
-    override fun `updateNodeStatus`(
-        `connectivity`: NodeConnectivity?,
-        `batteryPercent`: kotlin.UByte?,
-    ) = callWithHandle {
-        uniffiRustCallWithError(MobileException) { _status ->
-            UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(
-                it,
-                FfiConverterOptionalTypeNodeConnectivity.lower(`connectivity`),
-                FfiConverterOptionalUByte.lower(`batteryPercent`),
-                _status,
-            )
-        }
+    @Throws(MobileException::class)override fun `updateNodeStatus`(`connectivity`: NodeConnectivity?, `batteryPercent`: kotlin.UByte?)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_update_node_status(
+        it,
+
+        FfiConverterOptionalTypeNodeConnectivity.lower(`connectivity`),
+        FfiConverterOptionalUByte.lower(`batteryPercent`),_status)
+}
     }
+
+
+
 
     /**
      * Counters for the remote worker (zeros when it is not running).
-     */
-    override fun `workerStats`(): WorkerStats =
-        FfiConverterTypeWorkerStats.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `workerStats`(): WorkerStats {
+            return FfiConverterTypeWorkerStats.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_worker_stats(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+
+
+
+
+
 
     /**
      * @suppress
      */
     companion object
+
 }
+
 
 /**
  * @suppress
  */
-public object FfiConverterTypeMobileEngine : FfiConverter<MobileEngine, Long> {
-    override fun lower(value: MobileEngine): Long = value.uniffiCloneHandle()
+public object FfiConverterTypeMobileEngine: FfiConverter<MobileEngine, Long> {
+    override fun lower(value: MobileEngine): Long {
+        return value.uniffiCloneHandle()
+    }
 
-    override fun lift(value: Long): MobileEngine = MobileEngine(UniffiWithHandle, value)
+    override fun lift(value: Long): MobileEngine {
+        return MobileEngine(UniffiWithHandle, value)
+    }
 
-    override fun read(buf: ByteBuffer): MobileEngine = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): MobileEngine {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: MobileEngine) = 8UL
 
-    override fun write(
-        value: MobileEngine,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: MobileEngine, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -4494,15 +3957,14 @@ public object FfiConverterTypeMobileEngine : FfiConverter<MobileEngine, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 /**
  * Callback interface for host-registered step handlers.
  * Implementations live in Swift/Kotlin and are called by the engine during tick execution.
  */
 public interface StepHandler {
-    fun `execute`(
-        `stepName`: kotlin.String,
-        `input`: kotlin.String,
-    ): kotlin.String
+
+    fun `execute`(`stepName`: kotlin.String, `input`: kotlin.String): kotlin.String
 
     companion object
 }
@@ -4511,14 +3973,13 @@ public interface StepHandler {
  * Callback interface for host-registered step handlers.
  * Implementations live in Swift/Kotlin and are called by the engine during tick execution.
  */
-open class StepHandlerImpl :
-    Disposable,
-    AutoCloseable,
-    StepHandler {
+open class StepHandlerImpl: Disposable, AutoCloseable, StepHandler
+{
+
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -4575,7 +4036,7 @@ open class StepHandlerImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -4589,13 +4050,11 @@ open class StepHandlerImpl :
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(
-        private val handle: Long,
-    ) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_orch8_mobile_fn_free_stephandler(handle, status)
@@ -4608,79 +4067,83 @@ open class StepHandlerImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_orch8_mobile_fn_clone_stephandler(handle, status)
         }
     }
 
-    @Throws(HandlerException::class)
-    override fun `execute`(
-        `stepName`: kotlin.String,
-        `input`: kotlin.String,
-    ): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(HandlerException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_stephandler_execute(
-                        it,
-                        FfiConverterString.lower(`stepName`),
-                        FfiConverterString.lower(`input`),
-                        _status,
-                    )
-                }
-            },
-        )
+
+    @Throws(HandlerException::class)override fun `execute`(`stepName`: kotlin.String, `input`: kotlin.String): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(HandlerException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_stephandler_execute(
+        it,
+
+        FfiConverterString.lower(`stepName`),
+        FfiConverterString.lower(`input`),_status)
+}
+    }
+    )
+    }
+
+
+
+
+
+
+
+
 
     /**
      * @suppress
      */
     companion object
+
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceStepHandler {
-    internal object `execute` : UniffiCallbackInterfaceStepHandlerMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `stepName`: RustBuffer.ByValue,
-            `input`: RustBuffer.ByValue,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `execute`: UniffiCallbackInterfaceStepHandlerMethod0 {
+        override fun callback(`uniffiHandle`: Long,`stepName`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeStepHandler.handleMap.get(uniffiHandle)
-            val makeCall = {  uniffiObj.`execute`(
-                FfiConverterString.lift(`stepName`),
-                FfiConverterString.lift(`input`),
-            )
+            val makeCall = { ->
+                uniffiObj.`execute`(
+                    FfiConverterString.lift(`stepName`),
+                    FfiConverterString.lift(`input`),
+                )
             }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
                 writeReturn,
-                { e: HandlerException -> FfiConverterTypeHandlerError.lower(e) },
+                { e: HandlerException -> FfiConverterTypeHandlerError.lower(e) }
             )
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeStepHandler.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeStepHandler.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeStepHandler.handleMap.clone(handle)
+        }
     }
 
-    internal var vtable =
-        UniffiVTableCallbackInterfaceStepHandler.UniffiByValue(
-            uniffiFree,
-            uniffiClone,
-            `execute`,
-        )
+    internal var vtable = UniffiVTableCallbackInterfaceStepHandler.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `execute`,
+    )
 
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
@@ -4692,17 +4155,17 @@ internal object uniffiCallbackInterfaceStepHandler {
 /**
  * @suppress
  */
-public object FfiConverterTypeStepHandler : FfiConverter<StepHandler, Long> {
+public object FfiConverterTypeStepHandler: FfiConverter<StepHandler, Long> {
     internal val handleMap = UniffiHandleMap<StepHandler>()
 
     override fun lower(value: StepHandler): Long {
         if (value is StepHandlerImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): StepHandler {
@@ -4716,17 +4179,17 @@ public object FfiConverterTypeStepHandler : FfiConverter<StepHandler, Long> {
         }
     }
 
-    override fun read(buf: ByteBuffer): StepHandler = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): StepHandler {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: StepHandler) = 8UL
 
-    override fun write(
-        value: StepHandler,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: StepHandler, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
+
 
 // This template implements a class for working with a Rust struct via a handle
 // to the live Rust struct on the other side of the FFI.
@@ -4822,10 +4285,12 @@ public object FfiConverterTypeStepHandler : FfiConverter<StepHandler, Long> {
 // [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
 //
 
+
 /**
  * Callback interface for refreshable authentication tokens.
  */
 public interface TokenProvider {
+
     /**
      * Return a cached bootstrap token for synchronous provider installation.
      * Keep this prompt; reservation-based asynchronous installation does not
@@ -4845,14 +4310,13 @@ public interface TokenProvider {
 /**
  * Callback interface for refreshable authentication tokens.
  */
-open class TokenProviderImpl :
-    Disposable,
-    AutoCloseable,
-    TokenProvider {
+open class TokenProviderImpl: Disposable, AutoCloseable, TokenProvider
+{
+
+    @Suppress("UNUSED_PARAMETER")
     /**
      * @suppress
      */
-    @Suppress("UNUSED_PARAMETER")
     constructor(withHandle: UniffiWithHandle, handle: Long) {
         this.handle = handle
         this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
@@ -4909,7 +4373,7 @@ open class TokenProviderImpl :
             if (c == Long.MAX_VALUE) {
                 throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
             }
-        } while (!this.callCounter.compareAndSet(c, c + 1L))
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
         // Now we can safely do the method call without the handle being freed concurrently.
         try {
             return block(this.uniffiCloneHandle())
@@ -4923,13 +4387,11 @@ open class TokenProviderImpl :
 
     // Use a static inner class instead of a closure so as not to accidentally
     // capture `this` as part of the cleanable's action.
-    private class UniffiCleanAction(
-        private val handle: Long,
-    ) : Runnable {
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
         override fun run() {
             if (handle == 0.toLong()) {
                 // Fake object created with `NoHandle`, don't try to free.
-                return
+                return;
             }
             uniffiRustCall { status ->
                 UniffiLib.uniffi_orch8_mobile_fn_free_tokenprovider(handle, status)
@@ -4942,103 +4404,113 @@ open class TokenProviderImpl :
      */
     fun uniffiCloneHandle(): Long {
         if (handle == 0.toLong()) {
-            throw InternalException("uniffiCloneHandle() called on NoHandle object")
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
         }
-        return uniffiRustCall { status ->
+        return uniffiRustCall() { status ->
             UniffiLib.uniffi_orch8_mobile_fn_clone_tokenprovider(handle, status)
         }
     }
+
 
     /**
      * Return a cached bootstrap token for synchronous provider installation.
      * Keep this prompt; reservation-based asynchronous installation does not
      * invoke this getter. Perform network work in refresh or an async wrapper.
-     */
-    override fun `currentToken`(): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCall { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_tokenprovider_current_token(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+     */override fun `currentToken`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_tokenprovider_current_token(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
 
     /**
      * Obtain a token for unavailable initial authorization or after a 401.
      * Runs on a native blocking thread; it may outlive the caller's timeout.
      */
-    @Throws(MobileException::class)
-    override fun `refreshToken`(): kotlin.String =
-        FfiConverterString.lift(
-            callWithHandle {
-                uniffiRustCallWithError(MobileException) { _status ->
-                    UniffiLib.uniffi_orch8_mobile_fn_method_tokenprovider_refresh_token(
-                        it,
-                        _status,
-                    )
-                }
-            },
-        )
+    @Throws(MobileException::class)override fun `refreshToken`(): kotlin.String {
+            return FfiConverterString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_tokenprovider_refresh_token(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+
+
+
+
+
 
     /**
      * @suppress
      */
     companion object
+
 }
+
+
 
 // Put the implementation in an object so we don't pollute the top-level namespace
 internal object uniffiCallbackInterfaceTokenProvider {
-    internal object `currentToken` : UniffiCallbackInterfaceTokenProviderMethod0 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `currentToken`: UniffiCallbackInterfaceTokenProviderMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeTokenProvider.handleMap.get(uniffiHandle)
-            val makeCall = { uniffiObj.`currentToken`() }
+            val makeCall = { ->
+                uniffiObj.`currentToken`(
+                )
+            }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCall(uniffiCallStatus, makeCall, writeReturn)
         }
     }
-
-    internal object `refreshToken` : UniffiCallbackInterfaceTokenProviderMethod1 {
-        override fun callback(
-            `uniffiHandle`: Long,
-            `uniffiOutReturn`: RustBuffer,
-            uniffiCallStatus: UniffiRustCallStatus,
-        ) {
+    internal object `refreshToken`: UniffiCallbackInterfaceTokenProviderMethod1 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
             val uniffiObj = FfiConverterTypeTokenProvider.handleMap.get(uniffiHandle)
-            val makeCall = { uniffiObj.`refreshToken`() }
+            val makeCall = { ->
+                uniffiObj.`refreshToken`(
+                )
+            }
             val writeReturn = { value: kotlin.String -> uniffiOutReturn.setValue(FfiConverterString.lower(value)) }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
                 writeReturn,
-                { e: MobileException -> FfiConverterTypeMobileError.lower(e) },
+                { e: MobileException -> FfiConverterTypeMobileError.lower(e) }
             )
         }
     }
 
-    internal object uniffiFree : UniffiCallbackInterfaceFree {
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
             FfiConverterTypeTokenProvider.handleMap.remove(handle)
         }
     }
 
-    internal object uniffiClone : UniffiCallbackInterfaceClone {
-        override fun callback(handle: Long): Long = FfiConverterTypeTokenProvider.handleMap.clone(handle)
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeTokenProvider.handleMap.clone(handle)
+        }
     }
 
-    internal var vtable =
-        UniffiVTableCallbackInterfaceTokenProvider.UniffiByValue(
-            uniffiFree,
-            uniffiClone,
-            `currentToken`,
-            `refreshToken`,
-        )
+    internal var vtable = UniffiVTableCallbackInterfaceTokenProvider.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `currentToken`,
+        `refreshToken`,
+    )
 
     // Registers the foreign callback with the Rust side.
     // This method is generated for each callback interface.
@@ -5050,17 +4522,17 @@ internal object uniffiCallbackInterfaceTokenProvider {
 /**
  * @suppress
  */
-public object FfiConverterTypeTokenProvider : FfiConverter<TokenProvider, Long> {
+public object FfiConverterTypeTokenProvider: FfiConverter<TokenProvider, Long> {
     internal val handleMap = UniffiHandleMap<TokenProvider>()
 
     override fun lower(value: TokenProvider): Long {
         if (value is TokenProviderImpl) {
-            // Rust-implemented object.  Clone the handle and return it
+             // Rust-implemented object.  Clone the handle and return it
             return value.uniffiCloneHandle()
-        } else {
+         } else {
             // Kotlin object, generate a new vtable handle and return that.
             return handleMap.insert(value)
-        }
+         }
     }
 
     override fun lift(value: Long): TokenProvider {
@@ -5074,17 +4546,18 @@ public object FfiConverterTypeTokenProvider : FfiConverter<TokenProvider, Long> 
         }
     }
 
-    override fun read(buf: ByteBuffer): TokenProvider = lift(buf.getLong())
+    override fun read(buf: ByteBuffer): TokenProvider {
+        return lift(buf.getLong())
+    }
 
     override fun allocationSize(value: TokenProvider) = 8UL
 
-    override fun write(
-        value: TokenProvider,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: TokenProvider, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
+
+
 
 /**
  * Aggregate result from a bounded background execution window.
@@ -5093,72 +4566,92 @@ public object FfiConverterTypeTokenProvider : FfiConverter<TokenProvider, Long> 
  * amount of time. Hosts should call `run_until_idle` from their platform
  * scheduler instead of starting the foreground loop.
  */
-data class BackgroundRunResult(
-    var `ticksExecuted`: kotlin.UInt,
-    var `instancesAdvanced`: kotlin.UInt,
-    var `stepsExecuted`: kotlin.UInt,
-    var `hasPendingWork`: kotlin.Boolean,
+data class BackgroundRunResult (
+    var `ticksExecuted`: kotlin.UInt
+    ,
+    var `instancesAdvanced`: kotlin.UInt
+    ,
+    var `stepsExecuted`: kotlin.UInt
+    ,
+    var `hasPendingWork`: kotlin.Boolean
+    ,
     /**
      * True when work remains after either the tick or wall-clock budget was
      * exhausted, or when a tick made no immediate progress. The host should
      * schedule another background opportunity instead of spinning.
      */
-    var `budgetExhausted`: kotlin.Boolean,
-) {
+    var `budgetExhausted`: kotlin.Boolean
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeBackgroundRunResult : FfiConverterRustBuffer<BackgroundRunResult> {
-    override fun read(buf: ByteBuffer): BackgroundRunResult =
-        BackgroundRunResult(
+public object FfiConverterTypeBackgroundRunResult: FfiConverterRustBuffer<BackgroundRunResult> {
+    override fun read(buf: ByteBuffer): BackgroundRunResult {
+        return BackgroundRunResult(
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
         )
+    }
 
-    override fun allocationSize(value: BackgroundRunResult) =
-        (
+    override fun allocationSize(value: BackgroundRunResult) = (
             FfiConverterUInt.allocationSize(value.`ticksExecuted`) +
-                FfiConverterUInt.allocationSize(value.`instancesAdvanced`) +
-                FfiConverterUInt.allocationSize(value.`stepsExecuted`) +
-                FfiConverterBoolean.allocationSize(value.`hasPendingWork`) +
-                FfiConverterBoolean.allocationSize(value.`budgetExhausted`)
-        )
+            FfiConverterUInt.allocationSize(value.`instancesAdvanced`) +
+            FfiConverterUInt.allocationSize(value.`stepsExecuted`) +
+            FfiConverterBoolean.allocationSize(value.`hasPendingWork`) +
+            FfiConverterBoolean.allocationSize(value.`budgetExhausted`)
+    )
 
-    override fun write(
-        value: BackgroundRunResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterUInt.write(value.`ticksExecuted`, buf)
-        FfiConverterUInt.write(value.`instancesAdvanced`, buf)
-        FfiConverterUInt.write(value.`stepsExecuted`, buf)
-        FfiConverterBoolean.write(value.`hasPendingWork`, buf)
-        FfiConverterBoolean.write(value.`budgetExhausted`, buf)
+    override fun write(value: BackgroundRunResult, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`ticksExecuted`, buf)
+            FfiConverterUInt.write(value.`instancesAdvanced`, buf)
+            FfiConverterUInt.write(value.`stepsExecuted`, buf)
+            FfiConverterBoolean.write(value.`hasPendingWork`, buf)
+            FfiConverterBoolean.write(value.`budgetExhausted`, buf)
     }
 }
 
-data class CapabilityDescriptor(
-    var `handler`: kotlin.String,
-    var `capability`: DeviceCapability,
-    var `operations`: List<kotlin.String>,
-    var `requiresForeground`: kotlin.Boolean,
-    var `handlesProtectedData`: kotlin.Boolean,
-    var `maxResponseBytes`: kotlin.ULong,
-) {
+
+
+data class CapabilityDescriptor (
+    var `handler`: kotlin.String
+    ,
+    var `capability`: DeviceCapability
+    ,
+    var `operations`: List<kotlin.String>
+    ,
+    var `requiresForeground`: kotlin.Boolean
+    ,
+    var `handlesProtectedData`: kotlin.Boolean
+    ,
+    var `maxResponseBytes`: kotlin.ULong
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeCapabilityDescriptor : FfiConverterRustBuffer<CapabilityDescriptor> {
-    override fun read(buf: ByteBuffer): CapabilityDescriptor =
-        CapabilityDescriptor(
+public object FfiConverterTypeCapabilityDescriptor: FfiConverterRustBuffer<CapabilityDescriptor> {
+    override fun read(buf: ByteBuffer): CapabilityDescriptor {
+        return CapabilityDescriptor(
             FfiConverterString.read(buf),
             FfiConverterTypeDeviceCapability.read(buf),
             FfiConverterSequenceString.read(buf),
@@ -5166,251 +4659,294 @@ public object FfiConverterTypeCapabilityDescriptor : FfiConverterRustBuffer<Capa
             FfiConverterBoolean.read(buf),
             FfiConverterULong.read(buf),
         )
+    }
 
-    override fun allocationSize(value: CapabilityDescriptor) =
-        (
+    override fun allocationSize(value: CapabilityDescriptor) = (
             FfiConverterString.allocationSize(value.`handler`) +
-                FfiConverterTypeDeviceCapability.allocationSize(value.`capability`) +
-                FfiConverterSequenceString.allocationSize(value.`operations`) +
-                FfiConverterBoolean.allocationSize(value.`requiresForeground`) +
-                FfiConverterBoolean.allocationSize(value.`handlesProtectedData`) +
-                FfiConverterULong.allocationSize(value.`maxResponseBytes`)
-        )
+            FfiConverterTypeDeviceCapability.allocationSize(value.`capability`) +
+            FfiConverterSequenceString.allocationSize(value.`operations`) +
+            FfiConverterBoolean.allocationSize(value.`requiresForeground`) +
+            FfiConverterBoolean.allocationSize(value.`handlesProtectedData`) +
+            FfiConverterULong.allocationSize(value.`maxResponseBytes`)
+    )
 
-    override fun write(
-        value: CapabilityDescriptor,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`handler`, buf)
-        FfiConverterTypeDeviceCapability.write(value.`capability`, buf)
-        FfiConverterSequenceString.write(value.`operations`, buf)
-        FfiConverterBoolean.write(value.`requiresForeground`, buf)
-        FfiConverterBoolean.write(value.`handlesProtectedData`, buf)
-        FfiConverterULong.write(value.`maxResponseBytes`, buf)
+    override fun write(value: CapabilityDescriptor, buf: ByteBuffer) {
+            FfiConverterString.write(value.`handler`, buf)
+            FfiConverterTypeDeviceCapability.write(value.`capability`, buf)
+            FfiConverterSequenceString.write(value.`operations`, buf)
+            FfiConverterBoolean.write(value.`requiresForeground`, buf)
+            FfiConverterBoolean.write(value.`handlesProtectedData`, buf)
+            FfiConverterULong.write(value.`maxResponseBytes`, buf)
     }
 }
 
-data class ContinuityExportResult(
-    var `capsuleId`: kotlin.String,
-    var `continuityId`: kotlin.String,
-    var `sourceEpoch`: kotlin.ULong,
-    var `capsuleJson`: kotlin.String,
-    var `payloadBase64`: kotlin.String,
-) {
+
+
+data class ContinuityExportResult (
+    var `capsuleId`: kotlin.String
+    ,
+    var `continuityId`: kotlin.String
+    ,
+    var `sourceEpoch`: kotlin.ULong
+    ,
+    var `capsuleJson`: kotlin.String
+    ,
+    var `payloadBase64`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeContinuityExportResult : FfiConverterRustBuffer<ContinuityExportResult> {
-    override fun read(buf: ByteBuffer): ContinuityExportResult =
-        ContinuityExportResult(
+public object FfiConverterTypeContinuityExportResult: FfiConverterRustBuffer<ContinuityExportResult> {
+    override fun read(buf: ByteBuffer): ContinuityExportResult {
+        return ContinuityExportResult(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: ContinuityExportResult) =
-        (
+    override fun allocationSize(value: ContinuityExportResult) = (
             FfiConverterString.allocationSize(value.`capsuleId`) +
-                FfiConverterString.allocationSize(value.`continuityId`) +
-                FfiConverterULong.allocationSize(value.`sourceEpoch`) +
-                FfiConverterString.allocationSize(value.`capsuleJson`) +
-                FfiConverterString.allocationSize(value.`payloadBase64`)
-        )
+            FfiConverterString.allocationSize(value.`continuityId`) +
+            FfiConverterULong.allocationSize(value.`sourceEpoch`) +
+            FfiConverterString.allocationSize(value.`capsuleJson`) +
+            FfiConverterString.allocationSize(value.`payloadBase64`)
+    )
 
-    override fun write(
-        value: ContinuityExportResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`capsuleId`, buf)
-        FfiConverterString.write(value.`continuityId`, buf)
-        FfiConverterULong.write(value.`sourceEpoch`, buf)
-        FfiConverterString.write(value.`capsuleJson`, buf)
-        FfiConverterString.write(value.`payloadBase64`, buf)
+    override fun write(value: ContinuityExportResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`capsuleId`, buf)
+            FfiConverterString.write(value.`continuityId`, buf)
+            FfiConverterULong.write(value.`sourceEpoch`, buf)
+            FfiConverterString.write(value.`capsuleJson`, buf)
+            FfiConverterString.write(value.`payloadBase64`, buf)
     }
 }
 
-data class ContinuityImportResult(
-    var `capsuleId`: kotlin.String,
-    var `continuityId`: kotlin.String,
-    var `instanceId`: kotlin.String,
-    var `sourceEpoch`: kotlin.ULong,
-    var `state`: kotlin.String,
-) {
+
+
+data class ContinuityImportResult (
+    var `capsuleId`: kotlin.String
+    ,
+    var `continuityId`: kotlin.String
+    ,
+    var `instanceId`: kotlin.String
+    ,
+    var `sourceEpoch`: kotlin.ULong
+    ,
+    var `state`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeContinuityImportResult : FfiConverterRustBuffer<ContinuityImportResult> {
-    override fun read(buf: ByteBuffer): ContinuityImportResult =
-        ContinuityImportResult(
+public object FfiConverterTypeContinuityImportResult: FfiConverterRustBuffer<ContinuityImportResult> {
+    override fun read(buf: ByteBuffer): ContinuityImportResult {
+        return ContinuityImportResult(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: ContinuityImportResult) =
-        (
+    override fun allocationSize(value: ContinuityImportResult) = (
             FfiConverterString.allocationSize(value.`capsuleId`) +
-                FfiConverterString.allocationSize(value.`continuityId`) +
-                FfiConverterString.allocationSize(value.`instanceId`) +
-                FfiConverterULong.allocationSize(value.`sourceEpoch`) +
-                FfiConverterString.allocationSize(value.`state`)
-        )
+            FfiConverterString.allocationSize(value.`continuityId`) +
+            FfiConverterString.allocationSize(value.`instanceId`) +
+            FfiConverterULong.allocationSize(value.`sourceEpoch`) +
+            FfiConverterString.allocationSize(value.`state`)
+    )
 
-    override fun write(
-        value: ContinuityImportResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`capsuleId`, buf)
-        FfiConverterString.write(value.`continuityId`, buf)
-        FfiConverterString.write(value.`instanceId`, buf)
-        FfiConverterULong.write(value.`sourceEpoch`, buf)
-        FfiConverterString.write(value.`state`, buf)
+    override fun write(value: ContinuityImportResult, buf: ByteBuffer) {
+            FfiConverterString.write(value.`capsuleId`, buf)
+            FfiConverterString.write(value.`continuityId`, buf)
+            FfiConverterString.write(value.`instanceId`, buf)
+            FfiConverterULong.write(value.`sourceEpoch`, buf)
+            FfiConverterString.write(value.`state`, buf)
     }
 }
+
+
 
 /**
  * An explicit delegation requested by the host (`delegate`).
  */
-data class DelegateRequest(
+data class DelegateRequest (
     /**
      * Local parent instance the delegation belongs to (must exist).
      */
-    var `instanceId`: kotlin.String,
+    var `instanceId`: kotlin.String
+    ,
     /**
      * Destination runtime id (a live registration of the same tenant).
      */
-    var `destinationRuntimeId`: kotlin.String,
+    var `destinationRuntimeId`: kotlin.String
+    ,
     /**
      * Server-side sequence the destination runs.
      */
-    var `subSequenceId`: kotlin.String,
+    var `subSequenceId`: kotlin.String
+    ,
     /**
      * Explicit input (JSON object) handed to the sub-sequence.
      */
-    var `inputJson`: kotlin.String = "{}",
-) {
+    var `inputJson`: kotlin.String = "{}"
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDelegateRequest : FfiConverterRustBuffer<DelegateRequest> {
-    override fun read(buf: ByteBuffer): DelegateRequest =
-        DelegateRequest(
+public object FfiConverterTypeDelegateRequest: FfiConverterRustBuffer<DelegateRequest> {
+    override fun read(buf: ByteBuffer): DelegateRequest {
+        return DelegateRequest(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: DelegateRequest) =
-        (
+    override fun allocationSize(value: DelegateRequest) = (
             FfiConverterString.allocationSize(value.`instanceId`) +
-                FfiConverterString.allocationSize(value.`destinationRuntimeId`) +
-                FfiConverterString.allocationSize(value.`subSequenceId`) +
-                FfiConverterString.allocationSize(value.`inputJson`)
-        )
+            FfiConverterString.allocationSize(value.`destinationRuntimeId`) +
+            FfiConverterString.allocationSize(value.`subSequenceId`) +
+            FfiConverterString.allocationSize(value.`inputJson`)
+    )
 
-    override fun write(
-        value: DelegateRequest,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`instanceId`, buf)
-        FfiConverterString.write(value.`destinationRuntimeId`, buf)
-        FfiConverterString.write(value.`subSequenceId`, buf)
-        FfiConverterString.write(value.`inputJson`, buf)
+    override fun write(value: DelegateRequest, buf: ByteBuffer) {
+            FfiConverterString.write(value.`instanceId`, buf)
+            FfiConverterString.write(value.`destinationRuntimeId`, buf)
+            FfiConverterString.write(value.`subSequenceId`, buf)
+            FfiConverterString.write(value.`inputJson`, buf)
     }
 }
+
+
 
 /**
  * Options for `start_delegation`.
  */
-data class DelegationOptions(
+data class DelegationOptions (
     /**
      * Tenant of the node credential (the control plane scopes every
      * continuity call to it).
      */
-    var `tenantId`: kotlin.String,
+    var `tenantId`: kotlin.String
+    ,
     /**
      * How often pending delegations are advanced and their outcomes read
      * (default 2 s). Push wake-ups advance them immediately.
      */
-    var `pollIntervalMs`: kotlin.ULong = 2000uL,
+    var `pollIntervalMs`: kotlin.ULong = 2000uL
+    ,
     /**
      * Lifetime of each grant and delegation (default 600 s, max 86400). A
      * destination that has not reported by then fails the delegation, and
      * the parked step follows its retry policy.
      */
-    var `ttlSecs`: kotlin.UInt = 600u,
-) {
+    var `ttlSecs`: kotlin.UInt = 600u
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDelegationOptions : FfiConverterRustBuffer<DelegationOptions> {
-    override fun read(buf: ByteBuffer): DelegationOptions =
-        DelegationOptions(
+public object FfiConverterTypeDelegationOptions: FfiConverterRustBuffer<DelegationOptions> {
+    override fun read(buf: ByteBuffer): DelegationOptions {
+        return DelegationOptions(
             FfiConverterString.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUInt.read(buf),
         )
+    }
 
-    override fun allocationSize(value: DelegationOptions) =
-        (
+    override fun allocationSize(value: DelegationOptions) = (
             FfiConverterString.allocationSize(value.`tenantId`) +
-                FfiConverterULong.allocationSize(value.`pollIntervalMs`) +
-                FfiConverterUInt.allocationSize(value.`ttlSecs`)
-        )
+            FfiConverterULong.allocationSize(value.`pollIntervalMs`) +
+            FfiConverterUInt.allocationSize(value.`ttlSecs`)
+    )
 
-    override fun write(
-        value: DelegationOptions,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`tenantId`, buf)
-        FfiConverterULong.write(value.`pollIntervalMs`, buf)
-        FfiConverterUInt.write(value.`ttlSecs`, buf)
+    override fun write(value: DelegationOptions, buf: ByteBuffer) {
+            FfiConverterString.write(value.`tenantId`, buf)
+            FfiConverterULong.write(value.`pollIntervalMs`, buf)
+            FfiConverterUInt.write(value.`ttlSecs`, buf)
     }
 }
+
+
 
 /**
  * Counters exposed through `delegation_stats`.
  */
-data class DelegationStats(
-    var `running`: kotlin.Boolean,
+data class DelegationStats (
+    var `running`: kotlin.Boolean
+    ,
     /**
      * Delegations accepted by the control plane.
      */
-    var `delegated`: kotlin.ULong,
-    var `completed`: kotlin.ULong,
-    var `failed`: kotlin.ULong,
-    var `abandoned`: kotlin.ULong,
+    var `delegated`: kotlin.ULong
+    ,
+    var `completed`: kotlin.ULong
+    ,
+    var `failed`: kotlin.ULong
+    ,
+    var `abandoned`: kotlin.ULong
+    ,
     /**
      * Parked local steps resumed with an outcome (exactly once each).
      */
-    var `resumed`: kotlin.ULong,
-) {
+    var `resumed`: kotlin.ULong
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDelegationStats : FfiConverterRustBuffer<DelegationStats> {
-    override fun read(buf: ByteBuffer): DelegationStats =
-        DelegationStats(
+public object FfiConverterTypeDelegationStats: FfiConverterRustBuffer<DelegationStats> {
+    override fun read(buf: ByteBuffer): DelegationStats {
+        return DelegationStats(
             FfiConverterBoolean.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
@@ -5418,62 +4954,73 @@ public object FfiConverterTypeDelegationStats : FfiConverterRustBuffer<Delegatio
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
         )
+    }
 
-    override fun allocationSize(value: DelegationStats) =
-        (
+    override fun allocationSize(value: DelegationStats) = (
             FfiConverterBoolean.allocationSize(value.`running`) +
-                FfiConverterULong.allocationSize(value.`delegated`) +
-                FfiConverterULong.allocationSize(value.`completed`) +
-                FfiConverterULong.allocationSize(value.`failed`) +
-                FfiConverterULong.allocationSize(value.`abandoned`) +
-                FfiConverterULong.allocationSize(value.`resumed`)
-        )
+            FfiConverterULong.allocationSize(value.`delegated`) +
+            FfiConverterULong.allocationSize(value.`completed`) +
+            FfiConverterULong.allocationSize(value.`failed`) +
+            FfiConverterULong.allocationSize(value.`abandoned`) +
+            FfiConverterULong.allocationSize(value.`resumed`)
+    )
 
-    override fun write(
-        value: DelegationStats,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterBoolean.write(value.`running`, buf)
-        FfiConverterULong.write(value.`delegated`, buf)
-        FfiConverterULong.write(value.`completed`, buf)
-        FfiConverterULong.write(value.`failed`, buf)
-        FfiConverterULong.write(value.`abandoned`, buf)
-        FfiConverterULong.write(value.`resumed`, buf)
+    override fun write(value: DelegationStats, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`running`, buf)
+            FfiConverterULong.write(value.`delegated`, buf)
+            FfiConverterULong.write(value.`completed`, buf)
+            FfiConverterULong.write(value.`failed`, buf)
+            FfiConverterULong.write(value.`abandoned`, buf)
+            FfiConverterULong.write(value.`resumed`, buf)
     }
 }
+
+
 
 /**
  * Where a delegation stands, as recorded on this device.
  */
-data class DelegationStatus(
-    var `delegationId`: kotlin.String,
+data class DelegationStatus (
+    var `delegationId`: kotlin.String
+    ,
     /**
      * `preparing` (not yet accepted by the control plane), `delegated`
      * (in the destination's mailbox or running there), `completed`,
      * `failed`, or `abandoned` (never placed before its deadline).
      */
-    var `state`: kotlin.String,
-    var `localInstanceId`: kotlin.String,
+    var `state`: kotlin.String
+    ,
+    var `localInstanceId`: kotlin.String
+    ,
     /**
      * The parked local step, for delegations made by a sequence.
      */
-    var `blockId`: kotlin.String?,
-    var `destinationRuntimeId`: kotlin.String?,
+    var `blockId`: kotlin.String?
+    ,
+    var `destinationRuntimeId`: kotlin.String?
+    ,
     /**
      * The destination's reported output (JSON), once completed.
      */
-    var `outputJson`: kotlin.String?,
-    var `error`: kotlin.String?,
-) {
+    var `outputJson`: kotlin.String?
+    ,
+    var `error`: kotlin.String?
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDelegationStatus : FfiConverterRustBuffer<DelegationStatus> {
-    override fun read(buf: ByteBuffer): DelegationStatus =
-        DelegationStatus(
+public object FfiConverterTypeDelegationStatus: FfiConverterRustBuffer<DelegationStatus> {
+    override fun read(buf: ByteBuffer): DelegationStatus {
+        return DelegationStatus(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
@@ -5482,134 +5029,159 @@ public object FfiConverterTypeDelegationStatus : FfiConverterRustBuffer<Delegati
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: DelegationStatus) =
-        (
+    override fun allocationSize(value: DelegationStatus) = (
             FfiConverterString.allocationSize(value.`delegationId`) +
-                FfiConverterString.allocationSize(value.`state`) +
-                FfiConverterString.allocationSize(value.`localInstanceId`) +
-                FfiConverterOptionalString.allocationSize(value.`blockId`) +
-                FfiConverterOptionalString.allocationSize(value.`destinationRuntimeId`) +
-                FfiConverterOptionalString.allocationSize(value.`outputJson`) +
-                FfiConverterOptionalString.allocationSize(value.`error`)
-        )
+            FfiConverterString.allocationSize(value.`state`) +
+            FfiConverterString.allocationSize(value.`localInstanceId`) +
+            FfiConverterOptionalString.allocationSize(value.`blockId`) +
+            FfiConverterOptionalString.allocationSize(value.`destinationRuntimeId`) +
+            FfiConverterOptionalString.allocationSize(value.`outputJson`) +
+            FfiConverterOptionalString.allocationSize(value.`error`)
+    )
 
-    override fun write(
-        value: DelegationStatus,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`delegationId`, buf)
-        FfiConverterString.write(value.`state`, buf)
-        FfiConverterString.write(value.`localInstanceId`, buf)
-        FfiConverterOptionalString.write(value.`blockId`, buf)
-        FfiConverterOptionalString.write(value.`destinationRuntimeId`, buf)
-        FfiConverterOptionalString.write(value.`outputJson`, buf)
-        FfiConverterOptionalString.write(value.`error`, buf)
+    override fun write(value: DelegationStatus, buf: ByteBuffer) {
+            FfiConverterString.write(value.`delegationId`, buf)
+            FfiConverterString.write(value.`state`, buf)
+            FfiConverterString.write(value.`localInstanceId`, buf)
+            FfiConverterOptionalString.write(value.`blockId`, buf)
+            FfiConverterOptionalString.write(value.`destinationRuntimeId`, buf)
+            FfiConverterOptionalString.write(value.`outputJson`, buf)
+            FfiConverterOptionalString.write(value.`error`, buf)
     }
 }
+
+
 
 /**
  * Device context sent with every telemetry batch.
  */
-data class DeviceContext(
-    var `deviceId`: kotlin.String,
-    var `osName`: kotlin.String,
-    var `osVersion`: kotlin.String,
-    var `appVersion`: kotlin.String,
-    var `sdkVersion`: kotlin.String,
-) {
+data class DeviceContext (
+    var `deviceId`: kotlin.String
+    ,
+    var `osName`: kotlin.String
+    ,
+    var `osVersion`: kotlin.String
+    ,
+    var `appVersion`: kotlin.String
+    ,
+    var `sdkVersion`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeDeviceContext : FfiConverterRustBuffer<DeviceContext> {
-    override fun read(buf: ByteBuffer): DeviceContext =
-        DeviceContext(
+public object FfiConverterTypeDeviceContext: FfiConverterRustBuffer<DeviceContext> {
+    override fun read(buf: ByteBuffer): DeviceContext {
+        return DeviceContext(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: DeviceContext) =
-        (
+    override fun allocationSize(value: DeviceContext) = (
             FfiConverterString.allocationSize(value.`deviceId`) +
-                FfiConverterString.allocationSize(value.`osName`) +
-                FfiConverterString.allocationSize(value.`osVersion`) +
-                FfiConverterString.allocationSize(value.`appVersion`) +
-                FfiConverterString.allocationSize(value.`sdkVersion`)
-        )
+            FfiConverterString.allocationSize(value.`osName`) +
+            FfiConverterString.allocationSize(value.`osVersion`) +
+            FfiConverterString.allocationSize(value.`appVersion`) +
+            FfiConverterString.allocationSize(value.`sdkVersion`)
+    )
 
-    override fun write(
-        value: DeviceContext,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`deviceId`, buf)
-        FfiConverterString.write(value.`osName`, buf)
-        FfiConverterString.write(value.`osVersion`, buf)
-        FfiConverterString.write(value.`appVersion`, buf)
-        FfiConverterString.write(value.`sdkVersion`, buf)
+    override fun write(value: DeviceContext, buf: ByteBuffer) {
+            FfiConverterString.write(value.`deviceId`, buf)
+            FfiConverterString.write(value.`osName`, buf)
+            FfiConverterString.write(value.`osVersion`, buf)
+            FfiConverterString.write(value.`appVersion`, buf)
+            FfiConverterString.write(value.`sdkVersion`, buf)
     }
 }
+
+
 
 /**
  * Result of a telemetry flush operation.
  */
-data class FlushResult(
-    var `sent`: kotlin.ULong,
-    var `dropped`: kotlin.ULong,
-) {
+data class FlushResult (
+    var `sent`: kotlin.ULong
+    ,
+    var `dropped`: kotlin.ULong
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeFlushResult : FfiConverterRustBuffer<FlushResult> {
-    override fun read(buf: ByteBuffer): FlushResult =
-        FlushResult(
+public object FfiConverterTypeFlushResult: FfiConverterRustBuffer<FlushResult> {
+    override fun read(buf: ByteBuffer): FlushResult {
+        return FlushResult(
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
         )
+    }
 
-    override fun allocationSize(value: FlushResult) =
-        (
+    override fun allocationSize(value: FlushResult) = (
             FfiConverterULong.allocationSize(value.`sent`) +
-                FfiConverterULong.allocationSize(value.`dropped`)
-        )
+            FfiConverterULong.allocationSize(value.`dropped`)
+    )
 
-    override fun write(
-        value: FlushResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterULong.write(value.`sent`, buf)
-        FfiConverterULong.write(value.`dropped`, buf)
+    override fun write(value: FlushResult, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`sent`, buf)
+            FfiConverterULong.write(value.`dropped`, buf)
     }
 }
+
+
 
 /**
  * Snapshot of a single instance's state.
  */
-data class InstanceState(
-    var `instanceId`: kotlin.String,
-    var `sequenceName`: kotlin.String,
-    var `state`: InstanceStateKind,
-    var `context`: kotlin.String,
-    var `createdAt`: kotlin.String,
-    var `updatedAt`: kotlin.String,
-) {
+data class InstanceState (
+    var `instanceId`: kotlin.String
+    ,
+    var `sequenceName`: kotlin.String
+    ,
+    var `state`: InstanceStateKind
+    ,
+    var `context`: kotlin.String
+    ,
+    var `createdAt`: kotlin.String
+    ,
+    var `updatedAt`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeInstanceState_ : FfiConverterRustBuffer<InstanceState> {
-    override fun read(buf: ByteBuffer): InstanceState =
-        InstanceState(
+public object FfiConverterTypeInstanceState_: FfiConverterRustBuffer<InstanceState> {
+    override fun read(buf: ByteBuffer): InstanceState {
+        return InstanceState(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterTypeInstanceStateKind.read(buf),
@@ -5617,72 +5189,79 @@ public object FfiConverterTypeInstanceState_ : FfiConverterRustBuffer<InstanceSt
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: InstanceState) =
-        (
+    override fun allocationSize(value: InstanceState) = (
             FfiConverterString.allocationSize(value.`instanceId`) +
-                FfiConverterString.allocationSize(value.`sequenceName`) +
-                FfiConverterTypeInstanceStateKind.allocationSize(value.`state`) +
-                FfiConverterString.allocationSize(value.`context`) +
-                FfiConverterString.allocationSize(value.`createdAt`) +
-                FfiConverterString.allocationSize(value.`updatedAt`)
-        )
+            FfiConverterString.allocationSize(value.`sequenceName`) +
+            FfiConverterTypeInstanceStateKind.allocationSize(value.`state`) +
+            FfiConverterString.allocationSize(value.`context`) +
+            FfiConverterString.allocationSize(value.`createdAt`) +
+            FfiConverterString.allocationSize(value.`updatedAt`)
+    )
 
-    override fun write(
-        value: InstanceState,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`instanceId`, buf)
-        FfiConverterString.write(value.`sequenceName`, buf)
-        FfiConverterTypeInstanceStateKind.write(value.`state`, buf)
-        FfiConverterString.write(value.`context`, buf)
-        FfiConverterString.write(value.`createdAt`, buf)
-        FfiConverterString.write(value.`updatedAt`, buf)
+    override fun write(value: InstanceState, buf: ByteBuffer) {
+            FfiConverterString.write(value.`instanceId`, buf)
+            FfiConverterString.write(value.`sequenceName`, buf)
+            FfiConverterTypeInstanceStateKind.write(value.`state`, buf)
+            FfiConverterString.write(value.`context`, buf)
+            FfiConverterString.write(value.`createdAt`, buf)
+            FfiConverterString.write(value.`updatedAt`, buf)
     }
 }
+
+
 
 /**
  * Summary of a running instance, returned by `active_instances()`.
  */
-data class InstanceSummary(
-    var `instanceId`: kotlin.String,
-    var `sequenceName`: kotlin.String,
-    var `state`: InstanceStateKind,
-    var `createdAt`: kotlin.String,
-) {
+data class InstanceSummary (
+    var `instanceId`: kotlin.String
+    ,
+    var `sequenceName`: kotlin.String
+    ,
+    var `state`: InstanceStateKind
+    ,
+    var `createdAt`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeInstanceSummary : FfiConverterRustBuffer<InstanceSummary> {
-    override fun read(buf: ByteBuffer): InstanceSummary =
-        InstanceSummary(
+public object FfiConverterTypeInstanceSummary: FfiConverterRustBuffer<InstanceSummary> {
+    override fun read(buf: ByteBuffer): InstanceSummary {
+        return InstanceSummary(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterTypeInstanceStateKind.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: InstanceSummary) =
-        (
+    override fun allocationSize(value: InstanceSummary) = (
             FfiConverterString.allocationSize(value.`instanceId`) +
-                FfiConverterString.allocationSize(value.`sequenceName`) +
-                FfiConverterTypeInstanceStateKind.allocationSize(value.`state`) +
-                FfiConverterString.allocationSize(value.`createdAt`)
-        )
+            FfiConverterString.allocationSize(value.`sequenceName`) +
+            FfiConverterTypeInstanceStateKind.allocationSize(value.`state`) +
+            FfiConverterString.allocationSize(value.`createdAt`)
+    )
 
-    override fun write(
-        value: InstanceSummary,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`instanceId`, buf)
-        FfiConverterString.write(value.`sequenceName`, buf)
-        FfiConverterTypeInstanceStateKind.write(value.`state`, buf)
-        FfiConverterString.write(value.`createdAt`, buf)
+    override fun write(value: InstanceSummary, buf: ByteBuffer) {
+            FfiConverterString.write(value.`instanceId`, buf)
+            FfiConverterString.write(value.`sequenceName`, buf)
+            FfiConverterTypeInstanceStateKind.write(value.`state`, buf)
+            FfiConverterString.write(value.`createdAt`, buf)
     }
 }
+
+
 
 /**
  * Configuration for the mobile engine, exposed to host apps via `UniFFI`.
@@ -5691,75 +5270,91 @@ public object FfiConverterTypeInstanceSummary : FfiConverterRustBuffer<InstanceS
  * may carry signed-URL tokens in their query strings, so neither may reach
  * logs or crash reports verbatim.
  */
-data class MobileEngineConfig(
+data class MobileEngineConfig (
     /**
      * Tick interval in milliseconds for the foreground loop (default: 500).
      */
-    var `tickIntervalMs`: kotlin.ULong,
+    var `tickIntervalMs`: kotlin.ULong
+    ,
     /**
      * Maximum concurrent step executions; must be positive (default: 4).
      */
-    var `maxConcurrentSteps`: kotlin.UInt,
+    var `maxConcurrentSteps`: kotlin.UInt
+    ,
     /**
      * Maximum steps per instance before forced failure (default: 1000).
      */
-    var `maxStepsPerInstance`: kotlin.UInt,
+    var `maxStepsPerInstance`: kotlin.UInt
+    ,
     /**
      * Maximum concurrent running instances; must be positive (default: 10).
      */
-    var `maxConcurrentInstances`: kotlin.UInt,
+    var `maxConcurrentInstances`: kotlin.UInt
+    ,
     /**
      * Maximum tick duration in milliseconds before yielding (default: 5000).
      */
-    var `maxTickDurationMs`: kotlin.ULong,
+    var `maxTickDurationMs`: kotlin.ULong
+    ,
     /**
      * Maximum instance lifetime in seconds before auto-cancel (default: 86400 = 24h).
      */
-    var `maxInstanceLifetimeSecs`: kotlin.ULong,
+    var `maxInstanceLifetimeSecs`: kotlin.ULong
+    ,
     /**
      * Maximum stored sequences in the local database (default: 50).
      */
-    var `maxStoredSequences`: kotlin.UInt,
+    var `maxStoredSequences`: kotlin.UInt
+    ,
     /**
      * Maximum sequence JSON size in bytes (default: 1MB).
      */
-    var `maxSequenceSizeBytes`: kotlin.ULong,
+    var `maxSequenceSizeBytes`: kotlin.ULong
+    ,
     /**
      * Handler timeout in milliseconds — after this, step transitions to Waiting (default: 30000).
      */
-    var `handlerTimeoutMs`: kotlin.ULong,
+    var `handlerTimeoutMs`: kotlin.ULong
+    ,
     /**
      * Operation timeout in milliseconds for synchronous API calls like start/cancel/get (default: 10000).
      */
-    var `operationTimeoutMs`: kotlin.ULong,
+    var `operationTimeoutMs`: kotlin.ULong
+    ,
     /**
      * Enable telemetry collection (default: true).
      */
-    var `telemetryEnabled`: kotlin.Boolean,
+    var `telemetryEnabled`: kotlin.Boolean
+    ,
     /**
      * HTTPS endpoint where telemetry batches are sent. Must use port 443 and
      * target a public host. If empty, telemetry flushing is disabled.
      */
-    var `telemetryUrl`: kotlin.String,
+    var `telemetryUrl`: kotlin.String
+    ,
     /**
      * Target environment: "production" or "staging" (default: "production").
      */
-    var `environment`: kotlin.String,
+    var `environment`: kotlin.String
+    ,
     /**
      * Base64-encoded Ed25519 root public key for manifest verification.
      * If empty, sync is disabled.
      */
-    var `rootPublicKey`: kotlin.String,
+    var `rootPublicKey`: kotlin.String
+    ,
     /**
      * Mobile SDK version string, used for `min_sdk_version` checks during sync.
      */
-    var `sdkVersion`: kotlin.String,
+    var `sdkVersion`: kotlin.String
+    ,
     /**
      * Maximum memory budget in bytes (0 = unlimited). When process RSS exceeds
      * this limit, tick execution is skipped until memory drops below the threshold.
      * Default: 0 (unlimited).
      */
-    var `memoryBudgetBytes`: kotlin.ULong,
+    var `memoryBudgetBytes`: kotlin.ULong
+    ,
     /**
      * URL to fetch sequence definitions from. The endpoint must return a JSON
      * array of sequence objects. If empty, no remote loading is performed.
@@ -5767,31 +5362,40 @@ data class MobileEngineConfig(
      * `root_public_key` is set (use signed `sync` instead).
      * Example: `https://api.orch8.io/api/mobile/apps/{id}/sequences`
      */
-    var `sequencesUrl`: kotlin.String,
+    var `sequencesUrl`: kotlin.String
+    ,
     /**
      * Server sync endpoint URL. If non-empty, the engine will periodically
      * POST status updates / approval requests and receive commands.
      * Example: `https://api.orch8.io/api/v1/mobile/sync`
      */
-    var `syncUrl`: kotlin.String,
+    var `syncUrl`: kotlin.String
+    ,
     /**
      * Unique device identifier sent with each sync request.
      */
-    var `deviceId`: kotlin.String,
+    var `deviceId`: kotlin.String
+    ,
     /**
      * API key for authenticating sync requests.
      */
-    var `syncApiKey`: kotlin.String,
-) {
+    var `syncApiKey`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeMobileEngineConfig : FfiConverterRustBuffer<MobileEngineConfig> {
-    override fun read(buf: ByteBuffer): MobileEngineConfig =
-        MobileEngineConfig(
+public object FfiConverterTypeMobileEngineConfig: FfiConverterRustBuffer<MobileEngineConfig> {
+    override fun read(buf: ByteBuffer): MobileEngineConfig {
+        return MobileEngineConfig(
             FfiConverterULong.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
@@ -5813,111 +5417,128 @@ public object FfiConverterTypeMobileEngineConfig : FfiConverterRustBuffer<Mobile
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: MobileEngineConfig) =
-        (
+    override fun allocationSize(value: MobileEngineConfig) = (
             FfiConverterULong.allocationSize(value.`tickIntervalMs`) +
-                FfiConverterUInt.allocationSize(value.`maxConcurrentSteps`) +
-                FfiConverterUInt.allocationSize(value.`maxStepsPerInstance`) +
-                FfiConverterUInt.allocationSize(value.`maxConcurrentInstances`) +
-                FfiConverterULong.allocationSize(value.`maxTickDurationMs`) +
-                FfiConverterULong.allocationSize(value.`maxInstanceLifetimeSecs`) +
-                FfiConverterUInt.allocationSize(value.`maxStoredSequences`) +
-                FfiConverterULong.allocationSize(value.`maxSequenceSizeBytes`) +
-                FfiConverterULong.allocationSize(value.`handlerTimeoutMs`) +
-                FfiConverterULong.allocationSize(value.`operationTimeoutMs`) +
-                FfiConverterBoolean.allocationSize(value.`telemetryEnabled`) +
-                FfiConverterString.allocationSize(value.`telemetryUrl`) +
-                FfiConverterString.allocationSize(value.`environment`) +
-                FfiConverterString.allocationSize(value.`rootPublicKey`) +
-                FfiConverterString.allocationSize(value.`sdkVersion`) +
-                FfiConverterULong.allocationSize(value.`memoryBudgetBytes`) +
-                FfiConverterString.allocationSize(value.`sequencesUrl`) +
-                FfiConverterString.allocationSize(value.`syncUrl`) +
-                FfiConverterString.allocationSize(value.`deviceId`) +
-                FfiConverterString.allocationSize(value.`syncApiKey`)
-        )
+            FfiConverterUInt.allocationSize(value.`maxConcurrentSteps`) +
+            FfiConverterUInt.allocationSize(value.`maxStepsPerInstance`) +
+            FfiConverterUInt.allocationSize(value.`maxConcurrentInstances`) +
+            FfiConverterULong.allocationSize(value.`maxTickDurationMs`) +
+            FfiConverterULong.allocationSize(value.`maxInstanceLifetimeSecs`) +
+            FfiConverterUInt.allocationSize(value.`maxStoredSequences`) +
+            FfiConverterULong.allocationSize(value.`maxSequenceSizeBytes`) +
+            FfiConverterULong.allocationSize(value.`handlerTimeoutMs`) +
+            FfiConverterULong.allocationSize(value.`operationTimeoutMs`) +
+            FfiConverterBoolean.allocationSize(value.`telemetryEnabled`) +
+            FfiConverterString.allocationSize(value.`telemetryUrl`) +
+            FfiConverterString.allocationSize(value.`environment`) +
+            FfiConverterString.allocationSize(value.`rootPublicKey`) +
+            FfiConverterString.allocationSize(value.`sdkVersion`) +
+            FfiConverterULong.allocationSize(value.`memoryBudgetBytes`) +
+            FfiConverterString.allocationSize(value.`sequencesUrl`) +
+            FfiConverterString.allocationSize(value.`syncUrl`) +
+            FfiConverterString.allocationSize(value.`deviceId`) +
+            FfiConverterString.allocationSize(value.`syncApiKey`)
+    )
 
-    override fun write(
-        value: MobileEngineConfig,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterULong.write(value.`tickIntervalMs`, buf)
-        FfiConverterUInt.write(value.`maxConcurrentSteps`, buf)
-        FfiConverterUInt.write(value.`maxStepsPerInstance`, buf)
-        FfiConverterUInt.write(value.`maxConcurrentInstances`, buf)
-        FfiConverterULong.write(value.`maxTickDurationMs`, buf)
-        FfiConverterULong.write(value.`maxInstanceLifetimeSecs`, buf)
-        FfiConverterUInt.write(value.`maxStoredSequences`, buf)
-        FfiConverterULong.write(value.`maxSequenceSizeBytes`, buf)
-        FfiConverterULong.write(value.`handlerTimeoutMs`, buf)
-        FfiConverterULong.write(value.`operationTimeoutMs`, buf)
-        FfiConverterBoolean.write(value.`telemetryEnabled`, buf)
-        FfiConverterString.write(value.`telemetryUrl`, buf)
-        FfiConverterString.write(value.`environment`, buf)
-        FfiConverterString.write(value.`rootPublicKey`, buf)
-        FfiConverterString.write(value.`sdkVersion`, buf)
-        FfiConverterULong.write(value.`memoryBudgetBytes`, buf)
-        FfiConverterString.write(value.`sequencesUrl`, buf)
-        FfiConverterString.write(value.`syncUrl`, buf)
-        FfiConverterString.write(value.`deviceId`, buf)
-        FfiConverterString.write(value.`syncApiKey`, buf)
+    override fun write(value: MobileEngineConfig, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`tickIntervalMs`, buf)
+            FfiConverterUInt.write(value.`maxConcurrentSteps`, buf)
+            FfiConverterUInt.write(value.`maxStepsPerInstance`, buf)
+            FfiConverterUInt.write(value.`maxConcurrentInstances`, buf)
+            FfiConverterULong.write(value.`maxTickDurationMs`, buf)
+            FfiConverterULong.write(value.`maxInstanceLifetimeSecs`, buf)
+            FfiConverterUInt.write(value.`maxStoredSequences`, buf)
+            FfiConverterULong.write(value.`maxSequenceSizeBytes`, buf)
+            FfiConverterULong.write(value.`handlerTimeoutMs`, buf)
+            FfiConverterULong.write(value.`operationTimeoutMs`, buf)
+            FfiConverterBoolean.write(value.`telemetryEnabled`, buf)
+            FfiConverterString.write(value.`telemetryUrl`, buf)
+            FfiConverterString.write(value.`environment`, buf)
+            FfiConverterString.write(value.`rootPublicKey`, buf)
+            FfiConverterString.write(value.`sdkVersion`, buf)
+            FfiConverterULong.write(value.`memoryBudgetBytes`, buf)
+            FfiConverterString.write(value.`sequencesUrl`, buf)
+            FfiConverterString.write(value.`syncUrl`, buf)
+            FfiConverterString.write(value.`deviceId`, buf)
+            FfiConverterString.write(value.`syncApiKey`, buf)
     }
 }
+
+
 
 /**
  * What this device advertises to the control plane when it joins the
  * runtime mesh. Every field has a default, so hosts only set what they know.
  */
-data class NodeCapabilities(
+data class NodeCapabilities (
     /**
      * Handler names this node serves. Empty = every app-native handler
      * registered with `register_handler`. Built-in handlers are only served
      * remotely when listed here explicitly.
      */
-    var `handlers`: List<kotlin.String> = listOf(),
-    var `regions`: List<kotlin.String> = listOf(),
+    var `handlers`: List<kotlin.String> = listOf()
+    ,
+    var `regions`: List<kotlin.String> = listOf()
+    ,
     /**
      * Free-form hardware facts (`camera`, `nfc`, `secure-enclave`, …).
      * `device:<device_id>` is always added.
      */
-    var `hardware`: List<kotlin.String> = listOf(),
-    var `plugins`: List<kotlin.String> = listOf(),
+    var `hardware`: List<kotlin.String> = listOf()
+    ,
+    var `plugins`: List<kotlin.String> = listOf()
+    ,
     /**
      * Credential binding *names* available on the device (never secrets).
      */
-    var `credentials`: List<kotlin.String> = listOf(),
-    var `offlineCapable`: kotlin.Boolean = true,
-    var `connectivity`: NodeConnectivity? = null,
-    var `batteryPercent`: kotlin.UByte? = null,
+    var `credentials`: List<kotlin.String> = listOf()
+    ,
+    var `offlineCapable`: kotlin.Boolean = true
+    ,
+    var `connectivity`: NodeConnectivity? = null
+    ,
+    var `batteryPercent`: kotlin.UByte? = null
+    ,
     /**
      * `ios` / `android`; inferred from the build target when absent.
      */
-    var `platform`: kotlin.String? = null,
+    var `platform`: kotlin.String? = null
+    ,
     /**
      * APNs/FCM token used for id-only wake-up hints.
      */
-    var `pushToken`: kotlin.String? = null,
-    var `appVersion`: kotlin.String? = null,
+    var `pushToken`: kotlin.String? = null
+    ,
+    var `appVersion`: kotlin.String? = null
+    ,
     /**
      * Control-plane API base (e.g. `https://api.orch8.io/api/v1`). When
      * absent it is derived from `sync_url` by stripping `/mobile/sync`.
      */
-    var `apiBaseUrl`: kotlin.String? = null,
+    var `apiBaseUrl`: kotlin.String? = null
+    ,
     /**
      * Base64 Ed25519 key that signs capsules exported by this device.
      */
-    var `capsuleSigningPublicKey`: kotlin.String? = null,
-) {
+    var `capsuleSigningPublicKey`: kotlin.String? = null
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeNodeCapabilities : FfiConverterRustBuffer<NodeCapabilities> {
-    override fun read(buf: ByteBuffer): NodeCapabilities =
-        NodeCapabilities(
+public object FfiConverterTypeNodeCapabilities: FfiConverterRustBuffer<NodeCapabilities> {
+    override fun read(buf: ByteBuffer): NodeCapabilities {
+        return NodeCapabilities(
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterSequenceString.read(buf),
@@ -5932,330 +5553,385 @@ public object FfiConverterTypeNodeCapabilities : FfiConverterRustBuffer<NodeCapa
             FfiConverterOptionalString.read(buf),
             FfiConverterOptionalString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: NodeCapabilities) =
-        (
+    override fun allocationSize(value: NodeCapabilities) = (
             FfiConverterSequenceString.allocationSize(value.`handlers`) +
-                FfiConverterSequenceString.allocationSize(value.`regions`) +
-                FfiConverterSequenceString.allocationSize(value.`hardware`) +
-                FfiConverterSequenceString.allocationSize(value.`plugins`) +
-                FfiConverterSequenceString.allocationSize(value.`credentials`) +
-                FfiConverterBoolean.allocationSize(value.`offlineCapable`) +
-                FfiConverterOptionalTypeNodeConnectivity.allocationSize(value.`connectivity`) +
-                FfiConverterOptionalUByte.allocationSize(value.`batteryPercent`) +
-                FfiConverterOptionalString.allocationSize(value.`platform`) +
-                FfiConverterOptionalString.allocationSize(value.`pushToken`) +
-                FfiConverterOptionalString.allocationSize(value.`appVersion`) +
-                FfiConverterOptionalString.allocationSize(value.`apiBaseUrl`) +
-                FfiConverterOptionalString.allocationSize(value.`capsuleSigningPublicKey`)
-        )
+            FfiConverterSequenceString.allocationSize(value.`regions`) +
+            FfiConverterSequenceString.allocationSize(value.`hardware`) +
+            FfiConverterSequenceString.allocationSize(value.`plugins`) +
+            FfiConverterSequenceString.allocationSize(value.`credentials`) +
+            FfiConverterBoolean.allocationSize(value.`offlineCapable`) +
+            FfiConverterOptionalTypeNodeConnectivity.allocationSize(value.`connectivity`) +
+            FfiConverterOptionalUByte.allocationSize(value.`batteryPercent`) +
+            FfiConverterOptionalString.allocationSize(value.`platform`) +
+            FfiConverterOptionalString.allocationSize(value.`pushToken`) +
+            FfiConverterOptionalString.allocationSize(value.`appVersion`) +
+            FfiConverterOptionalString.allocationSize(value.`apiBaseUrl`) +
+            FfiConverterOptionalString.allocationSize(value.`capsuleSigningPublicKey`)
+    )
 
-    override fun write(
-        value: NodeCapabilities,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterSequenceString.write(value.`handlers`, buf)
-        FfiConverterSequenceString.write(value.`regions`, buf)
-        FfiConverterSequenceString.write(value.`hardware`, buf)
-        FfiConverterSequenceString.write(value.`plugins`, buf)
-        FfiConverterSequenceString.write(value.`credentials`, buf)
-        FfiConverterBoolean.write(value.`offlineCapable`, buf)
-        FfiConverterOptionalTypeNodeConnectivity.write(value.`connectivity`, buf)
-        FfiConverterOptionalUByte.write(value.`batteryPercent`, buf)
-        FfiConverterOptionalString.write(value.`platform`, buf)
-        FfiConverterOptionalString.write(value.`pushToken`, buf)
-        FfiConverterOptionalString.write(value.`appVersion`, buf)
-        FfiConverterOptionalString.write(value.`apiBaseUrl`, buf)
-        FfiConverterOptionalString.write(value.`capsuleSigningPublicKey`, buf)
+    override fun write(value: NodeCapabilities, buf: ByteBuffer) {
+            FfiConverterSequenceString.write(value.`handlers`, buf)
+            FfiConverterSequenceString.write(value.`regions`, buf)
+            FfiConverterSequenceString.write(value.`hardware`, buf)
+            FfiConverterSequenceString.write(value.`plugins`, buf)
+            FfiConverterSequenceString.write(value.`credentials`, buf)
+            FfiConverterBoolean.write(value.`offlineCapable`, buf)
+            FfiConverterOptionalTypeNodeConnectivity.write(value.`connectivity`, buf)
+            FfiConverterOptionalUByte.write(value.`batteryPercent`, buf)
+            FfiConverterOptionalString.write(value.`platform`, buf)
+            FfiConverterOptionalString.write(value.`pushToken`, buf)
+            FfiConverterOptionalString.write(value.`appVersion`, buf)
+            FfiConverterOptionalString.write(value.`apiBaseUrl`, buf)
+            FfiConverterOptionalString.write(value.`capsuleSigningPublicKey`, buf)
     }
 }
+
+
 
 /**
  * Result of `register_node`.
  */
-data class NodeRegistration(
+data class NodeRegistration (
     /**
      * Stable runtime UUID (also the `worker_id` used for task leases).
      */
-    var `runtimeId`: kotlin.String,
-    var `deviceId`: kotlin.String,
+    var `runtimeId`: kotlin.String
+    ,
+    var `deviceId`: kotlin.String
+    ,
     /**
      * Handlers advertised to the control plane.
      */
-    var `handlers`: List<kotlin.String>,
+    var `handlers`: List<kotlin.String>
+    ,
     /**
      * RFC 3339 expiry of the advertisement just sent; the engine refreshes
      * it automatically before then.
      */
-    var `expiresAt`: kotlin.String,
-) {
+    var `expiresAt`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeNodeRegistration : FfiConverterRustBuffer<NodeRegistration> {
-    override fun read(buf: ByteBuffer): NodeRegistration =
-        NodeRegistration(
+public object FfiConverterTypeNodeRegistration: FfiConverterRustBuffer<NodeRegistration> {
+    override fun read(buf: ByteBuffer): NodeRegistration {
+        return NodeRegistration(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterSequenceString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: NodeRegistration) =
-        (
+    override fun allocationSize(value: NodeRegistration) = (
             FfiConverterString.allocationSize(value.`runtimeId`) +
-                FfiConverterString.allocationSize(value.`deviceId`) +
-                FfiConverterSequenceString.allocationSize(value.`handlers`) +
-                FfiConverterString.allocationSize(value.`expiresAt`)
-        )
+            FfiConverterString.allocationSize(value.`deviceId`) +
+            FfiConverterSequenceString.allocationSize(value.`handlers`) +
+            FfiConverterString.allocationSize(value.`expiresAt`)
+    )
 
-    override fun write(
-        value: NodeRegistration,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`runtimeId`, buf)
-        FfiConverterString.write(value.`deviceId`, buf)
-        FfiConverterSequenceString.write(value.`handlers`, buf)
-        FfiConverterString.write(value.`expiresAt`, buf)
+    override fun write(value: NodeRegistration, buf: ByteBuffer) {
+            FfiConverterString.write(value.`runtimeId`, buf)
+            FfiConverterString.write(value.`deviceId`, buf)
+            FfiConverterSequenceString.write(value.`handlers`, buf)
+            FfiConverterString.write(value.`expiresAt`, buf)
     }
 }
+
+
 
 /**
  * Summary of a stored sequence, returned by `loaded_sequences()`.
  */
-data class SequenceInfo(
-    var `name`: kotlin.String,
-    var `version`: kotlin.Int,
-) {
+data class SequenceInfo (
+    var `name`: kotlin.String
+    ,
+    var `version`: kotlin.Int
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeSequenceInfo : FfiConverterRustBuffer<SequenceInfo> {
-    override fun read(buf: ByteBuffer): SequenceInfo =
-        SequenceInfo(
+public object FfiConverterTypeSequenceInfo: FfiConverterRustBuffer<SequenceInfo> {
+    override fun read(buf: ByteBuffer): SequenceInfo {
+        return SequenceInfo(
             FfiConverterString.read(buf),
             FfiConverterInt.read(buf),
         )
+    }
 
-    override fun allocationSize(value: SequenceInfo) =
-        (
+    override fun allocationSize(value: SequenceInfo) = (
             FfiConverterString.allocationSize(value.`name`) +
-                FfiConverterInt.allocationSize(value.`version`)
-        )
+            FfiConverterInt.allocationSize(value.`version`)
+    )
 
-    override fun write(
-        value: SequenceInfo,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`name`, buf)
-        FfiConverterInt.write(value.`version`, buf)
+    override fun write(value: SequenceInfo, buf: ByteBuffer) {
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterInt.write(value.`version`, buf)
     }
 }
+
+
 
 /**
  * Result of a sync operation.
  */
-data class SyncResult(
-    var `added`: kotlin.UInt,
-    var `updated`: kotlin.UInt,
-    var `removed`: kotlin.UInt,
-    var `skipped`: kotlin.UInt,
-    var `signatureFailures`: kotlin.UInt,
-) {
+data class SyncResult (
+    var `added`: kotlin.UInt
+    ,
+    var `updated`: kotlin.UInt
+    ,
+    var `removed`: kotlin.UInt
+    ,
+    var `skipped`: kotlin.UInt
+    ,
+    var `signatureFailures`: kotlin.UInt
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeSyncResult : FfiConverterRustBuffer<SyncResult> {
-    override fun read(buf: ByteBuffer): SyncResult =
-        SyncResult(
+public object FfiConverterTypeSyncResult: FfiConverterRustBuffer<SyncResult> {
+    override fun read(buf: ByteBuffer): SyncResult {
+        return SyncResult(
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
         )
+    }
 
-    override fun allocationSize(value: SyncResult) =
-        (
+    override fun allocationSize(value: SyncResult) = (
             FfiConverterUInt.allocationSize(value.`added`) +
-                FfiConverterUInt.allocationSize(value.`updated`) +
-                FfiConverterUInt.allocationSize(value.`removed`) +
-                FfiConverterUInt.allocationSize(value.`skipped`) +
-                FfiConverterUInt.allocationSize(value.`signatureFailures`)
-        )
+            FfiConverterUInt.allocationSize(value.`updated`) +
+            FfiConverterUInt.allocationSize(value.`removed`) +
+            FfiConverterUInt.allocationSize(value.`skipped`) +
+            FfiConverterUInt.allocationSize(value.`signatureFailures`)
+    )
 
-    override fun write(
-        value: SyncResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterUInt.write(value.`added`, buf)
-        FfiConverterUInt.write(value.`updated`, buf)
-        FfiConverterUInt.write(value.`removed`, buf)
-        FfiConverterUInt.write(value.`skipped`, buf)
-        FfiConverterUInt.write(value.`signatureFailures`, buf)
+    override fun write(value: SyncResult, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`added`, buf)
+            FfiConverterUInt.write(value.`updated`, buf)
+            FfiConverterUInt.write(value.`removed`, buf)
+            FfiConverterUInt.write(value.`skipped`, buf)
+            FfiConverterUInt.write(value.`signatureFailures`, buf)
     }
 }
+
+
 
 /**
  * A telemetry event emitted by the mobile engine.
  */
-data class TelemetryEventRecord(
-    var `eventType`: kotlin.String,
-    var `payload`: kotlin.String,
-    var `timestamp`: kotlin.String,
-) {
+data class TelemetryEventRecord (
+    var `eventType`: kotlin.String
+    ,
+    var `payload`: kotlin.String
+    ,
+    var `timestamp`: kotlin.String
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeTelemetryEventRecord : FfiConverterRustBuffer<TelemetryEventRecord> {
-    override fun read(buf: ByteBuffer): TelemetryEventRecord =
-        TelemetryEventRecord(
+public object FfiConverterTypeTelemetryEventRecord: FfiConverterRustBuffer<TelemetryEventRecord> {
+    override fun read(buf: ByteBuffer): TelemetryEventRecord {
+        return TelemetryEventRecord(
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: TelemetryEventRecord) =
-        (
+    override fun allocationSize(value: TelemetryEventRecord) = (
             FfiConverterString.allocationSize(value.`eventType`) +
-                FfiConverterString.allocationSize(value.`payload`) +
-                FfiConverterString.allocationSize(value.`timestamp`)
-        )
+            FfiConverterString.allocationSize(value.`payload`) +
+            FfiConverterString.allocationSize(value.`timestamp`)
+    )
 
-    override fun write(
-        value: TelemetryEventRecord,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterString.write(value.`eventType`, buf)
-        FfiConverterString.write(value.`payload`, buf)
-        FfiConverterString.write(value.`timestamp`, buf)
+    override fun write(value: TelemetryEventRecord, buf: ByteBuffer) {
+            FfiConverterString.write(value.`eventType`, buf)
+            FfiConverterString.write(value.`payload`, buf)
+            FfiConverterString.write(value.`timestamp`, buf)
     }
 }
+
+
 
 /**
  * Result of a single tick execution, returned to the host app.
  */
-data class TickResult(
-    var `instancesAdvanced`: kotlin.UInt,
-    var `stepsExecuted`: kotlin.UInt,
-    var `hasPendingWork`: kotlin.Boolean,
-) {
+data class TickResult (
+    var `instancesAdvanced`: kotlin.UInt
+    ,
+    var `stepsExecuted`: kotlin.UInt
+    ,
+    var `hasPendingWork`: kotlin.Boolean
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeTickResult : FfiConverterRustBuffer<TickResult> {
-    override fun read(buf: ByteBuffer): TickResult =
-        TickResult(
+public object FfiConverterTypeTickResult: FfiConverterRustBuffer<TickResult> {
+    override fun read(buf: ByteBuffer): TickResult {
+        return TickResult(
             FfiConverterUInt.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
         )
+    }
 
-    override fun allocationSize(value: TickResult) =
-        (
+    override fun allocationSize(value: TickResult) = (
             FfiConverterUInt.allocationSize(value.`instancesAdvanced`) +
-                FfiConverterUInt.allocationSize(value.`stepsExecuted`) +
-                FfiConverterBoolean.allocationSize(value.`hasPendingWork`)
-        )
+            FfiConverterUInt.allocationSize(value.`stepsExecuted`) +
+            FfiConverterBoolean.allocationSize(value.`hasPendingWork`)
+    )
 
-    override fun write(
-        value: TickResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterUInt.write(value.`instancesAdvanced`, buf)
-        FfiConverterUInt.write(value.`stepsExecuted`, buf)
-        FfiConverterBoolean.write(value.`hasPendingWork`, buf)
+    override fun write(value: TickResult, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`instancesAdvanced`, buf)
+            FfiConverterUInt.write(value.`stepsExecuted`, buf)
+            FfiConverterBoolean.write(value.`hasPendingWork`, buf)
     }
 }
+
+
 
 /**
  * Options for `start_worker`.
  */
-data class WorkerOptions(
+data class WorkerOptions (
     /**
      * Remote tasks executed concurrently on the device (default 1).
      */
-    var `maxConcurrentTasks`: kotlin.UInt = 1u,
+    var `maxConcurrentTasks`: kotlin.UInt = 1u
+    ,
     /**
      * Poll cadence while idle, before power-state scaling (default 15 s).
      * Push wake-ups and `on_push_received` poll immediately regardless.
      */
-    var `idlePollIntervalMs`: kotlin.ULong = 15000uL,
+    var `idlePollIntervalMs`: kotlin.ULong = 15000uL
+    ,
     /**
      * Worker build/version reported to the server's version pins.
      */
-    var `version`: kotlin.String? = null,
-) {
+    var `version`: kotlin.String? = null
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeWorkerOptions : FfiConverterRustBuffer<WorkerOptions> {
-    override fun read(buf: ByteBuffer): WorkerOptions =
-        WorkerOptions(
+public object FfiConverterTypeWorkerOptions: FfiConverterRustBuffer<WorkerOptions> {
+    override fun read(buf: ByteBuffer): WorkerOptions {
+        return WorkerOptions(
             FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterOptionalString.read(buf),
         )
+    }
 
-    override fun allocationSize(value: WorkerOptions) =
-        (
+    override fun allocationSize(value: WorkerOptions) = (
             FfiConverterUInt.allocationSize(value.`maxConcurrentTasks`) +
-                FfiConverterULong.allocationSize(value.`idlePollIntervalMs`) +
-                FfiConverterOptionalString.allocationSize(value.`version`)
-        )
+            FfiConverterULong.allocationSize(value.`idlePollIntervalMs`) +
+            FfiConverterOptionalString.allocationSize(value.`version`)
+    )
 
-    override fun write(
-        value: WorkerOptions,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterUInt.write(value.`maxConcurrentTasks`, buf)
-        FfiConverterULong.write(value.`idlePollIntervalMs`, buf)
-        FfiConverterOptionalString.write(value.`version`, buf)
+    override fun write(value: WorkerOptions, buf: ByteBuffer) {
+            FfiConverterUInt.write(value.`maxConcurrentTasks`, buf)
+            FfiConverterULong.write(value.`idlePollIntervalMs`, buf)
+            FfiConverterOptionalString.write(value.`version`, buf)
     }
 }
+
+
 
 /**
  * Counters exposed through `worker_stats`.
  */
-data class WorkerStats(
-    var `running`: kotlin.Boolean,
-    var `inFlight`: kotlin.UInt,
-    var `claimed`: kotlin.ULong,
-    var `completed`: kotlin.ULong,
-    var `failed`: kotlin.ULong,
-    var `released`: kotlin.ULong,
+data class WorkerStats (
+    var `running`: kotlin.Boolean
+    ,
+    var `inFlight`: kotlin.UInt
+    ,
+    var `claimed`: kotlin.ULong
+    ,
+    var `completed`: kotlin.ULong
+    ,
+    var `failed`: kotlin.ULong
+    ,
+    var `released`: kotlin.ULong
+    ,
     /**
      * Tasks whose lease was lost (reclaimed by the server) mid-execution.
      */
-    var `lost`: kotlin.ULong,
-) {
+    var `lost`: kotlin.ULong
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeWorkerStats : FfiConverterRustBuffer<WorkerStats> {
-    override fun read(buf: ByteBuffer): WorkerStats =
-        WorkerStats(
+public object FfiConverterTypeWorkerStats: FfiConverterRustBuffer<WorkerStats> {
+    override fun read(buf: ByteBuffer): WorkerStats {
+        return WorkerStats(
             FfiConverterBoolean.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterULong.read(buf),
@@ -6264,128 +5940,139 @@ public object FfiConverterTypeWorkerStats : FfiConverterRustBuffer<WorkerStats> 
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
         )
+    }
 
-    override fun allocationSize(value: WorkerStats) =
-        (
+    override fun allocationSize(value: WorkerStats) = (
             FfiConverterBoolean.allocationSize(value.`running`) +
-                FfiConverterUInt.allocationSize(value.`inFlight`) +
-                FfiConverterULong.allocationSize(value.`claimed`) +
-                FfiConverterULong.allocationSize(value.`completed`) +
-                FfiConverterULong.allocationSize(value.`failed`) +
-                FfiConverterULong.allocationSize(value.`released`) +
-                FfiConverterULong.allocationSize(value.`lost`)
-        )
+            FfiConverterUInt.allocationSize(value.`inFlight`) +
+            FfiConverterULong.allocationSize(value.`claimed`) +
+            FfiConverterULong.allocationSize(value.`completed`) +
+            FfiConverterULong.allocationSize(value.`failed`) +
+            FfiConverterULong.allocationSize(value.`released`) +
+            FfiConverterULong.allocationSize(value.`lost`)
+    )
 
-    override fun write(
-        value: WorkerStats,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterBoolean.write(value.`running`, buf)
-        FfiConverterUInt.write(value.`inFlight`, buf)
-        FfiConverterULong.write(value.`claimed`, buf)
-        FfiConverterULong.write(value.`completed`, buf)
-        FfiConverterULong.write(value.`failed`, buf)
-        FfiConverterULong.write(value.`released`, buf)
-        FfiConverterULong.write(value.`lost`, buf)
+    override fun write(value: WorkerStats, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`running`, buf)
+            FfiConverterUInt.write(value.`inFlight`, buf)
+            FfiConverterULong.write(value.`claimed`, buf)
+            FfiConverterULong.write(value.`completed`, buf)
+            FfiConverterULong.write(value.`failed`, buf)
+            FfiConverterULong.write(value.`released`, buf)
+            FfiConverterULong.write(value.`lost`, buf)
     }
 }
+
+
 
 /**
  * Result of a bounded background window (`run_worker_window`).
  */
-data class WorkerWindowResult(
-    var `claimed`: kotlin.ULong,
-    var `completed`: kotlin.ULong,
-    var `failed`: kotlin.ULong,
+data class WorkerWindowResult (
+    var `claimed`: kotlin.ULong
+    ,
+    var `completed`: kotlin.ULong
+    ,
+    var `failed`: kotlin.ULong
+    ,
     /**
      * Tasks still executing when the budget ran out. They keep running
      * while the process lives; if it is suspended, the lease lapses and the
      * next launch releases them.
      */
-    var `stillRunning`: kotlin.UInt,
-    var `budgetExhausted`: kotlin.Boolean,
-) {
+    var `stillRunning`: kotlin.UInt
+    ,
+    var `budgetExhausted`: kotlin.Boolean
+
+){
+
+
+
+
+
     companion object
 }
 
 /**
  * @suppress
  */
-public object FfiConverterTypeWorkerWindowResult : FfiConverterRustBuffer<WorkerWindowResult> {
-    override fun read(buf: ByteBuffer): WorkerWindowResult =
-        WorkerWindowResult(
+public object FfiConverterTypeWorkerWindowResult: FfiConverterRustBuffer<WorkerWindowResult> {
+    override fun read(buf: ByteBuffer): WorkerWindowResult {
+        return WorkerWindowResult(
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterULong.read(buf),
             FfiConverterUInt.read(buf),
             FfiConverterBoolean.read(buf),
         )
+    }
 
-    override fun allocationSize(value: WorkerWindowResult) =
-        (
+    override fun allocationSize(value: WorkerWindowResult) = (
             FfiConverterULong.allocationSize(value.`claimed`) +
-                FfiConverterULong.allocationSize(value.`completed`) +
-                FfiConverterULong.allocationSize(value.`failed`) +
-                FfiConverterUInt.allocationSize(value.`stillRunning`) +
-                FfiConverterBoolean.allocationSize(value.`budgetExhausted`)
-        )
+            FfiConverterULong.allocationSize(value.`completed`) +
+            FfiConverterULong.allocationSize(value.`failed`) +
+            FfiConverterUInt.allocationSize(value.`stillRunning`) +
+            FfiConverterBoolean.allocationSize(value.`budgetExhausted`)
+    )
 
-    override fun write(
-        value: WorkerWindowResult,
-        buf: ByteBuffer,
-    ) {
-        FfiConverterULong.write(value.`claimed`, buf)
-        FfiConverterULong.write(value.`completed`, buf)
-        FfiConverterULong.write(value.`failed`, buf)
-        FfiConverterUInt.write(value.`stillRunning`, buf)
-        FfiConverterBoolean.write(value.`budgetExhausted`, buf)
+    override fun write(value: WorkerWindowResult, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`claimed`, buf)
+            FfiConverterULong.write(value.`completed`, buf)
+            FfiConverterULong.write(value.`failed`, buf)
+            FfiConverterUInt.write(value.`stillRunning`, buf)
+            FfiConverterBoolean.write(value.`budgetExhausted`, buf)
     }
 }
 
+
+
+
 enum class DeviceCapability {
+
     CAMERA,
     FILE,
     BIOMETRIC,
-    SECURE_STORAGE,
-    ;
+    SECURE_STORAGE;
+
+
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeDeviceCapability : FfiConverterRustBuffer<DeviceCapability> {
-    override fun read(buf: ByteBuffer) =
-        try {
-            DeviceCapability.values()[buf.getInt() - 1]
-        } catch (e: IndexOutOfBoundsException) {
-            throw RuntimeException("invalid enum value, something is very wrong!!", e)
-        }
+public object FfiConverterTypeDeviceCapability: FfiConverterRustBuffer<DeviceCapability> {
+    override fun read(buf: ByteBuffer) = try {
+        DeviceCapability.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
 
     override fun allocationSize(value: DeviceCapability) = 4UL
 
-    override fun write(
-        value: DeviceCapability,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: DeviceCapability, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
 
+
+
+
+
+
+
 /**
  * Handler error returned by host-registered step handlers.
  */
-sealed class HandlerException(
-    message: String,
-) : kotlin.Exception(message) {
-    class Retryable(
-        message: String,
-    ) : HandlerException(message)
+sealed class HandlerException(message: String): kotlin.Exception(message) {
 
-    class Permanent(
-        message: String,
-    ) : HandlerException(message)
+        class Retryable(message: String) : HandlerException(message)
+
+        class Permanent(message: String) : HandlerException(message)
+
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<HandlerException> {
         override fun lift(error_buf: RustBuffer.ByValue): HandlerException = FfiConverterTypeHandlerError.lift(error_buf)
@@ -6396,104 +6083,100 @@ sealed class HandlerException(
  * @suppress
  */
 public object FfiConverterTypeHandlerError : FfiConverterRustBuffer<HandlerException> {
-    override fun read(buf: ByteBuffer): HandlerException =
-        when (buf.getInt()) {
+    override fun read(buf: ByteBuffer): HandlerException {
+
+            return when(buf.getInt()) {
             1 -> HandlerException.Retryable(FfiConverterString.read(buf))
             2 -> HandlerException.Permanent(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
 
-    override fun allocationSize(value: HandlerException): ULong = 4UL
+    }
 
-    override fun write(
-        value: HandlerException,
-        buf: ByteBuffer,
-    ) {
-        when (value) {
+    override fun allocationSize(value: HandlerException): ULong {
+        return 4UL
+    }
+
+    override fun write(value: HandlerException, buf: ByteBuffer) {
+        when(value) {
             is HandlerException.Retryable -> {
                 buf.putInt(1)
                 Unit
             }
-
             is HandlerException.Permanent -> {
                 buf.putInt(2)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
+
 }
+
+
 
 /**
  * Instance lifecycle state, exposed to mobile hosts.
  */
 
 enum class InstanceStateKind {
+
     SCHEDULED,
     RUNNING,
     WAITING,
     PAUSED,
     COMPLETED,
     FAILED,
-    CANCELLED,
-    ;
+    CANCELLED;
+
+
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeInstanceStateKind : FfiConverterRustBuffer<InstanceStateKind> {
-    override fun read(buf: ByteBuffer) =
-        try {
-            InstanceStateKind.values()[buf.getInt() - 1]
-        } catch (e: IndexOutOfBoundsException) {
-            throw RuntimeException("invalid enum value, something is very wrong!!", e)
-        }
+public object FfiConverterTypeInstanceStateKind: FfiConverterRustBuffer<InstanceStateKind> {
+    override fun read(buf: ByteBuffer) = try {
+        InstanceStateKind.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
 
     override fun allocationSize(value: InstanceStateKind) = 4UL
 
-    override fun write(
-        value: InstanceStateKind,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: InstanceStateKind, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
 
+
+
+
+
+
+
 /**
  * Error type exposed to mobile hosts via `UniFFI`.
  */
-sealed class MobileException(
-    message: String,
-) : kotlin.Exception(message) {
-    class Engine(
-        message: String,
-    ) : MobileException(message)
+sealed class MobileException(message: String): kotlin.Exception(message) {
 
-    class Storage(
-        message: String,
-    ) : MobileException(message)
+        class Engine(message: String) : MobileException(message)
 
-    class InvalidInput(
-        message: String,
-    ) : MobileException(message)
+        class Storage(message: String) : MobileException(message)
 
-    class NotFound(
-        message: String,
-    ) : MobileException(message)
+        class InvalidInput(message: String) : MobileException(message)
 
-    class ResourceLimit(
-        message: String,
-    ) : MobileException(message)
+        class NotFound(message: String) : MobileException(message)
 
-    class AlreadyExists(
-        message: String,
-    ) : MobileException(message)
+        class ResourceLimit(message: String) : MobileException(message)
 
-    class Shutdown(
-        message: String,
-    ) : MobileException(message)
+        class AlreadyExists(message: String) : MobileException(message)
+
+        class Shutdown(message: String) : MobileException(message)
+
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<MobileException> {
         override fun lift(error_buf: RustBuffer.ByValue): MobileException = FfiConverterTypeMobileError.lift(error_buf)
@@ -6504,8 +6187,9 @@ sealed class MobileException(
  * @suppress
  */
 public object FfiConverterTypeMobileError : FfiConverterRustBuffer<MobileException> {
-    override fun read(buf: ByteBuffer): MobileException =
-        when (buf.getInt()) {
+    override fun read(buf: ByteBuffer): MobileException {
+
+            return when(buf.getInt()) {
             1 -> MobileException.Engine(FfiConverterString.read(buf))
             2 -> MobileException.Storage(FfiConverterString.read(buf))
             3 -> MobileException.InvalidInput(FfiConverterString.read(buf))
@@ -6516,154 +6200,152 @@ public object FfiConverterTypeMobileError : FfiConverterRustBuffer<MobileExcepti
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
 
-    override fun allocationSize(value: MobileException): ULong = 4UL
+    }
 
-    override fun write(
-        value: MobileException,
-        buf: ByteBuffer,
-    ) {
-        when (value) {
+    override fun allocationSize(value: MobileException): ULong {
+        return 4UL
+    }
+
+    override fun write(value: MobileException, buf: ByteBuffer) {
+        when(value) {
             is MobileException.Engine -> {
                 buf.putInt(1)
                 Unit
             }
-
             is MobileException.Storage -> {
                 buf.putInt(2)
                 Unit
             }
-
             is MobileException.InvalidInput -> {
                 buf.putInt(3)
                 Unit
             }
-
             is MobileException.NotFound -> {
                 buf.putInt(4)
                 Unit
             }
-
             is MobileException.ResourceLimit -> {
                 buf.putInt(5)
                 Unit
             }
-
             is MobileException.AlreadyExists -> {
                 buf.putInt(6)
                 Unit
             }
-
             is MobileException.Shutdown -> {
                 buf.putInt(7)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
+
 }
+
+
 
 /**
  * Current network path, reported with the node's capabilities.
  */
 
 enum class NodeConnectivity {
+
     OFFLINE,
     METERED,
     WIFI,
-    ETHERNET,
-    ;
+    ETHERNET;
+
+
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypeNodeConnectivity : FfiConverterRustBuffer<NodeConnectivity> {
-    override fun read(buf: ByteBuffer) =
-        try {
-            NodeConnectivity.values()[buf.getInt() - 1]
-        } catch (e: IndexOutOfBoundsException) {
-            throw RuntimeException("invalid enum value, something is very wrong!!", e)
-        }
+public object FfiConverterTypeNodeConnectivity: FfiConverterRustBuffer<NodeConnectivity> {
+    override fun read(buf: ByteBuffer) = try {
+        NodeConnectivity.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
 
     override fun allocationSize(value: NodeConnectivity) = 4UL
 
-    override fun write(
-        value: NodeConnectivity,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: NodeConnectivity, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
+
+
+
+
 
 /**
  * Device power state reported by the host app. Used to adapt tick frequency.
  */
 
 enum class PowerState {
+
     /**
      * Plugged in — full tick frequency.
      */
     CHARGING,
-
     /**
      * Battery above 20% — normal tick frequency.
      */
     UNPLUGGED,
-
     /**
      * Battery at or below 20% — reduced tick frequency (2x interval).
      */
     LOW_BATTERY,
-
     /**
      * Battery at or below 5% — minimal tick frequency (4x interval).
      */
-    CRITICAL_BATTERY,
+    CRITICAL_BATTERY;
 
-    ;
+
+
 
     companion object
 }
 
+
 /**
  * @suppress
  */
-public object FfiConverterTypePowerState : FfiConverterRustBuffer<PowerState> {
-    override fun read(buf: ByteBuffer) =
-        try {
-            PowerState.values()[buf.getInt() - 1]
-        } catch (e: IndexOutOfBoundsException) {
-            throw RuntimeException("invalid enum value, something is very wrong!!", e)
-        }
+public object FfiConverterTypePowerState: FfiConverterRustBuffer<PowerState> {
+    override fun read(buf: ByteBuffer) = try {
+        PowerState.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
 
     override fun allocationSize(value: PowerState) = 4UL
 
-    override fun write(
-        value: PowerState,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: PowerState, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
 
+
+
+
+
+
+
 /**
  * Sync-specific error type.
  */
-sealed class SyncException(
-    message: String,
-) : kotlin.Exception(message) {
-    class Network(
-        message: String,
-    ) : SyncException(message)
+sealed class SyncException(message: String): kotlin.Exception(message) {
 
-    class SignatureInvalid(
-        message: String,
-    ) : SyncException(message)
+        class Network(message: String) : SyncException(message)
 
-    class InvalidManifest(
-        message: String,
-    ) : SyncException(message)
+        class SignatureInvalid(message: String) : SyncException(message)
+
+        class InvalidManifest(message: String) : SyncException(message)
+
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<SyncException> {
         override fun lift(error_buf: RustBuffer.ByValue): SyncException = FfiConverterTypeSyncError.lift(error_buf)
@@ -6674,43 +6356,47 @@ sealed class SyncException(
  * @suppress
  */
 public object FfiConverterTypeSyncError : FfiConverterRustBuffer<SyncException> {
-    override fun read(buf: ByteBuffer): SyncException =
-        when (buf.getInt()) {
+    override fun read(buf: ByteBuffer): SyncException {
+
+            return when(buf.getInt()) {
             1 -> SyncException.Network(FfiConverterString.read(buf))
             2 -> SyncException.SignatureInvalid(FfiConverterString.read(buf))
             3 -> SyncException.InvalidManifest(FfiConverterString.read(buf))
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
 
-    override fun allocationSize(value: SyncException): ULong = 4UL
+    }
 
-    override fun write(
-        value: SyncException,
-        buf: ByteBuffer,
-    ) {
-        when (value) {
+    override fun allocationSize(value: SyncException): ULong {
+        return 4UL
+    }
+
+    override fun write(value: SyncException, buf: ByteBuffer) {
+        when(value) {
             is SyncException.Network -> {
                 buf.putInt(1)
                 Unit
             }
-
             is SyncException.SignatureInvalid -> {
                 buf.putInt(2)
                 Unit
             }
-
             is SyncException.InvalidManifest -> {
                 buf.putInt(3)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
+
 }
+
+
+
 
 /**
  * @suppress
  */
-public object FfiConverterOptionalUByte : FfiConverterRustBuffer<kotlin.UByte?> {
+public object FfiConverterOptionalUByte: FfiConverterRustBuffer<kotlin.UByte?> {
     override fun read(buf: ByteBuffer): kotlin.UByte? {
         if (buf.get().toInt() == 0) {
             return null
@@ -6726,10 +6412,7 @@ public object FfiConverterOptionalUByte : FfiConverterRustBuffer<kotlin.UByte?> 
         }
     }
 
-    override fun write(
-        value: kotlin.UByte?,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: kotlin.UByte?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
@@ -6739,10 +6422,13 @@ public object FfiConverterOptionalUByte : FfiConverterRustBuffer<kotlin.UByte?> 
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?> {
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
     override fun read(buf: ByteBuffer): kotlin.String? {
         if (buf.get().toInt() == 0) {
             return null
@@ -6758,10 +6444,7 @@ public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?
         }
     }
 
-    override fun write(
-        value: kotlin.String?,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
@@ -6771,10 +6454,13 @@ public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeTokenProvider : FfiConverterRustBuffer<TokenProvider?> {
+public object FfiConverterOptionalTypeTokenProvider: FfiConverterRustBuffer<TokenProvider?> {
     override fun read(buf: ByteBuffer): TokenProvider? {
         if (buf.get().toInt() == 0) {
             return null
@@ -6790,10 +6476,7 @@ public object FfiConverterOptionalTypeTokenProvider : FfiConverterRustBuffer<Tok
         }
     }
 
-    override fun write(
-        value: TokenProvider?,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: TokenProvider?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
@@ -6803,10 +6486,13 @@ public object FfiConverterOptionalTypeTokenProvider : FfiConverterRustBuffer<Tok
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterOptionalTypeNodeConnectivity : FfiConverterRustBuffer<NodeConnectivity?> {
+public object FfiConverterOptionalTypeNodeConnectivity: FfiConverterRustBuffer<NodeConnectivity?> {
     override fun read(buf: ByteBuffer): NodeConnectivity? {
         if (buf.get().toInt() == 0) {
             return null
@@ -6822,10 +6508,7 @@ public object FfiConverterOptionalTypeNodeConnectivity : FfiConverterRustBuffer<
         }
     }
 
-    override fun write(
-        value: NodeConnectivity?,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: NodeConnectivity?, buf: ByteBuffer) {
         if (value == null) {
             buf.put(0)
         } else {
@@ -6835,10 +6518,13 @@ public object FfiConverterOptionalTypeNodeConnectivity : FfiConverterRustBuffer<
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.String>> {
+public object FfiConverterSequenceString: FfiConverterRustBuffer<List<kotlin.String>> {
     override fun read(buf: ByteBuffer): List<kotlin.String> {
         val len = buf.getInt()
         return List<kotlin.String>(len) {
@@ -6852,10 +6538,7 @@ public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.St
         return sizeForLength + sizeForItems
     }
 
-    override fun write(
-        value: List<kotlin.String>,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: List<kotlin.String>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterString.write(it, buf)
@@ -6863,10 +6546,13 @@ public object FfiConverterSequenceString : FfiConverterRustBuffer<List<kotlin.St
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeDelegationStatus : FfiConverterRustBuffer<List<DelegationStatus>> {
+public object FfiConverterSequenceTypeDelegationStatus: FfiConverterRustBuffer<List<DelegationStatus>> {
     override fun read(buf: ByteBuffer): List<DelegationStatus> {
         val len = buf.getInt()
         return List<DelegationStatus>(len) {
@@ -6880,10 +6566,7 @@ public object FfiConverterSequenceTypeDelegationStatus : FfiConverterRustBuffer<
         return sizeForLength + sizeForItems
     }
 
-    override fun write(
-        value: List<DelegationStatus>,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: List<DelegationStatus>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeDelegationStatus.write(it, buf)
@@ -6891,10 +6574,13 @@ public object FfiConverterSequenceTypeDelegationStatus : FfiConverterRustBuffer<
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeInstanceSummary : FfiConverterRustBuffer<List<InstanceSummary>> {
+public object FfiConverterSequenceTypeInstanceSummary: FfiConverterRustBuffer<List<InstanceSummary>> {
     override fun read(buf: ByteBuffer): List<InstanceSummary> {
         val len = buf.getInt()
         return List<InstanceSummary>(len) {
@@ -6908,10 +6594,7 @@ public object FfiConverterSequenceTypeInstanceSummary : FfiConverterRustBuffer<L
         return sizeForLength + sizeForItems
     }
 
-    override fun write(
-        value: List<InstanceSummary>,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: List<InstanceSummary>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeInstanceSummary.write(it, buf)
@@ -6919,10 +6602,13 @@ public object FfiConverterSequenceTypeInstanceSummary : FfiConverterRustBuffer<L
     }
 }
 
+
+
+
 /**
  * @suppress
  */
-public object FfiConverterSequenceTypeSequenceInfo : FfiConverterRustBuffer<List<SequenceInfo>> {
+public object FfiConverterSequenceTypeSequenceInfo: FfiConverterRustBuffer<List<SequenceInfo>> {
     override fun read(buf: ByteBuffer): List<SequenceInfo> {
         val len = buf.getInt()
         return List<SequenceInfo>(len) {
@@ -6936,10 +6622,7 @@ public object FfiConverterSequenceTypeSequenceInfo : FfiConverterRustBuffer<List
         return sizeForLength + sizeForItems
     }
 
-    override fun write(
-        value: List<SequenceInfo>,
-        buf: ByteBuffer,
-    ) {
+    override fun write(value: List<SequenceInfo>, buf: ByteBuffer) {
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeSequenceInfo.write(it, buf)
