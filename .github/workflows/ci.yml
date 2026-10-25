@@ -66,6 +66,13 @@ jobs:
         run: ./scripts/check-sdk-versions.sh
       - name: SDK packaging contracts
         run: ./scripts/check-sdk-packaging.sh
+      - name: Verify all Rust lockfiles
+        # Resolve the actual dependency graphs before compilation; --no-deps
+        # skips lockfile validation and cannot detect standalone workspace drift.
+        run: |
+          for manifest in Cargo.toml packages/node-native/Cargo.toml packages/python-native/Cargo.toml fuzz/Cargo.toml; do
+            cargo metadata --locked --format-version 1 --manifest-path "$manifest" > /dev/null
+          done
       - name: Check
         run: cargo check --locked --workspace
       - name: Browser WASM target
