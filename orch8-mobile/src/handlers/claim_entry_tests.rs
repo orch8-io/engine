@@ -308,7 +308,12 @@ async fn cancelled_native_preflight_retries_through_the_real_effect_ledger() {
     let (_sqlite, mut ctx) = claimed_context().await;
     let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
     ctx.storage = storage.clone();
-    let pause = faults.on("verify_instance_claim").times(1).pause();
+    let native_entry = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed_entry = native_entry.clone();
+    let pause = faults
+        .on("verify_instance_claim")
+        .when(move |_| observed_entry.load(Ordering::SeqCst))
+        .pause();
     let calls = Arc::new(AtomicUsize::new(0));
     let stragglers = Arc::new(Stragglers::default());
     let mut registry = HandlerRegistry::new();
@@ -319,7 +324,14 @@ async fn cancelled_native_preflight_retries_through_the_real_effect_ledger() {
         Duration::from_secs(60),
         stragglers.clone(),
     );
-    let registry = Arc::new(registry);
+    // Observe adapter entry instead of counting generic/core preflight reads.
+    let native = Arc::new(registry);
+    let mut execution_registry = HandlerRegistry::new();
+    execution_registry.register_with_deferred_effect_admission("queued", move |ctx| {
+        native_entry.store(true, Ordering::SeqCst);
+        native.get("queued").unwrap()(ctx)
+    });
+    let registry = Arc::new(execution_registry);
     let first = execution(&ctx);
     let first_store = storage.clone();
     let first_registry = registry.clone();
@@ -328,6 +340,19 @@ async fn cancelled_native_preflight_retries_through_the_real_effect_ledger() {
     tokio::time::timeout(Duration::from_secs(5), pause.entered())
         .await
         .unwrap();
+    let ledger = storage
+        .get_continuity_execution_by_instance(&ctx.tenant_id, ctx.instance_id)
+        .await
+        .unwrap()
+        .expect("native preflight must hold a prepared effect");
+    assert_eq!(
+        storage
+            .list_effect_receipts(&ctx.tenant_id, ledger.continuity_id, 10)
+            .await
+            .unwrap()[0]
+            .state,
+        orch8_types::continuity::EffectState::Prepared
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());

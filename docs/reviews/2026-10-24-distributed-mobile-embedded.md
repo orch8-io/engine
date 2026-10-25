@@ -2089,3 +2089,38 @@ warnings denied, formatting, documentation and diff checks passed. Hosted checks
 on the submitted commit must pass before merge. Custom Rust storage backends must implement
 InvariantStore.list_effect_commit_guards. No schema migration or HTTP/FFI change
 is introduced. The original distributed/mobile/embedded review remains open.
+
+
+### DME112 — Ordinary handler factories entered without current claim proof
+
+Three regressions failed against the preceding core: an ordinary handler factory
+was entered for a retained token after transition to Waiting, for a mismatched
+execution tenant, and after claim loss during durable dispatch's storage wait.
+The factory counter reached one in each case. Claim-bound output writes did not
+prevent the side effect of entering the handler in the first place.
+
+Core execution now checks a supplied running tenant claim before effect-scope
+creation. After durable preparation/dispatch awaits, it checks again inside the
+handler timeout and before invoking the future factory itself. Pure handlers use
+the same entry fence. A refused initial context cannot create a foreign receipt
+namespace. Storage errors remain typed; a failed initial check creates no effect
+scope and the exact same request can retry after storage recovers.
+
+Twenty contracts pass across plain/encrypted SQLite/Postgres with isolated,
+required Postgres. They cover the three reproduced cases, pure handler factories,
+and failed initial claim reads followed by same-request recovery. A mobile
+independent-pool retirement fixture checks that a retained running token cannot
+enter a generic handler or create its effect scope after account retirement.
+The native cancellation/real-ledger regression now observes adapter entry and
+asserts Prepared evidence there, so generic preflight reads cannot accidentally
+replace its physical-native coverage. Final validation passed 2,072 engine,
+533 mobile and 232 storage library tests, all twenty backend contracts,
+workspace/all-target Clippy with warnings denied, formatting, documentation and
+diff checks. Hosted checks must pass on the submitted commit before merge.
+
+Explicit unclaimed Rust helpers retain their trusted behavior. This is a
+preflight, not an atomic external transaction or forced interruption of admitted
+work. Dispatch already recorded before a later failed check retains conservative
+unknown evidence; it is not erased. No schema or HTTP/FFI changes are introduced.
+The broader parameter/memory read audit, scoped runtime/SDK integration and original
+distributed/mobile/embedded matrix remain open.

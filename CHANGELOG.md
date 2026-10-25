@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Claimed handler entry
+
+- Revalidate the running tenant claim before creating effect ownership metadata
+  and again after durable-dispatch waits, before calling a handler's future
+  factory. Ordinary and pure handlers cannot enter from stale or foreign contexts.
+- Keep initial storage failures free of new effect scopes and retryable with the
+  same request. Preserve conservative evidence once dispatch was recorded.
+  Trusted unclaimed helpers, schemas and HTTP/FFI signatures remain unchanged.
+
 ### Synchronous effect-guard discovery
 
 - Apply policy scope and effect-kind filters in storage before limiting invariant
