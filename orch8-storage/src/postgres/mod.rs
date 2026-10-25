@@ -23,6 +23,7 @@ mod federation;
 mod instances;
 mod kv_state;
 mod misc;
+mod mobile_access;
 mod mobile_sync;
 mod outputs;
 mod placement;
@@ -679,6 +680,21 @@ impl crate::InstanceStore for PostgresStorage {
         target: InstanceId,
     ) -> Result<Option<TaskInstance>, StorageError> {
         instances::get_for_caller(self, caller, tenant, target).await
+    }
+
+    async fn get_mobile_instance(
+        &self,
+        access: &crate::MobileInstanceAccess,
+        id: InstanceId,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        mobile_access::get(self, access, id).await
+    }
+    async fn cancel_mobile_instance(
+        &self,
+        access: &crate::MobileInstanceAccess,
+        id: InstanceId,
+    ) -> Result<Option<InstanceState>, StorageError> {
+        mobile_access::cancel(self, access, id).await
     }
 
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {

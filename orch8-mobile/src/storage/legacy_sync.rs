@@ -5,9 +5,7 @@ use std::collections::HashSet;
 /// Positive legacy authority, independent of account-name prefixes. Retained
 /// receipts remain independent of native row garbage collection. Materialized
 /// requests cannot be forgotten through the scoped cleanup API.
-pub(super) const OWNER: &str = "i.tenant_id = 'mobile'
- AND NOT EXISTS (SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=i.id)
- AND NOT EXISTS (SELECT 1 FROM mobile_catalog_run_materializations m WHERE m.request_id=i.id)";
+pub(super) const OWNER: &str = orch8_storage::sqlite::LEGACY_MOBILE_OWNER_SQL;
 
 impl MobileStorage {
     pub(crate) async fn legacy_sync_instance_ids(

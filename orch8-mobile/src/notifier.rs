@@ -164,7 +164,10 @@ impl MobileNotifier {
             if self.terminal_seen.lock().await.contains(&id) {
                 continue;
             }
-            let Ok(Some(inst)) = storage.get_instance(id).await else {
+            let Ok(Some(inst)) = storage
+                .get_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
+                .await
+            else {
                 continue;
             };
             if inst.state != projected_state {

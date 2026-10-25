@@ -682,14 +682,15 @@ async fn retired_cleanup_retains_capacity_and_registration_charges_until_host_dr
         .await
         .unwrap();
     drop(finished); // Losing the observer must not abort owned cleanup.
+    let rejoined = hub.close_retired(&owner).await.unwrap();
     release.send(()).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while gate.available_permits() == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    // A physical slot returns before retirement priority and completion
+    // metadata finish settling. Only the receipt proves registration is ready.
+    tokio::time::timeout(Duration::from_secs(5), async { rejoined.await })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(gate.available_permits(), 1);
     hub.bind(
         &reopened,
         "new",

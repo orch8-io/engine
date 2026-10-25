@@ -2918,3 +2918,108 @@ paths, real HTTP replay of old outbox rows, owner corruption and retirement,
 mismatched metadata, encrypted signals and late results, two-pool writer
 contention, unavailable authority storage, native-history GC and idempotent old
 outbox upgrades. All 44 reporter tests also passed as a focused suite.
+
+### DME134 — Native callbacks need trusted immutable originating context
+
+Scoped routing alone selected the right callback object but the existing
+`execute(name,input)` interface gave a shared callback no trusted account,
+catalog, run or effect identity. Workflow JSON and the currently selected UI
+account cannot supply that authority.
+
+The internal contextual callback path now supplies a separate immutable record
+containing the frozen account/catalog IDs, original account execution epoch,
+run ID, block, business attempt and durable effect ID. Its fields are private
+and it is not deserialized from input. The effect capability projects an ID only
+when its tenant/run/block/attempt match the original invocation; reading this
+projection does not dispatch or consume it. Native claim, expiry, dispatch and
+post-dispatch checks still run in the existing physically owned invocation path.
+
+Production scoped registration requires the contextual trait. The previous
+context-free scoped adapter exists only in test builds for older storage,
+admission and lifetime fixtures. Legacy global host callbacks retain their
+existing interface. Callback context holds ordinary immutable metadata rather
+than an engine/runtime/handler reference that could create an ownership cycle.
+The invocation adapter and accepted binding follow the existing foreign object
+release path before physical callback and registration capacity returns. Missing
+or mismatched effect authority fails before independently cloning the accepted
+foreign reference out of the registry.
+
+Real scheduler regressions register one callback object under identical names
+in two accounts × two catalogs. Forged ownership and attempt fields remain in
+ordinary input but cannot override the separately delivered owner; each delivered
+effect ID matches its actual committed ledger row. A held callback retains its
+old context through retirement/reopen, cannot publish its late result, and a new
+run receives the new epoch and a distinct effect. A running claim alone cannot
+invoke a contextual callback without durable effect admission. Core effect tests
+also prove mismatched identity projections leave a prepared capability usable
+for its original invocation.
+
+This is internal native runtime functionality. It does not claim a public
+UniFFI/Swift/Kotlin context contract, account/catalog/run SDK handles, scoped
+read/lifecycle/listener completion, catalog-authenticated reporting, or S1–S12
+completion. Those remain delivery requirements rather than optional follow-ups.
+
+Local validation passed all 612 mobile unit tests, 109 integration checks, all
+14 core effect-guard tests, and workspace/all-target Clippy with warnings denied.
+Fresh generation from the rebuilt native library matches all five committed
+mobile binding copies. These binding checks prove compatibility of the existing
+exported SDK surface, not completion of the new scoped foreign callback API.
+
+The first DME134 hosted unit run exposed a pre-existing synchronization race in
+`retired_cleanup_retains_capacity_and_registration_charges_until_host_drop`.
+All three new contextual callback tests passed in that run. The old cleanup
+fixture dropped its observer, then treated an available physical semaphore slot
+as proof that registration was ready. The retirement job releases that slot
+before its priority token and completion metadata finish settling, so a correct
+registration refusal could race the fixture's immediate rebind assertion.
+
+The fixture now reattaches to the already-running owned cleanup receipt after
+dropping its first observer. It waits for full completion before rebinding and
+still asserts the blocked destructor's physical/registration charges, another
+account's progress, observer independence and late cleanup's epoch isolation.
+No runtime admission or cleanup invariant was relaxed. The repaired case passed
+50 consecutive scheduling stress runs before the full suite was repeated.
+
+### DME135 — Run reads, cancellation and legacy notifications need owner boundaries
+
+Real catalog materializations exposed a second ownership gap: legacy lifecycle
+get/list returned scoped runs and their private context, legacy cancellation
+cancelled them, and legacy step completion merged output into their waiting
+context. A real global listener also received scoped completion data. These
+reproductions use two accounts and two catalogs rather than fabricated tenant
+strings alone.
+
+Storage now requires an explicit mobile access descriptor at the read/cancel
+boundary. SQLite authorizes the actual read in one snapshot against the active
+account session, catalog request, materialization receipt and original native
+identity. Cancellation proves authority inside the same immediate transaction
+as its state change, clears claim/wake metadata and preserves existing terminal
+states. Fresh sessions can read earlier execution history; stale sessions lose
+authority, and fresh sessions cannot mutate nonterminal work from an old epoch.
+These descriptors are supplied by trusted runtime handles, not workflow JSON or
+network bearer credentials. PostgreSQL supports the explicit legacy tenant and
+rejects unsupported catalog access without a global-read fallback.
+
+Internal run views bind their original account/catalog/session and weak runtime
+reference. Closing a view or runtime prevents result delivery without retiring
+the account or cancelling durable work. Reads pass through the encryption
+decorator after backend authorization; cancellation never rewrites context.
+Both methods are explicit fault-injection boundaries for decorator/race tests.
+
+Legacy lifecycle reads, active lists, cancellation, approval reads and listener
+projections now share the positive legacy-owner policy. Terminal hydration
+rechecks that policy. Waiting projections guard JSON extraction, so malformed
+foreign context cannot suppress legitimate legacy events. This closes the
+legacy access paths; it does not add scoped approval or scoped listener APIs.
+
+Eleven focused mobile regressions pass, including cross-account/catalog denial,
+retirement while storage is paused, old-session rejection, fresh-session history,
+view/runtime close during reads, encrypted access, inconsistent native identity,
+missing materialization receipts, and real legacy listener isolation. Eight
+plain/encrypted SQLite/PostgreSQL integration legs pass with PostgreSQL required
+and actually running. All 623 mobile unit tests and 109 integration checks pass.
+Workspace/all-target Clippy passes with warnings denied. All 239 storage unit
+tests and 32 strict-concurrency Swift tests linked to the rebuilt macOS native
+library pass; fresh generation matches all five committed binding copies.
+Public foreign run handles, scoped approval/listener delivery and the remaining
+ADR S1–S12 rollout are still open.

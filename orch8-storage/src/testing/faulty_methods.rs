@@ -40,6 +40,8 @@ fault_impl! {
         async fn create_instance_externalized(&self, instance: &TaskInstance, threshold_bytes: u32) -> Result<(), StorageError>;
         async fn create_instances_batch_externalized(&self, instances: &[TaskInstance], threshold_bytes: u32) -> Result<u64, StorageError>;
         async fn get_instance_for_caller(&self, caller: InstanceId, tenant: &TenantId, target: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
+        async fn get_mobile_instance(&self, access: &MobileInstanceAccess, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
+        async fn cancel_mobile_instance(&self, access: &MobileInstanceAccess, id: InstanceId) -> Result<Option<InstanceState>, StorageError>;
         async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn claim_due_instances(&self, now: DateTime<Utc>, limit: u32, max_per_tenant: u32) -> Result<Vec<TaskInstance>, StorageError>;
         async fn has_due_higher_priority(&self, now: DateTime<Utc>, priority: orch8_types::instance::Priority) -> Result<bool, StorageError>;

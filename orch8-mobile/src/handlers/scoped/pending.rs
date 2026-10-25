@@ -1,8 +1,8 @@
 //! Registration preflight owns references in the registry, not its async waiter.
+use super::context::BoundHandler;
 use super::{
     Binding, Bindings, CatalogHandlers, CatalogScope, Stragglers, check_capacity, lock, retirement,
 };
-use crate::handlers::StepHandler;
 use orch8_types::error::StepError;
 use std::{
     sync::{
@@ -24,7 +24,7 @@ impl<'a> Pending<'a> {
         owner: &'a CatalogHandlers,
         scope: &CatalogScope,
         name: &str,
-        handler: Arc<dyn StepHandler>,
+        handler: BoundHandler,
         timeout: Duration,
     ) -> Result<Self, StepError> {
         let mut bindings = lock(&owner.bindings);
