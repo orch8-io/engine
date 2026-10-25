@@ -1,4 +1,4 @@
-//! Internal frozen-owner native routing. No production scoped materializer yet.
+//! Internal frozen-owner local routing and scoped runtime admission.
 use super::{
     Callback, HandlerRegistry, StepContext, StepHandler, Stragglers, invoke_foreign_handler,
 };
@@ -28,7 +28,7 @@ fn unavailable() -> StepError {
         details: None,
     }
 }
-fn storage_error(error: orch8_types::error::StorageError) -> StepError {
+pub(super) fn storage_error(error: orch8_types::error::StorageError) -> StepError {
     if error.is_transient() {
         StepError::Retryable {
             message: "scoped native routing unavailable".into(),
@@ -40,6 +40,7 @@ fn storage_error(error: orch8_types::error::StorageError) -> StepError {
 }
 
 mod lifecycle;
+pub(crate) mod lifetime;
 pub(crate) mod materialize;
 mod pending;
 mod physical;
@@ -85,6 +86,7 @@ impl NativeCapacity {
 pub(super) struct Binding {
     // Foreign object drops before its plain metadata; never under the map lock.
     handler: Arc<dyn StepHandler>,
+    pub(super) lifetime: Arc<lifetime::Lifetime>,
     scope: CatalogScope,
     name: String,
     timeout: Duration,
@@ -124,6 +126,7 @@ impl Bindings {
 }
 
 pub(crate) struct CatalogHandlers {
+    lifetime: Arc<lifetime::Lifetime>,
     storage: Arc<MobileStorage>,
     backend: Arc<dyn StorageBackend>,
     bindings: Mutex<Bindings>,
@@ -140,12 +143,27 @@ pub(crate) struct CatalogHandlers {
 impl CatalogHandlers {
     /// Trusted runtime supplies the same backend used by its step executor.
     /// Decorators are allowed, but a context from another backend is refused.
+    #[cfg(test)]
     pub(crate) fn new(
         storage: Arc<MobileStorage>,
         backend: Arc<dyn StorageBackend>,
         stop: tokio_util::sync::CancellationToken,
     ) -> Arc<Self> {
+        Self::new_with_lifetime(
+            storage,
+            backend,
+            stop,
+            crate::MobileEngineConfig::default().max_instance_lifetime_secs,
+        )
+    }
+    pub(crate) fn new_with_lifetime(
+        storage: Arc<MobileStorage>,
+        backend: Arc<dyn StorageBackend>,
+        stop: tokio_util::sync::CancellationToken,
+        seconds: u64,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            lifetime: Arc::new(lifetime::Lifetime::new(storage.clone(), seconds)),
             storage,
             backend,
             bindings: Mutex::new(Bindings::default()),
@@ -162,6 +180,24 @@ impl CatalogHandlers {
     ) -> Arc<Self> {
         let mut owner = Self::new(storage, backend, tokio_util::sync::CancellationToken::new());
         Arc::get_mut(&mut owner).unwrap().capacity = NativeCapacity::new();
+        owner
+    }
+    #[cfg(test)]
+    pub(crate) fn isolated_with_lifetime(
+        storage: Arc<MobileStorage>,
+        backend: Arc<dyn StorageBackend>,
+        seconds: u64,
+        clock: orch8_types::clock::SharedClock,
+    ) -> Arc<Self> {
+        let mut owner = Self::new_with_lifetime(
+            storage,
+            backend,
+            tokio_util::sync::CancellationToken::new(),
+            seconds,
+        );
+        let state = Arc::get_mut(&mut owner).unwrap();
+        state.capacity = NativeCapacity::new();
+        Arc::get_mut(&mut state.lifetime).unwrap().set_clock(clock);
         owner
     }
     #[cfg(test)]

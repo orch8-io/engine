@@ -498,8 +498,12 @@ impl MobileEngine {
         info!(db_path = %db_path, "mobile engine initialized");
 
         let cancel = CancellationToken::new();
-        let catalog_handlers =
-            handlers::scoped::CatalogHandlers::new(mobile_storage, storage.clone(), cancel.clone());
+        let catalog_handlers = handlers::scoped::CatalogHandlers::new_with_lifetime(
+            mobile_storage,
+            storage.clone(),
+            cancel.clone(),
+            config.max_instance_lifetime_secs,
+        );
         let mut registry = builtins::registry_with(builtins::DEFAULT_BUILTINS);
         catalog_handlers.install_resolver_for_sdk(
             &mut registry,

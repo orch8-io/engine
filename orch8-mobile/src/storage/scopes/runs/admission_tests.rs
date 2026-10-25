@@ -33,7 +33,7 @@ impl StepHandler for Native {
         Ok("{}".into())
     }
 }
-async fn work_scope(storage: &MobileStorage, tree: bool) -> CatalogScope {
+pub(super) async fn work_scope(storage: &MobileStorage, tree: bool) -> CatalogScope {
     let account = storage
         .open_account_scope("alice", "issuer", "alice")
         .await

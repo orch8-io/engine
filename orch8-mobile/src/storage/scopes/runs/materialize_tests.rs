@@ -45,6 +45,15 @@ pub(super) async fn owner_with_params(
     catalog: &str,
     params: serde_json::Value,
 ) -> CatalogScope {
+    owner_with_handler(storage, account, catalog, params, "native").await
+}
+pub(super) async fn owner_with_handler(
+    storage: &MobileStorage,
+    account: &str,
+    catalog: &str,
+    params: serde_json::Value,
+    handler: &str,
+) -> CatalogScope {
     let account = storage
         .open_account_scope(account, "issuer", account)
         .await
@@ -56,7 +65,7 @@ pub(super) async fn owner_with_params(
     let seq = SequenceBuilder::new("publisher")
         .name("flow")
         .block(BlockDefinition::Step(Box::new(step_with_params(
-            "work", "native", params,
+            "work", handler, params,
         ))))
         .build();
     let digest = "b".repeat(64);
@@ -68,8 +77,8 @@ pub(super) async fn owner_with_params(
         .install_catalog_workflow(&owner, &serde_json::to_string(&seq).unwrap(), 1, &digest)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO mobile_catalog_execution_policy(account_id,catalog_id,name,version,manifest_version,manifest_digest,min_sdk_version,required_handlers) VALUES (?1,?2,'flow',1,1,?3,'0.0.0','[\"native\"]')")
-        .bind(owner.account_id()).bind(owner.catalog_id()).bind(&digest).execute(storage.pool()).await.unwrap();
+    sqlx::query("INSERT INTO mobile_catalog_execution_policy(account_id,catalog_id,name,version,manifest_version,manifest_digest,min_sdk_version,required_handlers) VALUES (?1,?2,'flow',1,1,?3,'0.0.0',?4)")
+        .bind(owner.account_id()).bind(owner.catalog_id()).bind(&digest).bind(serde_json::to_string(&[handler]).unwrap()).execute(storage.pool()).await.unwrap();
     storage
         .mark_catalog_reconciled(&owner, 1, &digest)
         .await
@@ -555,4 +564,74 @@ async fn materialization_receipt_survives_native_history_gc_and_cannot_be_forgot
     for receipt in hub.close() {
         receipt.await.unwrap();
     }
+}
+
+#[test]
+fn expired_scoped_request_never_enters_host_on_its_first_tick() {
+    let directory = tempfile::tempdir().unwrap();
+    let engine = crate::MobileEngine::new(
+        directory
+            .path()
+            .join("expired.sqlite")
+            .to_string_lossy()
+            .into_owned(),
+        crate::MobileEngineConfig {
+            max_instance_lifetime_secs: 60,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let gate = engine
+        .runtime
+        .block_on(CatalogHandlers::shared_test_gate().lock_owned());
+    let storage = engine.catalog_handlers.test_storage();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let owner = engine.runtime.block_on(owner_with_params(
+        &storage,
+        "alice",
+        "one",
+        serde_json::json!({}),
+    ));
+    engine
+        .runtime
+        .block_on(engine.catalog_handlers.bind(
+            &owner,
+            "native",
+            Arc::new(Echo(calls.clone())),
+            Duration::from_secs(5),
+        ))
+        .unwrap();
+    let run = engine
+        .runtime
+        .block_on(storage.prepare_catalog_run(&owner, request(Some("expired"), "{}"), limits()))
+        .unwrap();
+    engine.runtime.block_on(async {
+        sqlx::query("UPDATE mobile_catalog_run_requests SET created_at=?1 WHERE id=?2")
+            .bind((chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339())
+            .bind(run.id.to_string())
+            .execute(storage.pool())
+            .await
+            .unwrap();
+    });
+    engine
+        .runtime
+        .block_on(engine.materialize_catalog_run(owner, run.id))
+        .unwrap();
+    engine.tick_once().unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "expired scoped request entered a native host callback before expiry cleanup"
+    );
+    assert_eq!(
+        engine
+            .runtime
+            .block_on(engine.storage.get_instance(run.id))
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Failed
+    );
+    engine.shutdown();
+    drop(gate);
 }

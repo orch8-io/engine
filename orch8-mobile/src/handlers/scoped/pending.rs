@@ -53,6 +53,7 @@ impl<'a> Pending<'a> {
         let account = owner.capacity.physical.account(scope)?;
         let fence = Arc::downgrade(&epoch);
         let binding = Arc::new(Binding {
+            lifetime: owner.lifetime.clone(),
             handler,
             scope: scope.clone(),
             name: name.to_owned(),

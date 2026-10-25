@@ -553,7 +553,10 @@ async fn retired_account_cleanup_queues_once_and_cannot_detach_reopened_epoch_bi
     let next = running(&storage, &sqlite, &reopened, "new-epoch").await;
     let before = registry.get("same").unwrap()(next.clone()).await;
     release.send(()).unwrap();
-    task.await.unwrap().unwrap();
+    assert!(matches!(
+        task.await.unwrap(),
+        Err(orch8_types::error::StepError::ClaimLost)
+    ));
     for receipt in [first, second] {
         tokio::time::timeout(Duration::from_secs(5), receipt)
             .await
