@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile binding contract validation
+
+- Synchronize committed Swift/Kotlin bindings and native headers with current
+  UniFFI metadata; verify generated contracts before SDK packaging.
+
 ### Mobile recovery ownership
 
 - Acquire exclusive persisted database ownership before mobile startup recovery;

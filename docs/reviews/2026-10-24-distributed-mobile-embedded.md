@@ -2826,3 +2826,27 @@ checks passed. Fresh native-wrapper and exact-candidate hosted-CI results are
 recorded before merge. This establishes
 the mobile single-recovery-owner boundary; public scoped SDK handles, listener/
 callback ownership, children/delegation, migration and ADR S1-S12 remain open.
+
+
+### DME131 — Fresh generated bindings do not verify the committed SDK contract
+
+The ownership candidate's hosted iOS tests crashed at UniFFI initialization. Its
+shutdown documentation changed the generated method checksum from 65418 to 38962,
+while the committed Swift wrapper still expected 65418. The local native harness
+had substituted freshly generated Swift and therefore missed this packaging
+boundary. Actual simulator evidence made the missing check visible.
+
+All committed Swift, C-header and Kotlin copies now come from the same current
+native metadata. The parity baseline identified four stale copies, including
+older generated Swift/header declarations for token-installation tickets. A new
+mobile binding check compares all five committed copies against fresh generation,
+retaining code, documentation and checksum differences while normalizing only
+formatting trivia. Generation explicitly disables ambient formatter tools so its
+output is deterministic. CI checks parity before packaging bindings/frameworks.
+
+The local native harness now tests the committed production Swift binding rather
+than silently replacing it. All 32 strict Swift wrapper tests passed against the
+actual current macOS library. An iOS simulator check with the original CI-built
+framework is used to verify the repaired package before merge; hosted CI must
+also pass the exact corrected candidate. This is SDK-contract validation, not
+completion of the public scoped FFI surface.

@@ -1410,6 +1410,9 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     
     /**
      * Shut down the engine.
+     * Stop local work and request database closure. Synchronous callers wait
+     * at most `operation_timeout_ms`; pending physical I/O retains recovery
+     * ownership until it settles, so an immediate reopen may report busy.
      */
     func shutdown() 
     
@@ -2028,6 +2031,9 @@ open func setTokenProvider(provider: TokenProvider)  {try! rustCall() {
     
     /**
      * Shut down the engine.
+     * Stop local work and request database closure. Synchronous callers wait
+     * at most `operation_timeout_ms`; pending physical I/O retains recovery
+     * ownership until it settles, so an immediate reopen may report busy.
      */
 open func shutdown()  {try! rustCall() {
         uniffiCallStatus in
@@ -5574,7 +5580,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_set_token_provider() != 808) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() != 65418) {
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_shutdown() != 38962) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_start() != 15754) {
