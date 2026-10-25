@@ -2333,3 +2333,35 @@ pass. A complete logical run deadline needs owned pass/callback supervision and
 bounded physical continuation; that work remains open, along with queued native
 admission, global callback bounds, scoped runtime/SDK integration and the broader
 review matrix. This preflight fix does not claim a complete timeout solution.
+
+
+### DME120 — Python engine collection joined live callbacks while holding the GIL
+
+An actual extension subprocess entered a blocking Python callback, observed its
+step timeout and returned from run and close. Deleting the engine then hung:
+ENGINE_DROPPED was never printed, and the isolated child required killing after
+eight seconds. The default Tokio Runtime destructor joined blocking work while
+Python object destruction held the GIL. That live callback could not make the
+Python progress needed to let destruction finish. Two Rust regressions also
+failed: retirement blocked on a physical callback, and dropping the owner inside
+an async task panicked because blocking runtime destruction was forbidden.
+
+Python now owns its runtime through a small shared HostRuntime owner whose final
+drop signals background shutdown instead of joining. Arc ownership still retains
+the runtime for an in-progress native API call. Started blocking callbacks retain
+their resources until physical return; a detached logical observer does not free
+those captures. Normal block_on behavior and the Node-managed runtime are not
+changed by this Python ownership fix.
+
+The two retirement regressions passed, including physical-capture lifetime after
+logical retirement. The full facade suite passed 171 test results and three doc
+tests. Actual macOS arm64 Python passed all six runtime tests, including the
+committed child-process reproduction: collection returns first, then the test
+releases and observes the physical callback's return. Workspace/all-target lint
+with warnings denied passed. Formatting, documentation and diff checks passed;
+hosted CI must pass before merge.
+
+This does not force callback cancellation or establish process-wide callback
+capacity/fairness. Physical admission and resource bounds, complete in-flight run
+deadlines, scoped runtime/SDK integration and the remaining audit matrix stay
+open. No Python API, schema or callback envelope changes are introduced.

@@ -56,6 +56,10 @@ fn run_sequence_json(
 #[path = "../../native-common/durable.rs"]
 mod durable;
 
+#[path = "../../native-common/runtime.rs"]
+mod host_runtime;
+use host_runtime::HostRuntime;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -72,7 +76,7 @@ fn to_py(error: String) -> PyErr {
 #[pyclass(module = "orch8_engine._native")]
 struct DurableEngine {
     inner: Arc<durable::DurableEngine>,
-    runtime: Arc<tokio::runtime::Runtime>,
+    runtime: Arc<HostRuntime>,
 }
 
 impl DurableEngine {
@@ -104,7 +108,7 @@ impl DurableEngine {
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
         Ok(Self {
             inner: Arc::new(durable::DurableEngine::new(path)),
-            runtime: Arc::new(runtime),
+            runtime: Arc::new(HostRuntime::new(runtime)),
         })
     }
 
