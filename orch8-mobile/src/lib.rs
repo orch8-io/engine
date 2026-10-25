@@ -467,12 +467,12 @@ impl MobileEngine {
         let cancel = CancellationToken::new();
         let catalog_handlers =
             handlers::scoped::CatalogHandlers::new(mobile_storage, storage.clone(), cancel.clone());
+        let mut registry = builtins::registry_with(builtins::DEFAULT_BUILTINS);
+        catalog_handlers.install_resolver(&mut registry, builtins::DEFAULT_BUILTINS);
         let engine = Arc::new(Self {
             storage,
             catalog_handlers,
-            handlers: StdRwLock::new(Arc::new(builtins::registry_with(
-                builtins::DEFAULT_BUILTINS,
-            ))),
+            handlers: StdRwLock::new(Arc::new(registry)),
             config,
             scheduler_config,
             semaphore,
@@ -1672,6 +1672,8 @@ impl MobileEngine {
                     self.cancel.clone(),
                 );
             }
+            self.catalog_handlers
+                .install_resolver(&mut next_registry, &next_enabled);
             (
                 std::mem::replace(&mut *registry, Arc::new(next_registry)),
                 std::mem::replace(&mut *foreign, next_foreign),

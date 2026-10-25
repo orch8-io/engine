@@ -20,6 +20,8 @@ pub mod notify;
 pub mod parallel;
 pub mod param_resolve;
 pub mod query_instance;
+mod resolution;
+pub use resolution::{HandlerLookup, HandlerResolver, ResolvedHandler};
 pub mod race;
 pub mod router;
 pub mod saga;
@@ -224,6 +226,7 @@ fn state_storage_error(error: &orch8_types::error::StorageError) -> StepError {
 pub struct HandlerRegistry {
     handlers: HashMap<Arc<str>, StepHandler>,
     deferred_effect_handlers: HashSet<Arc<str>>,
+    resolver: Option<Arc<dyn HandlerResolver>>,
     /// Mock overrides. When present, `get()` returns the mock instead of the real handler.
     mocks: HashMap<Arc<str>, StepHandler>,
     /// Optional circuit breaker registry. When present, step dispatch sites
@@ -243,6 +246,7 @@ impl HandlerRegistry {
         Self {
             handlers: HashMap::new(),
             deferred_effect_handlers: HashSet::new(),
+            resolver: None,
             mocks: HashMap::new(),
             circuit_breakers: None,
             embed_sandbox: Arc::new(crate::embed_sandbox::SandboxPolicy::default()),
@@ -317,7 +321,12 @@ impl HandlerRegistry {
     }
 
     pub fn contains(&self, name: &str) -> bool {
-        self.mocks.contains_key(name) || self.handlers.contains_key(name)
+        self.mocks.contains_key(name)
+            || self.handlers.contains_key(name)
+            || self
+                .resolver
+                .as_ref()
+                .is_some_and(|resolver| resolver.contains(name))
     }
 
     /// Return all registered handler names (both real and mock).

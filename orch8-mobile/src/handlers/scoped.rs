@@ -43,6 +43,7 @@ mod lifecycle;
 mod pending;
 mod physical;
 mod registrations;
+mod resolution;
 mod retirement;
 pub(super) use physical::Permit as NativePermit;
 
@@ -264,6 +265,14 @@ impl CatalogHandlers {
         });
     }
     async fn invoke(&self, ctx: StepContext, name: &str) -> Result<serde_json::Value, StepError> {
+        self.invoke_selected(ctx, name, None).await
+    }
+    async fn invoke_selected(
+        &self,
+        ctx: StepContext,
+        name: &str,
+        selected: Option<&Weak<Binding>>,
+    ) -> Result<serde_json::Value, StepError> {
         if self.stop.is_cancelled() || !Arc::ptr_eq(&ctx.storage, &self.backend) {
             return Err(StepError::ClaimLost);
         }
@@ -282,6 +291,9 @@ impl CatalogHandlers {
                 .live
                 .get(&(scope.clone(), name.to_owned()))
                 .ok_or_else(unavailable)?;
+            if selected.is_some_and(|expected| !expected.ptr_eq(&Arc::downgrade(binding))) {
+                return Err(unavailable());
+            }
             if ctx.is_dry_run() {
                 return Ok(
                     serde_json::json!({ "dry_run": true, "handler": name, "would": "invoke registered handler" }),
