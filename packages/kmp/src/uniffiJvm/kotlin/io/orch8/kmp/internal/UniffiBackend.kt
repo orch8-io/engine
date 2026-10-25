@@ -62,6 +62,10 @@ internal actual fun <T> runHandlerBlocking(block: suspend () -> T): T = runBlock
 
 /** [EngineBackend] over the UniFFI Kotlin bindings (JNA). */
 internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend {
+    override fun openAccount(identity: io.orch8.kmp.AccountIdentity): AccountBackend = mapErrors {
+        UniffiAccountBackend(engine.openAccount(identity.toUniffi()))
+    }
+
     private val tokenSourcesLock = Any()
     private val tokenSources = java.util.WeakHashMap<DeviceSessionTokens, Unit>()
     private var closed = false
@@ -412,10 +416,10 @@ internal fun USyncException.toKind(): Orch8ErrorKind = when (this) {
     is USyncException.InvalidManifest -> Orch8ErrorKind.INVALID_MANIFEST
 }
 
-private fun Orch8TokenSource.toUniffi(): UTokenProvider {
+internal fun Orch8TokenSource.toUniffi(): UTokenProvider {
     val source = this
     return object : UTokenProvider {
-        override fun currentToken(): String = source.currentToken()
+        override fun currentToken(): String = try { source.currentToken() } catch (_: Exception) { "" }
 
         override fun refreshToken(): String =
             try {

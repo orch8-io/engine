@@ -3235,3 +3235,61 @@ strict concurrency and warnings as errors. Kotlin 2.1.0 compiles the generated
 binding and two committed JVM native tests, which both pass against the same
 library. Fresh generation matches all five binding copies; formatting, docs,
 SDK packaging and whitespace checks pass.
+
+### DME140 — Carry explicit scopes through the common KMP API and real Apple bridge
+
+The common coroutine API now exposes trusted account identities, catalogs,
+contextual handlers, per-call signed sync, durable run preparation/start,
+owned snapshots/cancellation, versioned parallel answers and opaque paginated
+history. JVM/Android adapters call the generated native objects directly.
+Protocol 4 transfers owned child/cursor ports across the Swift/Kotlin boundary;
+no global handle registry or ambient selected account is introduced. Callback
+and token adapters retain their own immutable identities/providers. Scoped
+objects keep no root engine reference. Disposing temporary parents preserves
+issued children; explicit closeView and account retirement retain their fences.
+
+The wrapper tests use an exported, checkpointed SQLite fixture with two accounts
+and two catalogs each. Its workflows are installed only by the existing trusted
+Rust test helper; there is no unsigned production install API. Both JVM and real
+Kotlin/Native host flows execute these four workflows through the common facade,
+check eight unique contextual effects, answer parallel waits in both orders,
+reject stale replies and read scoped history. The Swift host links the actual
+Kotlin framework, production Swift bridge and Rust library, without protocol
+shape mocks. Native host evidence is not an iOS simulator/device execution claim.
+
+Boundary regressions found while building this slice:
+
+- A malformed callback identity was classified as retryable. It is now permanent
+  before application handler entry; input JSON never supplies callback authority.
+- A successfully opened bridge leaked its engine when protocol validation or
+  callback installation failed. Cleanup now follows successful ownership
+  transfer and preserves the original error even when cleanup itself throws.
+- Kotlin/Native terminated the process on invalid configuration because the
+  public factory did not export its exceptions to Swift. Public throwing engine
+  and scoped operations now declare their exception contract; suspend exports
+  include cancellation. The real host regression catches invalid configuration
+  and verifies it creates no database before opening a valid engine.
+- Completing a step on a disposed JVM run escaped the common error contract.
+  It now uses the same disposed-view mapping as reads and cancellation.
+
+CI exports the trusted fixture and runs the actual common/JVM native workflows,
+the Kotlin/Native host flow, and the actual iOS framework/Swift typecheck. Android
+CI stages this commit's AAR under a unique version and compiles the KMP Android
+adapter against that artifact. This avoids silently validating development
+bindings against the older published SDK. No release is published; all runtime,
+bindings, KMP framework and protocol-4 adapter components must match.
+
+Scoped listeners/observation, RN/Flutter facades, account credential management,
+authenticated reporting, scoped workers/delegation, durable materialized-record
+reclamation and the remaining ADR S1–S12 matrix remain open. Root legacy
+observers deliberately exclude scoped runs. History still distinguishes a
+missing native record from a known execution outcome.
+
+Local validation: all 647 mobile unit tests and all 75 common/JVM tests pass
+with no skipped JVM cases when native integration is enabled. The disposed-reply
+regression fails before its mapping fix and passes in the full suite afterward.
+The actual macOS native framework/Swift/Rust flow, actual iOS simulator framework
+build and Swift bridge typecheck pass; strict Swift concurrency and warnings as
+errors are enabled. Mobile all-target Clippy, Rust formatting, actionlint, docs,
+SDK packaging and whitespace checks pass. Android source-cohort compilation is
+configured in CI and awaits that PR run; no Android device execution is claimed.

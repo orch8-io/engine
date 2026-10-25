@@ -301,6 +301,8 @@ internal object BridgeCodec {
 internal class JsonBridgeBackend private constructor(
     private val bridge: Orch8JsonBridge,
 ) : EngineBackend {
+    override fun openAccount(identity: io.orch8.kmp.AccountIdentity): AccountBackend = openJsonAccount(bridge, identity)
+
     private val handlers = HashMap<String, BlockingStepHandler>()
     private var sink: (EngineEvent) -> Unit = {}
 
@@ -625,16 +627,23 @@ internal class JsonBridgeBackend private constructor(
                 put("dbPath", dbPath)
                 put("config", BridgeCodec.configJson(config))
             }
-            val remoteProtocol = (result as? JsonObject)?.get("protocol")?.jsonPrimitive?.intOrNull
-            if (remoteProtocol != ORCH8_BRIDGE_PROTOCOL) {
-                throw Orch8Exception(
-                    Orch8ErrorKind.INVALID_INPUT,
-                    "Swift bridge speaks protocol $remoteProtocol, KMP expects $ORCH8_BRIDGE_PROTOCOL; " +
-                        "update Orch8KmpBridge.swift to the version shipped with this library",
-                )
+            try {
+                val remoteProtocol = (result as? JsonObject)?.get("protocol")?.jsonPrimitive?.intOrNull
+                if (remoteProtocol != ORCH8_BRIDGE_PROTOCOL) {
+                    throw Orch8Exception(
+                        Orch8ErrorKind.INVALID_INPUT,
+                        "Swift bridge speaks protocol $remoteProtocol, KMP expects $ORCH8_BRIDGE_PROTOCOL; " +
+                            "update Orch8KmpBridge.swift to the version shipped with this library",
+                    )
+                }
+                bridge.setCallbacks(backend.callbacks)
+                return backend
+            } catch (error: Throwable) {
+                // Only a successful open envelope transfers ownership. Refused
+                // opens above never shut down a bridge owned by another caller.
+                try { backend.shutdown() } catch (_: Throwable) { }
+                throw error
             }
-            bridge.setCallbacks(backend.callbacks)
-            return backend
         }
     }
 }

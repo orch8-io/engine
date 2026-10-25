@@ -18,6 +18,8 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 private class FakeBackend : EngineBackend {
+    override fun openAccount(identity: AccountIdentity): io.orch8.kmp.internal.AccountBackend = error("unexpected scoped account call")
+
     val handlers = mutableMapOf<String, BlockingStepHandler>()
     var sink: (EngineEvent) -> Unit = {}
     val started = mutableListOf<Triple<String, String, String?>>()

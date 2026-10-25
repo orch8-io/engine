@@ -39,6 +39,8 @@ internal fun interface BlockingStepHandler {
  * `Orch8Exception` so common code sees one error model.
  */
 internal interface EngineBackend {
+    fun openAccount(identity: io.orch8.kmp.AccountIdentity): AccountBackend
+
     fun registerHandler(name: String, handler: BlockingStepHandler)
 
     fun setListener(sink: (EngineEvent) -> Unit)
