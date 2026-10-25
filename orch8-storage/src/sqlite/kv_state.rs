@@ -107,6 +107,36 @@ impl SqliteStorage {
         set_instance_kv_on(&mut conn, instance_id, key, value).await
     }
 
+    pub(crate) async fn get_instance_kv_claimed_impl(
+        &self,
+        instance_id: InstanceId,
+        tenant: &orch8_types::ids::TenantId,
+        key: &str,
+        claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::ClaimedRead<Option<serde_json::Value>>, StorageError> {
+        let row: Option<(Option<String>,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT kv.value FROM task_instances LEFT JOIN instance_kv_state kv
+             ON kv.instance_id = task_instances.id AND kv.key = ?3
+             WHERE task_instances.id = ?1 AND task_instances.tenant_id = ?2
+             AND task_instances.state = 'running' AND task_instances.claimed_at = ?4 AND {}",
+            super::mobile_execution::ALLOWED
+        )))
+        .bind(instance_id.to_string())
+        .bind(tenant.as_str())
+        .bind(key)
+        .bind(super::helpers::ts(claim_token))
+        .fetch_optional(&self.pool)
+        .await?;
+        match row {
+            None => Ok(crate::ClaimedRead::Lost),
+            Some((value,)) => Ok(crate::ClaimedRead::Value(
+                value
+                    .map(|value| serde_json::from_str(&value))
+                    .transpose()?,
+            )),
+        }
+    }
+
     pub(crate) async fn get_instance_kv_impl(
         &self,
         instance_id: InstanceId,

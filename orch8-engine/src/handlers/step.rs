@@ -217,12 +217,30 @@ async fn run_step_core(
     mode: StepMode,
 ) -> Result<BlockOutput, EngineError> {
     let claim_token = exec.claim_token;
+    let memoized = if exec.attempt > 0 {
+        if let Some(token) = claim_token {
+            match storage
+                .get_block_output_claimed(exec.instance_id, &exec.tenant_id, &exec.block_id, token)
+                .await?
+            {
+                orch8_storage::ClaimedRead::Lost => {
+                    return Err(EngineError::ClaimLost {
+                        instance_id: exec.instance_id,
+                    });
+                }
+                orch8_storage::ClaimedRead::Value(output) => output,
+            }
+        } else {
+            storage
+                .get_block_output(exec.instance_id, &exec.block_id)
+                .await?
+        }
+    } else {
+        None
+    };
     // Memoization: if output already exists for this block+attempt, return it.
     // Skip the lookup on attempt 0 — no prior output can exist for a fresh block.
-    if exec.attempt > 0
-        && let Some(existing) = storage
-            .get_block_output(exec.instance_id, &exec.block_id)
-            .await?
+    if let Some(existing) = memoized
         // The in-progress sentinel now carries the real attempt number, so it
         // could falsely match the memoization check below — but it is NOT a
         // real output. Skip it so a crashed-mid-step block re-executes rather
@@ -249,10 +267,26 @@ async fn run_step_core(
     // in instance KV state, return it without running the handler.
     if let Some(ref cache_key) = exec.cache_key {
         let prefixed_key = format!("_cache:{cache_key}");
-        if let Ok(Some(cached)) = storage
-            .get_instance_kv(exec.instance_id, &prefixed_key)
-            .await
-        {
+        let cached = if let Some(token) = claim_token {
+            match storage
+                .get_instance_kv_claimed(exec.instance_id, &exec.tenant_id, &prefixed_key, token)
+                .await?
+            {
+                orch8_storage::ClaimedRead::Lost => {
+                    return Err(EngineError::ClaimLost {
+                        instance_id: exec.instance_id,
+                    });
+                }
+                orch8_storage::ClaimedRead::Value(value) => value,
+            }
+        } else {
+            storage
+                .get_instance_kv(exec.instance_id, &prefixed_key)
+                .await
+                .ok()
+                .flatten()
+        };
+        if let Some(cached) = cached {
             info!(
                 instance_id = %exec.instance_id,
                 block_id = %exec.block_id,

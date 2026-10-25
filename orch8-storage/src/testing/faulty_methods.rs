@@ -121,6 +121,7 @@ fault_impl! {
     [OUTPUT_STORE_METHODS] impl OutputStore {
         async fn save_block_output(&self, output: &BlockOutput) -> Result<(), StorageError>;
         async fn save_block_output_claimed(&self, output: &BlockOutput, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn get_block_output_claimed(&self, instance_id: InstanceId, tenant: &TenantId, block_id: &BlockId, claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError>;
         async fn get_block_output(&self, instance_id: InstanceId, block_id: &BlockId) -> Result<Option<BlockOutput>, StorageError>;
         async fn get_block_outputs_batch(&self, keys: &[(InstanceId, &BlockId)]) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
         async fn get_all_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
@@ -370,6 +371,7 @@ fault_impl! {
     [RESOURCE_STORE_METHODS] impl ResourceStore {
         async fn set_instance_kv(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value) -> Result<(), StorageError>;
         async fn set_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn get_instance_kv_claimed(&self, instance_id: InstanceId, tenant: &TenantId, key: &str, claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<serde_json::Value>>, StorageError>;
         async fn get_instance_kv(&self, instance_id: InstanceId, key: &str) -> Result<Option<serde_json::Value>, StorageError>;
         async fn get_all_instance_kv(&self, instance_id: InstanceId) -> Result<HashMap<String, serde_json::Value>, StorageError>;
         async fn delete_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;

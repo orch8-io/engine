@@ -94,6 +94,31 @@ impl PostgresStorage {
         set_instance_kv_on(&mut conn, instance_id, key, value).await
     }
 
+    pub(crate) async fn get_instance_kv_claimed_impl(
+        &self,
+        instance_id: InstanceId,
+        tenant: &orch8_types::ids::TenantId,
+        key: &str,
+        claim_token: chrono::DateTime<chrono::Utc>,
+    ) -> Result<crate::ClaimedRead<Option<serde_json::Value>>, StorageError> {
+        let row: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
+            "SELECT kv.value FROM task_instances LEFT JOIN instance_kv_state kv
+             ON kv.instance_id = task_instances.id AND kv.key = $3
+             WHERE task_instances.id = $1 AND task_instances.tenant_id = $2
+             AND task_instances.state = 'running' AND task_instances.claimed_at = $4",
+        )
+        .bind(instance_id.into_uuid())
+        .bind(tenant.as_str())
+        .bind(key)
+        .bind(claim_token)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match row {
+            None => crate::ClaimedRead::Lost,
+            Some((value,)) => crate::ClaimedRead::Value(value),
+        })
+    }
+
     pub(crate) async fn get_instance_kv_impl(
         &self,
         instance_id: InstanceId,

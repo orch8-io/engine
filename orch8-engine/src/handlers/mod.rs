@@ -114,6 +114,26 @@ pub struct StepContext {
 }
 
 impl StepContext {
+    /// Read this instance's KV state under its original claim when supplied.
+    pub async fn get_state(&self, key: &str) -> Result<Option<serde_json::Value>, StepError> {
+        if let Some(token) = self.claim_token {
+            match self
+                .storage
+                .get_instance_kv_claimed(self.instance_id, &self.tenant_id, key, token)
+                .await
+                .map_err(|error| state_storage_error(&error))?
+            {
+                orch8_storage::ClaimedRead::Lost => Err(StepError::ClaimLost),
+                orch8_storage::ClaimedRead::Value(value) => Ok(value),
+            }
+        } else {
+            self.storage
+                .get_instance_kv(self.instance_id, key)
+                .await
+                .map_err(|error| state_storage_error(&error))
+        }
+    }
+
     /// Mutate this instance's KV state under the original execution claim.
     pub async fn set_state(&self, key: &str, value: &serde_json::Value) -> Result<(), StepError> {
         if let Some(token) = self.claim_token {

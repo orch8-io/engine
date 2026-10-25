@@ -2,9 +2,10 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
-use orch8_types::ids::{BlockId, InstanceId};
+use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::output::BlockOutput;
+use sqlx::{FromRow, Row};
 
 use super::PostgresStorage;
 use super::rows::BlockOutputRow;
@@ -86,6 +87,37 @@ pub(super) async fn get(
     .fetch_optional(&store.pool)
     .await?;
     row.map(BlockOutputRow::into_output).transpose()
+}
+
+pub(super) async fn get_claimed(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    tenant: &TenantId,
+    block_id: &BlockId,
+    claim_token: DateTime<Utc>,
+) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError> {
+    let row = sqlx::query(
+        "SELECT output.* FROM task_instances LEFT JOIN block_outputs output
+         ON output.instance_id = task_instances.id AND output.block_id = $3
+         WHERE task_instances.id = $1 AND task_instances.tenant_id = $2
+         AND task_instances.state = 'running' AND task_instances.claimed_at = $4
+         ORDER BY output.created_at DESC, output.id DESC LIMIT 1",
+    )
+    .bind(instance_id.into_uuid())
+    .bind(tenant.as_str())
+    .bind(block_id.as_str())
+    .bind(claim_token)
+    .fetch_optional(&store.pool)
+    .await?;
+    match row {
+        None => Ok(crate::ClaimedRead::Lost),
+        Some(row) if row.try_get::<Option<Uuid>, _>("id")?.is_none() => {
+            Ok(crate::ClaimedRead::Value(None))
+        }
+        Some(row) => Ok(crate::ClaimedRead::Value(Some(
+            BlockOutputRow::from_row(&row)?.into_output()?,
+        ))),
+    }
 }
 
 pub(super) async fn get_batch(

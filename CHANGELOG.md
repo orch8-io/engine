@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Claim-bound execution reads
+
+- Fence claimed memoized outputs, step-cache values and builtin KV reads with the
+  exact running tenant claim and durable SQLite mobile owner proof in the same
+  read snapshot. Claim loss cannot be treated as a missing cache value.
+- Add Rust `ClaimedRead`, required `OutputStore::get_block_output_claimed` and
+  `ResourceStore::get_instance_kv_claimed`, plus `StepContext::get_state`.
+  Native, encrypted and fault wrappers preserve missing-value and claim-loss
+  distinctions. Custom Rust backends must implement the reads. Trusted unclaimed
+  calls and HTTP/FFI signatures remain unchanged.
+
 ### Durable coordination ownership
 
 - Authorize builtin instance queries and signal sends from a durable caller in
