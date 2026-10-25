@@ -570,3 +570,248 @@ async fn registration_limits_remain_charged_after_account_reopen() {
     assert!(hub.names(&owner).await.is_err());
     assert!(hub.names(&reopened).await.unwrap().is_empty());
 }
+
+struct IdleDrop {
+    entered: Arc<tokio::sync::Notify>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+impl StepHandler for IdleDrop {
+    fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
+        panic!("idle handler must never execute")
+    }
+}
+impl Drop for IdleDrop {
+    fn drop(&mut self) {
+        self.entered.notify_one();
+        let _ = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(10));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retired_cleanup_retains_capacity_and_registration_charges_until_host_drop() {
+    let (storage, sqlite) = fixture().await;
+    let hub = CatalogHandlers::isolated(storage.clone(), sqlite.clone());
+    let owner = scope(&storage, "alice", "one").await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release, held) = std::sync::mpsc::channel();
+    hub.bind(
+        &owner,
+        "idle",
+        Arc::new(IdleDrop {
+            entered: entered.clone(),
+            release: Mutex::new(held),
+        }),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    for index in 1..32 {
+        hub.bind(
+            &owner,
+            &format!("idle-{index}"),
+            Arc::new(Answer("alice", calls.clone())),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    }
+    assert!(
+        hub.release_retired(&owner).await.is_err(),
+        "an active epoch cannot be detached"
+    );
+    storage.retire_account_scope(&owner.account).await.unwrap();
+    let finished = hub.release_retired(&owner).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    let gate = hub.account_gate(&owner).unwrap();
+    assert_eq!(gate.available_permits(), 0);
+    let reopened = scope(&storage, "alice", "one").await;
+    assert!(
+        hub.bind(
+            &reopened,
+            "new",
+            Arc::new(Answer("new", calls.clone())),
+            Duration::from_secs(5)
+        )
+        .await
+        .is_err(),
+        "detached host references still consume registration quota"
+    );
+    assert!(
+        hub.release_retired(&owner).await.is_err(),
+        "a second cleanup cannot bypass the live destructor"
+    );
+    // Another account remains usable while Alice's destructor is blocked.
+    let bob = scope(&storage, "bob", "one").await;
+    hub.bind(
+        &bob,
+        "same",
+        Arc::new(Answer("bob", calls.clone())),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let registry = make_registry(&hub);
+    registry.get("same").unwrap()(running(&storage, &sqlite, &bob, "bob-cleanup").await)
+        .await
+        .unwrap();
+    drop(finished); // Losing the observer must not abort owned cleanup.
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gate.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    hub.bind(
+        &reopened,
+        "new",
+        Arc::new(Answer("new", calls)),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        hub.names(&reopened).await.unwrap(),
+        ["new".to_owned()].into()
+    );
+    hub.release_retired(&owner).await.unwrap().await.unwrap();
+    assert!(
+        hub.names(&reopened).await.unwrap().contains("new"),
+        "late cleanup must not detach the new epoch"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_retirement_cleanup_can_retry_after_physical_call_settles() {
+    let (storage, sqlite) = fixture().await;
+    let hub = CatalogHandlers::isolated(storage.clone(), sqlite.clone());
+    let owner = scope(&storage, "alice", "one").await;
+    let (handler, entered, release) = held();
+    let weak = Arc::downgrade(&handler);
+    hub.bind(&owner, "same", handler, Duration::from_secs(60))
+        .await
+        .unwrap();
+    let registry = make_registry(&hub);
+    let task = tokio::spawn(registry.get("same").unwrap()(
+        running(&storage, &sqlite, &owner, "retire-live").await,
+    ));
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    storage.retire_account_scope(&owner.account).await.unwrap();
+    assert!(hub.release_retired(&owner).await.is_err());
+    task.abort();
+    let _ = task.await;
+    assert!(hub.release_retired(&owner).await.is_err());
+    let gate = hub.account_gate(&owner).unwrap();
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gate.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    hub.release_retired(&owner).await.unwrap().await.unwrap();
+    assert!(
+        weak.upgrade().is_none(),
+        "retry must release the original host object"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn host_drop_panic_does_not_strand_other_retired_bindings_or_capacity() {
+    struct PanicDrop;
+    impl StepHandler for PanicDrop {
+        fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
+            Ok("{}".into())
+        }
+    }
+    impl Drop for PanicDrop {
+        fn drop(&mut self) {
+            panic!("host destructor panic");
+        }
+    }
+    let (storage, sqlite) = fixture().await;
+    let hub = CatalogHandlers::isolated(storage.clone(), sqlite);
+    let owner = scope(&storage, "alice", "one").await;
+    let ordinary = Arc::new(Answer("ordinary", Arc::new(AtomicUsize::new(0))));
+    let weak = Arc::downgrade(&ordinary);
+    hub.bind(&owner, "panic", Arc::new(PanicDrop), Duration::from_secs(5))
+        .await
+        .unwrap();
+    hub.bind(&owner, "ordinary", ordinary, Duration::from_secs(5))
+        .await
+        .unwrap();
+    storage.retire_account_scope(&owner.account).await.unwrap();
+    hub.release_retired(&owner).await.unwrap().await.unwrap();
+    assert!(weak.upgrade().is_none());
+    let reopened = scope(&storage, "alice", "one").await;
+    hub.bind(
+        &reopened,
+        "same",
+        Arc::new(Answer("new", Arc::new(AtomicUsize::new(0)))),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+}
+
+#[test]
+fn queued_retirement_keeps_cleanup_owned_after_runtime_shutdown() {
+    struct DropSignal(std::sync::mpsc::Sender<()>);
+    impl StepHandler for DropSignal {
+        fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
+            panic!("retired handler cannot execute")
+        }
+    }
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (storage, sqlite) = runtime.block_on(fixture());
+    let hub = CatalogHandlers::isolated(storage.clone(), sqlite);
+    let owner = runtime.block_on(scope(&storage, "alice", "one"));
+    let (dropped, observed) = std::sync::mpsc::channel();
+    runtime
+        .block_on(hub.bind(
+            &owner,
+            "idle",
+            Arc::new(DropSignal(dropped)),
+            Duration::from_secs(5),
+        ))
+        .unwrap();
+    runtime
+        .block_on(storage.retire_account_scope(&owner.account))
+        .unwrap();
+    let (started, entered) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    runtime.spawn_blocking(move || {
+        started.send(()).unwrap();
+        let _ = held.recv_timeout(Duration::from_secs(10));
+    });
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let receiver = runtime.block_on(hub.release_retired(&owner)).unwrap();
+    let gate = hub.account_gate(&owner).unwrap();
+    assert_eq!(gate.available_permits(), 0);
+    drop(receiver);
+    runtime.shutdown_background();
+    release.send(()).unwrap();
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
+    // The cleanup frame needs no async runtime/registry lock for its drop path.
+}

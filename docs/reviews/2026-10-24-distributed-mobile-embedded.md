@@ -1887,3 +1887,39 @@ No production scoped materializer or public SDK API is introduced. This budget
 covers scoped native callbacks only; other callback classes, initial routing SQL,
 independent processes, scoped builtin/read boundaries, listeners and recovery
 remain open under ADR-0002. Hosted checks must pass on the submitted commit.
+
+
+### DME107 — Explicit retirement cleanup retains physical ownership (internal)
+
+The internal native router can now release bindings for an already-retired
+account epoch. A durable account read rejects cleanup of an active epoch; late
+cleanup after reopen selects only the old epoch across its catalogs. Binding
+admission and detach are serialized, with the durable owner check inside that
+boundary, so a previously validated registration cannot insert after cleanup.
+Native admission reserves capacity before cloning a host reference; dry-run
+returns its simulation without cloning foreign ownership.
+
+Cleanup reserves the existing process/global and stable-account physical budget
+before detaching references. If an old call still owns that slot, cleanup returns
+a retryable busy result without moving references. Detached registrations remain
+charged against hub/account/catalog counts until physical destruction completes.
+The blocking owner drops references outside registry locks, catches each host
+panic, then removes the charges and releases capacity. Its completion receiver
+is observational: dropping it cannot abort owned cleanup. Another account can
+execute while one account's destructor is blocked.
+
+Four controlled contracts cover blocked destruction plus dropped observation,
+quota retention, late old-epoch cleanup, active-epoch refusal, busy cleanup retry
+after detached call settlement, panic isolation and queued cleanup after runtime
+shutdown. Teardown publishes completion through an atomic marker and does not
+re-enter the async registry lock or require a running executor. Completed marker
+entries are pruned on later binding/cleanup admission. Workspace/all-target
+Clippy with warnings denied, all 526 mobile library tests (including twelve
+scoped callback contracts), formatting, documentation and diff checks pass.
+Hosted checks must pass on the submitted commit before merging.
+
+This is an explicit internal cleanup primitive, not production account-close or
+shutdown wiring. Hosts must still call it after durable retirement and retry busy
+cleanup. General hub destruction, runtime shutdown integration, host-created
+reference cycles, cross-process bounds, builtin/read isolation and SDK lifecycle
+contracts remain open. No workflow/effect evidence is deleted.

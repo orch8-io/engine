@@ -229,6 +229,21 @@ impl MobileStorage {
         Ok(())
     }
 
+    /// Cleanup may release only an already-retired epoch, including after reopen.
+    pub(crate) async fn catalog_epoch_retired(
+        &self,
+        scope: &CatalogScope,
+    ) -> Result<bool, StorageError> {
+        let retired: Option<bool> = sqlx::query_scalar(
+            "SELECT (active = 0 OR epoch != ?2) FROM mobile_accounts WHERE id = ?1",
+        )
+        .bind(scope.account_id())
+        .bind(scope.epoch())
+        .fetch_optional(self.pool())
+        .await?;
+        retired.ok_or_else(|| invalid("mobile account scope is missing"))
+    }
+
     pub(crate) async fn open_catalog_scope(
         &self,
         account: &AccountScope,

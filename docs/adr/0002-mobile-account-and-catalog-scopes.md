@@ -246,9 +246,10 @@ An internal native router now selects immutable account/catalog/epoch bindings
 from durable running claims and retains process-local physical permits through
 host destruction (two globally, one per stable account). Eight contracts cover
 four scopes, colliding databases, retirement/reopen and independent pools.
-Registration caps are counts; retired bindings stay charged until hub teardown.
-This is not yet wired into production execution. Next implement account-close
-and shutdown cleanup with bounded foreign-reference destruction, then carry
+Registration caps are counts; explicit retired-epoch cleanup keeps detached
+bindings charged through physical reference destruction.
+This is not yet wired into production execution. Next wire account-close and
+shutdown lifecycle ownership to the cleanup primitive, then carry
 owners through actual materialization, builtin/read boundaries, recovery,
 listeners and every execution write. Other callback classes and independent
 processes still need shared-bound evidence.

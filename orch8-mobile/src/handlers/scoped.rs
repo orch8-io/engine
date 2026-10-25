@@ -7,10 +7,13 @@ use orch8_storage::StorageBackend;
 use orch8_types::error::StepError;
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
 fn busy() -> StepError {
     StepError::Retryable {
@@ -99,10 +102,27 @@ pub(super) struct Binding {
     stragglers: Arc<Stragglers>,
 }
 
+type BindingKey = (CatalogScope, String);
+#[derive(Default)]
+struct Bindings {
+    live: HashMap<BindingKey, Arc<Binding>>,
+    retiring: HashMap<BindingKey, Arc<AtomicBool>>,
+}
+impl Bindings {
+    fn keys(&self) -> impl Iterator<Item = &BindingKey> {
+        self.live.keys().chain(
+            self.retiring
+                .iter()
+                .filter(|(_, done)| !done.load(Ordering::Acquire))
+                .map(|(key, _)| key),
+        )
+    }
+}
+
 pub(crate) struct CatalogHandlers {
     storage: Arc<MobileStorage>,
     backend: Arc<dyn StorageBackend>,
-    bindings: Mutex<HashMap<(CatalogScope, String), Arc<Binding>>>,
+    bindings: AsyncMutex<Bindings>,
     capacity: Arc<NativeCapacity>,
 }
 impl CatalogHandlers {
@@ -112,7 +132,7 @@ impl CatalogHandlers {
         Arc::new(Self {
             storage,
             backend,
-            bindings: Mutex::new(HashMap::new()),
+            bindings: AsyncMutex::new(Bindings::default()),
             capacity: NativeCapacity::shared(),
         })
     }
@@ -149,20 +169,20 @@ impl CatalogHandlers {
         {
             return Err(unavailable());
         }
+        let mut bindings = self.bindings.lock().await;
+        bindings
+            .retiring
+            .retain(|_, done| !done.load(Ordering::Acquire));
         self.storage
             .catalog_metadata(scope, "native_handler_binding")
             .await
             .map_err(storage_error)?;
         let key = (scope.clone(), name.to_owned());
-        let mut bindings = self
-            .bindings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if bindings.contains_key(&key) {
+        if bindings.live.contains_key(&key) || bindings.retiring.contains_key(&key) {
             return Err(unavailable());
         }
         // Retired entries stay charged; cleanup is explicit runtime integration.
-        if bindings.len() >= 256
+        if bindings.keys().count() >= 256
             || bindings
                 .keys()
                 .filter(|(owner, _)| owner.account_id() == scope.account_id())
@@ -179,7 +199,7 @@ impl CatalogHandlers {
         {
             return Err(busy());
         }
-        bindings.insert(
+        bindings.live.insert(
             key,
             Arc::new(Binding {
                 handler,
@@ -199,12 +219,66 @@ impl CatalogHandlers {
         Ok(self
             .bindings
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .await
+            .live
             .keys()
             .filter(|(owner, _)| owner == scope)
             .map(|(_, name)| name.clone())
             .collect())
     }
+    /// Call after durable account retirement. No foreign destruction runs on
+    /// the async caller or under the registry lock. Busy cleanup is retryable.
+    /// Dropping the returned receiver detaches observation, not physical cleanup.
+    pub(crate) async fn release_retired(
+        self: &Arc<Self>,
+        scope: &CatalogScope,
+    ) -> Result<tokio::sync::oneshot::Receiver<()>, StepError> {
+        let mut bindings = self.bindings.lock().await;
+        bindings
+            .retiring
+            .retain(|_, done| !done.load(Ordering::Acquire));
+        if !self
+            .storage
+            .catalog_epoch_retired(scope)
+            .await
+            .map_err(storage_error)?
+        {
+            return Err(unavailable());
+        }
+        let keys: Vec<_> = bindings
+            .live
+            .keys()
+            .filter(|(owner, _)| {
+                owner.account_id() == scope.account_id() && owner.epoch() == scope.epoch()
+            })
+            .cloned()
+            .collect();
+        // Reserve before moving references. A hung call/destructor cannot be
+        // bypassed by retirement, reopen or another cleanup request.
+        let permit = self.capacity.reserve(scope)?;
+        let mut detached = Vec::with_capacity(keys.len());
+        let completed = Arc::new(AtomicBool::new(false));
+        for key in &keys {
+            if let Some(binding) = bindings.live.remove(key) {
+                detached.push(binding);
+                bindings.retiring.insert(key.clone(), completed.clone());
+            }
+        }
+        drop(bindings);
+        let retirement = Retirement {
+            detached,
+            completed,
+            _permit: permit,
+        };
+        let (finished, receiver) = tokio::sync::oneshot::channel();
+        // The observer cannot abort the owned cleanup task.
+        tokio::task::spawn_blocking(move || {
+            drop(retirement);
+            let _ = finished.send(());
+        });
+        Ok(receiver)
+    }
+
     pub(crate) fn register(self: &Arc<Self>, registry: &mut HandlerRegistry, name: &str) {
         let owner = self.clone();
         let name = name.to_owned();
@@ -224,18 +298,20 @@ impl CatalogHandlers {
             .catalog_callback_scope(ctx.instance_id, &ctx.tenant_id, token)
             .await
             .map_err(storage_error)?;
-        let binding = self
-            .bindings
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let bindings = self.bindings.lock().await;
+        let binding = bindings
+            .live
             .get(&(scope.clone(), name.to_owned()))
-            .cloned()
             .ok_or_else(unavailable)?;
-        let permits = if ctx.is_dry_run() {
-            None
-        } else {
-            Some(self.capacity.reserve(&scope)?)
-        };
+        if ctx.is_dry_run() {
+            return Ok(serde_json::json!({
+                "dry_run": true, "handler": name, "would": "invoke registered handler",
+            }));
+        }
+        // Reserve before cloning any host reference, serialized with cleanup.
+        let permits = Some(self.capacity.reserve(&scope)?);
+        let binding = binding.clone();
+        drop(bindings);
         let tracking_key = format!(
             "{}/{}/{}/{}",
             scope.account_id(),
@@ -256,5 +332,21 @@ impl CatalogHandlers {
             },
         )
         .await
+    }
+}
+
+// Drop order keeps permits through foreign destruction, even if the runtime
+// discards queued work. Pending registration charges clear only after dropping.
+struct Retirement {
+    detached: Vec<Arc<Binding>>,
+    completed: Arc<AtomicBool>,
+    _permit: NativePermit,
+}
+impl Drop for Retirement {
+    fn drop(&mut self) {
+        for binding in self.detached.drain(..) {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(binding)));
+        }
+        self.completed.store(true, Ordering::Release);
     }
 }
