@@ -2738,3 +2738,43 @@ remote-worker ownership, legacy migration, complete persistent-resource/at-rest
 contracts and platform scope-handle evidence remain required. Existing grants'
 encrypted-read/output tests do not prove encryption of every scoped request/history
 record. ADR S1-S12 and the overall distributed/mobile/embedded review remain open.
+
+
+### DME129 — Periodic expiry cleanup cannot authorize scoped execution
+
+A real MobileEngine regression materialized a frozen scoped request whose original
+creation time was older than its configured lifetime. Its first tick entered the
+native host and completed before the post-tick expiry sweep could fail it. A
+bounded maintenance scan is insufficient as an execution admission boundary.
+
+Scoped handler selection now checks the configured lifetime by a point lookup of
+the immutable request creation time and matching native timestamp, tenant and
+original claim. Expiry atomically fails only that running claim and clears its
+claim/next-fire fields. Foreign tenants, stale claim tokens and already terminal
+rows cannot be overwritten. Lifetimes beyond the representable clock range do
+not wrap or silently expire recent work.
+
+Native physical admission repeats the check before effect dispatch and after the
+durable dispatch wait. A host that finishes past expiry cannot publish its result;
+its Dispatched receipt remains evidence of the external attempt. The physical
+permit and foreign references stay owned until the host actually returns. A
+retired host likewise returns claim loss instead of an apparently successful
+logical result. Contextual builtins also check expiry independently of periodic
+cleanup. Transient preflight failures retain the infrastructure path before an
+effect is dispatched.
+
+Regression coverage includes the original production first-tick case, builtin
+admission without cleanup, flat/tree expiry after effect preparation but before
+native entry, a native result after a manual-clock advance, stale claims, foreign
+owners, terminal-state preservation and huge lifetimes. Counted native-entry
+injection also reproduced an actual host call when expiry occurred during the
+final post-dispatch claim read; verification now checks lifetime after that await.
+All 597 mobile unit and 109 integration checks passed, alongside workspace/all-
+target Clippy with warnings denied, formatting, docs and SDK packaging checks.
+Native wrapper validation and exact-candidate hosted CI are recorded in the
+candidate proof before merge.
+
+This fixes the internal scoped dispatch boundary. Full public lifecycle/read/
+listener APIs, legacy scheduler-wide lifetime semantics, persisted owner recovery,
+children/delegation and the remaining ADR S1-S12 gates remain open. Already-running
+native code is not preempted by logical expiry.

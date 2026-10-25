@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Scoped lifetime admission
+
+- Fence expired scoped work before handler/native entry, including work that ages
+  during preparation; discard results returned after logical expiry while
+  retaining physical ownership and durable effect evidence.
+
+
 ### Internal scoped run materialization
 
 - Convert frozen account/catalog requests into native instances under one writer

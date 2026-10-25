@@ -63,6 +63,14 @@ impl HandlerResolver for Resolver {
             return Err(lost());
         }
         let token = lookup.claim_token.ok_or_else(lost)?;
+        if !owner
+            .lifetime
+            .verify(lookup.instance_id, lookup.tenant_id, token)
+            .await
+            .map_err(EngineError::Storage)?
+        {
+            return Err(lost());
+        }
         let scope = owner
             .storage
             .catalog_callback_scope(lookup.instance_id, lookup.tenant_id, token)
@@ -178,6 +186,18 @@ fn builtin_entry(
                     .await
                     .map_err(storage_error)?;
                 if actual != expected || owner.stop.is_cancelled() {
+                    return Err(StepError::ClaimLost);
+                }
+                if !owner
+                    .lifetime
+                    .verify(
+                        ctx.instance_id,
+                        &ctx.tenant_id,
+                        ctx.claim_token.ok_or(StepError::ClaimLost)?,
+                    )
+                    .await
+                    .map_err(storage_error)?
+                {
                     return Err(StepError::ClaimLost);
                 }
                 builtins.get(&name).ok_or_else(unavailable)?(ctx).await

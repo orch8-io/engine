@@ -133,6 +133,7 @@ async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<
     let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
 
     let claim = ctx.claim_token.map(|token| NativeClaim {
+        lifetime: binding.as_ref().map(|binding| binding.lifetime.clone()),
         storage: Arc::clone(&ctx.storage),
         instance_id: ctx.instance_id,
         tenant_id: ctx.tenant_id.clone(),

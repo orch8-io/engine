@@ -12,12 +12,42 @@ use orch8_types::{
 
 pub(super) struct NativeClaim {
     pub(super) storage: Arc<dyn orch8_storage::StorageBackend>,
+    pub(super) lifetime: Option<Arc<super::scoped::lifetime::Lifetime>>,
     pub(super) instance_id: InstanceId,
     pub(super) tenant_id: TenantId,
     pub(super) token: chrono::DateTime<chrono::Utc>,
 }
 
 impl NativeClaim {
+    async fn verify_lifetime(
+        &self,
+        admission: Option<&orch8_engine::handlers::EffectAdmission>,
+    ) -> Result<(), StepError> {
+        if let Some(lifetime) = &self.lifetime {
+            match lifetime
+                .verify(self.instance_id, &self.tenant_id, self.token)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => return Err(StepError::ClaimLost),
+                Err(error) => {
+                    if error.is_transient()
+                        && let Some(admission) = admission
+                    {
+                        return Err(admission.reject_preflight(
+                            orch8_engine::error::EngineError::Storage(
+                                orch8_types::error::StorageError::Connection(
+                                    "scoped lifetime verification unavailable".into(),
+                                ),
+                            ),
+                        ));
+                    }
+                    return Err(super::scoped::storage_error(error));
+                }
+            }
+        }
+        Ok(())
+    }
     async fn verify(
         &self,
         admission: Option<&orch8_engine::handlers::EffectAdmission>,
@@ -55,7 +85,10 @@ impl NativeClaim {
                 message: "native callback claim verification failed".into(),
                 details: None,
             }),
-        }
+        }?;
+        // The claim read may wait; expiry must be the final awaited boundary
+        // before dispatch/host entry, including the post-dispatch recheck.
+        self.verify_lifetime(admission).await
     }
 }
 
@@ -169,7 +202,7 @@ fn invoke_native(
             return Err(StepError::ClaimLost);
         }
     }
-    handler.execute(name, input).map_err(|error| match error {
+    let result = handler.execute(name, input).map_err(|error| match error {
         HandlerError::Retryable { message } => StepError::Retryable {
             message,
             details: None,
@@ -178,7 +211,13 @@ fn invoke_native(
             message,
             details: None,
         },
-    })
+    });
+    // A host that outlives its logical deadline retains physical admission,
+    // but cannot publish a successful result into expired logical work.
+    if let Some(claim) = claim {
+        runtime.block_on(claim.verify_lifetime(effect_admission.as_ref()))?;
+    }
+    result
 }
 
 pub(super) struct NativeInvocation {
