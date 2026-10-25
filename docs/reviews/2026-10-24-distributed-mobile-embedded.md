@@ -3293,3 +3293,36 @@ build and Swift bridge typecheck pass; strict Swift concurrency and warnings as
 errors are enabled. Mobile all-target Clippy, Rust formatting, actionlint, docs,
 SDK packaging and whitespace checks pass. Android source-cohort compilation is
 configured in CI and awaits that PR run; no Android device execution is claimed.
+
+### DME141 — Observe owned KMP runs without a polling spin or read queue
+
+The three existing legacy KMP observers accepted zero, negative and infinite
+intervals. Zero/negative delay can create a tight read loop; infinite delay can
+leave an otherwise active observer permanently stale. A regression reproduced
+the missing validation. Each observer now refuses these intervals before its
+first backend read.
+
+A scoped run now exposes `observeSnapshots()`, a cold common-code flow that
+uses the existing authorized native snapshot operation at each poll. It retains
+only the run view, applies collector backpressure, emits distinct snapshots and
+completes on a known terminal state. It never routes through the legacy global
+listener or active-instance list. Missing native state is emitted as null and
+makes no outcome claim; callers cancel collection for an abandoned prepared
+request or a departing screen. Retirement, close and backend errors remain
+visible to the collector.
+
+Controlled coroutine tests cover cold construction, distinct queued/live states,
+terminal completion, missing-record uncertainty, slow collectors, cancellation,
+close fencing and invalid intervals before reads. A real JVM/native integration
+observes two workflows under different accounts through parallel approvals and
+completion, checks every emitted owner/run/session and verifies terminal stream
+completion. This supplies common KMP polling observation; native push listeners,
+RN/Flutter observation and the rest of the full review matrix remain open.
+
+Validation passes: 82 common/JVM tests with all native integration cases enabled,
+73 common tests executed on the Kotlin/Native macOS host, and no failures/skips in
+either suite. The real Swift/Kotlin/Rust four-scope flow still passes with the
+updated framework. Actual iOS framework compilation and Swift bridge typecheck,
+actionlint, documentation and whitespace checks pass. CI now runs the common
+Kotlin/Native tests before linking its host framework. Production Rust and
+bindings are unchanged in this slice.

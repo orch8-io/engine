@@ -384,6 +384,7 @@ class Orch8Engine internal constructor(
     @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun observeDelegation(delegationId: String, pollInterval: Duration = 1.seconds): Flow<DelegationStatus> =
         flow {
+            require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
             while (true) {
                 val status = backend.delegationStatus(delegationId)
                 emit(status)
@@ -399,6 +400,7 @@ class Orch8Engine internal constructor(
     @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun observeInstance(instanceId: String, pollInterval: Duration = 500.milliseconds): Flow<InstanceSnapshot> =
         flow {
+            require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
             while (true) {
                 val snapshot = backend.getInstance(instanceId)
                 emit(snapshot)
@@ -411,6 +413,7 @@ class Orch8Engine internal constructor(
     @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun observeActiveInstances(pollInterval: Duration = 1.seconds): Flow<List<InstanceSummary>> =
         flow {
+            require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
             while (true) {
                 emit(backend.activeInstances())
                 delay(pollInterval)

@@ -243,7 +243,7 @@ jobs:
             "-Porch8.native.fixture.path=$GITHUB_WORKSPACE/artifacts/scoped-fixture" jvmTest
       - name: Run real Kotlin Native scoped facade through Swift and Rust
         run: |
-          gradle -p packages/kmp -Porch8.kmp.targets=nativehost linkDebugFrameworkNativeHost
+          gradle -p packages/kmp -Porch8.kmp.targets=nativehost nativeHostTest linkDebugFrameworkNativeHost
           bash scripts/check-kmp-native-host.sh \
             "$GITHUB_WORKSPACE/packages/kmp/build/bin/nativeHost/debugFramework" \
             "$GITHUB_WORKSPACE/artifacts/bindings/swift" \

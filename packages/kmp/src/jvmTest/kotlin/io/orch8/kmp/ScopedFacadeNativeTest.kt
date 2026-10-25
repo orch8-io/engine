@@ -6,6 +6,11 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.withTimeout
+import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.Assume.assumeTrue
@@ -77,6 +82,36 @@ class ScopedFacadeNativeTest {
             }
         }
     }
+    @Test
+    fun scopedObserversFollowRealWorkflowsWithoutMixingAccountsAndStopAtTerminal()=runBlocking {
+        withFixture {engine,cases->
+            val runs=listOf(cases.first(),cases.last()).map {record->
+                val account=engine.openAccount(record.identity())
+                val catalog=account.openCatalog(record.configuration())
+                catalog.registerHandler("echo",Orch8CatalogStepHandler {_,_,_->"{}"},1000)
+                val run=catalog.prepareRun(CatalogRunRequest("flow",operationKey="observed-flow"))
+                account.close();catalog.close()
+                assertNull(run.observeSnapshots(10.milliseconds).first())
+                run
+            }
+            val streams=runs.map {run->async {withTimeout(10000) {run.observeSnapshots(10.milliseconds).toList()}}}
+            runs.forEach {it.start()}
+            for(run in runs) {
+                val waiting=advance(engine,run,InstanceState.WAITING,2)
+                assertTrue(run.answer(waiting,"left","yes"))
+                val next=advance(engine,run,InstanceState.WAITING,1)
+                assertTrue(run.answer(next,"right","yes"))
+                advance(engine,run,InstanceState.COMPLETED)
+            }
+            streams.forEachIndexed {index,stream->
+                val snapshots=stream.await().filterNotNull()
+                assertEquals(InstanceState.COMPLETED,snapshots.last().state)
+                assertTrue(snapshots.all {it.instanceId==runs[index].instanceId&&it.accountId==runs[index].accountId&&
+                    it.catalogId==runs[index].catalogId&&it.sessionEpoch==runs[index].sessionEpoch})
+            }
+        }
+    }
+
     @Test
     fun disposedParentsDoNotFenceIssuedViewsAndBrokenTokenGettersFailBeforeTransport()=runBlocking {
         withFixture {engine,cases->

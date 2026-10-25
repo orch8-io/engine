@@ -9,6 +9,12 @@ import io.orch8.kmp.internal.runHandlerBlocking
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -120,6 +126,24 @@ class Orch8CatalogRun internal constructor(private val backend: CatalogRunBacken
     suspend fun start() = withContext(io) { backend.start() }
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun snapshot(): CatalogRunSnapshot? = withContext(io) { backend.snapshot() }
+    /**
+     * Cold, backpressured snapshots of this owned run. A null value means no
+     * native snapshot, not a successful or cancelled execution. Completes after
+     * emitting a known terminal snapshot; cancel collection when the UI leaves.
+     * Every poll rechecks native ownership. Closing/retiring the view propagates
+     * its typed error. The flow retains this view, never the root engine.
+     */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun observeSnapshots(pollInterval: Duration = 500.milliseconds): Flow<CatalogRunSnapshot?> = flow {
+        require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
+        while (true) {
+            val current = snapshot()
+            emit(current)
+            if (current?.state?.isTerminal == true) return@flow
+            delay(pollInterval)
+        }
+    }.distinctUntilChanged()
+
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun cancel(): InstanceState? = withContext(io) { backend.cancel() }
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)

@@ -14,6 +14,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
+import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
@@ -27,6 +28,9 @@ private class FakeBackend : EngineBackend {
     val states = ArrayDeque<InstanceState>()
     var cancelled = mutableListOf<String>()
     var shutdown = false
+    var instanceReads = 0
+    var activeReads = 0
+    var delegationReads = 0
 
     override fun registerHandler(name: String, handler: BlockingStepHandler) {
         handlers[name] = handler
@@ -65,11 +69,12 @@ private class FakeBackend : EngineBackend {
     }
 
     override fun getInstance(instanceId: String): InstanceSnapshot {
+        instanceReads++
         val state = if (states.size > 1) states.removeFirst() else states.first()
         return InstanceSnapshot(instanceId, "field-inspection", state, "{}", "c", "u")
     }
 
-    override fun activeInstances() = emptyList<InstanceSummary>()
+    override fun activeInstances(): List<InstanceSummary> { activeReads++; return emptyList() }
 
     override fun completeStep(instanceId: String, stepName: String, outputJson: String) {
         completed += Triple(instanceId, stepName, outputJson)
@@ -187,6 +192,7 @@ private class FakeBackend : EngineBackend {
     }
 
     override fun delegationStatus(delegationId: String): DelegationStatus {
+        delegationReads++
         val state = if (delegationStates.size > 1) delegationStates.removeFirst() else delegationStates.first()
         val output = if (state == DelegationState.COMPLETED) "{}" else null
         return DelegationStatus(delegationId, state, "i1", null, "rt-2", output, null)
@@ -260,6 +266,22 @@ class Orch8EngineTest {
         assertFailsWith<IllegalArgumentException> { engine.runUntilIdle(maxTicks = 0) }
         assertFailsWith<IllegalArgumentException> { engine.runUntilIdle(timeBudget = 0.milliseconds) }
         assertEquals(7, engine.runUntilIdle(maxTicks = 7).ticksExecuted)
+    }
+
+    @Test
+    fun observersRefuseNonpositiveOrInfinitePollingBeforeAnyRead() = runTest {
+        val backend = FakeBackend()
+        backend.states.add(InstanceState.COMPLETED)
+        backend.delegationStates.add(DelegationState.COMPLETED)
+        val engine = Orch8Engine(backend, UnconfinedTestDispatcher(testScheduler))
+        for (interval in listOf(Duration.ZERO, (-1).milliseconds, Duration.INFINITE)) {
+            assertFailsWith<IllegalArgumentException> { engine.observeInstance("i1", interval).first() }
+            assertFailsWith<IllegalArgumentException> { engine.observeActiveInstances(interval).first() }
+            assertFailsWith<IllegalArgumentException> { engine.observeDelegation("d-1", interval).first() }
+        }
+        assertEquals(0, backend.instanceReads)
+        assertEquals(0, backend.activeReads)
+        assertEquals(0, backend.delegationReads)
     }
 
     @Test

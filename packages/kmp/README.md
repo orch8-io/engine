@@ -208,8 +208,15 @@ Obtain the principal and catalog configuration from trusted application state;
 workflow input cannot select either. A changed principal requires a different
 account key or explicit retirement. Root `engine.resume()` / `runUntilIdle()`
 still drive execution, while scoped reads, handlers, sync and answers use these
-owned objects. Root legacy observers do not expose scoped runs; use explicit
-`snapshot()` and paginated `history()` until scoped change observation is added.
+owned objects. Root legacy observers do not expose scoped runs. Collect
+`run.observeSnapshots()` for owned UI state and use paginated `history()` for
+metadata. The cold snapshot flow polls only while collected, emits distinct
+values, applies collector backpressure and completes after a known terminal
+snapshot. A `null` snapshot means the native record is absent; it does not prove
+success or cancellation, including before materialization or after GC. Cancel
+collection when the screen leaves or a prepared request is abandoned. Account
+retirement and close fences propagate their typed errors. Poll intervals must
+be finite and positive for both scoped and legacy observers.
 
 `close()` disposes one object, so a run survives disposal of its parent views.
 `closeView()` explicitly fences that view and its descendants. `account.retire()`
@@ -220,7 +227,7 @@ lifetime; scoped objects do not keep a stopped engine running.
 History reports request metadata separately from native execution state.
 `CatalogNativeState.Unavailable` after native GC does not prove success or
 failure. `forgetCancelledRequest()` only reclaims a cancelled request that was
-never materialized. Scoped credentials, reporting, workers/delegation, listeners
+never materialized. Scoped credentials, reporting, workers/delegation, native event listeners
 and materialized-history reclamation remain separate work.
 
 ## Authenticating the device: device sessions (engine release after 0.7.1)
