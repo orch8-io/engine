@@ -29,7 +29,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; internal authenticated private sync verified; public runtime/SDK integration remains open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; scoped transfer and acceptance audit remain open |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
-| Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Pending |
+| Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Reviewing; shared adapter post-storage claim entry covered below; queued physical host admission, reentrant cleanup and platform parity remain open |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
 | Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Pending |
@@ -2235,3 +2235,36 @@ Postgres, using freshly built current server and CLI binaries. The isolated
 Postgres container was removed. E2E TypeScript typechecking passed. This corrects
 the test producer; it does not weaken signature, payload-hash or ownership checks.
 The broader runtime, scoped integration and platform audit remains open.
+
+
+### DME117 — Shared Node/Python adapter entered hosts after claim loss
+
+Four plain/encrypted SQLite regressions failed: a stale context entered the host
+factory immediately, and an evaluation that lost its claim while loading outputs
+entered afterward. The callback-entry counter reached one in all four cases.
+The generic core's factory preflight precedes the adapter's own asynchronous
+request-envelope loading and could not protect that later phase.
+
+The shared adapter now checks its original context claim before loading outputs
+and again after that await, before interpreting the result or invoking the host
+factory. Lost ownership remains StepError::ClaimLost; ownership-read errors keep
+the existing StepContext classification and cannot dispatch. Same-context retry
+after a transient proof-read failure succeeds. Valid claimed and explicitly
+unclaimed trusted calls preserve the host request/reply envelope.
+
+All sixteen contracts passed across plain/encrypted SQLite/Postgres with required
+isolated Postgres; its owned container was removed. The complete embedded facade
+suite passed 158 test results and three documentation tests. Workspace/all-target
+Clippy with warnings denied passed. The storage test-util dependency is enabled
+only for the facade's regression tests. Actual macOS arm64 addons passed the
+repository's three Node restart/error tests on Node 24.15.0 and three Python
+restart/error tests on Python 3.14.6. The Python extension was linked with macOS
+dynamic symbol lookup; Maturin is not installed in this local environment.
+Formatting, documentation and diff checks passed. Hosted checks must pass on the
+submitted commit before merge. No schema, callback envelope or public Node/Python
+API changes are introduced.
+
+These are shared-adapter admission checks. They do not prove that already queued
+Node callbacks or Python blocking/GIL work can be interrupted, nor do they settle
+physical callback admission, reentrant destruction, scoped account/catalog SDK
+integration or the remaining distributed/mobile/embedded audit matrix.

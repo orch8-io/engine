@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native host callback claim checks
+
+- Revalidate the initiating claim before and after loading the Node/Python host
+  request envelope. A stale evaluation can no longer enter a host callback after
+  that storage wait. Explicitly unclaimed trusted calls remain supported.
+
 ### Credential storage recovery
 
 - Preserve typed storage failures through claimed credential preparation and
