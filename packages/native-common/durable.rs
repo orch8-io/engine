@@ -82,7 +82,8 @@ impl DurableEngine {
 
     /// Register a host handler. Fails once the engine has been used.
     pub fn register(&self, name: &str, invoke: Invoke) -> Result<(), String> {
-        if *lock(&self.closed) {
+        let closed = *lock(&self.closed);
+        if closed {
             return Err("engine is closed".into());
         }
         if name.is_empty() {
@@ -95,8 +96,16 @@ impl DurableEngine {
                  deploy/start/run/get call"
             ));
         }
-        handlers.entries.retain(|(existing, _)| existing != name);
+        let retired = handlers
+            .entries
+            .iter()
+            .position(|(existing, _)| existing == name)
+            .map(|index| handlers.entries.remove(index));
         handlers.entries.push((name.to_string(), invoke));
+        drop(handlers);
+        // Host captures can run arbitrary finalizers, including another engine
+        // call. Publish the replacement, then retire its predecessor unlocked.
+        drop(retired);
         Ok(())
     }
 
@@ -129,14 +138,20 @@ impl DurableEngine {
         *cached = Some(engine.clone());
         // The cached engine now owns the callbacks. A second copy would
         // unnecessarily retain host resources after the engine is closed.
-        lock(&self.handlers).entries.clear();
+        let registrations = std::mem::take(&mut lock(&self.handlers).entries);
         // close may have been called while storage was opening. Do not hand
         // the new engine to a caller after close stopped accepting work.
-        if *lock(&self.closed) {
+        let closed = *lock(&self.closed);
+        if closed {
             engine.close().await;
-            *cached = None;
+            let retired = cached.take();
+            drop(cached);
+            drop(retired);
+            drop(registrations);
             return Err("engine is closed".into());
         }
+        drop(cached);
+        drop(registrations);
         Ok(engine)
     }
 
@@ -319,10 +334,17 @@ impl DurableEngine {
             engine.close().await;
         }
         // Retain ownership until close completes so cancellation can retry.
-        *cached = None;
-        let mut handlers = lock(&self.handlers);
-        handlers.frozen = true;
-        handlers.entries.clear();
+        let retired_engine = cached.take();
+        drop(cached);
+        let retired_handlers = {
+            let mut handlers = lock(&self.handlers);
+            handlers.frozen = true;
+            std::mem::take(&mut handlers.entries)
+        };
+        // Both cached engine destruction and unused registration destruction
+        // can release the last host reference. Neither may hold lifecycle locks.
+        drop(retired_engine);
+        drop(retired_handlers);
     }
 }
 

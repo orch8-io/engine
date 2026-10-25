@@ -28,6 +28,33 @@ def effects(tmp: str) -> list:
 
 
 class DurableRestartTest(unittest.TestCase):
+    def test_handler_replacement_allows_reentrant_finalizer(self):
+        code = """
+from orch8_engine import Engine
+engine = Engine.open(':memory:')
+class Reentrant:
+    def __call__(self, ctx):
+        return {}
+    def __del__(self):
+        print('FINALIZER_ENTERED', flush=True)
+        engine.handler('nested', lambda ctx: {})
+        print('FINALIZER_RETURNED', flush=True)
+callback = Reentrant()
+engine.handler('host', callback)
+del callback
+engine.handler('host', lambda ctx: {})
+print('REPLACEMENT_RETURNED', flush=True)
+engine.close()
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=10,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "FINALIZER_ENTERED", "FINALIZER_RETURNED", "REPLACEMENT_RETURNED",
+        ])
+
     def test_resumes_after_hard_exit_between_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
             crashed = run_worker(tmp, "crash-between")
