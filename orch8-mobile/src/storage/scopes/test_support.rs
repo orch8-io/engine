@@ -87,3 +87,29 @@ pub(crate) async fn scoped_run(mobile: &MobileStorage, account: &str, catalog: &
         .unwrap();
     run.id
 }
+
+/// Trusted accepted definitions for tests of the public native dispatch surface.
+/// Deliberately test-only: unsigned installation is not an exported SDK method.
+pub(crate) async fn install_sdk_definition(
+    storage: &MobileStorage,
+    scope: &CatalogScope,
+    definition: &str,
+    required_handlers: &[&str],
+) {
+    let digest = "b".repeat(64);
+    storage
+        .accept_catalog_manifest(scope, &[], 1, &digest)
+        .await
+        .unwrap();
+    storage
+        .install_catalog_workflow(scope, definition, 1, &digest)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO mobile_catalog_execution_policy(account_id,catalog_id,name,version,manifest_version,manifest_digest,min_sdk_version,required_handlers) VALUES (?1,?2,'flow',1,1,?3,'0.0.0',?4)")
+        .bind(scope.account_id()).bind(scope.catalog_id()).bind(&digest)
+        .bind(serde_json::to_string(required_handlers).unwrap()).execute(storage.pool()).await.unwrap();
+    storage
+        .mark_catalog_reconciled(scope, 1, &digest)
+        .await
+        .unwrap();
+}

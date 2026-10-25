@@ -398,7 +398,7 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-// Initial value and increment amount for handles. 
+// Initial value and increment amount for handles.
 // These ensure that SWIFT handles always have the lowest bit set
 fileprivate let UNIFFI_HANDLEMAP_INITIAL: UInt64 = 1
 fileprivate let UNIFFI_HANDLEMAP_DELTA: UInt64 = 2
@@ -535,6 +535,22 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterInt64: FfiConverterPrimitive {
+    typealias FfiType = Int64
+    typealias SwiftType = Int64
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Int64 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Int64, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterBool : FfiConverter {
     typealias FfiType = Int8
     typealias SwiftType = Bool
@@ -606,22 +622,22 @@ fileprivate struct FfiConverterString: FfiConverter {
 
 
 public protocol CapsuleSigner: AnyObject, Sendable {
-    
+
     /**
      * Stable identifier of the host-managed signing key.
      */
     func keyId()  -> String
-    
+
     /**
      * Base64 raw 32-byte Ed25519 public key registered for this runtime.
      */
     func publicKeyBase64()  -> String
-    
+
     /**
      * Sign the ASCII SHA-256 digest with a non-exportable host key.
      */
     func signManifestSha256(digest: String) throws  -> String
-    
+
 }
 open class CapsuleSignerImpl: CapsuleSigner, @unchecked Sendable {
     fileprivate let handle: UInt64
@@ -673,9 +689,9 @@ open class CapsuleSignerImpl: CapsuleSigner, @unchecked Sendable {
         try! rustCall { uniffi_orch8_mobile_fn_free_capsulesigner(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
      * Stable identifier of the host-managed signing key.
      */
@@ -687,7 +703,7 @@ open func keyId() -> String  {
     )
 })
 }
-    
+
     /**
      * Base64 raw 32-byte Ed25519 public key registered for this runtime.
      */
@@ -699,7 +715,7 @@ open func publicKeyBase64() -> String  {
     )
 })
 }
-    
+
     /**
      * Sign the ASCII SHA-256 digest with a non-exportable host key.
      */
@@ -712,9 +728,9 @@ open func signManifestSha256(digest: String)throws  -> String  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -755,7 +771,7 @@ fileprivate struct UniffiCallbackInterfaceCapsuleSigner {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -777,7 +793,7 @@ fileprivate struct UniffiCallbackInterfaceCapsuleSigner {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -801,7 +817,7 @@ fileprivate struct UniffiCallbackInterfaceCapsuleSigner {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
@@ -894,13 +910,13 @@ public func FfiConverterTypeCapsuleSigner_lower(_ value: CapsuleSigner) -> UInt6
  * The host app receives notifications when instances complete, fail, or have pending steps.
  */
 public protocol EngineListener: AnyObject, Sendable {
-    
-    func onInstanceCompleted(instanceId: String, output: String) 
-    
-    func onInstanceFailed(instanceId: String, error: String) 
-    
-    func onStepPending(instanceId: String, stepName: String, handler: String) 
-    
+
+    func onInstanceCompleted(instanceId: String, output: String)
+
+    func onInstanceFailed(instanceId: String, error: String)
+
+    func onStepPending(instanceId: String, stepName: String, handler: String)
+
 }
 /**
  * Callback interface for engine lifecycle events.
@@ -956,9 +972,9 @@ open class EngineListenerImpl: EngineListener, @unchecked Sendable {
         try! rustCall { uniffi_orch8_mobile_fn_free_enginelistener(handle, $0) }
     }
 
-    
 
-    
+
+
 open func onInstanceCompleted(instanceId: String, output: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_orch8_mobile_fn_method_enginelistener_on_instance_completed(
@@ -968,7 +984,7 @@ open func onInstanceCompleted(instanceId: String, output: String)  {try! rustCal
     )
 }
 }
-    
+
 open func onInstanceFailed(instanceId: String, error: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_orch8_mobile_fn_method_enginelistener_on_instance_failed(
@@ -978,7 +994,7 @@ open func onInstanceFailed(instanceId: String, error: String)  {try! rustCall() 
     )
 }
 }
-    
+
 open func onStepPending(instanceId: String, stepName: String, handler: String)  {try! rustCall() {
         uniffiCallStatus in
     uniffi_orch8_mobile_fn_method_enginelistener_on_step_pending(
@@ -989,9 +1005,9 @@ open func onStepPending(instanceId: String, stepName: String, handler: String)  
     )
 }
 }
-    
 
-    
+
+
 }
 
 
@@ -1036,7 +1052,7 @@ fileprivate struct UniffiCallbackInterfaceEngineListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1062,7 +1078,7 @@ fileprivate struct UniffiCallbackInterfaceEngineListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1090,7 +1106,7 @@ fileprivate struct UniffiCallbackInterfaceEngineListener {
                 )
             }
 
-            
+
             let writeReturn = { () }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -1177,6 +1193,1006 @@ public func FfiConverterTypeEngineListener_lower(_ value: EngineListener) -> UIn
 
 
 
+public protocol MobileAccountProtocol: AnyObject, Sendable {
+
+    func accountId()  -> String
+
+    /**
+     * Close this local view and its child views. Durable runs and registered
+     * handlers continue under their original owner until explicitly retired.
+     */
+    func closeView()
+
+    func openCatalog(configuration: MobileCatalogConfiguration) throws  -> MobileCatalog
+
+    /**
+     * Retire this exact durable session and detach its registered callbacks.
+     * Accepted retirement settles independently of this observer. Physical
+     * host calls may finish later and retain their capacity until destruction.
+     */
+    func retire() throws
+
+    func sessionEpoch()  -> Int64
+
+}
+open class MobileAccount: MobileAccountProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_orch8_mobile_fn_clone_mobileaccount(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_orch8_mobile_fn_free_mobileaccount(handle, $0) }
+    }
+
+
+
+
+open func accountId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileaccount_account_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Close this local view and its child views. Durable runs and registered
+     * handlers continue under their original owner until explicitly retired.
+     */
+open func closeView()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileaccount_close_view(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+open func openCatalog(configuration: MobileCatalogConfiguration)throws  -> MobileCatalog  {
+    return try  FfiConverterTypeMobileCatalog_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileaccount_open_catalog(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMobileCatalogConfiguration_lower(configuration),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Retire this exact durable session and detach its registered callbacks.
+     * Accepted retirement settles independently of this observer. Physical
+     * host calls may finish later and retain their capacity until destruction.
+     */
+open func retire()throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileaccount_retire(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+open func sessionEpoch() -> Int64  {
+    return try!  FfiConverterInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileaccount_session_epoch(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileAccount: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileAccount
+
+    public static func lift(_ handle: UInt64) throws -> MobileAccount {
+        return MobileAccount(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MobileAccount) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileAccount {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileAccount, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileAccount_lift(_ handle: UInt64) throws -> MobileAccount {
+    return try FfiConverterTypeMobileAccount.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileAccount_lower(_ value: MobileAccount) -> UInt64 {
+    return FfiConverterTypeMobileAccount.lower(value)
+}
+
+
+
+
+
+
+public protocol MobileCatalogProtocol: AnyObject, Sendable {
+
+    func accountId()  -> String
+
+    func catalogId()  -> String
+
+    func closeView()
+
+    /**
+     * Live metadata-only keyset pages; page size is 1..128. A cursor cannot be
+     * reused in another account, catalog or reopened session.
+     */
+    func history(cursor: MobileCatalogHistoryCursor?, limit: UInt32) throws  -> MobileCatalogRunPage
+
+    /**
+     * Persist and return the durable request before dispatch. Retry with the
+     * same operation key after a timeout; changing its request is refused.
+     */
+    func prepareRun(request: MobileCatalogRunRequest) throws  -> MobileCatalogRun
+
+    func registerHandler(name: String, handler: MobileCatalogStepHandler, timeoutMs: UInt64) throws
+
+    /**
+     * Create a view, not authority. Every subsequent operation checks the
+     * durable catalog/session and native identity before returning private data.
+     */
+    func run(instanceId: String) throws  -> MobileCatalogRun
+
+    func sessionEpoch()  -> Int64
+
+    /**
+     * Signed sync authenticates this immutable principal/catalog before private
+     * content requests. The provider belongs to this operation, not an ambient
+     * current account, and shares bounded physical token-call admission.
+     */
+    func sync(tokenProvider: TokenProvider) throws  -> SyncResult
+
+}
+open class MobileCatalog: MobileCatalogProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_orch8_mobile_fn_clone_mobilecatalog(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_orch8_mobile_fn_free_mobilecatalog(handle, $0) }
+    }
+
+
+
+
+open func accountId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_account_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func catalogId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_catalog_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func closeView()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_close_view(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Live metadata-only keyset pages; page size is 1..128. A cursor cannot be
+     * reused in another account, catalog or reopened session.
+     */
+open func history(cursor: MobileCatalogHistoryCursor?, limit: UInt32)throws  -> MobileCatalogRunPage  {
+    return try  FfiConverterTypeMobileCatalogRunPage_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_history(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionTypeMobileCatalogHistoryCursor.lower(cursor),
+        FfiConverterUInt32.lower(limit),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Persist and return the durable request before dispatch. Retry with the
+     * same operation key after a timeout; changing its request is refused.
+     */
+open func prepareRun(request: MobileCatalogRunRequest)throws  -> MobileCatalogRun  {
+    return try  FfiConverterTypeMobileCatalogRun_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_prepare_run(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMobileCatalogRunRequest_lower(request),uniffiCallStatus
+    )
+})
+}
+
+open func registerHandler(name: String, handler: MobileCatalogStepHandler, timeoutMs: UInt64)throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_register_handler(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(name),
+        FfiConverterTypeMobileCatalogStepHandler_lower(handler),
+        FfiConverterUInt64.lower(timeoutMs),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Create a view, not authority. Every subsequent operation checks the
+     * durable catalog/session and native identity before returning private data.
+     */
+open func run(instanceId: String)throws  -> MobileCatalogRun  {
+    return try  FfiConverterTypeMobileCatalogRun_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_run(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(instanceId),uniffiCallStatus
+    )
+})
+}
+
+open func sessionEpoch() -> Int64  {
+    return try!  FfiConverterInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_session_epoch(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Signed sync authenticates this immutable principal/catalog before private
+     * content requests. The provider belongs to this operation, not an ambient
+     * current account, and shares bounded physical token-call admission.
+     */
+open func sync(tokenProvider: TokenProvider)throws  -> SyncResult  {
+    return try  FfiConverterTypeSyncResult_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalog_sync(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeTokenProvider_lower(tokenProvider),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalog: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileCatalog
+
+    public static func lift(_ handle: UInt64) throws -> MobileCatalog {
+        return MobileCatalog(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MobileCatalog) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalog {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileCatalog, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalog_lift(_ handle: UInt64) throws -> MobileCatalog {
+    return try FfiConverterTypeMobileCatalog.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalog_lower(_ value: MobileCatalog) -> UInt64 {
+    return FfiConverterTypeMobileCatalog.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Opaque pagination position. The destination catalog revalidates its scope
+ * and session; possessing this object grants no access to a run.
+ */
+public protocol MobileCatalogHistoryCursorProtocol: AnyObject, Sendable {
+
+}
+/**
+ * Opaque pagination position. The destination catalog revalidates its scope
+ * and session; possessing this object grants no access to a run.
+ */
+open class MobileCatalogHistoryCursor: MobileCatalogHistoryCursorProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_orch8_mobile_fn_clone_mobilecataloghistorycursor(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_orch8_mobile_fn_free_mobilecataloghistorycursor(handle, $0) }
+    }
+
+
+
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogHistoryCursor: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileCatalogHistoryCursor
+
+    public static func lift(_ handle: UInt64) throws -> MobileCatalogHistoryCursor {
+        return MobileCatalogHistoryCursor(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MobileCatalogHistoryCursor) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogHistoryCursor {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileCatalogHistoryCursor, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogHistoryCursor_lift(_ handle: UInt64) throws -> MobileCatalogHistoryCursor {
+    return try FfiConverterTypeMobileCatalogHistoryCursor.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogHistoryCursor_lower(_ value: MobileCatalogHistoryCursor) -> UInt64 {
+    return FfiConverterTypeMobileCatalogHistoryCursor.lower(value)
+}
+
+
+
+
+
+
+public protocol MobileCatalogRunProtocol: AnyObject, Sendable {
+
+    func accountId()  -> String
+
+    /**
+     * Return the resulting native state, or None if the run is not owned or a
+     * concurrent materialization won. A terminal outcome is never overwritten.
+     */
+    func cancel() throws  -> InstanceStateKind?
+
+    func catalogId()  -> String
+
+    func closeView()
+
+    /**
+     * Commit an answer only if the snapshot version and pending step still
+     * match inside the owner-bound transaction. False means no answer committed.
+     */
+    func completeStep(expectedUpdatedAt: String, stepName: String, outputJson: String) throws  -> Bool
+
+    /**
+     * Release a cancelled, never-materialized request's quota. Materialized
+     * executions and unknown effects retain their durable evidence.
+     */
+    func forgetCancelledRequest() throws  -> Bool
+
+    func instanceId()  -> String
+
+    func sessionEpoch()  -> Int64
+
+    /**
+     * An owned native snapshot, or None for an unmaterialized, foreign or purged
+     * run. Use catalog history to distinguish durable request metadata.
+     */
+    func snapshot() throws  -> MobileCatalogRunSnapshot?
+
+    /**
+     * Materialize this prepared request under its original execution epoch.
+     * Idempotent while its native row survives. A GC receipt never rematerializes.
+     */
+    func start() throws
+
+}
+open class MobileCatalogRun: MobileCatalogRunProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_orch8_mobile_fn_clone_mobilecatalogrun(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_orch8_mobile_fn_free_mobilecatalogrun(handle, $0) }
+    }
+
+
+
+
+open func accountId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_account_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Return the resulting native state, or None if the run is not owned or a
+     * concurrent materialization won. A terminal outcome is never overwritten.
+     */
+open func cancel()throws  -> InstanceStateKind?  {
+    return try  FfiConverterOptionTypeInstanceStateKind.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_cancel(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func catalogId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_catalog_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func closeView()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_close_view(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+    /**
+     * Commit an answer only if the snapshot version and pending step still
+     * match inside the owner-bound transaction. False means no answer committed.
+     */
+open func completeStep(expectedUpdatedAt: String, stepName: String, outputJson: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_complete_step(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(expectedUpdatedAt),
+        FfiConverterString.lower(stepName),
+        FfiConverterString.lower(outputJson),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Release a cancelled, never-materialized request's quota. Materialized
+     * executions and unknown effects retain their durable evidence.
+     */
+open func forgetCancelledRequest()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_forget_cancelled_request(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func instanceId() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_instance_id(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+open func sessionEpoch() -> Int64  {
+    return try!  FfiConverterInt64.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_session_epoch(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * An owned native snapshot, or None for an unmaterialized, foreign or purged
+     * run. Use catalog history to distinguish durable request metadata.
+     */
+open func snapshot()throws  -> MobileCatalogRunSnapshot?  {
+    return try  FfiConverterOptionTypeMobileCatalogRunSnapshot.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_snapshot(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Materialize this prepared request under its original execution epoch.
+     * Idempotent while its native row survives. A GC receipt never rematerializes.
+     */
+open func start()throws   {try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_start(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogRun: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileCatalogRun
+
+    public static func lift(_ handle: UInt64) throws -> MobileCatalogRun {
+        return MobileCatalogRun(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: MobileCatalogRun) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogRun {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileCatalogRun, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRun_lift(_ handle: UInt64) throws -> MobileCatalogRun {
+    return try FfiConverterTypeMobileCatalogRun.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRun_lower(_ value: MobileCatalogRun) -> UInt64 {
+    return FfiConverterTypeMobileCatalogRun.lower(value)
+}
+
+
+
+
+
+
+public protocol MobileCatalogStepHandler: AnyObject, Sendable {
+
+    func execute(context: MobileCatalogCallbackContext, stepName: String, input: String) throws  -> String
+
+}
+open class MobileCatalogStepHandlerImpl: MobileCatalogStepHandler, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_orch8_mobile_fn_clone_mobilecatalogstephandler(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_orch8_mobile_fn_free_mobilecatalogstephandler(handle, $0) }
+    }
+
+
+
+
+open func execute(context: MobileCatalogCallbackContext, stepName: String, input: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHandlerError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogstephandler_execute(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMobileCatalogCallbackContext_lower(context),
+        FfiConverterString.lower(stepName),
+        FfiConverterString.lower(input),uniffiCallStatus
+    )
+})
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceMobileCatalogStepHandler {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceMobileCatalogStepHandler = UniffiVTableCallbackInterfaceMobileCatalogStepHandler(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeMobileCatalogStepHandler.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface MobileCatalogStepHandler: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeMobileCatalogStepHandler.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface MobileCatalogStepHandler: handle missing in uniffiClone")
+            }
+        },
+        execute: { (
+            uniffiHandle: UInt64,
+            context: RustBuffer,
+            stepName: RustBuffer,
+            input: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> String in
+                guard let uniffiObj = try? FfiConverterTypeMobileCatalogStepHandler.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.execute(
+                     context: try FfiConverterTypeMobileCatalogCallbackContext_lift(context),
+                     stepName: try FfiConverterString.lift(stepName),
+                     input: try FfiConverterString.lift(input)
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypeHandlerError_lower
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceMobileCatalogStepHandler> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceMobileCatalogStepHandler>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitMobileCatalogStepHandler() {
+    uniffi_orch8_mobile_fn_init_callback_vtable_mobilecatalogstephandler(UniffiCallbackInterfaceMobileCatalogStepHandler.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogStepHandler: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<MobileCatalogStepHandler>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = MobileCatalogStepHandler
+
+    public static func lift(_ handle: UInt64) throws -> MobileCatalogStepHandler {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return MobileCatalogStepHandlerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: MobileCatalogStepHandler) -> UInt64 {
+         if let rustImpl = value as? MobileCatalogStepHandlerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogStepHandler {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: MobileCatalogStepHandler, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogStepHandler_lift(_ handle: UInt64) throws -> MobileCatalogStepHandler {
+    return try FfiConverterTypeMobileCatalogStepHandler.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogStepHandler_lower(_ value: MobileCatalogStepHandler) -> UInt64 {
+    return FfiConverterTypeMobileCatalogStepHandler.lower(value)
+}
+
+
+
+
+
+
 /**
  * The mobile workflow engine. Opaque handle for the host app.
  *
@@ -1187,19 +2203,19 @@ public func FfiConverterTypeEngineListener_lower(_ value: EngineListener) -> UIn
  * - `telemetry::TelemetryManager` — event recording and flushing
  */
 public protocol MobileEngineProtocol: AnyObject, Sendable {
-    
+
     /**
      * Activate a previously imported capsule after the control plane has
      * accepted its handoff. Ownership is advanced locally before scheduling,
      * so a crash can delay execution but cannot run an unowned effect.
      */
-    func activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) throws 
-    
+    func activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) throws
+
     /**
      * List all non-terminal instances.
      */
     func activeInstances() throws  -> [InstanceSummary]
-    
+
     /**
      * Reserve an authorization owner before starting an asynchronous initial
      * fetch. Clears prior credentials without invoking the provider getter.
@@ -1210,8 +2226,8 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     /**
      * Cancel a running instance.
      */
-    func cancelInstance(instanceId: String) throws 
-    
+    func cancelInstance(instanceId: String) throws
+
     /**
      * Retire this owner on caller cancellation, even if completion just won a
      * race. A stale ticket cannot retire a newer provider. No anonymous fallback.
@@ -1221,8 +2237,8 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     /**
      * Complete a step that transitioned to Waiting state.
      */
-    func completeStep(instanceId: String, stepName: String, output: String) throws 
-    
+    func completeStep(instanceId: String, stepName: String, output: String) throws
+
     /**
      * Publish an initial token only for its reserved owner. Returns false for
      * superseded/cancelled tickets or blank tokens. Repeated completion cannot
@@ -1236,60 +2252,60 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * the outcome with `delegation_status`. Requires `start_delegation`.
      */
     func delegate(request: DelegateRequest) throws  -> String
-    
+
     /**
      * Counters for the delegation pump (zeros when it is not running).
      */
     func delegationStats()  -> DelegationStats
-    
+
     /**
      * The locally journaled state of a delegation.
      */
     func delegationStatus(delegationId: String) throws  -> DelegationStatus
-    
+
     /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
      * registered. Must be called before `resume()` / `start_worker()`.
      */
-    func enableBuiltin(name: String) throws 
-    
+    func enableBuiltin(name: String) throws
+
     /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
      * never receives the private signing key.
      */
     func exportContinuityCapsule(instanceId: String, destinationRuntimeId: String, payloadKeyBase64: String, expiresInSeconds: UInt32, signer: CapsuleSigner) throws  -> ContinuityExportResult
-    
+
     /**
      * Flush buffered telemetry to the remote endpoint.
      *
      * The endpoint must be a public HTTPS URL on port 443 to limit SSRF risk.
      */
     func flushTelemetry(endpointUrl: String) throws  -> FlushResult
-    
+
     /**
      * Get the state of a specific instance.
      */
     func getInstance(instanceId: String) throws  -> InstanceState
-    
+
     /**
      * Verify and import an encrypted portable capsule into paused local
      * quarantine. The sequence referenced by the capsule must already be
      * loaded, and the destination-generated transfer key never persists.
      */
     func importContinuityCapsule(capsuleJson: String, payloadBase64: String, payloadKeyBase64: String, destinationRuntimeId: String, destinationInstanceId: String) throws  -> ContinuityImportResult
-    
+
     /**
      * Every journaled delegation, oldest first.
      */
     func listDelegations() throws  -> [DelegationStatus]
-    
+
     /**
      * Load a sequence directly from a JSON string, bypassing sync.
      */
-    func loadSequenceFromJson(json: String) throws 
-    
+    func loadSequenceFromJson(json: String) throws
+
     /**
      * Fetch and load sequences from a remote URL. The endpoint must return a
      * JSON array of sequence definition objects. Uses the URL from
@@ -1300,26 +2316,26 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * content through [`MobileEngine::sync`]). `max_stored_sequences` applies.
      */
     func loadSequencesFromUrl(url: String) throws  -> UInt32
-    
+
     /**
      * List all sequences stored locally.
      */
     func loadedSequences() throws  -> [SequenceInfo]
-    
+
     /**
      * This device's stable runtime id (a UUID persisted in the local
      * database). It is the `worker_id` for task leases and the target for
      * `$runtime.runtime_id` step placement.
      */
     func nodeRuntimeId() throws  -> String
-    
+
     /**
      * Notify the engine that a silent push notification was received.
      * Triggers an immediate sync cycle on the next tick and an immediate
      * worker poll.
      */
-    func onPushReceived() 
-    
+    func onPushReceived()
+
     /**
      * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
      * "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
@@ -1329,19 +2345,19 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * accepted.
      */
     func onPushWake(envelopeJson: String)  -> Bool
-    
+
     /**
      * Pause the foreground tick loop. The remote worker stops claiming new
      * tasks and gives back any task claimed but not yet started; tasks that
      * are already executing run to completion while the process lives.
      */
-    func pause() 
-    
+    func pause()
+
     /**
      * Register a native step handler. Must be called before `resume()`.
      */
-    func registerHandler(name: String, handler: StepHandler) throws 
-    
+    func registerHandler(name: String, handler: StepHandler) throws
+
     /**
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
@@ -1354,20 +2370,20 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * process left claimed.
      */
     func registerNode(capabilities: NodeCapabilities) throws  -> NodeRegistration
-    
+
     /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
      * `CriticalBattery` = 4x interval.
      */
-    func reportPowerState(state: PowerState) 
-    
+    func reportPowerState(state: PowerState)
+
     /**
      * Start a foreground tick loop. Also lets the remote worker (if started)
      * claim tasks again.
      */
-    func resume() 
-    
+    func resume()
+
     /**
      * Execute a bounded batch of ticks for an OS-granted background window.
      *
@@ -1377,7 +2393,7 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * `BGTaskScheduler`/`WorkManager` job.
      */
     func runUntilIdle(maxTicks: UInt32, timeBudgetMs: UInt64) throws  -> BackgroundRunResult
-    
+
     /**
      * Run the worker for an OS-granted background window (`BGTask` /
      * `WorkManager` / push-wake handler): claims tasks even while paused,
@@ -1385,17 +2401,17 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * elapses. Requires `start_worker`.
      */
     func runWorkerWindow(timeBudgetMs: UInt64) throws  -> WorkerWindowResult
-    
+
     /**
      * Set device context for telemetry.
      */
-    func setDeviceContext(ctx: DeviceContext) 
-    
+    func setDeviceContext(ctx: DeviceContext)
+
     /**
      * Set the event listener for engine lifecycle events.
      */
-    func setListener(listener: EngineListener) 
-    
+    func setListener(listener: EngineListener)
+
     /**
      * Authenticate every control-plane call (node registration, worker
      * leases, delegation, sync) with tokens from `provider` instead of the
@@ -1406,21 +2422,21 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * plane answers `401` (expired session) and the request is retried once.
      * Call it before `register_node`. Never ship an operator key in an app.
      */
-    func setTokenProvider(provider: TokenProvider) 
-    
+    func setTokenProvider(provider: TokenProvider)
+
     /**
      * Shut down the engine.
      * Stop local work and request database closure. Synchronous callers wait
      * at most `operation_timeout_ms`; pending physical I/O retains recovery
      * ownership until it settles, so an immediate reopen may report busy.
      */
-    func shutdown() 
-    
+    func shutdown()
+
     /**
      * Start a new workflow instance.
      */
     func start(sequenceName: String, input: String, dedupKey: String?) throws  -> String
-    
+
     /**
      * Start delegating placed local steps: a step of a workflow running on
      * this engine whose `$runtime` places it on another runtime
@@ -1434,55 +2450,61 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
      * and app kills: delegations are journaled locally and picked up again
      * by the next `start_delegation`.
      */
-    func startDelegation(options: DelegationOptions) throws 
-    
+    func startDelegation(options: DelegationOptions) throws
+
     /**
      * Start the remote worker loop: poll the control plane as this `mobile`
      * runtime, run claimed tasks with the registered handlers, heartbeat
      * per the task lease, and complete / fail / release them. Requires
      * `register_node` first. Handlers must be registered before this call.
      */
-    func startWorker(options: WorkerOptions) throws 
-    
+    func startWorker(options: WorkerOptions) throws
+
     /**
      * Stop advancing delegations. Journaled delegations resume with the
      * next `start_delegation`.
      */
-    func stopDelegation() 
-    
+    func stopDelegation()
+
     /**
      * Stop claiming remote tasks. Tasks already executing finish and are
      * settled in the background.
      */
-    func stopWorker() 
-    
+    func stopWorker()
+
     /**
      * Sync sequences from the remote manifest.
      */
     func sync(manifestUrl: String, tokenProvider: TokenProvider?) throws  -> SyncResult
-    
+
     /**
      * Execute a single tick.
      */
     func tickOnce() throws  -> TickResult
-    
+
     /**
      * Leave the mesh: stops the worker, advertises the node as draining
      * (best effort), and stops the background re-advertisement.
      */
-    func unregisterNode() 
-    
+    func unregisterNode()
+
     /**
      * Update the liveness facts advertised by a registered node (battery,
      * connectivity) and push them to the control plane now.
      */
-    func updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: UInt8?) throws 
-    
+    func updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: UInt8?) throws
+
     /**
      * Counters for the remote worker (zeros when it is not running).
      */
     func workerStats()  -> WorkerStats
-    
+
+    /**
+     * Open an explicit trusted host identity. Reusing a key for another
+     * principal is refused. A token is independently verified by catalog sync.
+     */
+    func openAccount(identity: MobileAccountIdentity) throws  -> MobileAccount
+
 }
 /**
  * The mobile workflow engine. Opaque handle for the host app.
@@ -1556,9 +2578,9 @@ public convenience init(dbPath: String, config: MobileEngineConfig)throws  {
         try! rustCall { uniffi_orch8_mobile_fn_free_mobileengine(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
      * Activate a previously imported capsule after the control plane has
      * accepted its handoff. Ownership is advanced locally before scheduling,
@@ -1574,7 +2596,7 @@ open func activateContinuityCapsule(capsuleId: String, destinationRuntimeId: Str
     )
 }
 }
-    
+
     /**
      * List all non-terminal instances.
      */
@@ -1601,7 +2623,7 @@ open func beginTokenProviderInstallation(provider: TokenProvider)throws  -> Stri
     )
 })
 }
-    
+
     /**
      * Cancel a running instance.
      */
@@ -1627,7 +2649,7 @@ open func cancelTokenProviderInstallation(installationId: String) -> Bool  {
     )
 })
 }
-    
+
     /**
      * Complete a step that transitioned to Waiting state.
      */
@@ -1657,7 +2679,7 @@ open func completeTokenProviderInstallation(installationId: String, token: Strin
     )
 })
 }
-    
+
     /**
      * Explicitly delegate a server-side sub-sequence on behalf of a local
      * instance, without parking any step. Returns the delegation id; read
@@ -1672,7 +2694,7 @@ open func delegate(request: DelegateRequest)throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Counters for the delegation pump (zeros when it is not running).
      */
@@ -1684,7 +2706,7 @@ open func delegationStats() -> DelegationStats  {
     )
 })
 }
-    
+
     /**
      * The locally journaled state of a delegation.
      */
@@ -1697,7 +2719,7 @@ open func delegationStatus(delegationId: String)throws  -> DelegationStatus  {
     )
 })
 }
-    
+
     /**
      * Enable an opt-in builtin handler (see `OPT_IN_BUILTINS`, currently
      * `http_request`). The default builtins (`DEFAULT_BUILTINS`) are always
@@ -1711,7 +2733,7 @@ open func enableBuiltin(name: String)throws   {try rustCallWithError(FfiConverte
     )
 }
 }
-    
+
     /**
      * Export a paused or waiting device-owned execution for a destination
      * runtime. The host signer can be backed by Secure Enclave/KeyStore; Rust
@@ -1730,7 +2752,7 @@ open func exportContinuityCapsule(instanceId: String, destinationRuntimeId: Stri
     )
 })
 }
-    
+
     /**
      * Flush buffered telemetry to the remote endpoint.
      *
@@ -1745,7 +2767,7 @@ open func flushTelemetry(endpointUrl: String)throws  -> FlushResult  {
     )
 })
 }
-    
+
     /**
      * Get the state of a specific instance.
      */
@@ -1758,7 +2780,7 @@ open func getInstance(instanceId: String)throws  -> InstanceState  {
     )
 })
 }
-    
+
     /**
      * Verify and import an encrypted portable capsule into paused local
      * quarantine. The sequence referenced by the capsule must already be
@@ -1777,7 +2799,7 @@ open func importContinuityCapsule(capsuleJson: String, payloadBase64: String, pa
     )
 })
 }
-    
+
     /**
      * Every journaled delegation, oldest first.
      */
@@ -1789,7 +2811,7 @@ open func listDelegations()throws  -> [DelegationStatus]  {
     )
 })
 }
-    
+
     /**
      * Load a sequence directly from a JSON string, bypassing sync.
      */
@@ -1801,7 +2823,7 @@ open func loadSequenceFromJson(json: String)throws   {try rustCallWithError(FfiC
     )
 }
 }
-    
+
     /**
      * Fetch and load sequences from a remote URL. The endpoint must return a
      * JSON array of sequence definition objects. Uses the URL from
@@ -1820,7 +2842,7 @@ open func loadSequencesFromUrl(url: String)throws  -> UInt32  {
     )
 })
 }
-    
+
     /**
      * List all sequences stored locally.
      */
@@ -1832,7 +2854,7 @@ open func loadedSequences()throws  -> [SequenceInfo]  {
     )
 })
 }
-    
+
     /**
      * This device's stable runtime id (a UUID persisted in the local
      * database). It is the `worker_id` for task leases and the target for
@@ -1846,7 +2868,7 @@ open func nodeRuntimeId()throws  -> String  {
     )
 })
 }
-    
+
     /**
      * Notify the engine that a silent push notification was received.
      * Triggers an immediate sync cycle on the next tick and an immediate
@@ -1859,7 +2881,7 @@ open func onPushReceived()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Handle an id-only push wake envelope (`{"task_id"?, "runtime_id"?,
      * "reason"?}`, the push `data`/`userInfo` payload as JSON). A wake that
@@ -1877,7 +2899,7 @@ open func onPushWake(envelopeJson: String) -> Bool  {
     )
 })
 }
-    
+
     /**
      * Pause the foreground tick loop. The remote worker stops claiming new
      * tasks and gives back any task claimed but not yet started; tasks that
@@ -1890,7 +2912,7 @@ open func pause()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Register a native step handler. Must be called before `resume()`.
      */
@@ -1903,7 +2925,7 @@ open func registerHandler(name: String, handler: StepHandler)throws   {try rustC
     )
 }
 }
-    
+
     /**
      * Join the distributed runtime mesh: registers the device
      * (`/mobile/devices/register`) and its runtime capabilities
@@ -1924,7 +2946,7 @@ open func registerNode(capabilities: NodeCapabilities)throws  -> NodeRegistratio
     )
 })
 }
-    
+
     /**
      * Report current device power state. The engine adapts tick frequency based
      * on battery level: `Charging`/`Unplugged` = normal, `LowBattery` = 2x interval,
@@ -1938,7 +2960,7 @@ open func reportPowerState(state: PowerState)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Start a foreground tick loop. Also lets the remote worker (if started)
      * claim tasks again.
@@ -1950,7 +2972,7 @@ open func resume()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Execute a bounded batch of ticks for an OS-granted background window.
      *
@@ -1969,7 +2991,7 @@ open func runUntilIdle(maxTicks: UInt32, timeBudgetMs: UInt64)throws  -> Backgro
     )
 })
 }
-    
+
     /**
      * Run the worker for an OS-granted background window (`BGTask` /
      * `WorkManager` / push-wake handler): claims tasks even while paused,
@@ -1985,7 +3007,7 @@ open func runWorkerWindow(timeBudgetMs: UInt64)throws  -> WorkerWindowResult  {
     )
 })
 }
-    
+
     /**
      * Set device context for telemetry.
      */
@@ -1997,7 +3019,7 @@ open func setDeviceContext(ctx: DeviceContext)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Set the event listener for engine lifecycle events.
      */
@@ -2009,7 +3031,7 @@ open func setListener(listener: EngineListener)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Authenticate every control-plane call (node registration, worker
      * leases, delegation, sync) with tokens from `provider` instead of the
@@ -2028,7 +3050,7 @@ open func setTokenProvider(provider: TokenProvider)  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Shut down the engine.
      * Stop local work and request database closure. Synchronous callers wait
@@ -2042,7 +3064,7 @@ open func shutdown()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Start a new workflow instance.
      */
@@ -2057,7 +3079,7 @@ open func start(sequenceName: String, input: String, dedupKey: String?)throws  -
     )
 })
 }
-    
+
     /**
      * Start delegating placed local steps: a step of a workflow running on
      * this engine whose `$runtime` places it on another runtime
@@ -2079,7 +3101,7 @@ open func startDelegation(options: DelegationOptions)throws   {try rustCallWithE
     )
 }
 }
-    
+
     /**
      * Start the remote worker loop: poll the control plane as this `mobile`
      * runtime, run claimed tasks with the registered handlers, heartbeat
@@ -2094,7 +3116,7 @@ open func startWorker(options: WorkerOptions)throws   {try rustCallWithError(Ffi
     )
 }
 }
-    
+
     /**
      * Stop advancing delegations. Journaled delegations resume with the
      * next `start_delegation`.
@@ -2106,7 +3128,7 @@ open func stopDelegation()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Stop claiming remote tasks. Tasks already executing finish and are
      * settled in the background.
@@ -2118,7 +3140,7 @@ open func stopWorker()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Sync sequences from the remote manifest.
      */
@@ -2132,7 +3154,7 @@ open func sync(manifestUrl: String, tokenProvider: TokenProvider?)throws  -> Syn
     )
 })
 }
-    
+
     /**
      * Execute a single tick.
      */
@@ -2144,7 +3166,7 @@ open func tickOnce()throws  -> TickResult  {
     )
 })
 }
-    
+
     /**
      * Leave the mesh: stops the worker, advertises the node as draining
      * (best effort), and stops the background re-advertisement.
@@ -2156,7 +3178,7 @@ open func unregisterNode()  {try! rustCall() {
     )
 }
 }
-    
+
     /**
      * Update the liveness facts advertised by a registered node (battery,
      * connectivity) and push them to the control plane now.
@@ -2170,7 +3192,7 @@ open func updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: UInt
     )
 }
 }
-    
+
     /**
      * Counters for the remote worker (zeros when it is not running).
      */
@@ -2182,9 +3204,23 @@ open func workerStats() -> WorkerStats  {
     )
 })
 }
-    
 
-    
+    /**
+     * Open an explicit trusted host identity. Reusing a key for another
+     * principal is refused. A token is independently verified by catalog sync.
+     */
+open func openAccount(identity: MobileAccountIdentity)throws  -> MobileAccount  {
+    return try  FfiConverterTypeMobileAccount_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_open_account(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeMobileAccountIdentity_lower(identity),uniffiCallStatus
+    )
+})
+}
+
+
+
 }
 
 
@@ -2238,9 +3274,9 @@ public func FfiConverterTypeMobileEngine_lower(_ value: MobileEngine) -> UInt64 
  * Implementations live in Swift/Kotlin and are called by the engine during tick execution.
  */
 public protocol StepHandler: AnyObject, Sendable {
-    
+
     func execute(stepName: String, input: String) throws  -> String
-    
+
 }
 /**
  * Callback interface for host-registered step handlers.
@@ -2296,9 +3332,9 @@ open class StepHandlerImpl: StepHandler, @unchecked Sendable {
         try! rustCall { uniffi_orch8_mobile_fn_free_stephandler(handle, $0) }
     }
 
-    
 
-    
+
+
 open func execute(stepName: String, input: String)throws  -> String  {
     return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHandlerError_lift) {
         uniffiCallStatus in
@@ -2309,9 +3345,9 @@ open func execute(stepName: String, input: String)throws  -> String  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -2356,7 +3392,7 @@ fileprivate struct UniffiCallbackInterfaceStepHandler {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
@@ -2448,20 +3484,20 @@ public func FfiConverterTypeStepHandler_lower(_ value: StepHandler) -> UInt64 {
  * Callback interface for refreshable authentication tokens.
  */
 public protocol TokenProvider: AnyObject, Sendable {
-    
+
     /**
      * Return a cached bootstrap token for synchronous provider installation.
      * Keep this prompt; reservation-based asynchronous installation does not
      * invoke this getter. Perform network work in refresh or an async wrapper.
      */
     func currentToken()  -> String
-    
+
     /**
      * Obtain a token for unavailable initial authorization or after a 401.
      * Runs on a native blocking thread; it may outlive the caller's timeout.
      */
     func refreshToken() throws  -> String
-    
+
 }
 /**
  * Callback interface for refreshable authentication tokens.
@@ -2516,9 +3552,9 @@ open class TokenProviderImpl: TokenProvider, @unchecked Sendable {
         try! rustCall { uniffi_orch8_mobile_fn_free_tokenprovider(handle, $0) }
     }
 
-    
 
-    
+
+
     /**
      * Return a cached bootstrap token for synchronous provider installation.
      * Keep this prompt; reservation-based asynchronous installation does not
@@ -2532,7 +3568,7 @@ open func currentToken() -> String  {
     )
 })
 }
-    
+
     /**
      * Obtain a token for unavailable initial authorization or after a 401.
      * Runs on a native blocking thread; it may outlive the caller's timeout.
@@ -2545,9 +3581,9 @@ open func refreshToken()throws  -> String  {
     )
 })
 }
-    
 
-    
+
+
 }
 
 
@@ -2588,7 +3624,7 @@ fileprivate struct UniffiCallbackInterfaceTokenProvider {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCall(
                 callStatus: uniffiCallStatus,
@@ -2610,7 +3646,7 @@ fileprivate struct UniffiCallbackInterfaceTokenProvider {
                 )
             }
 
-            
+
             let writeReturn = { uniffiOutReturn.pointee = FfiConverterString.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
@@ -2717,7 +3753,7 @@ public struct BackgroundRunResult: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(ticksExecuted: UInt32, instancesAdvanced: UInt32, stepsExecuted: UInt32, hasPendingWork: Bool, 
+    public init(ticksExecuted: UInt32, instancesAdvanced: UInt32, stepsExecuted: UInt32, hasPendingWork: Bool,
         /**
          * True when work remains after either the tick or wall-clock budget was
          * exhausted, or when a tick made no immediate progress. The host should
@@ -2730,9 +3766,9 @@ public struct BackgroundRunResult: Equatable, Hashable {
         self.budgetExhausted = budgetExhausted
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2746,10 +3782,10 @@ public struct FfiConverterTypeBackgroundRunResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BackgroundRunResult {
         return
             try BackgroundRunResult(
-                ticksExecuted: FfiConverterUInt32.read(from: &buf), 
-                instancesAdvanced: FfiConverterUInt32.read(from: &buf), 
-                stepsExecuted: FfiConverterUInt32.read(from: &buf), 
-                hasPendingWork: FfiConverterBool.read(from: &buf), 
+                ticksExecuted: FfiConverterUInt32.read(from: &buf),
+                instancesAdvanced: FfiConverterUInt32.read(from: &buf),
+                stepsExecuted: FfiConverterUInt32.read(from: &buf),
+                hasPendingWork: FfiConverterBool.read(from: &buf),
                 budgetExhausted: FfiConverterBool.read(from: &buf)
         )
     }
@@ -2798,9 +3834,9 @@ public struct CapabilityDescriptor: Equatable, Hashable {
         self.maxResponseBytes = maxResponseBytes
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2814,11 +3850,11 @@ public struct FfiConverterTypeCapabilityDescriptor: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> CapabilityDescriptor {
         return
             try CapabilityDescriptor(
-                handler: FfiConverterString.read(from: &buf), 
-                capability: FfiConverterTypeDeviceCapability.read(from: &buf), 
-                operations: FfiConverterSequenceString.read(from: &buf), 
-                requiresForeground: FfiConverterBool.read(from: &buf), 
-                handlesProtectedData: FfiConverterBool.read(from: &buf), 
+                handler: FfiConverterString.read(from: &buf),
+                capability: FfiConverterTypeDeviceCapability.read(from: &buf),
+                operations: FfiConverterSequenceString.read(from: &buf),
+                requiresForeground: FfiConverterBool.read(from: &buf),
+                handlesProtectedData: FfiConverterBool.read(from: &buf),
                 maxResponseBytes: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -2866,9 +3902,9 @@ public struct ContinuityExportResult: Equatable, Hashable {
         self.payloadBase64 = payloadBase64
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2882,10 +3918,10 @@ public struct FfiConverterTypeContinuityExportResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ContinuityExportResult {
         return
             try ContinuityExportResult(
-                capsuleId: FfiConverterString.read(from: &buf), 
-                continuityId: FfiConverterString.read(from: &buf), 
-                sourceEpoch: FfiConverterUInt64.read(from: &buf), 
-                capsuleJson: FfiConverterString.read(from: &buf), 
+                capsuleId: FfiConverterString.read(from: &buf),
+                continuityId: FfiConverterString.read(from: &buf),
+                sourceEpoch: FfiConverterUInt64.read(from: &buf),
+                capsuleJson: FfiConverterString.read(from: &buf),
                 payloadBase64: FfiConverterString.read(from: &buf)
         )
     }
@@ -2932,9 +3968,9 @@ public struct ContinuityImportResult: Equatable, Hashable {
         self.state = state
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -2948,10 +3984,10 @@ public struct FfiConverterTypeContinuityImportResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ContinuityImportResult {
         return
             try ContinuityImportResult(
-                capsuleId: FfiConverterString.read(from: &buf), 
-                continuityId: FfiConverterString.read(from: &buf), 
-                instanceId: FfiConverterString.read(from: &buf), 
-                sourceEpoch: FfiConverterUInt64.read(from: &buf), 
+                capsuleId: FfiConverterString.read(from: &buf),
+                continuityId: FfiConverterString.read(from: &buf),
+                instanceId: FfiConverterString.read(from: &buf),
+                sourceEpoch: FfiConverterUInt64.read(from: &buf),
                 state: FfiConverterString.read(from: &buf)
         )
     }
@@ -3007,13 +4043,13 @@ public struct DelegateRequest: Equatable, Hashable {
     public init(
         /**
          * Local parent instance the delegation belongs to (must exist).
-         */instanceId: String, 
+         */instanceId: String,
         /**
          * Destination runtime id (a live registration of the same tenant).
-         */destinationRuntimeId: String, 
+         */destinationRuntimeId: String,
         /**
          * Server-side sequence the destination runs.
-         */subSequenceId: String, 
+         */subSequenceId: String,
         /**
          * Explicit input (JSON object) handed to the sub-sequence.
          */inputJson: String = "{}") {
@@ -3023,9 +4059,9 @@ public struct DelegateRequest: Equatable, Hashable {
         self.inputJson = inputJson
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3039,9 +4075,9 @@ public struct FfiConverterTypeDelegateRequest: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegateRequest {
         return
             try DelegateRequest(
-                instanceId: FfiConverterString.read(from: &buf), 
-                destinationRuntimeId: FfiConverterString.read(from: &buf), 
-                subSequenceId: FfiConverterString.read(from: &buf), 
+                instanceId: FfiConverterString.read(from: &buf),
+                destinationRuntimeId: FfiConverterString.read(from: &buf),
+                subSequenceId: FfiConverterString.read(from: &buf),
                 inputJson: FfiConverterString.read(from: &buf)
         )
     }
@@ -3097,11 +4133,11 @@ public struct DelegationOptions: Equatable, Hashable {
         /**
          * Tenant of the node credential (the control plane scopes every
          * continuity call to it).
-         */tenantId: String, 
+         */tenantId: String,
         /**
          * How often pending delegations are advanced and their outcomes read
          * (default 2 s). Push wake-ups advance them immediately.
-         */pollIntervalMs: UInt64 = UInt64(2000), 
+         */pollIntervalMs: UInt64 = UInt64(2000),
         /**
          * Lifetime of each grant and delegation (default 600 s, max 86400). A
          * destination that has not reported by then fails the delegation, and
@@ -3112,9 +4148,9 @@ public struct DelegationOptions: Equatable, Hashable {
         self.ttlSecs = ttlSecs
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3128,8 +4164,8 @@ public struct FfiConverterTypeDelegationOptions: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegationOptions {
         return
             try DelegationOptions(
-                tenantId: FfiConverterString.read(from: &buf), 
-                pollIntervalMs: FfiConverterUInt64.read(from: &buf), 
+                tenantId: FfiConverterString.read(from: &buf),
+                pollIntervalMs: FfiConverterUInt64.read(from: &buf),
                 ttlSecs: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -3176,10 +4212,10 @@ public struct DelegationStats: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(running: Bool, 
+    public init(running: Bool,
         /**
          * Delegations accepted by the control plane.
-         */delegated: UInt64, completed: UInt64, failed: UInt64, abandoned: UInt64, 
+         */delegated: UInt64, completed: UInt64, failed: UInt64, abandoned: UInt64,
         /**
          * Parked local steps resumed with an outcome (exactly once each).
          */resumed: UInt64) {
@@ -3191,9 +4227,9 @@ public struct DelegationStats: Equatable, Hashable {
         self.resumed = resumed
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3207,11 +4243,11 @@ public struct FfiConverterTypeDelegationStats: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegationStats {
         return
             try DelegationStats(
-                running: FfiConverterBool.read(from: &buf), 
-                delegated: FfiConverterUInt64.read(from: &buf), 
-                completed: FfiConverterUInt64.read(from: &buf), 
-                failed: FfiConverterUInt64.read(from: &buf), 
-                abandoned: FfiConverterUInt64.read(from: &buf), 
+                running: FfiConverterBool.read(from: &buf),
+                delegated: FfiConverterUInt64.read(from: &buf),
+                completed: FfiConverterUInt64.read(from: &buf),
+                failed: FfiConverterUInt64.read(from: &buf),
+                abandoned: FfiConverterUInt64.read(from: &buf),
                 resumed: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -3267,15 +4303,15 @@ public struct DelegationStatus: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(delegationId: String, 
+    public init(delegationId: String,
         /**
          * `preparing` (not yet accepted by the control plane), `delegated`
          * (in the destination's mailbox or running there), `completed`,
          * `failed`, or `abandoned` (never placed before its deadline).
-         */state: String, localInstanceId: String, 
+         */state: String, localInstanceId: String,
         /**
          * The parked local step, for delegations made by a sequence.
-         */blockId: String?, destinationRuntimeId: String?, 
+         */blockId: String?, destinationRuntimeId: String?,
         /**
          * The destination's reported output (JSON), once completed.
          */outputJson: String?, error: String?) {
@@ -3288,9 +4324,9 @@ public struct DelegationStatus: Equatable, Hashable {
         self.error = error
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3304,12 +4340,12 @@ public struct FfiConverterTypeDelegationStatus: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DelegationStatus {
         return
             try DelegationStatus(
-                delegationId: FfiConverterString.read(from: &buf), 
-                state: FfiConverterString.read(from: &buf), 
-                localInstanceId: FfiConverterString.read(from: &buf), 
-                blockId: FfiConverterOptionString.read(from: &buf), 
-                destinationRuntimeId: FfiConverterOptionString.read(from: &buf), 
-                outputJson: FfiConverterOptionString.read(from: &buf), 
+                delegationId: FfiConverterString.read(from: &buf),
+                state: FfiConverterString.read(from: &buf),
+                localInstanceId: FfiConverterString.read(from: &buf),
+                blockId: FfiConverterOptionString.read(from: &buf),
+                destinationRuntimeId: FfiConverterOptionString.read(from: &buf),
+                outputJson: FfiConverterOptionString.read(from: &buf),
                 error: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -3361,9 +4397,9 @@ public struct DeviceContext: Equatable, Hashable {
         self.sdkVersion = sdkVersion
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3377,10 +4413,10 @@ public struct FfiConverterTypeDeviceContext: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceContext {
         return
             try DeviceContext(
-                deviceId: FfiConverterString.read(from: &buf), 
-                osName: FfiConverterString.read(from: &buf), 
-                osVersion: FfiConverterString.read(from: &buf), 
-                appVersion: FfiConverterString.read(from: &buf), 
+                deviceId: FfiConverterString.read(from: &buf),
+                osName: FfiConverterString.read(from: &buf),
+                osVersion: FfiConverterString.read(from: &buf),
+                appVersion: FfiConverterString.read(from: &buf),
                 sdkVersion: FfiConverterString.read(from: &buf)
         )
     }
@@ -3424,9 +4460,9 @@ public struct FlushResult: Equatable, Hashable {
         self.dropped = dropped
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3440,7 +4476,7 @@ public struct FfiConverterTypeFlushResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FlushResult {
         return
             try FlushResult(
-                sent: FfiConverterUInt64.read(from: &buf), 
+                sent: FfiConverterUInt64.read(from: &buf),
                 dropped: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -3489,9 +4525,9 @@ public struct InstanceState: Equatable, Hashable {
         self.updatedAt = updatedAt
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3505,11 +4541,11 @@ public struct FfiConverterTypeInstanceState_: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InstanceState {
         return
             try InstanceState(
-                instanceId: FfiConverterString.read(from: &buf), 
-                sequenceName: FfiConverterString.read(from: &buf), 
-                state: FfiConverterTypeInstanceStateKind.read(from: &buf), 
-                context: FfiConverterString.read(from: &buf), 
-                createdAt: FfiConverterString.read(from: &buf), 
+                instanceId: FfiConverterString.read(from: &buf),
+                sequenceName: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeInstanceStateKind.read(from: &buf),
+                context: FfiConverterString.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf),
                 updatedAt: FfiConverterString.read(from: &buf)
         )
     }
@@ -3558,9 +4594,9 @@ public struct InstanceSummary: Equatable, Hashable {
         self.createdAt = createdAt
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3574,9 +4610,9 @@ public struct FfiConverterTypeInstanceSummary: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InstanceSummary {
         return
             try InstanceSummary(
-                instanceId: FfiConverterString.read(from: &buf), 
-                sequenceName: FfiConverterString.read(from: &buf), 
-                state: FfiConverterTypeInstanceStateKind.read(from: &buf), 
+                instanceId: FfiConverterString.read(from: &buf),
+                sequenceName: FfiConverterString.read(from: &buf),
+                state: FfiConverterTypeInstanceStateKind.read(from: &buf),
                 createdAt: FfiConverterString.read(from: &buf)
         )
     }
@@ -3602,6 +4638,514 @@ public func FfiConverterTypeInstanceSummary_lift(_ buf: RustBuffer) throws -> In
 #endif
 public func FfiConverterTypeInstanceSummary_lower(_ value: InstanceSummary) -> RustBuffer {
     return FfiConverterTypeInstanceSummary.lower(value)
+}
+
+
+public struct MobileAccountIdentity: Equatable, Hashable {
+    public let accountKey: String
+    public let issuer: String
+    public let subject: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accountKey: String, issuer: String, subject: String) {
+        self.accountKey = accountKey
+        self.issuer = issuer
+        self.subject = subject
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileAccountIdentity: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileAccountIdentity: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileAccountIdentity {
+        return
+            try MobileAccountIdentity(
+                accountKey: FfiConverterString.read(from: &buf),
+                issuer: FfiConverterString.read(from: &buf),
+                subject: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileAccountIdentity, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountKey, into: &buf)
+        FfiConverterString.write(value.issuer, into: &buf)
+        FfiConverterString.write(value.subject, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileAccountIdentity_lift(_ buf: RustBuffer) throws -> MobileAccountIdentity {
+    return try FfiConverterTypeMobileAccountIdentity.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileAccountIdentity_lower(_ value: MobileAccountIdentity) -> RustBuffer {
+    return FfiConverterTypeMobileAccountIdentity.lower(value)
+}
+
+
+/**
+ * Engine-issued callback identity. It is never accepted as authorization by
+ * any SDK method, and is never derived from mutable workflow input.
+ */
+public struct MobileCatalogCallbackContext: Equatable, Hashable {
+    public let accountId: String
+    public let catalogId: String
+    public let ownerEpoch: Int64
+    public let runId: String
+    public let blockId: String
+    public let attempt: UInt32
+    public let effectId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(accountId: String, catalogId: String, ownerEpoch: Int64, runId: String, blockId: String, attempt: UInt32, effectId: String) {
+        self.accountId = accountId
+        self.catalogId = catalogId
+        self.ownerEpoch = ownerEpoch
+        self.runId = runId
+        self.blockId = blockId
+        self.attempt = attempt
+        self.effectId = effectId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogCallbackContext: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogCallbackContext: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogCallbackContext {
+        return
+            try MobileCatalogCallbackContext(
+                accountId: FfiConverterString.read(from: &buf),
+                catalogId: FfiConverterString.read(from: &buf),
+                ownerEpoch: FfiConverterInt64.read(from: &buf),
+                runId: FfiConverterString.read(from: &buf),
+                blockId: FfiConverterString.read(from: &buf),
+                attempt: FfiConverterUInt32.read(from: &buf),
+                effectId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogCallbackContext, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterString.write(value.catalogId, into: &buf)
+        FfiConverterInt64.write(value.ownerEpoch, into: &buf)
+        FfiConverterString.write(value.runId, into: &buf)
+        FfiConverterString.write(value.blockId, into: &buf)
+        FfiConverterUInt32.write(value.attempt, into: &buf)
+        FfiConverterString.write(value.effectId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogCallbackContext_lift(_ buf: RustBuffer) throws -> MobileCatalogCallbackContext {
+    return try FfiConverterTypeMobileCatalogCallbackContext.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogCallbackContext_lower(_ value: MobileCatalogCallbackContext) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogCallbackContext.lower(value)
+}
+
+
+public struct MobileCatalogConfiguration: Equatable, Hashable {
+    public let catalogKey: String
+    public let source: String
+    /**
+     * Ed25519 verification key in the existing `ed25519:<base64>` format.
+     */
+    public let signingAuthority: String
+    public let manifestUrl: String
+    public let identityUrl: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(catalogKey: String, source: String,
+        /**
+         * Ed25519 verification key in the existing `ed25519:<base64>` format.
+         */signingAuthority: String, manifestUrl: String, identityUrl: String) {
+        self.catalogKey = catalogKey
+        self.source = source
+        self.signingAuthority = signingAuthority
+        self.manifestUrl = manifestUrl
+        self.identityUrl = identityUrl
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogConfiguration: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogConfiguration: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogConfiguration {
+        return
+            try MobileCatalogConfiguration(
+                catalogKey: FfiConverterString.read(from: &buf),
+                source: FfiConverterString.read(from: &buf),
+                signingAuthority: FfiConverterString.read(from: &buf),
+                manifestUrl: FfiConverterString.read(from: &buf),
+                identityUrl: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogConfiguration, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.catalogKey, into: &buf)
+        FfiConverterString.write(value.source, into: &buf)
+        FfiConverterString.write(value.signingAuthority, into: &buf)
+        FfiConverterString.write(value.manifestUrl, into: &buf)
+        FfiConverterString.write(value.identityUrl, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogConfiguration_lift(_ buf: RustBuffer) throws -> MobileCatalogConfiguration {
+    return try FfiConverterTypeMobileCatalogConfiguration.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogConfiguration_lower(_ value: MobileCatalogConfiguration) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogConfiguration.lower(value)
+}
+
+
+public struct MobileCatalogRunPage {
+    public let items: [MobileCatalogRunSummary]
+    public let next: MobileCatalogHistoryCursor?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(items: [MobileCatalogRunSummary], next: MobileCatalogHistoryCursor?) {
+        self.items = items
+        self.next = next
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogRunPage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogRunPage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogRunPage {
+        return
+            try MobileCatalogRunPage(
+                items: FfiConverterSequenceTypeMobileCatalogRunSummary.read(from: &buf),
+                next: FfiConverterOptionTypeMobileCatalogHistoryCursor.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogRunPage, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeMobileCatalogRunSummary.write(value.items, into: &buf)
+        FfiConverterOptionTypeMobileCatalogHistoryCursor.write(value.next, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunPage_lift(_ buf: RustBuffer) throws -> MobileCatalogRunPage {
+    return try FfiConverterTypeMobileCatalogRunPage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunPage_lower(_ value: MobileCatalogRunPage) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogRunPage.lower(value)
+}
+
+
+/**
+ * Reuse an operation key only for an identical request. It remains charged
+ * after cancellation; preparing before starting keeps its handle on failure.
+ */
+public struct MobileCatalogRunRequest: Equatable, Hashable {
+    public let workflow: String
+    public let version: Int32?
+    public let inputJson: String
+    public let operationKey: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(workflow: String, version: Int32?, inputJson: String, operationKey: String) {
+        self.workflow = workflow
+        self.version = version
+        self.inputJson = inputJson
+        self.operationKey = operationKey
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogRunRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogRunRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogRunRequest {
+        return
+            try MobileCatalogRunRequest(
+                workflow: FfiConverterString.read(from: &buf),
+                version: FfiConverterOptionInt32.read(from: &buf),
+                inputJson: FfiConverterString.read(from: &buf),
+                operationKey: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogRunRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.workflow, into: &buf)
+        FfiConverterOptionInt32.write(value.version, into: &buf)
+        FfiConverterString.write(value.inputJson, into: &buf)
+        FfiConverterString.write(value.operationKey, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunRequest_lift(_ buf: RustBuffer) throws -> MobileCatalogRunRequest {
+    return try FfiConverterTypeMobileCatalogRunRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunRequest_lower(_ value: MobileCatalogRunRequest) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogRunRequest.lower(value)
+}
+
+
+public struct MobileCatalogRunSnapshot: Equatable, Hashable {
+    public let instanceId: String
+    public let accountId: String
+    public let catalogId: String
+    /**
+     * The viewing session, which may differ from a historical execution epoch.
+     */
+    public let sessionEpoch: Int64
+    public let state: InstanceStateKind
+    public let dataJson: String
+    public let pendingSteps: [String]
+    public let createdAt: String
+    /**
+     * Pass this exact version to `complete_step`; a stale reply returns false.
+     */
+    public let updatedAt: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(instanceId: String, accountId: String, catalogId: String,
+        /**
+         * The viewing session, which may differ from a historical execution epoch.
+         */sessionEpoch: Int64, state: InstanceStateKind, dataJson: String, pendingSteps: [String], createdAt: String,
+        /**
+         * Pass this exact version to `complete_step`; a stale reply returns false.
+         */updatedAt: String) {
+        self.instanceId = instanceId
+        self.accountId = accountId
+        self.catalogId = catalogId
+        self.sessionEpoch = sessionEpoch
+        self.state = state
+        self.dataJson = dataJson
+        self.pendingSteps = pendingSteps
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogRunSnapshot: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogRunSnapshot: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogRunSnapshot {
+        return
+            try MobileCatalogRunSnapshot(
+                instanceId: FfiConverterString.read(from: &buf),
+                accountId: FfiConverterString.read(from: &buf),
+                catalogId: FfiConverterString.read(from: &buf),
+                sessionEpoch: FfiConverterInt64.read(from: &buf),
+                state: FfiConverterTypeInstanceStateKind.read(from: &buf),
+                dataJson: FfiConverterString.read(from: &buf),
+                pendingSteps: FfiConverterSequenceString.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf),
+                updatedAt: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogRunSnapshot, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.instanceId, into: &buf)
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterString.write(value.catalogId, into: &buf)
+        FfiConverterInt64.write(value.sessionEpoch, into: &buf)
+        FfiConverterTypeInstanceStateKind.write(value.state, into: &buf)
+        FfiConverterString.write(value.dataJson, into: &buf)
+        FfiConverterSequenceString.write(value.pendingSteps, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunSnapshot_lift(_ buf: RustBuffer) throws -> MobileCatalogRunSnapshot {
+    return try FfiConverterTypeMobileCatalogRunSnapshot.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunSnapshot_lower(_ value: MobileCatalogRunSnapshot) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogRunSnapshot.lower(value)
+}
+
+
+public struct MobileCatalogRunSummary: Equatable, Hashable {
+    public let instanceId: String
+    public let accountId: String
+    public let catalogId: String
+    public let ownerEpoch: Int64
+    public let workflow: String
+    public let version: Int32
+    public let sequenceId: String
+    public let createdAt: String
+    public let requestState: MobileCatalogRequestState
+    public let nativeState: MobileCatalogNativeState
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(instanceId: String, accountId: String, catalogId: String, ownerEpoch: Int64, workflow: String, version: Int32, sequenceId: String, createdAt: String, requestState: MobileCatalogRequestState, nativeState: MobileCatalogNativeState) {
+        self.instanceId = instanceId
+        self.accountId = accountId
+        self.catalogId = catalogId
+        self.ownerEpoch = ownerEpoch
+        self.workflow = workflow
+        self.version = version
+        self.sequenceId = sequenceId
+        self.createdAt = createdAt
+        self.requestState = requestState
+        self.nativeState = nativeState
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogRunSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogRunSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogRunSummary {
+        return
+            try MobileCatalogRunSummary(
+                instanceId: FfiConverterString.read(from: &buf),
+                accountId: FfiConverterString.read(from: &buf),
+                catalogId: FfiConverterString.read(from: &buf),
+                ownerEpoch: FfiConverterInt64.read(from: &buf),
+                workflow: FfiConverterString.read(from: &buf),
+                version: FfiConverterInt32.read(from: &buf),
+                sequenceId: FfiConverterString.read(from: &buf),
+                createdAt: FfiConverterString.read(from: &buf),
+                requestState: FfiConverterTypeMobileCatalogRequestState.read(from: &buf),
+                nativeState: FfiConverterTypeMobileCatalogNativeState.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogRunSummary, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.instanceId, into: &buf)
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterString.write(value.catalogId, into: &buf)
+        FfiConverterInt64.write(value.ownerEpoch, into: &buf)
+        FfiConverterString.write(value.workflow, into: &buf)
+        FfiConverterInt32.write(value.version, into: &buf)
+        FfiConverterString.write(value.sequenceId, into: &buf)
+        FfiConverterString.write(value.createdAt, into: &buf)
+        FfiConverterTypeMobileCatalogRequestState.write(value.requestState, into: &buf)
+        FfiConverterTypeMobileCatalogNativeState.write(value.nativeState, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunSummary_lift(_ buf: RustBuffer) throws -> MobileCatalogRunSummary {
+    return try FfiConverterTypeMobileCatalogRunSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRunSummary_lower(_ value: MobileCatalogRunSummary) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogRunSummary.lower(value)
 }
 
 
@@ -3709,71 +5253,71 @@ public struct MobileEngineConfig: Equatable, Hashable {
     public init(
         /**
          * Tick interval in milliseconds for the foreground loop (default: 500).
-         */tickIntervalMs: UInt64, 
+         */tickIntervalMs: UInt64,
         /**
          * Maximum concurrent step executions; must be positive (default: 4).
-         */maxConcurrentSteps: UInt32, 
+         */maxConcurrentSteps: UInt32,
         /**
          * Maximum steps per instance before forced failure (default: 1000).
-         */maxStepsPerInstance: UInt32, 
+         */maxStepsPerInstance: UInt32,
         /**
          * Maximum concurrent running instances; must be positive (default: 10).
-         */maxConcurrentInstances: UInt32, 
+         */maxConcurrentInstances: UInt32,
         /**
          * Maximum tick duration in milliseconds before yielding (default: 5000).
-         */maxTickDurationMs: UInt64, 
+         */maxTickDurationMs: UInt64,
         /**
          * Maximum instance lifetime in seconds before auto-cancel (default: 86400 = 24h).
-         */maxInstanceLifetimeSecs: UInt64, 
+         */maxInstanceLifetimeSecs: UInt64,
         /**
          * Maximum stored sequences in the local database (default: 50).
-         */maxStoredSequences: UInt32, 
+         */maxStoredSequences: UInt32,
         /**
          * Maximum sequence JSON size in bytes (default: 1MB).
-         */maxSequenceSizeBytes: UInt64, 
+         */maxSequenceSizeBytes: UInt64,
         /**
          * Handler timeout in milliseconds — after this, step transitions to Waiting (default: 30000).
-         */handlerTimeoutMs: UInt64, 
+         */handlerTimeoutMs: UInt64,
         /**
          * Operation timeout in milliseconds for synchronous API calls like start/cancel/get (default: 10000).
-         */operationTimeoutMs: UInt64, 
+         */operationTimeoutMs: UInt64,
         /**
          * Enable telemetry collection (default: true).
-         */telemetryEnabled: Bool, 
+         */telemetryEnabled: Bool,
         /**
          * HTTPS endpoint where telemetry batches are sent. Must use port 443 and
          * target a public host. If empty, telemetry flushing is disabled.
-         */telemetryUrl: String, 
+         */telemetryUrl: String,
         /**
          * Target environment: "production" or "staging" (default: "production").
-         */environment: String, 
+         */environment: String,
         /**
          * Base64-encoded Ed25519 root public key for manifest verification.
          * If empty, sync is disabled.
-         */rootPublicKey: String, 
+         */rootPublicKey: String,
         /**
          * Mobile SDK version string, used for `min_sdk_version` checks during sync.
-         */sdkVersion: String, 
+         */sdkVersion: String,
         /**
          * Maximum memory budget in bytes (0 = unlimited). When process RSS exceeds
          * this limit, tick execution is skipped until memory drops below the threshold.
          * Default: 0 (unlimited).
-         */memoryBudgetBytes: UInt64, 
+         */memoryBudgetBytes: UInt64,
         /**
          * URL to fetch sequence definitions from. The endpoint must return a JSON
          * array of sequence objects. If empty, no remote loading is performed.
          * The array is unsigned: `load_sequences_from_url` is refused while
          * `root_public_key` is set (use signed `sync` instead).
          * Example: `https://api.orch8.io/api/mobile/apps/{id}/sequences`
-         */sequencesUrl: String, 
+         */sequencesUrl: String,
         /**
          * Server sync endpoint URL. If non-empty, the engine will periodically
          * POST status updates / approval requests and receive commands.
          * Example: `https://api.orch8.io/api/v1/mobile/sync`
-         */syncUrl: String, 
+         */syncUrl: String,
         /**
          * Unique device identifier sent with each sync request.
-         */deviceId: String, 
+         */deviceId: String,
         /**
          * API key for authenticating sync requests.
          */syncApiKey: String) {
@@ -3799,9 +5343,9 @@ public struct MobileEngineConfig: Equatable, Hashable {
         self.syncApiKey = syncApiKey
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3815,25 +5359,25 @@ public struct FfiConverterTypeMobileEngineConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileEngineConfig {
         return
             try MobileEngineConfig(
-                tickIntervalMs: FfiConverterUInt64.read(from: &buf), 
-                maxConcurrentSteps: FfiConverterUInt32.read(from: &buf), 
-                maxStepsPerInstance: FfiConverterUInt32.read(from: &buf), 
-                maxConcurrentInstances: FfiConverterUInt32.read(from: &buf), 
-                maxTickDurationMs: FfiConverterUInt64.read(from: &buf), 
-                maxInstanceLifetimeSecs: FfiConverterUInt64.read(from: &buf), 
-                maxStoredSequences: FfiConverterUInt32.read(from: &buf), 
-                maxSequenceSizeBytes: FfiConverterUInt64.read(from: &buf), 
-                handlerTimeoutMs: FfiConverterUInt64.read(from: &buf), 
-                operationTimeoutMs: FfiConverterUInt64.read(from: &buf), 
-                telemetryEnabled: FfiConverterBool.read(from: &buf), 
-                telemetryUrl: FfiConverterString.read(from: &buf), 
-                environment: FfiConverterString.read(from: &buf), 
-                rootPublicKey: FfiConverterString.read(from: &buf), 
-                sdkVersion: FfiConverterString.read(from: &buf), 
-                memoryBudgetBytes: FfiConverterUInt64.read(from: &buf), 
-                sequencesUrl: FfiConverterString.read(from: &buf), 
-                syncUrl: FfiConverterString.read(from: &buf), 
-                deviceId: FfiConverterString.read(from: &buf), 
+                tickIntervalMs: FfiConverterUInt64.read(from: &buf),
+                maxConcurrentSteps: FfiConverterUInt32.read(from: &buf),
+                maxStepsPerInstance: FfiConverterUInt32.read(from: &buf),
+                maxConcurrentInstances: FfiConverterUInt32.read(from: &buf),
+                maxTickDurationMs: FfiConverterUInt64.read(from: &buf),
+                maxInstanceLifetimeSecs: FfiConverterUInt64.read(from: &buf),
+                maxStoredSequences: FfiConverterUInt32.read(from: &buf),
+                maxSequenceSizeBytes: FfiConverterUInt64.read(from: &buf),
+                handlerTimeoutMs: FfiConverterUInt64.read(from: &buf),
+                operationTimeoutMs: FfiConverterUInt64.read(from: &buf),
+                telemetryEnabled: FfiConverterBool.read(from: &buf),
+                telemetryUrl: FfiConverterString.read(from: &buf),
+                environment: FfiConverterString.read(from: &buf),
+                rootPublicKey: FfiConverterString.read(from: &buf),
+                sdkVersion: FfiConverterString.read(from: &buf),
+                memoryBudgetBytes: FfiConverterUInt64.read(from: &buf),
+                sequencesUrl: FfiConverterString.read(from: &buf),
+                syncUrl: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
                 syncApiKey: FfiConverterString.read(from: &buf)
         )
     }
@@ -3929,24 +5473,24 @@ public struct NodeCapabilities: Equatable, Hashable {
          * Handler names this node serves. Empty = every app-native handler
          * registered with `register_handler`. Built-in handlers are only served
          * remotely when listed here explicitly.
-         */handlers: [String] = [], regions: [String] = [], 
+         */handlers: [String] = [], regions: [String] = [],
         /**
          * Free-form hardware facts (`camera`, `nfc`, `secure-enclave`, …).
          * `device:<device_id>` is always added.
-         */hardware: [String] = [], plugins: [String] = [], 
+         */hardware: [String] = [], plugins: [String] = [],
         /**
          * Credential binding *names* available on the device (never secrets).
-         */credentials: [String] = [], offlineCapable: Bool = true, connectivity: NodeConnectivity? = nil, batteryPercent: UInt8? = nil, 
+         */credentials: [String] = [], offlineCapable: Bool = true, connectivity: NodeConnectivity? = nil, batteryPercent: UInt8? = nil,
         /**
          * `ios` / `android`; inferred from the build target when absent.
-         */platform: String? = nil, 
+         */platform: String? = nil,
         /**
          * APNs/FCM token used for id-only wake-up hints.
-         */pushToken: String? = nil, appVersion: String? = nil, 
+         */pushToken: String? = nil, appVersion: String? = nil,
         /**
          * Control-plane API base (e.g. `https://api.orch8.io/api/v1`). When
          * absent it is derived from `sync_url` by stripping `/mobile/sync`.
-         */apiBaseUrl: String? = nil, 
+         */apiBaseUrl: String? = nil,
         /**
          * Base64 Ed25519 key that signs capsules exported by this device.
          */capsuleSigningPublicKey: String? = nil) {
@@ -3965,9 +5509,9 @@ public struct NodeCapabilities: Equatable, Hashable {
         self.capsuleSigningPublicKey = capsuleSigningPublicKey
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -3981,18 +5525,18 @@ public struct FfiConverterTypeNodeCapabilities: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeCapabilities {
         return
             try NodeCapabilities(
-                handlers: FfiConverterSequenceString.read(from: &buf), 
-                regions: FfiConverterSequenceString.read(from: &buf), 
-                hardware: FfiConverterSequenceString.read(from: &buf), 
-                plugins: FfiConverterSequenceString.read(from: &buf), 
-                credentials: FfiConverterSequenceString.read(from: &buf), 
-                offlineCapable: FfiConverterBool.read(from: &buf), 
-                connectivity: FfiConverterOptionTypeNodeConnectivity.read(from: &buf), 
-                batteryPercent: FfiConverterOptionUInt8.read(from: &buf), 
-                platform: FfiConverterOptionString.read(from: &buf), 
-                pushToken: FfiConverterOptionString.read(from: &buf), 
-                appVersion: FfiConverterOptionString.read(from: &buf), 
-                apiBaseUrl: FfiConverterOptionString.read(from: &buf), 
+                handlers: FfiConverterSequenceString.read(from: &buf),
+                regions: FfiConverterSequenceString.read(from: &buf),
+                hardware: FfiConverterSequenceString.read(from: &buf),
+                plugins: FfiConverterSequenceString.read(from: &buf),
+                credentials: FfiConverterSequenceString.read(from: &buf),
+                offlineCapable: FfiConverterBool.read(from: &buf),
+                connectivity: FfiConverterOptionTypeNodeConnectivity.read(from: &buf),
+                batteryPercent: FfiConverterOptionUInt8.read(from: &buf),
+                platform: FfiConverterOptionString.read(from: &buf),
+                pushToken: FfiConverterOptionString.read(from: &buf),
+                appVersion: FfiConverterOptionString.read(from: &buf),
+                apiBaseUrl: FfiConverterOptionString.read(from: &buf),
                 capsuleSigningPublicKey: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -4054,10 +5598,10 @@ public struct NodeRegistration: Equatable, Hashable {
     public init(
         /**
          * Stable runtime UUID (also the `worker_id` used for task leases).
-         */runtimeId: String, deviceId: String, 
+         */runtimeId: String, deviceId: String,
         /**
          * Handlers advertised to the control plane.
-         */handlers: [String], 
+         */handlers: [String],
         /**
          * RFC 3339 expiry of the advertisement just sent; the engine refreshes
          * it automatically before then.
@@ -4068,9 +5612,9 @@ public struct NodeRegistration: Equatable, Hashable {
         self.expiresAt = expiresAt
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4084,9 +5628,9 @@ public struct FfiConverterTypeNodeRegistration: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeRegistration {
         return
             try NodeRegistration(
-                runtimeId: FfiConverterString.read(from: &buf), 
-                deviceId: FfiConverterString.read(from: &buf), 
-                handlers: FfiConverterSequenceString.read(from: &buf), 
+                runtimeId: FfiConverterString.read(from: &buf),
+                deviceId: FfiConverterString.read(from: &buf),
+                handlers: FfiConverterSequenceString.read(from: &buf),
                 expiresAt: FfiConverterString.read(from: &buf)
         )
     }
@@ -4129,9 +5673,9 @@ public struct SequenceInfo: Equatable, Hashable {
         self.version = version
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4145,7 +5689,7 @@ public struct FfiConverterTypeSequenceInfo: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SequenceInfo {
         return
             try SequenceInfo(
-                name: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf),
                 version: FfiConverterInt32.read(from: &buf)
         )
     }
@@ -4192,9 +5736,9 @@ public struct SyncResult: Equatable, Hashable {
         self.signatureFailures = signatureFailures
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4208,10 +5752,10 @@ public struct FfiConverterTypeSyncResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncResult {
         return
             try SyncResult(
-                added: FfiConverterUInt32.read(from: &buf), 
-                updated: FfiConverterUInt32.read(from: &buf), 
-                removed: FfiConverterUInt32.read(from: &buf), 
-                skipped: FfiConverterUInt32.read(from: &buf), 
+                added: FfiConverterUInt32.read(from: &buf),
+                updated: FfiConverterUInt32.read(from: &buf),
+                removed: FfiConverterUInt32.read(from: &buf),
+                skipped: FfiConverterUInt32.read(from: &buf),
                 signatureFailures: FfiConverterUInt32.read(from: &buf)
         )
     }
@@ -4257,9 +5801,9 @@ public struct TelemetryEventRecord: Equatable, Hashable {
         self.timestamp = timestamp
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4273,8 +5817,8 @@ public struct FfiConverterTypeTelemetryEventRecord: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TelemetryEventRecord {
         return
             try TelemetryEventRecord(
-                eventType: FfiConverterString.read(from: &buf), 
-                payload: FfiConverterString.read(from: &buf), 
+                eventType: FfiConverterString.read(from: &buf),
+                payload: FfiConverterString.read(from: &buf),
                 timestamp: FfiConverterString.read(from: &buf)
         )
     }
@@ -4318,9 +5862,9 @@ public struct TickResult: Equatable, Hashable {
         self.hasPendingWork = hasPendingWork
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4334,8 +5878,8 @@ public struct FfiConverterTypeTickResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TickResult {
         return
             try TickResult(
-                instancesAdvanced: FfiConverterUInt32.read(from: &buf), 
-                stepsExecuted: FfiConverterUInt32.read(from: &buf), 
+                instancesAdvanced: FfiConverterUInt32.read(from: &buf),
+                stepsExecuted: FfiConverterUInt32.read(from: &buf),
                 hasPendingWork: FfiConverterBool.read(from: &buf)
         )
     }
@@ -4386,11 +5930,11 @@ public struct WorkerOptions: Equatable, Hashable {
     public init(
         /**
          * Remote tasks executed concurrently on the device (default 1).
-         */maxConcurrentTasks: UInt32 = UInt32(1), 
+         */maxConcurrentTasks: UInt32 = UInt32(1),
         /**
          * Poll cadence while idle, before power-state scaling (default 15 s).
          * Push wake-ups and `on_push_received` poll immediately regardless.
-         */idlePollIntervalMs: UInt64 = UInt64(15000), 
+         */idlePollIntervalMs: UInt64 = UInt64(15000),
         /**
          * Worker build/version reported to the server's version pins.
          */version: String? = nil) {
@@ -4399,9 +5943,9 @@ public struct WorkerOptions: Equatable, Hashable {
         self.version = version
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4415,8 +5959,8 @@ public struct FfiConverterTypeWorkerOptions: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerOptions {
         return
             try WorkerOptions(
-                maxConcurrentTasks: FfiConverterUInt32.read(from: &buf), 
-                idlePollIntervalMs: FfiConverterUInt64.read(from: &buf), 
+                maxConcurrentTasks: FfiConverterUInt32.read(from: &buf),
+                idlePollIntervalMs: FfiConverterUInt64.read(from: &buf),
                 version: FfiConverterOptionString.read(from: &buf)
         )
     }
@@ -4461,7 +6005,7 @@ public struct WorkerStats: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(running: Bool, inFlight: UInt32, claimed: UInt64, completed: UInt64, failed: UInt64, released: UInt64, 
+    public init(running: Bool, inFlight: UInt32, claimed: UInt64, completed: UInt64, failed: UInt64, released: UInt64,
         /**
          * Tasks whose lease was lost (reclaimed by the server) mid-execution.
          */lost: UInt64) {
@@ -4474,9 +6018,9 @@ public struct WorkerStats: Equatable, Hashable {
         self.lost = lost
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4490,12 +6034,12 @@ public struct FfiConverterTypeWorkerStats: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerStats {
         return
             try WorkerStats(
-                running: FfiConverterBool.read(from: &buf), 
-                inFlight: FfiConverterUInt32.read(from: &buf), 
-                claimed: FfiConverterUInt64.read(from: &buf), 
-                completed: FfiConverterUInt64.read(from: &buf), 
-                failed: FfiConverterUInt64.read(from: &buf), 
-                released: FfiConverterUInt64.read(from: &buf), 
+                running: FfiConverterBool.read(from: &buf),
+                inFlight: FfiConverterUInt32.read(from: &buf),
+                claimed: FfiConverterUInt64.read(from: &buf),
+                completed: FfiConverterUInt64.read(from: &buf),
+                failed: FfiConverterUInt64.read(from: &buf),
+                released: FfiConverterUInt64.read(from: &buf),
                 lost: FfiConverterUInt64.read(from: &buf)
         )
     }
@@ -4544,7 +6088,7 @@ public struct WorkerWindowResult: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(claimed: UInt64, completed: UInt64, failed: UInt64, 
+    public init(claimed: UInt64, completed: UInt64, failed: UInt64,
         /**
          * Tasks still executing when the budget ran out. They keep running
          * while the process lives; if it is suspended, the lease lapses and the
@@ -4557,9 +6101,9 @@ public struct WorkerWindowResult: Equatable, Hashable {
         self.budgetExhausted = budgetExhausted
     }
 
-    
 
-    
+
+
 }
 
 #if compiler(>=6)
@@ -4573,10 +6117,10 @@ public struct FfiConverterTypeWorkerWindowResult: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WorkerWindowResult {
         return
             try WorkerWindowResult(
-                claimed: FfiConverterUInt64.read(from: &buf), 
-                completed: FfiConverterUInt64.read(from: &buf), 
-                failed: FfiConverterUInt64.read(from: &buf), 
-                stillRunning: FfiConverterUInt32.read(from: &buf), 
+                claimed: FfiConverterUInt64.read(from: &buf),
+                completed: FfiConverterUInt64.read(from: &buf),
+                failed: FfiConverterUInt64.read(from: &buf),
+                stillRunning: FfiConverterUInt32.read(from: &buf),
                 budgetExhausted: FfiConverterBool.read(from: &buf)
         )
     }
@@ -4608,7 +6152,7 @@ public func FfiConverterTypeWorkerWindowResult_lower(_ value: WorkerWindowResult
 
 
 public enum DeviceCapability: Equatable, Hashable {
-    
+
     case camera
     case file
     case biometric
@@ -4633,38 +6177,38 @@ public struct FfiConverterTypeDeviceCapability: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceCapability {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .camera
-        
+
         case 2: return .file
-        
+
         case 3: return .biometric
-        
+
         case 4: return .secureStorage
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: DeviceCapability, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .camera:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .file:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .biometric:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .secureStorage:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -4689,25 +6233,25 @@ public func FfiConverterTypeDeviceCapability_lower(_ value: DeviceCapability) ->
 /**
  * Handler error returned by host-registered step handlers.
  */
-public 
+public
 enum HandlerError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     case Retryable(message: String)
-    
+
     case Permanent(message: String)
-    
 
-    
 
-    
 
-    
+
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -4724,17 +6268,17 @@ public struct FfiConverterTypeHandlerError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Retryable(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 2: return .Permanent(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -4743,15 +6287,15 @@ public struct FfiConverterTypeHandlerError: FfiConverterRustBuffer {
     public static func write(_ value: HandlerError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
+
+
         case .Retryable(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
         case .Permanent(_ /* message is ignored*/):
             writeInt(&buf, Int32(2))
 
-        
+
         }
     }
 }
@@ -4777,7 +6321,7 @@ public func FfiConverterTypeHandlerError_lower(_ value: HandlerError) -> RustBuf
  */
 
 public enum InstanceStateKind: Equatable, Hashable {
-    
+
     case scheduled
     case running
     case waiting
@@ -4805,56 +6349,56 @@ public struct FfiConverterTypeInstanceStateKind: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> InstanceStateKind {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .scheduled
-        
+
         case 2: return .running
-        
+
         case 3: return .waiting
-        
+
         case 4: return .paused
-        
+
         case 5: return .completed
-        
+
         case 6: return .failed
-        
+
         case 7: return .cancelled
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: InstanceStateKind, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .scheduled:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .running:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .waiting:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .paused:
             writeInt(&buf, Int32(4))
-        
-        
+
+
         case .completed:
             writeInt(&buf, Int32(5))
-        
-        
+
+
         case .failed:
             writeInt(&buf, Int32(6))
-        
-        
+
+
         case .cancelled:
             writeInt(&buf, Int32(7))
-        
+
         }
     }
 }
@@ -4876,38 +6420,180 @@ public func FfiConverterTypeInstanceStateKind_lower(_ value: InstanceStateKind) 
 
 
 
+
+public enum MobileCatalogNativeState: Equatable, Hashable {
+
+    case notMaterialized
+    case present(state: InstanceStateKind
+    )
+    case unavailable
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogNativeState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogNativeState: FfiConverterRustBuffer {
+    typealias SwiftType = MobileCatalogNativeState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogNativeState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .notMaterialized
+
+        case 2: return .present(state: try FfiConverterTypeInstanceStateKind.read(from: &buf)
+        )
+
+        case 3: return .unavailable
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MobileCatalogNativeState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .notMaterialized:
+            writeInt(&buf, Int32(1))
+
+
+        case let .present(state):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeInstanceStateKind.write(state, into: &buf)
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogNativeState_lift(_ buf: RustBuffer) throws -> MobileCatalogNativeState {
+    return try FfiConverterTypeMobileCatalogNativeState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogNativeState_lower(_ value: MobileCatalogNativeState) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogNativeState.lower(value)
+}
+
+
+
+
+public enum MobileCatalogRequestState: Equatable, Hashable {
+
+    case prepared
+    case cancelled
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogRequestState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogRequestState: FfiConverterRustBuffer {
+    typealias SwiftType = MobileCatalogRequestState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogRequestState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .prepared
+
+        case 2: return .cancelled
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: MobileCatalogRequestState, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .prepared:
+            writeInt(&buf, Int32(1))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRequestState_lift(_ buf: RustBuffer) throws -> MobileCatalogRequestState {
+    return try FfiConverterTypeMobileCatalogRequestState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogRequestState_lower(_ value: MobileCatalogRequestState) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogRequestState.lower(value)
+}
+
+
+
 /**
  * Error type exposed to mobile hosts via `UniFFI`.
  */
-public 
+public
 enum MobileError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     case Engine(message: String)
-    
+
     case Storage(message: String)
-    
+
     case InvalidInput(message: String)
-    
+
     case NotFound(message: String)
-    
+
     case ResourceLimit(message: String)
-    
+
     case AlreadyExists(message: String)
-    
+
     case Shutdown(message: String)
-    
 
-    
 
-    
 
-    
+
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -4924,37 +6610,37 @@ public struct FfiConverterTypeMobileError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Engine(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 2: return .Storage(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 3: return .InvalidInput(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 4: return .NotFound(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 5: return .ResourceLimit(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 6: return .AlreadyExists(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 7: return .Shutdown(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -4963,9 +6649,9 @@ public struct FfiConverterTypeMobileError: FfiConverterRustBuffer {
     public static func write(_ value: MobileError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
+
+
         case .Engine(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
         case .Storage(_ /* message is ignored*/):
@@ -4981,7 +6667,7 @@ public struct FfiConverterTypeMobileError: FfiConverterRustBuffer {
         case .Shutdown(_ /* message is ignored*/):
             writeInt(&buf, Int32(7))
 
-        
+
         }
     }
 }
@@ -5007,7 +6693,7 @@ public func FfiConverterTypeMobileError_lower(_ value: MobileError) -> RustBuffe
  */
 
 public enum NodeConnectivity: Equatable, Hashable {
-    
+
     case offline
     case metered
     case wifi
@@ -5032,38 +6718,38 @@ public struct FfiConverterTypeNodeConnectivity: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeConnectivity {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .offline
-        
+
         case 2: return .metered
-        
+
         case 3: return .wifi
-        
+
         case 4: return .ethernet
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: NodeConnectivity, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .offline:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .metered:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .wifi:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .ethernet:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -5090,7 +6776,7 @@ public func FfiConverterTypeNodeConnectivity_lower(_ value: NodeConnectivity) ->
  */
 
 public enum PowerState: Equatable, Hashable {
-    
+
     /**
      * Plugged in — full tick frequency.
      */
@@ -5127,38 +6813,38 @@ public struct FfiConverterTypePowerState: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PowerState {
         let variant: Int32 = try readInt(&buf)
         switch variant {
-        
+
         case 1: return .charging
-        
+
         case 2: return .unplugged
-        
+
         case 3: return .lowBattery
-        
+
         case 4: return .criticalBattery
-        
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
     public static func write(_ value: PowerState, into buf: inout [UInt8]) {
         switch value {
-        
-        
+
+
         case .charging:
             writeInt(&buf, Int32(1))
-        
-        
+
+
         case .unplugged:
             writeInt(&buf, Int32(2))
-        
-        
+
+
         case .lowBattery:
             writeInt(&buf, Int32(3))
-        
-        
+
+
         case .criticalBattery:
             writeInt(&buf, Int32(4))
-        
+
         }
     }
 }
@@ -5183,27 +6869,27 @@ public func FfiConverterTypePowerState_lower(_ value: PowerState) -> RustBuffer 
 /**
  * Sync-specific error type.
  */
-public 
+public
 enum SyncError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
-    
-    
+
+
     case Network(message: String)
-    
+
     case SignatureInvalid(message: String)
-    
+
     case InvalidManifest(message: String)
-    
 
-    
 
-    
 
-    
+
+
+
+
     public var errorDescription: String? {
         String(reflecting: self)
     }
-    
+
 }
 
 #if compiler(>=6)
@@ -5220,21 +6906,21 @@ public struct FfiConverterTypeSyncError: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
 
-        
 
-        
+
+
         case 1: return .Network(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 2: return .SignatureInvalid(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
         case 3: return .InvalidManifest(
             message: try FfiConverterString.read(from: &buf)
         )
-        
+
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -5243,9 +6929,9 @@ public struct FfiConverterTypeSyncError: FfiConverterRustBuffer {
     public static func write(_ value: SyncError, into buf: inout [UInt8]) {
         switch value {
 
-        
 
-        
+
+
         case .Network(_ /* message is ignored*/):
             writeInt(&buf, Int32(1))
         case .SignatureInvalid(_ /* message is ignored*/):
@@ -5253,7 +6939,7 @@ public struct FfiConverterTypeSyncError: FfiConverterRustBuffer {
         case .InvalidManifest(_ /* message is ignored*/):
             writeInt(&buf, Int32(3))
 
-        
+
         }
     }
 }
@@ -5300,6 +6986,30 @@ fileprivate struct FfiConverterOptionUInt8: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionInt32: FfiConverterRustBuffer {
+    typealias SwiftType = Int32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -5324,6 +7034,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMobileCatalogHistoryCursor: FfiConverterRustBuffer {
+    typealias SwiftType = MobileCatalogHistoryCursor?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMobileCatalogHistoryCursor.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMobileCatalogHistoryCursor.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeTokenProvider: FfiConverterRustBuffer {
     typealias SwiftType = TokenProvider?
 
@@ -5340,6 +7074,54 @@ fileprivate struct FfiConverterOptionTypeTokenProvider: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeTokenProvider.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeMobileCatalogRunSnapshot: FfiConverterRustBuffer {
+    typealias SwiftType = MobileCatalogRunSnapshot?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMobileCatalogRunSnapshot.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMobileCatalogRunSnapshot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeInstanceStateKind: FfiConverterRustBuffer {
+    typealias SwiftType = InstanceStateKind?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeInstanceStateKind.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeInstanceStateKind.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -5439,6 +7221,31 @@ fileprivate struct FfiConverterSequenceTypeInstanceSummary: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeInstanceSummary.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeMobileCatalogRunSummary: FfiConverterRustBuffer {
+    typealias SwiftType = [MobileCatalogRunSummary]
+
+    public static func write(_ value: [MobileCatalogRunSummary], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeMobileCatalogRunSummary.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [MobileCatalogRunSummary] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [MobileCatalogRunSummary]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeMobileCatalogRunSummary.read(from: &buf))
         }
         return seq
     }
@@ -5613,6 +7420,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_mobileengine_worker_stats() != 54173) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_open_account() != 44476) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_method_capsulesigner_key_id() != 14959) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -5640,12 +7450,88 @@ private let initializationResult: InitializationResult = {
     if (uniffi_orch8_mobile_checksum_method_stephandler_execute() != 17601) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogstephandler_execute() != 39433) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileaccount_account_id() != 20870) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileaccount_close_view() != 55620) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileaccount_open_catalog() != 49710) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileaccount_retire() != 12695) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileaccount_session_epoch() != 1888) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_account_id() != 18928) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_catalog_id() != 34151) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_close_view() != 20986) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_history() != 58153) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_prepare_run() != 4260) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_register_handler() != 4286) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_run() != 11884) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_session_epoch() != 12775) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalog_sync() != 64677) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_account_id() != 12243) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_cancel() != 20162) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_catalog_id() != 9197) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_close_view() != 22144) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_complete_step() != 48670) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_forget_cancelled_request() != 25481) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_instance_id() != 62611) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_session_epoch() != 53800) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_snapshot() != 44233) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_start() != 16895) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_orch8_mobile_checksum_constructor_mobileengine_new() != 21007) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitCapsuleSigner()
     uniffiCallbackInitEngineListener()
+    uniffiCallbackInitMobileCatalogStepHandler()
     uniffiCallbackInitStepHandler()
     uniffiCallbackInitTokenProvider()
     return InitializationResult.ok

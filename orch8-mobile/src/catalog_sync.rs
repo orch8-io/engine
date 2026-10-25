@@ -50,6 +50,14 @@ pub(crate) struct CatalogSyncCoordinator {
     accounts: Mutex<HashMap<String, Weak<Semaphore>>>,
 }
 
+/// Shared by the logical sync and its physically owned foreign token call.
+/// A cancelled observer cannot free an account/global slot while host code or
+/// its native-owned foreign reference is still alive. Contains no runtime.
+pub(crate) struct CatalogSyncAdmission {
+    _account: tokio::sync::OwnedSemaphorePermit,
+    _global: tokio::sync::OwnedSemaphorePermit,
+}
+
 struct Wait {
     cancelled: CancellationToken,
     task: tokio::task::JoinHandle<Result<SyncResult, MobileError>>,
@@ -85,6 +93,7 @@ impl CatalogSyncCoordinator {
         Ok(gate)
     }
 
+    #[cfg(test)]
     pub(crate) async fn sync<A, F>(
         &self,
         catalog: Arc<CatalogSynchronizer>,
@@ -94,6 +103,26 @@ impl CatalogSyncCoordinator {
     ) -> Result<SyncResult, MobileError>
     where
         A: FnOnce(CancellationToken) -> F + Send + 'static,
+        F: Future<Output = Result<String, MobileError>> + Send + 'static,
+    {
+        self.sync_with_admission(
+            catalog,
+            handlers,
+            cancelled,
+            move |cancelled, _admission| authorize(cancelled),
+        )
+        .await
+    }
+
+    pub(crate) async fn sync_with_admission<A, F>(
+        &self,
+        catalog: Arc<CatalogSynchronizer>,
+        handlers: HashSet<String>,
+        cancelled: CancellationToken,
+        authorize: A,
+    ) -> Result<SyncResult, MobileError>
+    where
+        A: FnOnce(CancellationToken, Arc<CatalogSyncAdmission>) -> F + Send + 'static,
         F: Future<Output = Result<String, MobileError>> + Send + 'static,
     {
         let account = self
@@ -106,11 +135,18 @@ impl CatalogSyncCoordinator {
         let mut operation = catalog.transport.clone();
         operation.run_cancelled = Some(cancelled.clone());
         let task_cancelled = cancelled.clone();
+        let admission = Arc::new(CatalogSyncAdmission {
+            _account: account,
+            _global: global,
+        });
         let task = tokio::spawn(async move {
             // A cancelled caller never drops admission ahead of dispatched SQL.
-            let (_account, _global) = (account, global);
             catalog.active(&operation, None).await?;
-            let token = zeroize::Zeroizing::new(operation.io(authorize(task_cancelled)).await??);
+            let token = zeroize::Zeroizing::new(
+                operation
+                    .io(authorize(task_cancelled, admission.clone()))
+                    .await??,
+            );
             if token.trim().is_empty() {
                 return Err(refused());
             }
