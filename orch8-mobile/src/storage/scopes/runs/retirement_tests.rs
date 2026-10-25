@@ -276,7 +276,14 @@ fn mobile_engine_lifecycle_owns_scoped_cleanup_without_retiring_the_account() {
                     .unwrap()
                     .unwrap();
             }
-            storage
+            let inspector = crate::storage::MobileStorage::new(Arc::new(
+                orch8_storage::sqlite::SqliteStorage::file_mobile(
+                    root.path().join("engine.db").to_str().unwrap(),
+                )
+                .await
+                .unwrap(),
+            ));
+            inspector
                 .catalog_metadata(&owner, "still-active")
                 .await
                 .unwrap();

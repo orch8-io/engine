@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile recovery ownership
+
+- Acquire exclusive persisted database ownership before mobile startup recovery;
+  retain it through physical SQLite work and independently owned pool closure.
+- Bound shutdown's close observer without releasing unsettled recovery authority;
+  preserve durable account and claim state across local runtime closure.
+
+
 ### Scoped lifetime admission
 
 - Fence expired scoped work before handler/native entry, including work that ages

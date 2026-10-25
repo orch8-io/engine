@@ -2778,3 +2778,51 @@ This fixes the internal scoped dispatch boundary. Full public lifecycle/read/
 listener APIs, legacy scheduler-wide lifetime semantics, persisted owner recovery,
 children/delegation and the remaining ADR S1-S12 gates remain open. Already-running
 native code is not preempted by logical expiry.
+
+
+### DME130 — Startup recovery must not steal another live mobile engine's claim
+
+A real MobileEngine reproduction opened two engines on the same persisted file.
+The second constructor's zero-threshold recovery cleared the first engine's live
+Running claim. The documented one-executor assumption was not enforced before
+migrations or recovery.
+
+MobileEngine now uses an explicitly owned SQLite constructor. It acquires a stable
+OS file lock before initialization, resolves symlink aliases, refuses hard-linked
+databases and treats database paths as literal filesystem paths. The persistent
+`.orch8-owner` companion is never unlinked on close and uses the existing native
+runner's lock protocol. In-memory engines remain independent and need no file
+lock. Generic administrative SQLite pools retain their existing behavior; every
+participating executor must acquire recovery authority.
+
+The lease follows physical SQLite lifetime. A private connection-owned collation
+retains the guard until SQLite's native connection destructor runs; it does not
+change normal query comparison. Pool connection options retain only a weak owner.
+This matters because dropping a SQLx observer can leave its native worker alive.
+A detached connection therefore still prevents a successor from recovering the
+same database, even after the logical pool closes.
+
+Pool close is independently owned and starts once. Cancelling a waiter cannot
+cancel draining or unlock unfinished work, and another observer can await the
+same settlement. Shutdown revokes local host admission and requests close without
+retiring accounts or clearing durable claims. Synchronous callers wait up to the
+configured operation deadline; reentrant runtime callers do not block their own
+executor. A timed-out waiter leaves recovery authority charged until physical
+settlement. Drop requests close without joining an executing host.
+
+A held-connection reproduction also showed the initial synchronous close ignoring
+its operation deadline; the bounded observer now returns while the independently
+owned close retains authority. Tests verify that another opener is refused until
+the held connection settles and can open afterward. Existing shutdown/retirement
+checks now inspect durable state through a fresh administrative pool rather than
+a deliberately closed runtime pool, preserving their original assertions.
+
+Validation covers live claim preservation, real separate-process contention and
+reopen, literal path characters, symlink/hard-link aliases, independent in-memory
+databases, detached physical connections and cancelled close observers. All 599
+mobile unit and 109 integration checks, 239 storage library tests, workspace/all-
+target Clippy with warnings denied, formatting, documentation and SDK packaging
+checks passed. Fresh native-wrapper and exact-candidate hosted-CI results are
+recorded before merge. This establishes
+the mobile single-recovery-owner boundary; public scoped SDK handles, listener/
+callback ownership, children/delegation, migration and ADR S1-S12 remain open.

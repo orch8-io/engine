@@ -51,6 +51,7 @@ mod misc;
 mod mobile_execution;
 mod mobile_sync;
 mod outputs;
+mod ownership;
 mod placement;
 mod plugins;
 mod pools;
@@ -133,6 +134,8 @@ pub const BUNDLED_SCHEMA_VERSION: i64 = schema::SCHEMA_VERSION;
 
 /// SQLite storage backend. Supports in-memory (testing) and file-backed (standalone).
 pub struct SqliteStorage {
+    recovery_owner: std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<ownership::Owner>>>>,
+    closing: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     pub(crate) pool: SqlitePool,
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
     /// methods return `Unsupported`.
@@ -258,6 +261,8 @@ impl SqliteStorage {
             .map_err(|e| StorageError::Connection(e.to_string()))?;
 
         let storage = Self {
+            recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            closing: std::sync::Mutex::new(None),
             pool,
             artifact_store: None,
         };
@@ -282,6 +287,8 @@ impl SqliteStorage {
             .map_err(|e| StorageError::Connection(e.to_string()))?;
 
         let storage = Self {
+            recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            closing: std::sync::Mutex::new(None),
             pool,
             artifact_store: None,
         };
@@ -321,11 +328,100 @@ impl SqliteStorage {
             .map_err(|e| StorageError::Connection(e.to_string()))?;
 
         let storage = Self {
+            recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            closing: std::sync::Mutex::new(None),
             pool,
             artifact_store: None,
         };
         storage.create_tables().await?;
         Ok(storage)
+    }
+
+    /// Acquire exclusive mobile recovery authority before migrations or recovery.
+    /// Raw administrative pools can still inspect the database; every executor
+    /// must participate in the same stable `.orch8-owner` lock protocol.
+    pub async fn file_mobile_owned(path: &str) -> Result<Self, StorageError> {
+        if path == ":memory:" {
+            return Self::file_mobile(path).await;
+        }
+        let (canonical, owner) = ownership::Owner::acquire(path)?;
+        let weak = std::sync::Arc::downgrade(&owner);
+        let opts = space_reclaiming(
+            SqliteConnectOptions::new()
+                .filename(canonical)
+                .create_if_missing(true)
+                .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+                .busy_timeout(Duration::from_secs(5))
+                .foreign_keys(true),
+        );
+        let pool = pool_options(5)
+            .idle_timeout(Duration::from_secs(30))
+            .after_connect(move |connection, _| {
+                let owner = weak.upgrade();
+                Box::pin(async move {
+                    let owner = owner.ok_or_else(|| {
+                        sqlx::Error::Protocol("mobile database ownership is retired".into())
+                    })?;
+                    // SQLx SQLite workers can outlive a cancelled async caller.
+                    // A native connection-owned destructor is the final barrier:
+                    // this private, ordinary string collation pins the OS lease
+                    // until SQLite actually closes the physical connection. The
+                    // options retain only Weak, so a closed pool cannot keep the
+                    // lease merely because old host objects retain pool aliases.
+                    connection.lock_handle().await?.create_collation(
+                        "__orch8_recovery_owner",
+                        move |left, right| {
+                            let _lease = &owner;
+                            left.cmp(right)
+                        },
+                    )?;
+                    Ok(())
+                })
+            })
+            .connect_with(opts)
+            .await?;
+        let storage = Self {
+            pool,
+            artifact_store: None,
+            recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(Some(owner))),
+            closing: std::sync::Mutex::new(None),
+        };
+        storage.create_tables().await?;
+        Ok(storage)
+    }
+
+    /// Close every pool alias before relinquishing logical recovery ownership.
+    /// Connection-owned leases still protect any physical SQLite worker that
+    /// has not actually closed after observer cancellation/runtime teardown.
+    pub async fn close(&self) {
+        let mut observer = {
+            let mut closing = self
+                .closing
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(observer) = &*closing {
+                observer.clone()
+            } else {
+                let (completion, observer) = tokio::sync::watch::channel(false);
+                let pool = self.pool.clone();
+                let owner = self.recovery_owner.clone();
+                // One independently owned close per pool. Dropping any waiter
+                // cannot cancel draining or its physical ownership barrier.
+                tokio::spawn(async move {
+                    pool.close().await;
+                    let retired = owner
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    drop(retired);
+                    completion.send_replace(true);
+                });
+                *closing = Some(observer.clone());
+                observer
+            }
+        };
+        let _ = observer.wait_for(|done| *done).await;
     }
 
     async fn create_tables(&self) -> Result<(), StorageError> {
@@ -3862,6 +3958,8 @@ mod tests {
         .unwrap();
 
         let storage = SqliteStorage {
+            recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            closing: std::sync::Mutex::new(None),
             pool,
             artifact_store: None,
         };
