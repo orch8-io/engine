@@ -92,3 +92,8 @@ cd ../..  # return to the repository root; the virtual environment stays active
 The `pyproject.toml` selects the `orch8_engine._native` module and abi3 Python
 3.10 compatibility. Let maturin place the platform library; manually copying a
 host library from an assumed Cargo target path is unnecessary.
+
+Runtime retirement does not join an already-entered host callback during Python
+object collection. A callback that outlives its step timeout keeps its resources
+until it returns, even after `close()` and engine collection. Arbitrary Python
+host code is not forcibly interrupted.

@@ -28,6 +28,42 @@ def effects(tmp: str) -> list:
 
 
 class DurableRestartTest(unittest.TestCase):
+    def test_engine_collection_does_not_join_a_timed_out_host_callback(self):
+        code = """
+import gc
+import threading
+from orch8_engine import Engine
+entered = threading.Event()
+release = threading.Event()
+returned = threading.Event()
+def host(ctx):
+    entered.set()
+    release.wait()
+    returned.set()
+    return True
+engine = Engine.open(':memory:')
+engine.handler('host', host)
+engine.deploy({'name': 'retire', 'blocks': [
+    {'type': 'step', 'id': 'work', 'handler': 'host', 'timeout': 1500}]})
+instance = engine.start('retire')
+result = engine.run(instance, timeout=5)
+assert entered.is_set(), 'fixture did not enter physical host work'
+assert result['state'] == 'failed', result
+engine.close()
+del engine
+gc.collect()
+print('ENGINE_DROPPED', flush=True)
+release.set()
+assert returned.wait(5), 'physical callback failed to finish after release'
+print('PHYSICAL_RETURNED', flush=True)
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=15,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["ENGINE_DROPPED", "PHYSICAL_RETURNED"])
+
     def test_run_preflight_rejects_invalid_timeouts_without_dispatch(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine = Engine.open(os.path.join(tmp, "app.db"))

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Python runtime retirement
+
+- Retire the native Python runtime without joining physical blocking callbacks
+  during engine garbage collection. A timed-out callback can finish after the
+  engine object is released, with its captures retained until physical return.
+- Allow runtime retirement from an async context without Tokio's blocking-drop
+  panic. This does not interrupt arbitrary Python host code.
+
 ### Native run preflight
 
 - Reject malformed targets and unrepresentable run deadlines before lazy engine
