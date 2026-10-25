@@ -280,3 +280,6 @@ mod coordination_tests;
 
 #[cfg(test)]
 mod read_tests;
+
+#[cfg(test)]
+mod entry_tests;

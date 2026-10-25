@@ -314,6 +314,18 @@ async fn run_step_core(
         }
     }
 
+    // Refuse stale/foreign claimed contexts before creating receipt ownership
+    // metadata, including on fresh blocks without memoization or cache reads.
+    if let Some(token) = claim_token
+        && !storage
+            .verify_instance_claim(exec.instance_id, &exec.tenant_id, token)
+            .await?
+    {
+        return Err(EngineError::ClaimLost {
+            instance_id: exec.instance_id,
+        });
+    }
+
     let handler = handlers.get(&exec.handler_name).ok_or_else(|| {
         let names = handlers.handler_names();
         let suggestion = orch8_types::suggest::did_you_mean(&exec.handler_name, &names);
@@ -388,7 +400,13 @@ async fn run_step_core(
         wait_for_input: exec.wait_for_input,
     };
 
-    let handler_fut = handler(step_ctx).instrument(step_span);
+    // Durable preparation/dispatch can wait on storage. Recheck afterward,
+    // inside the timeout and before calling even the handler's future factory.
+    let handler_fut = async move {
+        step_ctx.verify_claim().await?;
+        handler(step_ctx).await
+    }
+    .instrument(step_span);
     let result = if let Some(dur) = timeout {
         let Ok(result) = tokio::time::timeout(dur, handler_fut).await else {
             if let Some(mut guard) = effect_guard.take() {

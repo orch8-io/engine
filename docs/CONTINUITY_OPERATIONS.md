@@ -356,6 +356,14 @@ and create a preview-bound return handoff. The device calls
 SHA-256 digest, so Secure Enclave/KeyStore private keys remain non-exportable
 and never enter Rust memory.
 
+Use the digest supplied to `CapsuleSigner` directly. A separate implementation
+that constructs a manifest must hash the typed manifest's canonical JSON,
+including UTC timestamp serialization. Whole-second timestamps use `Z` with
+no `.000` fraction; JavaScript's `Date.toISOString()` needs that normalization
+before hashing. Apply the same rule to typed checkpoint timestamps before
+sealing a manually constructed payload. Reformatting signed metadata after
+hashing invalidates the capsule.
+
 Upload the returned manifest and encrypted payload to
 `POST /continuity/handoffs/{id}/attach-device-capsule`. The control plane
 requires a live source-runtime registration, an exact match to its signing

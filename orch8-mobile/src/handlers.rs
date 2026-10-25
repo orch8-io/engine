@@ -140,7 +140,7 @@ async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<
     match result {
         Ok(Ok(output_json)) => {
             let value: Value = serde_json::from_str(&output_json).unwrap_or_else(|_| {
-                warn!(output = %output_json, "handler returned non-JSON string, wrapping");
+                warn!("handler returned non-JSON string, wrapping");
                 Value::String(output_json)
             });
             Ok(value)
@@ -403,6 +403,73 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[("foreign".into(), r#"{"n":7}"#.into())]
+        );
+    }
+
+    #[derive(Clone)]
+    struct CapturedEvents(Arc<Mutex<String>>);
+
+    impl tracing::Subscriber for CapturedEvents {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Fields<'a>(&'a mut String);
+            impl tracing::field::Visit for Fields<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    writeln!(self.0, "{}={value:?}", field.name()).unwrap();
+                }
+            }
+            event.record(&mut Fields(&mut self.0.lock().unwrap()));
+        }
+    }
+
+    #[tokio::test]
+    async fn non_json_native_output_is_not_copied_into_diagnostics() {
+        use tracing::instrument::WithSubscriber;
+        let canary = "PRIVATE_NATIVE_CALLBACK_OUTPUT_CANARY";
+        let events = Arc::new(Mutex::new(String::new()));
+        let dispatch = tracing::Dispatch::new(CapturedEvents(Arc::clone(&events)));
+        for _ in 0..2 {
+            let output = invoke(
+                Arc::new(RecordingHandler {
+                    result: Ok(canary.into()),
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                }),
+                Duration::from_secs(1),
+            )
+            .with_subscriber(dispatch.clone())
+            .await
+            .unwrap();
+            assert_eq!(output, Value::String(canary.into()));
+            if !events.lock().unwrap().is_empty() {
+                break;
+            }
+            // Concurrent first callsite registration without a subscriber can
+            // cache `never`. Match the engine's span-capture regression: rebuild
+            // after that registration, then run a separate mock invocation.
+            tracing::dispatcher::with_default(&dispatch, tracing::callsite::rebuild_interest_cache);
+        }
+        let events = events.lock().unwrap();
+        assert!(
+            events.contains("handler returned non-JSON string, wrapping"),
+            "warning missing from captured events: {events}"
+        );
+        assert!(
+            !events.contains(canary),
+            "native payload leaked into diagnostics"
         );
     }
 

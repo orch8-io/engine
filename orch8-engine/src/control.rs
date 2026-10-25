@@ -13,7 +13,7 @@ use orch8_storage::{
 use orch8_types::{
     error::StorageError,
     execution::{ExecutionNode, NodeState},
-    ids::{BlockId, ExecutionNodeId, InstanceId},
+    ids::{BlockId, ExecutionNodeId, InstanceId, TenantId},
     output::BlockOutput,
 };
 
@@ -21,6 +21,22 @@ use orch8_types::{
 pub struct ExecutionClaim {
     pub instance_id: InstanceId,
     pub token: DateTime<Utc>,
+}
+
+impl ExecutionClaim {
+    /// Read-only admission check using this evaluation's original nonce.
+    pub(crate) async fn verify(
+        self,
+        backend: &dyn StorageBackend,
+        tenant: &TenantId,
+    ) -> Result<(), EngineError> {
+        held(
+            self,
+            backend
+                .verify_instance_claim(self.instance_id, tenant, self.token)
+                .await?,
+        )
+    }
 }
 
 /// A backend viewed through the immutable claim that started this evaluation.

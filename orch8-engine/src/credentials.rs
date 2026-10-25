@@ -182,55 +182,164 @@ pub async fn resolve_in_value(
     Ok(())
 }
 
-/// Resolve a single string. Returns `Ok(None)` if it isn't a `credentials://`
-/// reference (caller should leave the value as-is).
+/// Keep infrastructure and ownership failures distinct from reference failures so the
+/// caller cannot convert a lost evaluation into a user step failure.
+#[derive(Debug)]
+pub(crate) enum ClaimedResolutionError {
+    Infrastructure(crate::error::EngineError),
+    Credential(StepError),
+}
+
+pub(crate) async fn resolve_claimed_in_value(
+    storage: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    claim: crate::control::ExecutionClaim,
+    value: &mut Value,
+) -> Result<(), ClaimedResolutionError> {
+    claim
+        .verify(storage, tenant)
+        .await
+        .map_err(ClaimedResolutionError::Infrastructure)?;
+    let mut resolved = value.clone();
+    resolve_claimed_walk(storage, tenant, claim, &mut resolved).await?;
+    claim
+        .verify(storage, tenant)
+        .await
+        .map_err(ClaimedResolutionError::Infrastructure)?;
+    *value = resolved;
+    Ok(())
+}
+
+async fn resolve_claimed_walk(
+    storage: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    claim: crate::control::ExecutionClaim,
+    value: &mut Value,
+) -> Result<(), ClaimedResolutionError> {
+    match value {
+        Value::String(reference) if reference.starts_with(SCHEME) => {
+            claim
+                .verify(storage, tenant)
+                .await
+                .map_err(ClaimedResolutionError::Infrastructure)?;
+            let result = resolve_string_classified(storage, tenant.as_str(), reference).await;
+            claim
+                .verify(storage, tenant)
+                .await
+                .map_err(ClaimedResolutionError::Infrastructure)?;
+            if let Some(resolved) = result.map_err(|error| match error {
+                CredentialLookupError::Storage { source, .. } => {
+                    ClaimedResolutionError::Infrastructure(crate::error::EngineError::Storage(
+                        source,
+                    ))
+                }
+                CredentialLookupError::Credential(error) => {
+                    ClaimedResolutionError::Credential(error)
+                }
+            })? {
+                *value = resolved;
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                Box::pin(resolve_claimed_walk(storage, tenant, claim, value)).await?;
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                Box::pin(resolve_claimed_walk(storage, tenant, claim, value)).await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Preserve the storage cause until the caller selects its recovery policy.
+/// Claimed preparation uses scheduler infrastructure recovery; trusted legacy
+/// resolution exposes the existing `StepError` classification.
+#[derive(Debug)]
+enum CredentialLookupError {
+    Storage {
+        credential_id: String,
+        source: orch8_types::error::StorageError,
+    },
+    Credential(StepError),
+}
+
+impl CredentialLookupError {
+    fn into_step_error(self) -> StepError {
+        match self {
+            Self::Credential(error) => error,
+            Self::Storage {
+                credential_id,
+                source,
+            } => {
+                let message =
+                    format!("credentials: storage lookup for '{credential_id}' failed: {source}");
+                if source.is_transient() {
+                    StepError::Retryable {
+                        message,
+                        details: None,
+                    }
+                } else {
+                    StepError::Permanent {
+                        message,
+                        details: None,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Resolve a single string. Returns `Ok(None)` for an ordinary string.
 async fn resolve_string(
     storage: &dyn StorageBackend,
     tenant_id: &str,
     s: &str,
 ) -> Result<Option<Value>, StepError> {
-    let Some((id, key)) = parse_reference(s)? else {
+    resolve_string_classified(storage, tenant_id, s)
+        .await
+        .map_err(CredentialLookupError::into_step_error)
+}
+
+async fn resolve_string_classified(
+    storage: &dyn StorageBackend,
+    tenant_id: &str,
+    s: &str,
+) -> Result<Option<Value>, CredentialLookupError> {
+    let Some((id, key)) = parse_reference(s).map_err(CredentialLookupError::Credential)? else {
         return Ok(None);
     };
 
-    // Tenant isolation is enforced by the storage layer itself: a non-empty
-    // `tenant_id` scopes the lookup to that tenant (or the global scope,
-    // empty `tenant_id` on the credential) so a cross-tenant reference
-    // fails closed with "not registered" rather than relying on a
-    // post-fetch check here to catch every caller.
+    // Storage selects this tenant or the existing global scope. Claimed
+    // preparation changes error recovery, not credential lookup authority.
     let owned_tenant =
         (!tenant_id.is_empty()).then(|| orch8_types::ids::TenantId::unchecked(tenant_id));
     let credential = storage
         .get_credential(owned_tenant.as_ref(), id)
         .await
-        .map_err(|e| {
-            let message = format!("credentials: storage lookup for '{id}' failed: {e}");
-            // A failover or pool blip must not permanently fail every step
-            // that references a credential.
-            if e.is_transient() {
-                StepError::Retryable {
-                    message,
-                    details: None,
-                }
-            } else {
-                StepError::Permanent {
-                    message,
-                    details: None,
-                }
-            }
+        .map_err(|source| CredentialLookupError::Storage {
+            credential_id: id.to_owned(),
+            source,
         })?;
-    let credential = credential.ok_or_else(|| StepError::Permanent {
-        message: format!("credentials: no credential registered with id '{id}'"),
-        details: None,
+    let credential = credential.ok_or_else(|| {
+        CredentialLookupError::Credential(StepError::Permanent {
+            message: format!("credentials: no credential registered with id '{id}'"),
+            details: None,
+        })
     })?;
     if !credential.enabled {
-        return Err(StepError::Permanent {
+        return Err(CredentialLookupError::Credential(StepError::Permanent {
             message: format!("credentials: credential '{id}' is disabled"),
             details: None,
-        });
+        }));
     }
 
-    expand_material(id, key, credential.value.expose()).map(Some)
+    expand_material(id, key, credential.value.expose())
+        .map(Some)
+        .map_err(CredentialLookupError::Credential)
 }
 
 /// Turn stored credential text into the value a reference expands to.

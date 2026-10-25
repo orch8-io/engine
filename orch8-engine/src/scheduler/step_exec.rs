@@ -1334,6 +1334,7 @@ pub(super) async fn execute_step_block(
         &outputs_snap,
         defer_credentials,
         handlers.embed_sandbox(),
+        claim_token,
     )
     .await
     {
@@ -1390,17 +1391,22 @@ pub(super) async fn execute_step_block(
     if prepared.credentials_deferred
         && !crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?
         && let Err(error) = prepared
-            .resolve_deferred_credentials(storage.as_ref(), instance)
+            .resolve_deferred_credentials(storage.as_ref(), instance, claim_token)
             .await
     {
-        return fail_instance_with_error(
-            storage,
-            instance,
-            webhook_config,
-            cancel,
-            &error.to_string(),
-        )
-        .await;
+        match error {
+            crate::handlers::step_block::PrepareError::Infra(error) => return Err(error),
+            other => {
+                return fail_instance_with_error(
+                    storage,
+                    instance,
+                    webhook_config,
+                    cancel,
+                    &other.fail_message(),
+                )
+                .await;
+            }
+        }
     }
     let crate::handlers::step_block::PreparedStep {
         step_context,

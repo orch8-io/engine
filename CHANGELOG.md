@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Credential storage recovery
+
+- Preserve typed storage failures through claimed credential preparation and
+  deferred fallback. Transient lookup outages now use bounded scheduler
+  infrastructure recovery without requiring a handler retry policy or entering
+  the handler. Invalid credential references still fail as authoring errors.
+- Keep trusted legacy resolver error classification and credential lookup scopes
+  unchanged. Failed expansion still preserves the original parameters.
+
+### Native callback diagnostics
+
+- Stop copying non-JSON native callback output into warning logs. Preserve the
+  original string returned to the workflow and retain the static warning.
+
+### Claimed step preparation
+
+- Preserve the evaluation's original claim through template preparation and
+  deferred credential fallback. Recheck ownership across preparation waits and
+  credential lookups, and propagate ownership failures as infrastructure errors.
+- Expand credentials into a temporary value and publish parameters only after
+  complete resolution and a final ownership check. Failed preparation no longer
+  leaves partially expanded credentials in the caller's parameters.
+
+### Claimed handler entry
+
+- Revalidate the running tenant claim before creating effect ownership metadata
+  and again after durable-dispatch waits, before calling a handler's future
+  factory. Ordinary and pure handlers cannot enter from stale or foreign contexts.
+- Keep initial storage failures free of new effect scopes and retryable with the
+  same request. Preserve conservative evidence once dispatch was recorded.
+  Trusted unclaimed helpers, schemas and HTTP/FFI signatures remain unchanged.
+
 ### Synchronous effect-guard discovery
 
 - Apply policy scope and effect-kind filters in storage before limiting invariant

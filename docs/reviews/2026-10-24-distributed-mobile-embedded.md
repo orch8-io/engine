@@ -2089,3 +2089,149 @@ warnings denied, formatting, documentation and diff checks passed. Hosted checks
 on the submitted commit must pass before merge. Custom Rust storage backends must implement
 InvariantStore.list_effect_commit_guards. No schema migration or HTTP/FFI change
 is introduced. The original distributed/mobile/embedded review remains open.
+
+
+### DME112 — Ordinary handler factories entered without current claim proof
+
+Three regressions failed against the preceding core: an ordinary handler factory
+was entered for a retained token after transition to Waiting, for a mismatched
+execution tenant, and after claim loss during durable dispatch's storage wait.
+The factory counter reached one in each case. Claim-bound output writes did not
+prevent the side effect of entering the handler in the first place.
+
+Core execution now checks a supplied running tenant claim before effect-scope
+creation. After durable preparation/dispatch awaits, it checks again inside the
+handler timeout and before invoking the future factory itself. Pure handlers use
+the same entry fence. A refused initial context cannot create a foreign receipt
+namespace. Storage errors remain typed; a failed initial check creates no effect
+scope and the exact same request can retry after storage recovers.
+
+Twenty contracts pass across plain/encrypted SQLite/Postgres with isolated,
+required Postgres. They cover the three reproduced cases, pure handler factories,
+and failed initial claim reads followed by same-request recovery. A mobile
+independent-pool retirement fixture checks that a retained running token cannot
+enter a generic handler or create its effect scope after account retirement.
+The native cancellation/real-ledger regression now observes adapter entry and
+asserts Prepared evidence there, so generic preflight reads cannot accidentally
+replace its physical-native coverage. Final validation passed 2,072 engine,
+533 mobile and 232 storage library tests, all twenty backend contracts,
+workspace/all-target Clippy with warnings denied, formatting, documentation and
+diff checks. Hosted checks must pass on the submitted commit before merge.
+
+Explicit unclaimed Rust helpers retain their trusted behavior. This is a
+preflight, not an atomic external transaction or forced interruption of admitted
+work. Dispatch already recorded before a later failed check retains conservative
+unknown evidence; it is not erased. No schema or HTTP/FFI changes are introduced.
+The broader parameter/memory read audit, scoped runtime/SDK integration and original
+distributed/mobile/embedded matrix remain open.
+
+
+### DME113 — Step preparation outlived its initiating claim
+
+Three regressions failed against the preceding core: preparation started a
+credential lookup after transition to Waiting; template I/O lost ownership but
+continued to credential lookup; and deferred fallback resolved credentials using
+a stale evaluation. Each observed one secret lookup where zero was expected.
+
+Both flat and tree execution now pass the original evaluation nonce through
+preparation and deferred fallback. Preparation checks the running tenant claim
+at entry, after template and sandbox waits, and before returning. Credential
+resolution checks ownership before and after each lookup and before publishing
+results. Ownership errors remain infrastructure errors, including in deferred
+fallback, rather than becoming user credential failures. A refreshed instance
+cannot substitute a successor's nonce for the initiating evaluation's nonce.
+Expansion uses a temporary JSON value, preserving the original parameters when
+any reference or ownership check fails.
+
+All nineteen preparation contracts passed, including native/encrypted SQLite
+and required isolated Postgres. They cover the three reproduced cases, complete
+nested resolution, partial-resolution rollback, claim loss during a lookup,
+transient ownership-read recovery and successor-token substitution. The full
+library suites passed 2,091 engine, 533 mobile and 232 storage tests. Workspace
+all-target lint with warnings denied, formatting, documentation and diff checks
+passed. Hosted checks must pass on the exact submitted commit before merge.
+
+These are admission checks, not an atomic credential-read transaction or forced
+interruption of already admitted I/O. Legacy credential lookup scope and
+credential-error retry policy are unchanged. Broader parameter snapshots, memory
+reads, scoped runtime/SDK integration and the original distributed/mobile/
+embedded matrix remain open. No schema or HTTP/FFI changes are introduced.
+
+
+### DME114 — Non-JSON native callback output leaked into diagnostics
+
+A captured-subscriber regression reproduced a private callback-output canary in
+the native adapter's warning fields. Native callbacks can return arbitrary text,
+so this logging path copied workflow data into diagnostic sinks without a
+separate logging decision by the host.
+
+The warning now contains only its static message. Workflow behavior remains
+compatible: valid JSON is parsed and non-JSON output is returned as the original
+string. The regression requires both the warning and unchanged returned output,
+while rejecting the canary anywhere in the captured event fields. This fix
+covers the shared adapter used by ordinary and scoped native callbacks; it does
+not claim a complete diagnostic-data audit of all runtime paths.
+
+Validation passed all 534 mobile library tests, workspace/all-target Clippy with
+warnings denied, formatting, documentation and diff checks. The diagnostic test
+handles the same concurrent first-callsite registration race as the existing
+engine span-capture regression: only an empty capture permits rebuilding tracing
+interest and making one fresh mock invocation. A captured payload fails the
+assertion. Hosted CI must pass on the submitted commit before merge.
+
+
+### DME115 — Transient credential storage failures permanently failed workflows
+
+Four real-scheduler regressions failed against the preceding implementation:
+flat and parallel-tree executions on plain/encrypted SQLite became Failed after
+one injected transient credential lookup error. No handler ran. The resolver had
+converted the storage cause to StepError::Retryable, but preparation callers
+handled all credential errors as user failures before reaching handler retry
+policy. The existing resolver-only retryability test did not cover this boundary.
+
+Lookup and expansion now preserve a typed storage cause internally. Claimed
+preparation propagates it as EngineError::Storage through its infrastructure
+branch, including deferred fallback, so the existing scheduler's bounded
+infrastructure recovery applies. No handler retry policy is required. Genuine
+missing/disabled/malformed credential references retain their authoring-failure
+classification. The trusted legacy resolver uses the same lookup implementation
+and keeps its existing StepError classification. Lookup authority, including the
+legacy global credential fallback, does not change.
+
+All 31 preparation contracts passed with required isolated PostgreSQL, including
+plain/encrypted SQLite/Postgres. New contracts exercise actual scheduler
+rescheduling and eventual completion in flat and tree paths, no dispatch during
+the outage, unchanged failed-expansion parameters, deferred retry recovery,
+permanent storage classification and missing-reference classification. The
+isolated Postgres container was removed. Full library validation passed 2,103 engine, 534 mobile and 232 storage tests.
+Workspace/all-target lint with warnings denied, formatting, documentation and
+diff checks passed. Hosted checks must pass before merge.
+
+This fixes preparation-stage database recovery, not an external provider's
+credential rejection, cross-catalog credential policy, or the broader remaining
+parameter/memory, scoped integration and runtime matrix audits.
+
+
+### DME116 — Device-return E2E signed noncanonical whole-second timestamps
+
+PR #302's E2E job rejected the hand-signed device-return capsule with a canonical
+manifest hash conflict. Forcing the fixture's JavaScript timestamps to an exact
+second reproduced the same HTTP 409 locally against the current server.
+JavaScript emitted .000Z; typed Rust UTC serialization emitted Z. The fixture
+hashed a representation different from the verifier's canonical typed manifest.
+Its manually resealed checkpoint carried the same timestamp-format risk.
+
+Normalize the fixture's typed checkpoint and manifest timestamps before hashing,
+and deliberately use whole seconds so this formerly intermittent boundary runs
+every time. The production verifier and signing protocol remain unchanged.
+Document that host CapsuleSigner implementations sign the Rust-supplied digest,
+while separate manual manifest construction must match typed canonical JSON.
+No equivalent manual hashing implementation was found in the in-repository
+Swift/KMP/RN/Flutter wrappers; this is not proof of full platform parity.
+
+The focused regression first failed with HTTP 409, then passed. All 18 portable
+continuity E2Es passed with fresh SQLite and all 18 passed with required isolated
+Postgres, using freshly built current server and CLI binaries. The isolated
+Postgres container was removed. E2E TypeScript typechecking passed. This corrects
+the test producer; it does not weaken signature, payload-hash or ownership checks.
+The broader runtime, scoped integration and platform audit remains open.
