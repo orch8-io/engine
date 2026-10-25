@@ -2056,3 +2056,36 @@ instance/block; no separate within-claim activation generation is introduced.
 In-flight external work is not forcibly interrupted. Broader parameter/memory
 reads, public scoped runtime/SDK integration and the original review matrix remain
 open; this finding does not close those gates.
+
+
+### DME111 — Unrelated invariant history hid synchronous dispatch policy
+
+A regression creates 10,000 earlier observational invariants followed by an
+active Http at-most-once commit guard. The preceding lookup loaded only the
+first 10,000 entries before filtering for commit guards. The configured guard
+was absent from dispatch policy, and the later-attempt duplicate did not receive
+the required invariant refusal. The regression failed against that lookup.
+
+Dispatch now uses a required storage lookup that applies tenant, sequence,
+global/exact version, enabled flag, commit-guard flag, rule and effect kind before
+its bounded result limit. Unrelated metadata cannot hide a matching policy.
+SQLite/Postgres implement the filtered query; encrypted and fault wrappers
+preserve it. The engine retains its defensive rule/kind filter. Public invariant
+listing remains unchanged. The guard path still returns bounded diagnostic
+aliases, while the presence of any matching policy is enforced independently of
+unrelated history. This change does not claim complete unbounded audit-result
+pagination or receipt-evidence coverage.
+
+Four backend contracts cover the reproduced 10,000-entry boundary, exact/global
+version and tenant/kind/enablement selection, ordinary unguarded per-attempt
+retry semantics, and failed policy reads that cannot dispatch and remain safely
+Prepared for recovery. The protected retry leaves the provider call counter at one.
+Ordinary retry policy is intentionally per attempt; cross-attempt duplicate
+exclusion is an explicit synchronous commit-guard policy, as documented in
+[Continuity Operations](../CONTINUITY_OPERATIONS.md#synchronous-at-most-once-invariants).
+The full library suites passed 2,072 engine, 532 mobile and 232 storage tests.
+All sixteen native/encrypted backend contracts, workspace/all-target Clippy with
+warnings denied, formatting, documentation and diff checks passed. Hosted checks
+on the submitted commit must pass before merge. Custom Rust storage backends must implement
+InvariantStore.list_effect_commit_guards. No schema migration or HTTP/FFI change
+is introduced. The original distributed/mobile/embedded review remains open.

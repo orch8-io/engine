@@ -927,6 +927,19 @@ impl crate::InvariantStore for EncryptingStorage {
         self.inner.create_workflow_invariant(invariant).await
     }
 
+    async fn list_effect_commit_guards(
+        &self,
+        tenant_id: &TenantId,
+        sequence_id: orch8_types::ids::SequenceId,
+        sequence_version: i32,
+        kind: orch8_types::continuity::EffectKind,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
+        self.inner
+            .list_effect_commit_guards(tenant_id, sequence_id, sequence_version, kind, limit)
+            .await
+    }
+
     async fn list_workflow_invariants(
         &self,
         tenant_id: &orch8_types::ids::TenantId,

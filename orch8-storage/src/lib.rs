@@ -4488,6 +4488,18 @@ pub trait InvariantStore: Send + Sync + 'static {
         invariant: &WorkflowInvariant,
     ) -> Result<(), StorageError>;
 
+    /// List enabled synchronous at-most-once guards of this effect kind.
+    /// Apply tenant/sequence/version, commit-guard and rule/kind predicates
+    /// before the bounded result limit. Unrelated invariants cannot hide policy.
+    async fn list_effect_commit_guards(
+        &self,
+        tenant_id: &TenantId,
+        sequence_id: SequenceId,
+        sequence_version: i32,
+        kind: orch8_types::continuity::EffectKind,
+        limit: u32,
+    ) -> Result<Vec<WorkflowInvariant>, StorageError>;
+
     async fn list_workflow_invariants(
         &self,
         tenant_id: &TenantId,

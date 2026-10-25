@@ -346,7 +346,13 @@ async fn load_effect_commit_guards(
         return Ok(Vec::new());
     };
     let invariants = storage
-        .list_workflow_invariants(&receipt.tenant_id, sequence.id, sequence.version, 10_000)
+        .list_effect_commit_guards(
+            &receipt.tenant_id,
+            sequence.id,
+            sequence.version,
+            receipt.kind,
+            10_000,
+        )
         .await?;
     Ok(invariants
         .into_iter()
