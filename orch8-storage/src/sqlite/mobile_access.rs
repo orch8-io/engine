@@ -15,6 +15,14 @@ pub const LEGACY_MOBILE_OWNER_SQL: &str = "i.tenant_id = 'mobile'
  AND NOT EXISTS (SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=i.id)
  AND NOT EXISTS (SELECT 1 FROM mobile_catalog_run_materializations m WHERE m.request_id=i.id)";
 
+/// Native identity shared by scoped instance access and metadata projections.
+/// Trusted aliases: `i` is task_instances, `r` is the catalog run request.
+/// Callers separately prove the active session and materialization receipt.
+pub const CATALOG_NATIVE_IDENTITY_SQL: &str = "i.id=r.id
+ AND i.tenant_id='mobile-account-' || r.account_id
+ AND i.namespace='catalog-' || r.catalog_id
+ AND i.sequence_id=r.selected_sequence_id AND i.created_at=r.created_at";
+
 fn selection(
     access: &MobileInstanceAccess,
     id: InstanceId,
@@ -53,11 +61,9 @@ fn selection(
                 } else {
                     "r.owner_epoch<=a.epoch"
                 })
-                .push(
-                    " AND i.tenant_id='mobile-account-' || r.account_id
-                    AND i.namespace='catalog-' || r.catalog_id
-                    AND i.sequence_id=r.selected_sequence_id AND i.created_at=r.created_at)",
-                );
+                .push(" AND ")
+                .push(CATALOG_NATIVE_IDENTITY_SQL)
+                .push(")");
         }
     }
     query

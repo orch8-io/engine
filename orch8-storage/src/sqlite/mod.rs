@@ -27,7 +27,7 @@
 )]
 
 mod mobile_access;
-pub use mobile_access::LEGACY_MOBILE_OWNER_SQL;
+pub use mobile_access::{CATALOG_NATIVE_IDENTITY_SQL, LEGACY_MOBILE_OWNER_SQL};
 
 mod ai;
 mod alert_rules;
