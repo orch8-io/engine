@@ -3079,16 +3079,45 @@ against the rebuilt macOS library, including real committed-binding calls that
 complete both parallel branches in either order and prove an unknown step makes
 no context/state/version changes. Hosted CI remains pending for this change.
 
-### DME137 — In-memory SQLite state can disappear after connection recycling (open)
+### DME137 — Memory database lifetime must outlive replaceable connections
 
 An isolated stress run of the zero-timeout test failed after 17 passes with
-`no such table: task_instances` in the evaluator. The timeout encloses
-asynchronous claim verification; cancellation can recycle SQLite's sole pooled
-in-memory connection, whose destruction also destroys that database. This is
-separate from the deadline fixture's nondeterministic completion expectation.
-The file-backed fixture isolates that test; it does not fix memory storage.
+`no such table: task_instances` in the evaluator. Five deterministic regressions
+then lost real instance rows by retiring every pooled connection: all four
+memory constructors, plus a raw pool alias retained after dropping its storage
+wrapper. SQLite releases a memory database with its last physical connection;
+replacing a pooled connection must not define application data lifetime. The
+same boundary applies to normal idle/lifetime recycling in a long-running pool.
+[SQLite memory database lifetime documentation](https://www.sqlite.org/inmemorydb.html)
+explains that ownership boundary.
 
-Add a deterministic physical-connection retirement regression and retain memory
-database lifetime independently of a recycled pooled connection. The fix must
-also preserve pool-alias lifetime and explicit bounded close, rather than
-retaining a permanent global keeper connection. This finding remains open.
+Memory pools now retain a passive connection through a private database owner.
+The pool options keep that owner alive for retained aliases, while its owner
+contains no pool reference. A close-event watcher owns an event listener and a
+weak owner reference, never a pool clone. Raw pool close and the existing
+independently owned storage close join the same keeper-close receipt. Cancelling
+an observer cannot cancel physical cleanup, and closed retained aliases do not
+retain the database contents. This adds one passive connection per memory pool;
+on-disk recovery ownership and its physical SQLite-worker leases are unchanged.
+
+Anonymous memory inputs receive a unique shared-memory name; explicitly named
+shared-memory URLs preserve their identity. Encoded mode/cache parameters follow
+the already validated SQLx input. The implementation does not serialize SQLx
+0.9 options: that serializer panics on generated memory names. Memory pools with
+an explicitly private cache and empty temporary-file paths fail explicitly,
+rather than silently opening independent databases for different connections.
+The existing `url` dependency is used directly for URI query decoding; no new
+package version is added.
+
+All 13 focused storage regressions pass. They cover repeated full connection
+replacement, all constructors and URI forms, anonymous isolation, intentional
+named sharing, retained aliases, cancelled close observers, raw pool close and
+physical keeper release. A dedicated engine regression now runs zero-timeout
+claim-query cancellation against memory storage; all 101 engine edge-case tests
+and 100 isolated cancellation stress runs pass. All 252 storage unit tests,
+629 mobile unit tests and 109 mobile integration checks pass. Workspace/all-target
+Clippy with warnings denied, formatting, documentation and SDK packaging checks
+pass. All five committed binding copies match fresh native generation; all 33
+strict-concurrency Swift tests pass against the rebuilt macOS library, including
+both parallel answer orders on both file-backed and memory engines. Hosted CI
+remains pending; the broader scoped SDK rollout remains open.

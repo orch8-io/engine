@@ -7,7 +7,7 @@ final class StepCompletionTests: XCTestCase {
         func execute(stepName: String, input: String) throws -> String { "{\"ok\":true}" }
     }
 
-    private func makeEngine() throws -> (MobileEngine, URL) {
+    private func makeEngine(inMemory: Bool = false) throws -> (MobileEngine, URL) {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let config = MobileEngineConfig(
@@ -19,7 +19,8 @@ final class StepCompletionTests: XCTestCase {
             environment: "test", rootPublicKey: "", sdkVersion: "0.7.1",
             memoryBudgetBytes: 0, sequencesUrl: "", syncUrl: "", deviceId: "answer-test", syncApiKey: ""
         )
-        return (try MobileEngine(dbPath: directory.appendingPathComponent("node.db").path, config: config), directory)
+        let path = inMemory ? ":memory:" : directory.appendingPathComponent("node.db").path
+        return (try MobileEngine(dbPath: path, config: config), directory)
     }
 
     private func advance(_ engine: MobileEngine, _ id: String, to target: InstanceStateKind) throws -> InstanceState {
@@ -34,8 +35,8 @@ final class StepCompletionTests: XCTestCase {
     }
 
     func testParallelWaitingStepsCompleteInEitherOrderThroughCommittedBindings() throws {
-        for first in ["left", "right"] {
-            let (engine, directory) = try makeEngine()
+        for (first, inMemory) in [("left", false), ("right", false), ("left", true), ("right", true)] {
+            let (engine, directory) = try makeEngine(inMemory: inMemory)
             defer { engine.shutdown(); try? FileManager.default.removeItem(at: directory) }
             try engine.registerHandler(name: "approval_echo", handler: Echo())
             let step: (String) -> [String: Any] = { name in

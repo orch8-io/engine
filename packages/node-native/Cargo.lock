@@ -1909,6 +1909,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
  "zstd",

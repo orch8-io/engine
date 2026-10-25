@@ -1014,6 +1014,27 @@ async fn step_timeout_zero_fails_immediately() {
     assert_eq!(node_state(&tree, "s1"), NodeState::Failed);
 }
 
+// Cancelling timeout-protected claim verification must not destroy memory storage.
+#[tokio::test]
+async fn zero_timeout_memory_storage_survives_claim_query_cancellation() {
+    let (storage, seq, inst) =
+        setup(vec![mk_step_with_timeout("s1", "never_ready_memory", 0)]).await;
+    let mut reg = registry();
+    reg.register(
+        "never_ready_memory",
+        |_ctx| Box::pin(std::future::pending()),
+    );
+    tokio::time::timeout(Duration::from_secs(5), drive(&storage, &reg, inst.id, &seq))
+        .await
+        .expect("zero timeout must leave usable memory storage");
+    assert_eq!(
+        storage.get_instance(inst.id).await.unwrap().unwrap().state,
+        InstanceState::Failed
+    );
+    let tree = storage.get_execution_tree(inst.id).await.unwrap();
+    assert_eq!(node_state(&tree, "s1"), NodeState::Failed);
+}
+
 // 40. cascading_failures_parallel_all_fail
 #[tokio::test]
 async fn cascading_failures_parallel_all_fail() {
