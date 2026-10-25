@@ -2873,3 +2873,48 @@ backend legs), including kill during a native step, late completion after lease
 loss, handoff refusal and offline delegation. The PostgreSQL service was removed
 afterward. Focused all-target Clippy, formatting, binding parity, documentation
 and SDK packaging checks passed before resubmission.
+
+### DME133 — Legacy device sync must not adopt catalog-owned work
+
+The scoped-canary review reproduced three distinct legacy protocol authority
+failures using runs admitted through the actual scoped materializer: a scan
+queued all four runs belonging to two accounts × two catalogs; a legacy cancel
+command cancelled a catalog run; and a real HTTP sync sent pre-existing scoped
+status/approval outbox rows under the legacy device credential without a new
+scan. Baselines are retained in `orch8-legacy-sync-scope-baseline.log` and
+`orch8-legacy-sync-http-baseline.log` in the task's temporary evidence directory.
+
+Legacy reporting now positively requires the original `mobile` tenant and the
+absence of both a catalog request and an independent materialization receipt.
+This is not a string-prefix denylist. Active, terminal and explicit-ID status
+projections use the same owner predicate. Before HTTP serialization, persisted
+outbox keys and payload instance IDs must agree with a proven legacy instance;
+unowned/mismatched rows are discarded instead of being sent or moved to another
+account. The guarded scanner records `legacy_verified` atomically with each
+new outbox row, so an offline report can survive native task garbage collection.
+Startup adds this column idempotently to old outboxes with an unverified default;
+an upgrade never invents an owner proof. Verified rows must still match their
+key/payload ID and may never override retained catalog requests or receipts. An
+unverified row with a missing native task cannot establish legacy authority and
+is discarded. This conservative treatment is specific to the old unscoped
+outbox; a new scoped outbox still needs its own durable ownership contract.
+
+Every instance-targeting legacy command checks that same authority before any
+replacement is started. Terminal state transitions include the ownership fence
+in the atomic SQL write, clear stale claims, and cannot overwrite a terminal
+result. Approval/delegation signals use the existing transactional caller-owner
+signal API with the explicitly authorized legacy tenant; the encryption decorator
+still encrypts their payloads. Late delegation results cannot enqueue into a
+terminal instance. Scoped targets are permanently refused rather than retried
+until they accidentally acquire authority.
+
+This completes the demonstrated legacy reporter boundary only. It does not
+implement a catalog-authenticated sync transport, scoped command idempotency,
+scoped public reads/listeners, public callback context or the S1–S12 SDK rollout.
+
+The final local mobile run passed 609 unit tests and 109 integration checks.
+Ten new ownership regressions cover the four-scope scan, seven incoming command
+paths, real HTTP replay of old outbox rows, owner corruption and retirement,
+mismatched metadata, encrypted signals and late results, two-pool writer
+contention, unavailable authority storage, native-history GC and idempotent old
+outbox upgrades. All 44 reporter tests also passed as a focused suite.

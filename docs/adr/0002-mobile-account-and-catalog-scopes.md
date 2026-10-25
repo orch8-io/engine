@@ -325,3 +325,11 @@ The internal runtime now also fences scoped expiry at handler/native admission
 (DME130). Logical shutdown preserves accounts and durable claims; pending native
 SQLite work retains the recovery lease until physical close. These internal
 boundaries do not complete the public lifecycle or independent-process matrix.
+
+The legacy device reporter is now explicitly confined to legacy work (DME133).
+Its scans, persisted outbox replay and incoming instance-targeted commands cannot
+adopt catalog-owned requests. Newly queued legacy reports retain verified origin
+across native-history GC; old unverified payloads require a surviving legacy
+instance. This does not provide catalog-authenticated reporting or scoped public
+reads/listeners. Those operations still require immutable account/catalog/epoch
+ownership before public scope handles can be exported.

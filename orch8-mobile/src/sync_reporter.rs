@@ -18,6 +18,8 @@ use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 
 use crate::storage::{MobileStorage, SyncExecutionStepProjection, SyncInstanceProjection};
 
+mod legacy;
+
 /// Bounds for the server-suggested sync interval. A buggy (or malicious, if
 /// the API key/channel is ever abused) response must not be able to turn the
 /// device into a sync hot-loop (`0` → a POST every tick) or stop syncing
@@ -341,6 +343,7 @@ impl SyncReporter {
                 entry_type    TEXT NOT NULL,
                 instance_id   TEXT NOT NULL,
                 payload       TEXT NOT NULL,
+                legacy_verified INTEGER NOT NULL DEFAULT 0 CHECK(legacy_verified IN (0,1)),
                 created_at    TEXT NOT NULL DEFAULT (datetime('now')),
                 UNIQUE (entry_type, instance_id) ON CONFLICT REPLACE
             )",
@@ -350,6 +353,14 @@ impl SyncReporter {
 
         if let Err(e) = result {
             warn!(error = %e, "failed to create sync_outbox table");
+        }
+
+        if let Err(error) = sqlx::query(
+            "ALTER TABLE sync_outbox ADD COLUMN legacy_verified INTEGER NOT NULL DEFAULT 0 CHECK(legacy_verified IN (0,1))",
+        ).execute(&self.pool).await
+            && !error.to_string().contains("duplicate column")
+        {
+            warn!(%error, "failed to add legacy sync outbox authority column");
         }
 
         let result = sqlx::query(
@@ -413,7 +424,7 @@ impl SyncReporter {
                 return false;
             }
         };
-        let terminal_all = match mobile_storage.list_terminal_instance_states().await {
+        let terminal_all = match mobile_storage.list_sync_terminal_instance_states().await {
             Ok(list) => list,
             Err(e) => {
                 debug!(error = %e, "scan_and_queue: failed to list terminal instances");
@@ -560,14 +571,14 @@ impl SyncReporter {
         let result = async {
             insert_outbox_entries(
                 &mut transaction,
-                "INSERT OR REPLACE INTO sync_outbox (entry_type, instance_id, payload) ",
+                "INSERT OR REPLACE INTO sync_outbox (entry_type, instance_id, payload, legacy_verified) ",
                 "status",
                 status_entries,
             )
             .await?;
             insert_outbox_entries(
                 &mut transaction,
-                "INSERT OR IGNORE INTO sync_outbox (entry_type, instance_id, payload) ",
+                "INSERT OR IGNORE INTO sync_outbox (entry_type, instance_id, payload, legacy_verified) ",
                 "approval",
                 approval_entries,
             )
@@ -595,12 +606,12 @@ impl SyncReporter {
         // arriving during the HTTP round trip must remain pending afterward.
         let attempted_push_generation = self.push_generation.load(Ordering::Acquire);
         let pending = tokio::try_join!(
-            sqlx::query_as::<_, (i64, String)>(
-                "SELECT id, payload FROM sync_outbox WHERE entry_type = 'status' ORDER BY id LIMIT 100",
+            sqlx::query_as::<_, (i64, String, String, bool)>(
+                "SELECT id, instance_id, payload, legacy_verified FROM sync_outbox WHERE entry_type = 'status' ORDER BY id LIMIT 100",
             )
             .fetch_all(&self.pool),
-            sqlx::query_as::<_, (i64, String)>(
-                "SELECT id, payload FROM sync_outbox WHERE entry_type = 'approval' ORDER BY id LIMIT 50",
+            sqlx::query_as::<_, (i64, String, String, bool)>(
+                "SELECT id, instance_id, payload, legacy_verified FROM sync_outbox WHERE entry_type = 'approval' ORDER BY id LIMIT 50",
             )
             .fetch_all(&self.pool),
             sqlx::query_scalar::<_, String>(
@@ -612,6 +623,18 @@ impl SyncReporter {
             Ok(rows) => rows,
             Err(error) => {
                 warn!(%error, "failed to read pending mobile sync data");
+                return false;
+            }
+        };
+
+        let filtered = tokio::try_join!(
+            self.legacy_outbox_rows(status_rows, lifecycle.mobile_storage(), false),
+            self.legacy_outbox_rows(approval_rows, lifecycle.mobile_storage(), true),
+        );
+        let (status_rows, approval_rows) = match filtered {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(%error, "failed to verify mobile sync outbox authority");
                 return false;
             }
         };
@@ -874,13 +897,14 @@ impl SyncReporter {
     /// old instance whose replacement already exists.
     async fn replace_instance(
         cmd: &CommandEntry,
-        storage: &Arc<dyn StorageBackend>,
         lifecycle: &Arc<InstanceLifecycleManager>,
         old: InstanceId,
         label: &str,
     ) -> CommandOutcome {
         let cancel_old = || async {
-            transition_unless_terminal(storage.as_ref(), old, InstanceState::Cancelled)
+            lifecycle
+                .mobile_storage()
+                .transition_legacy_sync_instance(old, InstanceState::Cancelled)
                 .await
                 .map_err(|e| warn!(error = %e, label, "update_sequence: cancel failed"))
         };
@@ -941,6 +965,32 @@ impl SyncReporter {
         storage: &Arc<dyn StorageBackend>,
         lifecycle: &Arc<InstanceLifecycleManager>,
     ) -> CommandOutcome {
+        if matches!(
+            cmd.command_type.as_str(),
+            "complete_step" | "cancel_instance" | "update_sequence" | "step_result"
+        ) {
+            let Some(id) = cmd
+                .payload
+                .get("instance_id")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                .map(|id| id.to_string())
+            else {
+                return CommandOutcome::Done;
+            };
+            match lifecycle
+                .mobile_storage()
+                .legacy_sync_instance_ids(std::slice::from_ref(&id))
+                .await
+            {
+                Ok(ids) if ids.contains(&id) => {}
+                Ok(_) => return CommandOutcome::Done,
+                Err(error) => {
+                    warn!(%error, "failed to verify legacy sync command authority");
+                    return CommandOutcome::Retryable;
+                }
+            }
+        }
         match cmd.command_type.as_str() {
             "complete_step" => {
                 let instance_id = cmd.payload.get("instance_id").and_then(|v| v.as_str());
@@ -976,8 +1026,16 @@ impl SyncReporter {
                         delivered_at: None,
                     };
                     // MC-16: refuse to enqueue into a terminal/missing instance.
-                    match storage.enqueue_signal_if_active(&signal).await {
-                        Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                    match storage
+                        .enqueue_signal_for_caller(
+                            inst_id,
+                            &crate::mobile_tenant_id(),
+                            &signal,
+                            None,
+                        )
+                        .await
+                    {
+                        Ok(_) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
                         Err(
                             orch8_types::error::StorageError::TerminalTarget { .. }
                             | orch8_types::error::StorageError::NotFound { .. },
@@ -1004,9 +1062,10 @@ impl SyncReporter {
                         warn!(instance_id = %iid, "invalid UUID in cancel_instance command");
                         return CommandOutcome::Done;
                     };
-                    if let Err(e) =
-                        transition_unless_terminal(storage.as_ref(), id, InstanceState::Cancelled)
-                            .await
+                    if let Err(e) = lifecycle
+                        .mobile_storage()
+                        .transition_legacy_sync_instance(id, InstanceState::Cancelled)
+                        .await
                     {
                         warn!(error = %e, "failed to cancel instance from server command");
                         return CommandOutcome::Retryable;
@@ -1103,31 +1162,26 @@ impl SyncReporter {
                         "restart" => {
                             // Start the replacement first, then cancel (MC-02).
                             let outcome =
-                                Self::replace_instance(cmd, storage, lifecycle, inst_id, "restart")
-                                    .await;
+                                Self::replace_instance(cmd, lifecycle, inst_id, "restart").await;
                             if outcome != CommandOutcome::Done {
                                 return outcome;
                             }
                         }
                         "fail" => {
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Failed,
-                            )
-                            .await
+                            if let Err(e) = lifecycle
+                                .mobile_storage()
+                                .transition_legacy_sync_instance(inst_id, InstanceState::Failed)
+                                .await
                             {
                                 warn!(error = %e, "update_sequence(fail): failed");
                                 return CommandOutcome::Retryable;
                             }
                         }
                         "cancel" => {
-                            if let Err(e) = transition_unless_terminal(
-                                storage.as_ref(),
-                                inst_id,
-                                InstanceState::Cancelled,
-                            )
-                            .await
+                            if let Err(e) = lifecycle
+                                .mobile_storage()
+                                .transition_legacy_sync_instance(inst_id, InstanceState::Cancelled)
+                                .await
                             {
                                 warn!(error = %e, "update_sequence(cancel): failed");
                                 return CommandOutcome::Retryable;
@@ -1144,14 +1198,9 @@ impl SyncReporter {
                             // Start new with same sequence, then cancel old (MC-02);
                             // executed steps will be skipped by the engine if the
                             // execution tree carries forward completed node states.
-                            let outcome = Self::replace_instance(
-                                cmd,
-                                storage,
-                                lifecycle,
-                                inst_id,
-                                "skip_executed",
-                            )
-                            .await;
+                            let outcome =
+                                Self::replace_instance(cmd, lifecycle, inst_id, "skip_executed")
+                                    .await;
                             if outcome != CommandOutcome::Done {
                                 return outcome;
                             }
@@ -1208,9 +1257,22 @@ impl SyncReporter {
                             created_at: chrono::Utc::now(),
                             delivered_at: None,
                         };
-                        match storage.enqueue_signal(&signal).await {
-                            // Conflict: this command's signal was already enqueued.
-                            Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => {}
+                        match storage
+                            .enqueue_signal_for_caller(
+                                inst_id,
+                                &crate::mobile_tenant_id(),
+                                &signal,
+                                None,
+                            )
+                            .await
+                        {
+                            // Duplicate, retired, terminal and foreign targets cannot be retried into authority.
+                            Ok(_)
+                            | Err(
+                                orch8_types::error::StorageError::Conflict(_)
+                                | orch8_types::error::StorageError::NotFound { .. }
+                                | orch8_types::error::StorageError::TerminalTarget { .. },
+                            ) => {}
                             Err(e) => {
                                 warn!(error = %e, "failed to enqueue step_result signal");
                                 return CommandOutcome::Retryable;
@@ -1255,33 +1317,6 @@ fn command_uuid(kind: &str, command_id: &str) -> uuid::Uuid {
     )
 }
 
-/// Compare-and-set `id` to `target` unless it is already terminal. Returns
-/// `Ok(false)` when the instance is missing or terminal (nothing to do).
-/// Retries a few times if the state moves concurrently between read and CAS.
-async fn transition_unless_terminal(
-    storage: &dyn StorageBackend,
-    id: InstanceId,
-    target: InstanceState,
-) -> Result<bool, orch8_types::error::StorageError> {
-    for _ in 0..3 {
-        let Some(inst) = storage.get_instance(id).await? else {
-            return Ok(false);
-        };
-        if inst.state.is_terminal() {
-            return Ok(false);
-        }
-        if storage
-            .conditional_update_instance_state(id, inst.state, target, None)
-            .await?
-        {
-            return Ok(true);
-        }
-    }
-    Err(orch8_types::error::StorageError::Conflict(format!(
-        "instance {id} state kept changing; transition to {target} not applied"
-    )))
-}
-
 async fn delete_outbox_rows(pool: &SqlitePool, ids: &[i64]) -> Result<(), sqlx::Error> {
     if ids.is_empty() {
         return Ok(());
@@ -1323,7 +1358,8 @@ async fn insert_outbox_entries(
     query.push_values(entries, |mut row, (instance_id, payload)| {
         row.push_bind(entry_type)
             .push_bind(instance_id)
-            .push_bind(payload);
+            .push_bind(payload)
+            .push_bind(true);
     });
     query.build().execute(&mut **transaction).await?;
     Ok(())
@@ -1674,7 +1710,7 @@ mod tests {
     use orch8_types::sequence::{SequenceStatus, StepDef};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    async fn setup(
+    pub(super) async fn setup(
         sync_url: String,
     ) -> (
         SyncReporter,
@@ -1749,7 +1785,7 @@ mod tests {
         server.await.unwrap();
     }
 
-    async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
+    pub(super) async fn seed_sequence(storage: &Arc<dyn StorageBackend>, name: &str) {
         let seq = SequenceDefinition {
             embed: None,
             sub_tenant: None,
@@ -1979,7 +2015,7 @@ mod tests {
         assert!(entries.iter().all(|entry| entry["state"] == "pending"));
     }
 
-    async fn count_instances(storage: &Arc<dyn StorageBackend>) -> usize {
+    pub(super) async fn count_instances(storage: &Arc<dyn StorageBackend>) -> usize {
         let filter = InstanceFilter::default();
         let pagination = Pagination {
             offset: 0,
@@ -2550,7 +2586,7 @@ mod tests {
 
     // ---- MC-03 / OPT-01: status scan drains and only rewrites changes ----
 
-    async fn insert_raw_instance(
+    pub(super) async fn insert_raw_instance(
         mobile: &crate::storage::MobileStorage,
         state: &str,
         updated_at: chrono::DateTime<chrono::Utc>,
@@ -2571,7 +2607,7 @@ mod tests {
         id
     }
 
-    async fn outbox_count(reporter: &SyncReporter) -> i64 {
+    pub(super) async fn outbox_count(reporter: &SyncReporter) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM sync_outbox WHERE entry_type = 'status'")
             .fetch_one(&reporter.pool)
             .await
@@ -2641,7 +2677,7 @@ mod tests {
 
     // ---- MC-02 / MC-10 / MC-16: command idempotency ----
 
-    fn cmd(id: &str, kind: &str, payload: serde_json::Value) -> CommandEntry {
+    pub(super) fn cmd(id: &str, kind: &str, payload: serde_json::Value) -> CommandEntry {
         CommandEntry {
             id: id.to_string(),
             command_type: kind.to_string(),
@@ -2792,7 +2828,9 @@ mod tests {
         );
 
         // MC-16: terminal target -> acked as Done, no signal row.
-        transition_unless_terminal(storage.as_ref(), inst, InstanceState::Cancelled)
+        lifecycle
+            .mobile_storage()
+            .transition_legacy_sync_instance(inst, InstanceState::Cancelled)
             .await
             .unwrap();
         let late = cmd(
@@ -2807,3 +2845,7 @@ mod tests {
         assert_eq!(storage.get_pending_signals(inst).await.unwrap().len(), 1);
     }
 }
+
+#[cfg(test)]
+#[path = "sync_reporter_scope_tests.rs"]
+mod scope_tests;
