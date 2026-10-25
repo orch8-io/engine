@@ -2850,3 +2850,26 @@ actual current macOS library. An iOS simulator check with the original CI-built
 framework is used to verify the repaired package before merge; hosted CI must
 also pass the exact corrected candidate. This is SDK-contract validation, not
 completion of the public scoped FFI surface.
+
+
+### DME132 — In-process crash fixtures must observe physical teardown
+
+The full hosted workspace run exposed the phone-local delegation restart fixture
+reopening immediately after dropping its in-process MobileEngine. The old native
+SQLite workers could still hold recovery authority, so the new constructor
+correctly refused the open. The fixture's timing assumption had bypassed the
+physical teardown boundary enforced by DME130.
+
+The interrupted-phone fixture now waits, within its existing deadline, until it
+can acquire and immediately release the same stable OS ownership lock. It never
+unlinks the companion or weakens the production constructor. Both interruption
+points still preserve the original parked workflow/delegation journal and all
+exactly-once assertions. The fixture models in-process teardown; dedicated
+abrupt-process crash coverage remains part of the wider S12 matrix.
+
+All three phone-local delegation scenarios and eight related cloud/phone round-
+trip scenarios passed against SQLite and a real isolated PostgreSQL service (22
+backend legs), including kill during a native step, late completion after lease
+loss, handoff refusal and offline delegation. The PostgreSQL service was removed
+afterward. Focused all-target Clippy, formatting, binding parity, documentation
+and SDK packaging checks passed before resubmission.
