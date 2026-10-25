@@ -162,3 +162,119 @@ async fn close_releases_frozen_handler_registrations() {
 async fn close_releases_handlers_after_failed_initialization() {
     verify_close_releases_callbacks(true, true).await;
 }
+
+#[derive(Clone, Copy)]
+enum Reenter {
+    Register,
+    Close,
+}
+
+struct DropProbe {
+    engine: std::sync::Weak<durable::DurableEngine>,
+    operation: Reenter,
+    completed_during_drop: Arc<std::sync::atomic::AtomicBool>,
+    worker: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
+
+impl Drop for DropProbe {
+    fn drop(&mut self) {
+        let engine = self.engine.upgrade().expect("engine must own its callback");
+        let operation = self.operation;
+        let (done, wait) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            match operation {
+                Reenter::Register => engine
+                    .register(
+                        "nested",
+                        Arc::new(|_| Box::pin(async { Ok(json!({"ok":true}).to_string()) })),
+                    )
+                    .unwrap(),
+                Reenter::Close => tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(engine.close()),
+            }
+            let _ = done.send(());
+        });
+        *self.worker.lock().unwrap() = Some(worker);
+        // A host destructor may synchronously wait for another engine call.
+        // Keep this regression bounded even when the old code holds a lock.
+        self.completed_during_drop.store(
+            wait.recv_timeout(std::time::Duration::from_secs(5)).is_ok(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+async fn callback_drop_can_reenter(operation: Reenter, initialize: bool, fail: bool) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let root =
+        std::env::temp_dir().join(format!("orch8-native-reentrant-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&root).unwrap();
+    let database = if fail {
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, "not a directory").unwrap();
+        blocker.join("engine.db")
+    } else {
+        root.join("engine.db")
+    };
+    let engine = Arc::new(durable::DurableEngine::new(database.to_string_lossy()));
+    let completed = Arc::new(AtomicBool::new(false));
+    let worker = Arc::new(std::sync::Mutex::new(None));
+    let probe = DropProbe {
+        engine: Arc::downgrade(&engine),
+        operation,
+        completed_during_drop: completed.clone(),
+        worker: worker.clone(),
+    };
+    engine
+        .register(
+            "host",
+            Arc::new(move |_| {
+                let _held = &probe;
+                Box::pin(async { Ok(json!({"ok":true}).to_string()) })
+            }),
+        )
+        .unwrap();
+    if initialize {
+        let result = engine.deploy(&json!({"name":"reentrant","blocks":[{"type":"step","id":"work","handler":"noop"}]}).to_string()).await;
+        assert_eq!(result.is_err(), fail);
+    }
+    match operation {
+        Reenter::Register => engine
+            .register(
+                "host",
+                Arc::new(|_| Box::pin(async { Ok(json!({"ok":true}).to_string()) })),
+            )
+            .unwrap(),
+        Reenter::Close => engine.close().await,
+    }
+    if let Some(worker) = worker.lock().unwrap().take() {
+        worker.join().unwrap();
+    }
+    engine.close().await;
+    drop(engine);
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(
+        completed.load(Ordering::SeqCst),
+        "callback destruction blocked a reentrant engine call"
+    );
+}
+
+#[tokio::test]
+async fn replacing_callback_can_reenter_registration() {
+    callback_drop_can_reenter(Reenter::Register, false, false).await;
+}
+#[tokio::test]
+async fn unused_callback_drop_can_reenter_close() {
+    callback_drop_can_reenter(Reenter::Close, false, false).await;
+}
+#[tokio::test]
+async fn initialized_callback_drop_can_reenter_close() {
+    callback_drop_can_reenter(Reenter::Close, true, false).await;
+}
+#[tokio::test]
+async fn failed_initialization_callback_drop_can_reenter_close() {
+    callback_drop_can_reenter(Reenter::Close, true, true).await;
+}

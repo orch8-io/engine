@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Native callback finalization
+
+- Release replaced callbacks, cached engines and unused registrations outside
+  native lifecycle locks so host finalizers can reenter registration or close.
+- Keep the cached engine owned until asynchronous shutdown finishes, then detach
+  cleanup values before releasing their last host references.
+
 ### Native host callback claim checks
 
 - Revalidate the initiating claim before and after loading the Node/Python host

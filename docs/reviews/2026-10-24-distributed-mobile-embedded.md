@@ -29,7 +29,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; internal authenticated private sync verified; public runtime/SDK integration remains open |
 | Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; scoped transfer and acceptance audit remain open |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
-| Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Reviewing; shared adapter post-storage claim entry covered below; queued physical host admission, reentrant cleanup and platform parity remain open |
+| Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Reviewing; shared adapter post-storage claim entry and replacement/close finalization covered below; queued physical host admission, resource bounds and platform parity remain open |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
 | Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Pending |
@@ -2268,3 +2268,35 @@ These are shared-adapter admission checks. They do not prove that already queued
 Node callbacks or Python blocking/GIL work can be interrupted, nor do they settle
 physical callback admission, reentrant destruction, scoped account/catalog SDK
 integration or the remaining distributed/mobile/embedded audit matrix.
+
+
+### DME118 — Native callback destruction held reentrant lifecycle locks
+
+An actual Python callback finalizer entered during handler replacement, attempted
+to register another handler, and deadlocked. The isolated reproduction printed
+FINALIZER_ENTERED but never returned and required killing its child after five
+seconds. Four bounded Rust regressions also failed: callback destruction blocked
+reentrant registration during replacement and reentrant close from unused,
+initialized and failed-initialization engines.
+
+Replacement now publishes the new registration, releases the registration mutex,
+and only then drops the predecessor. Successful initialization detaches its retry
+registration copies and releases the cache lock before retiring them. Close keeps
+the cached engine through the asynchronous shutdown await, preserving ownership
+for cancellation/retry, then detaches cached engine and registration values and
+releases both lifecycle locks before destruction. The closed flag and frozen
+registration state are established before host finalizers can reenter cleanup.
+The initialization-versus-close path likewise releases the cache lock before its
+last local engine and registration references drop.
+
+All eleven native lifecycle tests passed, including the four reproduced cases.
+The full facade suite passed 162 test results plus three documentation tests.
+Actual macOS arm64 addons passed three Node restart/error tests and four Python
+tests, including the committed real-finalizer subprocess regression. Workspace
+all-target lint with warnings denied, formatting, documentation and diff checks
+passed. Hosted CI must pass on the exact commit before merge. No public API, schema or callback envelope changes are introduced.
+
+This removes lifecycle-lock deadlocks. Arbitrary host destruction can still block
+its own calling thread, and queued physical host admission, general callback
+resource bounds, full platform parity and scoped SDK/runtime integration remain
+open. The original distributed/mobile/embedded matrix is not complete.
