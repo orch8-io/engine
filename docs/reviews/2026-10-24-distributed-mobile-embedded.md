@@ -2012,3 +2012,47 @@ These checks cover the claimed read paths named above. They do not sandbox host
 Rust, revoke values already delivered, or complete public scoped read APIs,
 parameter/memory/agent read audits, callback lifecycle wiring, materialization or
 the original distributed/mobile/embedded completion matrix.
+
+
+### DME110 — Agent checkpoint recovery discarded ownership and failures
+
+Two regressions failed against the preceding implementation. A stale agent read
+and deleted a successor's checkpoint after the instance acquired a new running
+claim; the stored successor record became absent. A checkpoint read also used raw
+unclaimed storage and treated failure as permission to start fresh.
+
+Agent checkpoint load/save/clear now use the initiating StepContext's claim-bound
+state operations. Recovery loads and validates before agent discovery, embedding
+or model/tool work. Missing checkpoints can start fresh; corrupt records,
+missing/invalid counters and counters beyond the supported loop ceilings require
+explicit recovery and are preserved. The loop propagates checkpoint errors:
+a failed load starts no turn, a failed save prevents the next tool/model phase,
+and a failed clear cannot report successful completion on either terminal path.
+
+Agent registration uses deferred effect admission. The checkpoint is read and
+validated before admitting the agent effect, with claim preflights around that
+admission. Thus a pre-admission storage failure leaves Prepared evidence and can
+retry the same attempt after storage recovers. Ambiguous admitted effects retain
+existing conservative evidence; no uncertain dispatch is cleared. Subsequent
+model/tool phases and automatic-memory boundaries revalidate the initiating
+claim. A controlled real-provider mock loses its lease after the model response
+and proves no tool HTTP request occurs.
+
+The initial 50 agent tests pass; five additional loop/network contracts cover
+load/save/clear errors, corrupt recovery and model-to-tool lease loss. Native and
+encrypted backend contracts cover successor checkpoint preservation, failed load,
+corrupt checkpoint preservation and same-attempt recovery through the real step
+effect ledger. All sixteen backend contracts pass. Final validation passed
+2,072 engine, 532 mobile and 232 storage library tests, workspace/all-target
+Clippy with warnings denied, formatting, documentation and diff checks. Hosted
+checks must pass on the submitted commit before merge. Valid legacy checkpoint
+records keep their existing three-field format;
+public HTTP/FFI signatures are unchanged. StepContext adds a Rust claim preflight.
+
+This does not make tool execution and checkpoint persistence one atomic
+transaction. Completion before a durable checkpoint remains ambiguous and safe
+replay requires effect evidence/tool idempotency. Checkpoints remain keyed by
+instance/block; no separate within-claim activation generation is introduced.
+In-flight external work is not forcibly interrupted. Broader parameter/memory
+reads, public scoped runtime/SDK integration and the original review matrix remain
+open; this finding does not close those gates.

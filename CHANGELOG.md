@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Agent checkpoint ownership and recovery
+
+- Fence agent checkpoint loads, saves and deletion with the initiating claim.
+  Recovery failures and corrupt checkpoints stop the loop and preserve evidence;
+  they no longer silently start a fresh conversation or continue to another tool.
+- Validate recovery before agent effect admission, so pre-admission storage
+  failures can retry the same attempt. Revalidate the claim before subsequent
+  model/tool phases and automatic-memory boundaries. Add Rust
+  `StepContext::verify_claim`; HTTP/FFI signatures are unchanged.
+- Keep valid legacy checkpoint records compatible. Invalid records now require
+  explicit recovery. Tool completion before checkpoint persistence remains
+  ambiguous; this does not provide atomic or exactly-once external tool effects.
+
 ### Claim-bound execution reads
 
 - Fence claimed memoized outputs, step-cache values and builtin KV reads with the

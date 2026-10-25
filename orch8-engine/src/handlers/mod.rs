@@ -114,6 +114,21 @@ pub struct StepContext {
 }
 
 impl StepContext {
+    /// Revalidate the initiating running claim before another external phase.
+    /// This preflight cannot interrupt an already-admitted external operation.
+    pub async fn verify_claim(&self) -> Result<(), StepError> {
+        if let Some(token) = self.claim_token
+            && !self
+                .storage
+                .verify_instance_claim(self.instance_id, &self.tenant_id, token)
+                .await
+                .map_err(|error| state_storage_error(&error))?
+        {
+            return Err(StepError::ClaimLost);
+        }
+        Ok(())
+    }
+
     /// Read this instance's KV state under its original claim when supplied.
     pub async fn get_state(&self, key: &str) -> Result<Option<serde_json::Value>, StepError> {
         if let Some(token) = self.claim_token {

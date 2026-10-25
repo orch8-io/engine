@@ -19,7 +19,10 @@
 //! iteration counter) to the instance KV, keyed by block id. If the step
 //! crashes or is retried, the loop **resumes after the last completed tool
 //! call** rather than re-running (and re-paying for) earlier turns or
-//! re-executing side-effecting tools — only the in-flight call is redone.
+//! re-executing saved tool observations. A tool that completes before its
+//! checkpoint is durable has an ambiguous outcome; safe replay still requires
+//! effect evidence and provider/tool idempotency. Checkpoint load/save/clear
+//! failures stop the loop rather than silently permitting more work.
 //!
 //! Only tools declared in `tools` are dispatched (a model naming anything else
 //! gets an error observation), at most `MAX_TOOL_CALLS_PER_TURN` per turn, and
@@ -126,10 +129,25 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
         .unwrap_or(DEFAULT_MAX_ITERATIONS)
         .clamp(1, MAX_ITERATIONS_CEILING);
 
+    let checkpoint = std::sync::Arc::new(AgentCheckpoint {
+        ctx: ctx.clone(),
+        key: format!("__agent__:{}", ctx.block_id.as_str()),
+    });
+    // Load and validate before discovery, embedding or model work. A failed
+    // recovery read is never permission to start a new conversation.
+    let initial_checkpoint = checkpoint.load().await?;
+    ctx.verify_claim().await?;
+    if let Some(admission) = &ctx.effect_admission {
+        admission.admit().await?;
+        ctx.verify_claim().await?;
+    }
+
     // Effective params start as the step params, then get (1) auto-discovered
     // tools and (2) recalled memories layered in.
     let mut effective_params = maybe_discover_tools(&ctx).await?;
+    ctx.verify_claim().await?;
     effective_params = maybe_recall_memory(&ctx, effective_params).await?;
+    ctx.verify_claim().await?;
 
     // Closures wire the real handlers. They clone the step context and swap in
     // freshly-built params, so sub-calls inherit tenant/instance identity and
@@ -138,7 +156,10 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
     let call_llm = move |llm_params: Value| {
         let mut sub = llm_ctx.clone();
         sub.params = llm_params;
-        async move { super::llm::handle_llm_call(sub).await }
+        async move {
+            sub.verify_claim().await?;
+            super::llm::handle_llm_call(sub).await
+        }
     };
 
     let tool_ctx = ctx.clone();
@@ -147,6 +168,7 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
         let mut sub = tool_ctx.clone();
         let cfg = dispatch_cfg.clone();
         async move {
+            sub.verify_claim().await?;
             let (kind, params) = build_tool_dispatch(cfg.as_ref(), &call)?;
             sub.params = params;
             match kind {
@@ -156,44 +178,18 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
         }
     };
 
-    // Durable checkpoint: progress (messages + completed iterations) is
-    // persisted to the instance KV after each iteration, keyed by block id.
-    // On crash/retry the loop resumes from the last completed iteration
-    // instead of re-running (and re-paying for) earlier turns.
-    let cp_key = format!("__agent__:{}", ctx.block_id.as_str());
-    let (load_storage, load_iid, load_key) = (ctx.storage.clone(), ctx.instance_id, cp_key.clone());
     let load_checkpoint = move || {
-        let (s, k) = (load_storage.clone(), load_key.clone());
-        async move {
-            // Best-effort: a read failure means starting fresh, not failing.
-            match s.get_instance_kv(load_iid, &k).await {
-                Ok(cp) => cp,
-                Err(e) => {
-                    warn!(error = %e, key = %k, "agent: failed to load checkpoint, starting fresh");
-                    None
-                }
-            }
-        }
+        let value = initial_checkpoint.clone();
+        async move { Ok(value) }
     };
-    let (save_storage, save_iid, save_key) = (ctx.storage.clone(), ctx.instance_id, cp_key.clone());
-    let save_checkpoint = move |cp: Value| {
-        let (s, k) = (save_storage.clone(), save_key.clone());
-        async move {
-            // Best-effort: a write failure must not fail the agent.
-            if let Err(e) = s.set_instance_kv(save_iid, &k, &cp).await {
-                warn!(error = %e, key = %k, "agent: failed to save checkpoint");
-            }
-        }
+    let saved = checkpoint.clone();
+    let save_checkpoint = move |value: Value| {
+        let checkpoint = saved.clone();
+        async move { checkpoint.save(&value).await }
     };
-    let (clear_storage, clear_iid) = (ctx.storage.clone(), ctx.instance_id);
     let clear_checkpoint = move || {
-        let (s, k) = (clear_storage.clone(), cp_key.clone());
-        async move {
-            // Best-effort: a delete failure must not fail the agent.
-            if let Err(e) = s.delete_instance_kv(clear_iid, &k).await {
-                warn!(error = %e, key = %k, "agent: failed to clear checkpoint");
-            }
-        }
+        let checkpoint = checkpoint.clone();
+        async move { checkpoint.clear().await }
     };
 
     let outcome = run_agent_loop(
@@ -208,9 +204,31 @@ pub async fn handle_agent(ctx: StepContext) -> Result<Value, StepError> {
     .await?;
 
     // Persist the final answer to memory if auto_memory.store_outcome is on.
+    ctx.verify_claim().await?;
     maybe_store_memory(&ctx, &effective_params, &outcome).await;
+    ctx.verify_claim().await?;
 
     Ok(outcome)
+}
+
+struct AgentCheckpoint {
+    ctx: StepContext,
+    key: String,
+}
+impl AgentCheckpoint {
+    async fn load(&self) -> Result<Option<Value>, StepError> {
+        let value = self.ctx.get_state(&self.key).await?;
+        if let Some(ref checkpoint) = value {
+            checkpoint_parts(checkpoint)?;
+        }
+        Ok(value)
+    }
+    async fn save(&self, value: &Value) -> Result<(), StepError> {
+        self.ctx.set_state(&self.key, value).await
+    }
+    async fn clear(&self) -> Result<(), StepError> {
+        self.ctx.delete_state(&self.key).await
+    }
 }
 
 /// Which sub-handler executes a tool call.
@@ -246,19 +264,19 @@ where
     T: Fn(ToolCall) -> TFut,
     TFut: std::future::Future<Output = Result<Value, StepError>>,
     LD: Fn() -> LDFut,
-    LDFut: std::future::Future<Output = Option<Value>>,
+    LDFut: std::future::Future<Output = Result<Option<Value>, StepError>>,
     SV: Fn(Value) -> SVFut,
-    SVFut: std::future::Future<Output = ()>,
+    SVFut: std::future::Future<Output = Result<(), StepError>>,
     CL: Fn() -> CLFut,
-    CLFut: std::future::Future<Output = ()>,
+    CLFut: std::future::Future<Output = Result<(), StepError>>,
 {
-    let checkpoint = load_checkpoint().await;
+    let checkpoint = load_checkpoint().await?;
     let resumed = checkpoint
         .as_ref()
         .and_then(|cp| cp.get("messages"))
         .is_some_and(Value::is_array);
     let (mut messages, start_iteration, mut tool_calls_made) =
-        restore_checkpoint(checkpoint, agent_params);
+        restore_checkpoint(checkpoint, agent_params)?;
     let declared = declared_tool_names(agent_params);
     // A mid-turn checkpoint (saved after each tool call) leaves the last
     // assistant message's remaining calls unanswered: finish those before
@@ -283,7 +301,7 @@ where
                     iteration,
                     "agent: model produced no tool calls — completing"
                 );
-                clear_checkpoint().await;
+                clear_checkpoint().await?;
                 return Ok(result(
                     final_text(&assistant),
                     iteration + 1,
@@ -329,12 +347,12 @@ where
             } else {
                 iteration
             };
-            save_checkpoint(make_checkpoint(&messages, next_iteration, tool_calls_made)).await;
+            save_checkpoint(make_checkpoint(&messages, next_iteration, tool_calls_made)).await?;
         }
     }
 
     debug!(max_iterations, "agent: iteration budget exhausted");
-    clear_checkpoint().await;
+    clear_checkpoint().await?;
     Ok(result(
         None,
         max_iterations,
@@ -396,20 +414,41 @@ fn make_checkpoint(messages: &[Value], iteration: u64, tool_calls_made: u64) -> 
     })
 }
 
-/// Restore `(messages, start_iteration, tool_calls_made)` from a checkpoint, or
-/// start fresh from the agent params when there is no valid checkpoint.
-fn restore_checkpoint(checkpoint: Option<Value>, agent_params: &Value) -> (Vec<Value>, u64, u64) {
-    if let Some(cp) = checkpoint
-        && let Some(messages) = cp.get("messages").and_then(Value::as_array)
+/// Validate persisted recovery evidence before new provider work.
+fn checkpoint_parts(checkpoint: &Value) -> Result<(&Vec<Value>, u64, u64), StepError> {
+    let invalid =
+        || super::util::permanent("agent checkpoint is invalid; explicit recovery is required");
+    let messages = checkpoint
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(invalid)?;
+    let iteration = checkpoint
+        .get("iteration")
+        .and_then(Value::as_u64)
+        .ok_or_else(invalid)?;
+    let calls = checkpoint
+        .get("tool_calls_made")
+        .and_then(Value::as_u64)
+        .ok_or_else(invalid)?;
+    if iteration > MAX_ITERATIONS_CEILING
+        || calls > MAX_ITERATIONS_CEILING * MAX_TOOL_CALLS_PER_TURN as u64
     {
-        let iteration = cp.get("iteration").and_then(Value::as_u64).unwrap_or(0);
-        let tool_calls_made = cp
-            .get("tool_calls_made")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        return (messages.clone(), iteration, tool_calls_made);
+        return Err(invalid());
     }
-    (initial_messages(agent_params), 0, 0)
+    Ok((messages, iteration, calls))
+}
+
+fn restore_checkpoint(
+    checkpoint: Option<Value>,
+    agent_params: &Value,
+) -> Result<(Vec<Value>, u64, u64), StepError> {
+    match checkpoint {
+        Some(checkpoint) => {
+            let (messages, iteration, calls) = checkpoint_parts(&checkpoint)?;
+            Ok((messages.clone(), iteration, calls))
+        }
+        None => Ok((initial_messages(agent_params), 0, 0)),
+    }
 }
 
 // ---- Tool auto-discovery (MCP `tools/list`) --------------------------------
@@ -986,6 +1025,55 @@ mod tests {
 
     // ---- loop integration tests with deterministic closures ----------------
 
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_with_checkpoints<L, LFut, T, TFut, LD, LDFut, SV, SVFut, CL, CLFut>(
+        params: &Value,
+        max: u64,
+        llm: L,
+        tool: T,
+        load: LD,
+        save: SV,
+        clear: CL,
+    ) -> Result<Value, StepError>
+    where
+        L: Fn(Value) -> LFut,
+        LFut: std::future::Future<Output = Result<Value, StepError>>,
+        T: Fn(ToolCall) -> TFut,
+        TFut: std::future::Future<Output = Result<Value, StepError>>,
+        LD: Fn() -> LDFut,
+        LDFut: std::future::Future<Output = Option<Value>>,
+        SV: Fn(Value) -> SVFut,
+        SVFut: std::future::Future<Output = ()>,
+        CL: Fn() -> CLFut,
+        CLFut: std::future::Future<Output = ()>,
+    {
+        super::run_agent_loop(
+            params,
+            max,
+            llm,
+            tool,
+            || {
+                let future = load();
+                async move { Ok(future.await) }
+            },
+            |value| {
+                let future = save(value);
+                async move {
+                    future.await;
+                    Ok(())
+                }
+            },
+            || {
+                let future = clear();
+                async move {
+                    future.await;
+                    Ok(())
+                }
+            },
+        )
+        .await
+    }
+
     /// Run the loop with no-op checkpointing (most loop tests don't exercise
     /// resume).
     async fn run_loop_no_cp<L, LFut, T, TFut>(
@@ -1000,7 +1088,7 @@ mod tests {
         T: Fn(ToolCall) -> TFut,
         TFut: std::future::Future<Output = Result<Value, StepError>>,
     {
-        super::run_agent_loop(
+        run_loop_with_checkpoints(
             agent_params,
             max_iterations,
             call_llm,
@@ -1208,7 +1296,7 @@ mod tests {
     fn checkpoint_round_trips() {
         let messages = vec![json!({ "role": "user", "content": "hi" })];
         let cp = make_checkpoint(&messages, 3, 2);
-        let (restored, iter, tcm) = restore_checkpoint(Some(cp), &json!({ "goal": "x" }));
+        let (restored, iter, tcm) = restore_checkpoint(Some(cp), &json!({ "goal": "x" })).unwrap();
         assert_eq!(restored, messages);
         assert_eq!(iter, 3);
         assert_eq!(tcm, 2);
@@ -1216,19 +1304,25 @@ mod tests {
 
     #[test]
     fn restore_checkpoint_none_starts_fresh() {
-        let (msgs, iter, tcm) = restore_checkpoint(None, &json!({ "goal": "fresh" }));
+        let (msgs, iter, tcm) = restore_checkpoint(None, &json!({ "goal": "fresh" })).unwrap();
         assert_eq!(msgs[0]["content"], "fresh");
         assert_eq!(iter, 0);
         assert_eq!(tcm, 0);
     }
 
     #[test]
-    fn restore_checkpoint_invalid_starts_fresh() {
-        // No `messages` array → treated as no checkpoint.
-        let (msgs, iter, _) =
-            restore_checkpoint(Some(json!({ "garbage": 1 })), &json!({ "goal": "g" }));
-        assert_eq!(msgs[0]["content"], "g");
-        assert_eq!(iter, 0);
+    fn restore_checkpoint_invalid_requires_explicit_recovery() {
+        for checkpoint in [
+            json!({"garbage":1}),
+            Value::Null,
+            json!({"messages":[],"iteration":0}),
+            json!({"messages":[],"iteration":0,"tool_calls_made":u64::MAX}),
+        ] {
+            assert!(matches!(
+                restore_checkpoint(Some(checkpoint), &json!({"goal":"g"})),
+                Err(StepError::Permanent { .. })
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1239,7 +1333,7 @@ mod tests {
             "iteration": 2,
             "tool_calls_made": 1
         });
-        let out = super::run_agent_loop(
+        let out = run_loop_with_checkpoints(
             &json!({ "goal": "ignored-because-checkpoint-wins" }),
             6,
             |_p| async { Ok(assistant_text("resumed answer")) },
@@ -1267,7 +1361,7 @@ mod tests {
     #[tokio::test]
     async fn loop_clears_checkpoint_on_completion() {
         let cleared = RefCell::new(false);
-        let out = super::run_agent_loop(
+        let out = run_loop_with_checkpoints(
             &json!({ "goal": "x" }),
             6,
             |_p| async { Ok(assistant_text("done")) },
@@ -1295,7 +1389,7 @@ mod tests {
     #[tokio::test]
     async fn loop_clears_checkpoint_on_max_iterations() {
         let cleared = RefCell::new(false);
-        let out = super::run_agent_loop(
+        let out = run_loop_with_checkpoints(
             &json!({
                 "goal": "x",
                 "tools": test_tools(),
@@ -1326,7 +1420,7 @@ mod tests {
     #[tokio::test]
     async fn stale_checkpoint_is_not_resumed_after_clear() {
         async fn run_pass(store: &RefCell<Option<Value>>, reply: &'static str) -> Value {
-            super::run_agent_loop(
+            run_loop_with_checkpoints(
                 &json!({ "goal": "x" }),
                 6,
                 move |_p| async move { Ok(assistant_text(reply)) },
@@ -1364,7 +1458,7 @@ mod tests {
     async fn loop_saves_checkpoint_after_each_iteration() {
         let saved = RefCell::new(Vec::<Value>::new());
         let step = RefCell::new(0u32);
-        let out = super::run_agent_loop(
+        let out = run_loop_with_checkpoints(
             &json!({
                 "goal": "x",
                 "tools": test_tools(),
@@ -1524,7 +1618,7 @@ mod tests {
         });
         let dispatched = RefCell::new(Vec::<String>::new());
         let llm_calls = RefCell::new(0u32);
-        let out = super::run_agent_loop(
+        let out = run_loop_with_checkpoints(
             &json!({ "goal": "x", "tools": test_tools() }),
             6,
             |_p| {
@@ -1554,7 +1648,7 @@ mod tests {
     async fn checkpoint_saved_after_each_tool_call() {
         let saved = RefCell::new(Vec::<Value>::new());
         let step = RefCell::new(0u32);
-        super::run_agent_loop(
+        run_loop_with_checkpoints(
             &json!({ "goal": "x", "tools": test_tools(),
                      "tool_dispatch": { "type": "http", "url": "https://x.example" } }),
             6,
@@ -1830,6 +1924,69 @@ mod net_tests {
     }
 
     #[tokio::test]
+    async fn lease_loss_after_model_response_prevents_tool_request() {
+        use orch8_storage::testing::faulty::FaultStorage;
+        let model_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let models = Arc::new(AtomicU32::new(0));
+        let tools = Arc::new(AtomicU32::new(0));
+        let (done, model_count, tool_count) = (model_done.clone(), models.clone(), tools.clone());
+        let url = spawn(3, move |path, _| {
+            if path.contains("/tool") {
+                tool_count.fetch_add(1, Ordering::SeqCst);
+                return (200, json!({"ok":true}).to_string());
+            }
+            model_count.fetch_add(1, Ordering::SeqCst);
+            done.store(true, Ordering::SeqCst);
+            (200, llm_tool_call("do_it", "{}"))
+        })
+        .await;
+        mark_safe(&url).await;
+        mark_safe(&format!("{url}/tool")).await;
+        let (mut ctx, storage, id) = mk_ctx(json!({
+            "provider":"openai", "base_url":url.clone(), "api_key":"k", "model":"m",
+            "goal":"go", "tools":super::tests::test_tools(),
+            "tool_dispatch":{"type":"http","url":format!("{url}/tool")}
+        }))
+        .await;
+        storage
+            .update_instance_state(id, InstanceState::Scheduled, Some(Utc::now()))
+            .await
+            .unwrap();
+        ctx.claim_token = storage
+            .claim_due_instances(Utc::now() + chrono::Duration::seconds(1), 1, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
+            .claimed_at;
+        let (guarded, faults) = FaultStorage::wrap(storage.clone());
+        let pause = faults
+            .on("verify_instance_claim")
+            .when(move |_| model_done.load(Ordering::SeqCst))
+            .pause();
+        ctx.storage = guarded;
+        let task = tokio::spawn(handle_agent(ctx));
+        tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered())
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(id, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        pause.release();
+        assert!(matches!(task.await.unwrap(), Err(StepError::ClaimLost)));
+        assert_eq!(models.load(Ordering::SeqCst), 1);
+        assert_eq!(tools.load(Ordering::SeqCst), 0);
+        assert!(
+            storage
+                .get_instance_kv(id, "__agent__:b")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn dry_run_skips_loop() {
         // No LLM mock spawned — a real loop would fail. Ok proves the skip.
         let (mut ctx, _s, _i) =
@@ -2021,5 +2178,117 @@ mod net_tests {
         maybe_store_memory(&ctx, &ctx.params, &json!({ "final": "x" })).await;
         let kv = storage.get_all_instance_kv(iid).await.unwrap();
         assert!(kv.keys().all(|k| !k.starts_with("__mem__:")));
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_failure_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn unavailable() -> StepError {
+        StepError::Retryable {
+            message: "checkpoint unavailable".into(),
+            details: None,
+        }
+    }
+    #[tokio::test]
+    async fn failed_load_never_starts_model_or_tool() {
+        let models = AtomicUsize::new(0);
+        let tools = AtomicUsize::new(0);
+        let result = run_agent_loop(
+            &json!({"goal":"go"}),
+            2,
+            |_| async {
+                models.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            },
+            |_| async {
+                tools.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            },
+            || async { Err(unavailable()) },
+            |_| async { Ok(()) },
+            || async { Ok(()) },
+        )
+        .await;
+        assert!(matches!(result, Err(StepError::Retryable { .. })));
+        assert_eq!(models.load(Ordering::SeqCst), 0);
+        assert_eq!(tools.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn failed_save_stops_before_second_tool_and_preserves_progress() {
+        let models = AtomicUsize::new(0);
+        let tools = AtomicUsize::new(0);
+        let clears = AtomicUsize::new(0);
+        let result = run_agent_loop(
+            &json!({"tools":[{"name":"one"},{"name":"two"}]}),
+            2,
+            |_| async {
+                models.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({"message":{"role":"assistant","tool_calls":[
+                {"id":"one","function":{"name":"one","arguments":"{}"}},
+                {"id":"two","function":{"name":"two","arguments":"{}"}}]}}))
+            },
+            |_| async {
+                tools.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            },
+            || async { Ok(None) },
+            |_| async { Err(unavailable()) },
+            || async {
+                clears.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(StepError::Retryable { .. })));
+        assert_eq!(models.load(Ordering::SeqCst), 1);
+        assert_eq!(tools.load(Ordering::SeqCst), 1);
+        assert_eq!(clears.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn failed_clear_prevents_success_on_both_terminal_paths() {
+        for exhausted in [false, true] {
+            let checkpoint = exhausted.then(|| make_checkpoint(&[], 1, 0));
+            let result = run_agent_loop(
+                &json!({"goal":"go"}),
+                1,
+                |_| async { Ok(json!({"message":{"role":"assistant","content":"done"}})) },
+                |_| async { Ok(json!({})) },
+                || {
+                    let checkpoint = checkpoint.clone();
+                    async move { Ok(checkpoint) }
+                },
+                |_| async { Ok(()) },
+                || async { Err(StepError::ClaimLost) },
+            )
+            .await;
+            assert!(matches!(result, Err(StepError::ClaimLost)));
+        }
+    }
+    #[tokio::test]
+    async fn corrupt_checkpoint_never_starts_model_or_clears_evidence() {
+        let models = AtomicUsize::new(0);
+        let clears = AtomicUsize::new(0);
+        let result = run_agent_loop(
+            &json!({"goal":"go"}),
+            2,
+            |_| async {
+                models.fetch_add(1, Ordering::SeqCst);
+                Ok(json!({}))
+            },
+            |_| async { Ok(json!({})) },
+            || async { Ok(Some(json!({"garbage":true}))) },
+            |_| async { Ok(()) },
+            || async {
+                clears.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(StepError::Permanent { .. })));
+        assert_eq!(models.load(Ordering::SeqCst), 0);
+        assert_eq!(clears.load(Ordering::SeqCst), 0);
     }
 }
