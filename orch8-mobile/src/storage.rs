@@ -16,6 +16,7 @@ use orch8_types::instance::InstanceState;
 pub(crate) mod manifest;
 #[allow(dead_code)]
 pub(crate) mod scopes;
+mod starts;
 
 #[cfg(test)]
 struct MetadataBarrier {
@@ -374,8 +375,7 @@ impl MobileStorage {
         Ok(())
     }
 
-    /// Remove crash leftovers for missing or terminal instances before the
-    /// in-memory dedup map is hydrated.
+    /// Remove crash leftovers for missing or terminal instances at startup.
     pub async fn prune_stale_dedup(&self) -> Result<u64, StorageError> {
         let result = sqlx::query(
             "DELETE FROM mobile_dedup

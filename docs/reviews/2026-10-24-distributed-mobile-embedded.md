@@ -1675,9 +1675,33 @@ injected insert failure, byte accounting/index plans, corruption and independent
 pool races. Hosted checks must also pass on the submitted commit before merging.
 The full original matrix and ADR-0002 gates remain open.
 
-Next runtime review: legacy `InstanceLifecycleManager::start` still counts active
-instances before a separate insert and handles terminal-key reuse with a new salted
-key. Reproduce concurrent admission and terminal-key retry races, fix confirmed
-failures atomically, and retain the existing legacy API semantics. Continue scoped
-materialization/callback ownership after this admission work; do not substitute
-preparation for the required executable multi-account runtime.
+### DME100 — Legacy mobile start could duplicate reruns or orphan runnable work (fixed)
+
+Real SQLite lifecycle tests reproduced two failures: concurrent callers reusing a
+terminal operation key created distinct fresh instances, and an injected dedup
+mapping write failure returned an error after leaving a scheduled instance behind.
+The capacity preflight also occurred outside the instance insert transaction.
+
+Legacy start now reserves the SQLite writer before resolving durable dedup state,
+checking database-wide active capacity, inserting the canonical native instance and
+updating the mobile mapping. All effects commit together. Terminal-key reuse keeps
+legacy fresh-run semantics, while concurrent retries see the same fresh mapping.
+An active native instance from an older client with a missing mapping can be
+recovered without another insertion. Empty legacy keys also serialize correctly.
+Paused instances remain charged so resuming one cannot overbook capacity.
+
+The in-memory dedup shortcut was removed: another manager's cancellation or
+completion cannot leave a cached dead ID in an existing manager. Cleanup remains
+qualified by the old instance ID, so late cleanup cannot delete a replacement's
+mapping. No scoped instance is materialized by this legacy-only path.
+
+Validation: the initial regression run failed on duplicate fresh IDs and the
+runnable orphan. After the atomic change, all 500 mobile library tests passed,
+including 27 lifecycle tests. Independent-pool, paused-capacity, cross-manager
+stale-ID, empty-key and retry-after-rollback contracts passed. Workspace/all-target
+Clippy with warnings denied, formatting, documentation and diff checks passed.
+Hosted checks must pass on the submitted commit before merging.
+
+Next: continue scoped materialization/callback ownership; durable preparation is
+not a substitute for the required executable multi-account runtime. Preserve the
+full original review matrix and ADR-0002 release gates.

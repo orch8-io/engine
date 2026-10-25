@@ -193,6 +193,18 @@ impl SqliteStorage {
         sequences::create_on(tx, seq).await
     }
 
+    /// Insert an instance in an adapter-owned transaction using canonical
+    /// encoding. The adapter must enforce authorization and admission limits.
+    pub async fn create_instance_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        instance: &TaskInstance,
+    ) -> Result<(), StorageError> {
+        instances::bind_instance_insert(sqlx::query(instances::INSTANCE_INSERT_SQL), instance)?
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
     /// Read within the same snapshot as an adapter's ownership checks.
     pub async fn get_sequence_in_transaction(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
