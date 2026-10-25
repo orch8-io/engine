@@ -283,3 +283,6 @@ mod read_tests;
 
 #[cfg(test)]
 mod entry_tests;
+
+#[cfg(test)]
+mod registration_tests;

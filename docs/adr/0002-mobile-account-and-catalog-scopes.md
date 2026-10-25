@@ -246,8 +246,11 @@ An internal native router now selects immutable account/catalog/epoch bindings
 from durable running claims and retains process-local physical permits through
 host destruction (two globally, one per stable account). Eight contracts cover
 four scopes, colliding databases, retirement/reopen and independent pools.
-Registration caps are counts; explicit retired-epoch cleanup keeps detached
-bindings charged through physical reference destruction.
+Process-owned registration permits enforce 256 bindings globally, 64 per stable
+account and 32 per catalog across router and login-epoch replacement. Each
+binding retains its permits through its final engine-owned foreign reference
+release, including physical destruction. These are count bounds, not byte quotas;
+explicit retired-epoch cleanup still owns detached reference destruction.
 Coordination query/signal handlers now use storage authorization that checks
 both durable owners; signal admission serializes that check with its write.
 This does not enable mobile's otherwise forbidden coordination builtins or
