@@ -1534,7 +1534,9 @@ pub(super) async fn execute_step_block(
 
     match result {
         Err(e @ EngineError::ClaimLost { .. }) => Err(e),
-        Err(e) if e.is_transient_storage() => Err(e),
+        Err(e) if e.is_transient_storage() || matches!(e, EngineError::AdmissionBusy { .. }) => {
+            Err(e)
+        }
         Ok(block_output) => {
             crate::handlers::step::persist_output(
                 storage.as_ref(),

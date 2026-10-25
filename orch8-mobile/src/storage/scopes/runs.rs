@@ -292,3 +292,6 @@ mod retirement_tests;
 
 #[cfg(test)]
 mod policy_tests;
+
+#[cfg(test)]
+mod admission_tests;

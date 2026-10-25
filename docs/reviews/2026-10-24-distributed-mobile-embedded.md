@@ -2614,3 +2614,48 @@ hooks/remote work, reads, listeners, children/delegation, migration and complete
 SDK/platform contracts remain rollout gates. Native-capacity backpressure and
 native-preflight infrastructure classification still require real scheduler
 coverage without business retry policies. ADR S1-S12 remain open.
+
+
+### DME127 — Native admission and preflight faults failed no-retry workflows
+
+Four real-scheduler baselines failed for account/process capacity contention in
+flat and parallel-tree workflows. Two additional baselines failed when a one-shot
+storage fault fired only after native adapter entry, rather than in the generic
+scheduler preflight. All became Failed without entering the host callback.
+StepError::Retryable was being treated as an ordinary business failure, requiring
+a workflow retry policy for runtime conditions the author cannot control.
+
+The opaque effect-admission capability can now reject an owned preflight with a
+typed scheduler outcome before dispatch starts. Rejection consumes the capability;
+a later admit is refused, and even an adapter incorrectly returning success cannot
+commit that Prepared receipt. Rejection after dispatch has started cannot relabel
+its ambiguous outcome or erase the original admission. This is trusted runtime
+control, not a serialized flag that workflow parameters can manufacture.
+
+Scoped native physical-capacity refusal reports AdmissionBusy. Both flat and tree
+paths propagate it without invoking retry/fallback handling. The scheduler hands
+back the same claim as Scheduled with a fixed 250ms deferral, clears the prior
+consecutive storage-fault streak and spends no business attempt or bounded
+infrastructure-fault budget. Forty deferred dispatch opportunities retain one
+Prepared receipt at attempt zero; after capacity returns, one host call completes
+and commits that same receipt. A non-returning callback keeps its physical charge;
+this change does not pretend to interrupt it or free its slot on logical timeout.
+
+Transient claim-verification errors before native dispatch retain a typed storage
+cause through the same owned capability. Diagnostic backend detail is removed,
+while pool/connection/backend classification is retained. The scheduler's existing
+bounded infrastructure recovery then applies without business retry configuration.
+After dispatch starts, rejection cannot assert that retry is safe. Direct adapter
+calls without a core admission capability keep their existing StepError mapping.
+
+Six focused real-scheduler cases and two capability-state contracts pass. Full
+validation passed 2,116 engine library tests, 573 mobile unit tests, 109 mobile
+integration/example/coverage tests and all 32 Swift wrappers against the rebuilt
+macOS native library and fresh UniFFI bindings, with strict concurrency and
+warnings denied. Workspace/all-target Clippy, formatting, docs and SDK packaging
+checks passed. Hosted CI must pass this exact candidate before merge. Tests use
+the existing test-only scoped instance fixture; production materialization is
+not introduced. These changes cover ordinary/scoped mobile native callback entry,
+not every independently
+scheduled foreign callback class. Scoped materialization, credential/read/recovery/
+listener integration, public SDK handles and all ADR S1-S12 gates remain open.

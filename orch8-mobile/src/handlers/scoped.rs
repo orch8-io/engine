@@ -174,6 +174,11 @@ impl CatalogHandlers {
         owner
     }
     #[cfg(test)]
+    pub(crate) fn occupy_native_for_test(&self, scope: &CatalogScope) -> Box<dyn Send> {
+        Box::new(self.capacity.reserve(scope).unwrap())
+    }
+
+    #[cfg(test)]
     pub(crate) fn account_gate(&self, scope: &CatalogScope) -> Option<Arc<Semaphore>> {
         self.capacity.physical.account_gate(scope)
     }
@@ -299,7 +304,13 @@ impl CatalogHandlers {
                     serde_json::json!({ "dry_run": true, "handler": name, "would": "invoke registered handler" }),
                 );
             }
-            let permits = Some(self.capacity.reserve(&scope)?);
+            let permits = Some(self.capacity.reserve(&scope).map_err(|error| {
+                ctx.effect_admission.as_ref().map_or(error, |admission| {
+                    admission.reject_preflight(orch8_engine::error::EngineError::AdmissionBusy {
+                        instance_id: ctx.instance_id,
+                    })
+                })
+            })?);
             (binding.clone(), permits)
         };
         let tracking_key = format!(

@@ -19,6 +19,11 @@ pub enum EngineError {
     #[error("execution claim lost for instance {instance_id}")]
     ClaimLost { instance_id: InstanceId },
 
+    /// Capacity was refused before durable dispatch. Reschedule without spending
+    /// business attempts or the bounded infrastructure-fault retry budget.
+    #[error("native admission capacity is occupied for instance {instance_id}")]
+    AdmissionBusy { instance_id: InstanceId },
+
     #[error("handler not found: {0}")]
     HandlerNotFound(String),
 

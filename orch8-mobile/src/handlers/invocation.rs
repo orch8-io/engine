@@ -18,7 +18,10 @@ pub(super) struct NativeClaim {
 }
 
 impl NativeClaim {
-    async fn verify(&self) -> Result<(), StepError> {
+    async fn verify(
+        &self,
+        admission: Option<&orch8_engine::handlers::EffectAdmission>,
+    ) -> Result<(), StepError> {
         match self
             .storage
             .verify_instance_claim(self.instance_id, &self.tenant_id, self.token)
@@ -26,10 +29,28 @@ impl NativeClaim {
         {
             Ok(true) => Ok(()),
             Ok(false) => Err(StepError::ClaimLost),
-            Err(error) if error.is_transient() => Err(StepError::Retryable {
-                message: "native callback claim verification unavailable".into(),
-                details: None,
-            }),
+            Err(error) if error.is_transient() => {
+                if let Some(admission) = admission {
+                    use orch8_types::error::StorageError;
+                    // Retain infrastructure type without logging backend detail.
+                    let error = match error {
+                        StorageError::PoolExhausted => StorageError::PoolExhausted,
+                        StorageError::Backend(_) => {
+                            StorageError::Backend("native claim verification unavailable".into())
+                        }
+                        _ => {
+                            StorageError::Connection("native claim verification unavailable".into())
+                        }
+                    };
+                    Err(admission
+                        .reject_preflight(orch8_engine::error::EngineError::Storage(error)))
+                } else {
+                    Err(StepError::Retryable {
+                        message: "native callback claim verification unavailable".into(),
+                        details: None,
+                    })
+                }
+            }
             Err(_) => Err(StepError::Permanent {
                 message: "native callback claim verification failed".into(),
                 details: None,
@@ -118,7 +139,7 @@ fn invoke_native(
     // Borrow the proof for verification: its owner/backend must remain
     // captured until physical native completion, even after detach.
     if let Some(claim) = claim {
-        runtime.block_on(claim.verify())?;
+        runtime.block_on(claim.verify(effect_admission.as_ref()))?;
     }
     // Cancellation may arrive while the database preflight is pending.
     // Check at host admission, after that await, before any native code.
@@ -136,7 +157,7 @@ fn invoke_native(
         // The durable dispatch itself can wait on storage. Recheck the
         // claim/cancellation afterward; this window stays conservative.
         if let Some(claim) = claim {
-            runtime.block_on(claim.verify())?;
+            runtime.block_on(claim.verify(effect_admission.as_ref()))?;
         }
         if ownership.stop.is_cancelled()
             || entry

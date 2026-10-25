@@ -282,9 +282,11 @@ scope-aware integration; this resolver alone is not a complete execution boundar
 
 This does not create production scoped instances or expose scoped SDK handles.
 Next carry frozen owners through actual materialization, remaining builtin/read
-boundaries, background recovery and listeners. Verify admission backpressure and
-infrastructure failure semantics through real scheduler execution, not only
-adapter calls. Other callback classes and independent processes still need their
+boundaries, background recovery and listeners. Real flat/tree scheduler cases now
+verify scoped native capacity deferral and transient pre-dispatch claim recovery
+without business retry policies: one Prepared receipt/attempt survives contention
+until exactly one callback commits. Capability rejection cannot relabel dispatched
+work. Other admission and infrastructure boundaries still need their own evidence. Other callback classes and independent processes still need their
 resource-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open
 until their complete runtime and SDK evidence exists.
