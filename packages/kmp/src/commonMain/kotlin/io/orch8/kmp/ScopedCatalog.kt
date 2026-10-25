@@ -150,8 +150,7 @@ class Orch8CatalogRun internal constructor(private val backend: CatalogRunBacken
     /** Swift-safe callbacks on the IO dispatcher; close the subscription when its UI leaves. */
     @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun subscribeSnapshots(observer: CatalogSnapshotObserver, pollIntervalMs: Long = 500): CatalogSnapshotSubscription {
-        val interval = pollIntervalMs.milliseconds
-        require(interval.isFinite() && interval.isPositive()) { "pollIntervalMs must be finite and greater than zero" }
+        val interval = pollingInterval(pollIntervalMs)
         return subscribeCatalogSnapshots(this, observer, interval, io)
     }
 

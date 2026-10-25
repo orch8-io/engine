@@ -5,6 +5,9 @@ import io.orch8.kmp.internal.EngineBackend
 import io.orch8.kmp.internal.openPlatformBackend
 import io.orch8.kmp.internal.platformIoDispatcher
 import io.orch8.kmp.internal.runHandlerBlocking
+import kotlin.native.HiddenFromObjC
+import kotlin.experimental.ExperimentalObjCRefinement
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.NonCancellable
@@ -48,10 +51,12 @@ import kotlin.time.Duration.Companion.seconds
  * engine.observeInstance(id).collect { println(it.state) }
  * ```
  */
+@OptIn(ExperimentalObjCRefinement::class)
 class Orch8Engine internal constructor(
     private val backend: EngineBackend,
     private val ioDispatcher: CoroutineDispatcher = platformIoDispatcher,
 ) : AutoCloseable {
+    private val observationOwner = SupervisorJob()
     private val _events = MutableSharedFlow<EngineEvent>(
         extraBufferCapacity = EVENT_BUFFER,
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -59,15 +64,21 @@ class Orch8Engine internal constructor(
     private val _pendingSteps = MutableStateFlow<List<PendingStep>>(emptyList())
 
     /** Hot stream of lifecycle events. Late collectors do not receive past events. */
+    @HiddenFromObjC
     val events: SharedFlow<EngineEvent> = _events.asSharedFlow()
 
     /** Steps currently waiting for the host, derived from [events]. */
+    @HiddenFromObjC
     val pendingSteps: StateFlow<List<PendingStep>> = _pendingSteps.asStateFlow()
 
     init {
+        // Native listener ownership must not capture this engine wrapper.
+        // Already accepted callbacks can settle into their own flow state.
+        val pending = _pendingSteps
+        val events = _events
         backend.setListener { event ->
-            _pendingSteps.update { PendingSteps.reduce(it, event) }
-            _events.tryEmit(event)
+            pending.update { PendingSteps.reduce(it, event) }
+            events.tryEmit(event)
         }
     }
 
@@ -381,7 +392,7 @@ class Orch8Engine internal constructor(
      * Cold flow of distinct statuses of one delegation, polled every
      * [pollInterval]. Completes after emitting a terminal state.
      */
-    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    @HiddenFromObjC
     fun observeDelegation(delegationId: String, pollInterval: Duration = 1.seconds): Flow<DelegationStatus> =
         flow {
             require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
@@ -397,7 +408,7 @@ class Orch8Engine internal constructor(
      * Cold flow of distinct snapshots of one instance, polled every
      * [pollInterval]. Completes after emitting a terminal state.
      */
-    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    @HiddenFromObjC
     fun observeInstance(instanceId: String, pollInterval: Duration = 500.milliseconds): Flow<InstanceSnapshot> =
         flow {
             require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
@@ -410,7 +421,7 @@ class Orch8Engine internal constructor(
         }.distinctUntilChanged().flowOn(ioDispatcher)
 
     /** Cold flow of the active-instance list, polled every [pollInterval], distinct. */
-    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    @HiddenFromObjC
     fun observeActiveInstances(pollInterval: Duration = 1.seconds): Flow<List<InstanceSummary>> =
         flow {
             require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
@@ -420,8 +431,41 @@ class Orch8Engine internal constructor(
             }
         }.distinctUntilChanged().flowOn(ioDispatcher)
 
+    /** Swift-safe legacy instance observation. Scoped instances remain excluded. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun subscribeInstance(instanceId: String, observer: InstanceSnapshotObserver, pollIntervalMs: Long = 500): Orch8ObservationSubscription {
+        require(instanceId.isNotBlank()) { "instanceId must not be blank" }
+        return subscribeOwned(observeInstance(instanceId, pollingInterval(pollIntervalMs)), observer, observer::onInstance)
+    }
+
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun subscribeActiveInstances(observer: ActiveInstancesObserver, pollIntervalMs: Long = 1000): Orch8ObservationSubscription =
+        subscribeOwned(observeActiveInstances(pollingInterval(pollIntervalMs)), observer, observer::onInstances)
+
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun subscribeDelegation(delegationId: String, observer: DelegationStatusObserver, pollIntervalMs: Long = 1000): Orch8ObservationSubscription {
+        require(delegationId.isNotBlank()) { "delegationId must not be blank" }
+        return subscribeOwned(observeDelegation(delegationId, pollingInterval(pollIntervalMs)), observer, observer::onStatus)
+    }
+
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun subscribeEvents(observer: EngineEventObserver): Orch8ObservationSubscription =
+        subscribeOwned(events, observer, observer::onEvent, startImmediately = true)
+
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
+    fun subscribePendingSteps(observer: PendingStepsObserver): Orch8ObservationSubscription =
+        subscribeOwned(pendingSteps, observer, observer::onSteps, startImmediately = true)
+
+    private fun <T> subscribeOwned(source: Flow<T>, observer: Orch8ObservationObserver, emit: (T) -> Unit, startImmediately: Boolean = false): Orch8ObservationSubscription {
+        if (!observationOwner.isActive) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine observation is closed")
+        return Orch8ObservationSubscription(subscribeFlow(source, observer, emit, ioDispatcher, observationOwner, startImmediately))
+    }
+
     /** Shut down the engine. The instance must not be used afterwards. */
-    override fun close() = backend.shutdown()
+    override fun close() {
+        observationOwner.cancel()
+        backend.shutdown()
+    }
 
     private suspend fun <T> offload(block: () -> T): T = withContext(ioDispatcher) { block() }
 

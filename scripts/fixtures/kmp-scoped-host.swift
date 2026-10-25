@@ -66,6 +66,52 @@ private func checkObservation(_ run: Orch8CatalogRun, expectShutdown: Bool = fal
     try check(accepted, "Swift subscription did not report the expected completion/error")
 }
 
+private final class RootSnapshotProbe: NSObject, InstanceSnapshotObserver, @unchecked Sendable {
+    private let expectedId: String
+    private let expectedError: Orch8ErrorKind?
+    private let finished: @Sendable (Result<Bool, Error>) -> Void
+    private let lock = NSLock()
+    private var completed = false
+    init(id: String, error: Orch8ErrorKind?, finished: @escaping @Sendable (Result<Bool, Error>) -> Void) {
+        expectedId = id; expectedError = error; self.finished = finished
+    }
+    func onInstance(snapshot: Orch8Kmp.InstanceSnapshot) {
+        if snapshot.instanceId != expectedId { finished(.failure(Failure(message: "legacy observer crossed instance identity"))) }
+        lock.lock(); completed = snapshot.state == .completed; lock.unlock()
+    }
+    func onError(error: Orch8Exception) { finished(.success(error.kind == expectedError)) }
+    func onComplete() {
+        lock.lock(); let terminal = completed; lock.unlock()
+        finished(.success(expectedError == nil && terminal))
+    }
+}
+private func checkRootObservation(_ engine: Orch8Engine, id: String, error: Orch8ErrorKind? = nil) throws {
+    var subscription: Orch8ObservationSubscription?
+    defer { subscription?.close() }
+    let accepted: Bool = try wait { done in
+        do { subscription = try engine.subscribeInstance(instanceId: id,
+            observer: RootSnapshotProbe(id: id, error: error, finished: done), pollIntervalMs: 10) }
+        catch { done(.failure(error)) }
+    }
+    try check(accepted, "legacy Swift observation missed completion/error")
+}
+private final class LegacyEcho: NSObject, Orch8StepHandler, @unchecked Sendable {
+    func execute(stepName: String, inputJson: String, completionHandler: @escaping (String?, Error?) -> Void) {
+        completionHandler("{}", nil)
+    }
+}
+private final class LegacyEventProbe: NSObject, EngineEventObserver, PendingStepsObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var ids: [String] = []
+    private var nonemptySteps = false
+    private var failed = false
+    func onEvent(event: EngineEvent) { lock.lock(); ids.append(event.instanceId); lock.unlock() }
+    func onSteps(steps: [PendingStep]) { lock.lock(); nonemptySteps = nonemptySteps || !steps.isEmpty; lock.unlock() }
+    func onError(error: Orch8Exception) { lock.lock(); failed = true; lock.unlock() }
+    func onComplete() {}
+    func state() -> ([String], Bool, Bool) { lock.lock(); defer { lock.unlock() }; return (ids, nonemptySteps, failed) }
+}
+
 private final class Echo: NSObject, Orch8CatalogStepHandler, @unchecked Sendable {
     private let lock = NSLock()
     private var contexts: [CatalogCallbackContext] = []
@@ -113,6 +159,10 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         try check(!FileManager.default.fileExists(atPath: invalid.path), "invalid config opened a database")
         let engine = try Orch8Engine.companion.open(dbPath: database.path, config: configuration())
         defer { engine.close() }
+        let legacyEvents = LegacyEventProbe()
+        let eventSubscription = try engine.subscribeEvents(observer: legacyEvents)
+        let stepSubscription = try engine.subscribePendingSteps(observer: legacyEvents)
+        defer { eventSubscription.close(); stepSubscription.close() }
         let echo = Echo()
         var retained: [(Orch8Catalog, Orch8CatalogRun, [String: Any])] = []
         for record in cases {
@@ -166,6 +216,35 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         try catalog.closeView()
         try refused { let _: CatalogRunPage = try object { catalog.history(cursor: nil, limit: 1, completionHandler: $0) } }
         try checkObservation(retained[0].1, expectShutdown: true)
+        let privateEvents = legacyEvents.state()
+        try check(privateEvents.0.isEmpty && !privateEvents.1 && !privateEvents.2, "legacy observation exposed scoped events")
+        try checkRootObservation(engine, id: retained[0].1.instanceId, error: .notFound)
+        try engine.registerHandler(name: "legacy_echo", handler: LegacyEcho())
+        let definition: [String: Any] = [
+            "id": UUID().uuidString, "tenant_id": "mobile", "namespace": "default",
+            "name": "legacy-observation", "version": 1,
+            "blocks": [["type": "step", "id": "work", "handler": "legacy_echo", "params": [:]]],
+            "created_at": ISO8601DateFormatter().string(from: Date()),
+        ]
+        let sequence = String(decoding: try JSONSerialization.data(withJSONObject: definition), as: UTF8.self)
+        try unit { engine.loadSequence(json: sequence, completionHandler: $0) }
+        let legacyId: String = try object { engine.startJson(sequenceName: "legacy-observation", inputJson: "{}", dedupKey: nil, completionHandler: $0) }
+        let deadline = Date().addingTimeInterval(10)
+        while true {
+            let _: Orch8Kmp.TickResult = try object { engine.tick(completionHandler: $0) }
+            let value: Orch8Kmp.InstanceSnapshot = try object { engine.getInstance(instanceId: legacyId, completionHandler: $0) }
+            if value.state == .completed { break }
+            if Date() > deadline { throw Failure(message: "legacy workflow did not complete") }
+        }
+        try checkRootObservation(engine, id: legacyId)
+        while legacyEvents.state().0.isEmpty && Date() < deadline {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        let publicEvents = legacyEvents.state()
+        try check(!publicEvents.0.isEmpty && publicEvents.0.allSatisfy { $0 == legacyId } && !publicEvents.1 && !publicEvents.2,
+            "legacy observation failed owner isolation or event delivery")
+        engine.close()
+        try refused { _ = try engine.subscribeEvents(observer: legacyEvents) }
         print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, history and close fences passed")
     }
 }

@@ -129,6 +129,37 @@ in common Kotlin (`JsonBridgeBackend`), where the JVM test suite covers them.
 Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 4`) when the
 engine opens, so a stale adapter fails immediately with a clear message.
 
+## Swift observation
+
+The common Kotlin Flow API remains available to shared Kotlin code. Swift uses
+typed subscriptions; raw Flow exports are hidden because their collection
+boundary only converts cancellation errors and can terminate the process on
+ordinary engine errors. Use the following replacements in a matching development
+framework (these APIs are not in published `0.7.1` artifacts):
+
+| Shared Kotlin stream | Swift subscription | Observer callback |
+| --- | --- | --- |
+| `observeInstance(id)` | `subscribeInstance(instanceId:observer:pollIntervalMs:)` | `InstanceSnapshotObserver.onInstance` |
+| `observeActiveInstances()` | `subscribeActiveInstances(observer:pollIntervalMs:)` | `ActiveInstancesObserver.onInstances` |
+| `observeDelegation(id)` | `subscribeDelegation(delegationId:observer:pollIntervalMs:)` | `DelegationStatusObserver.onStatus` |
+| `events` | `subscribeEvents(observer:)` | `EngineEventObserver.onEvent` |
+| `pendingSteps` | `subscribePendingSteps(observer:)` | `PendingStepsObserver.onSteps` |
+
+Observers also implement `onError(Orch8Exception)` and `onComplete()`. Callbacks
+run on IO; dispatch UI changes to the main thread. Close the returned
+`Orch8ObservationSubscription` when the screen leaves. Closing one subscription
+keeps other subscriptions and workflow/delegation execution intact. Engine close
+cancels all its root subscriptions and refuses new ones. Cancellation has no
+error/completion callback; a previously accepted host callback may finish.
+Instance/delegation streams complete on a known terminal state. Hot event and
+pending-step streams attach before the subscription call returns; events do not
+replay past deliveries, while pending steps include the current list.
+
+These root subscriptions preserve legacy visibility and exclude scoped private
+data. Use the catalog run's `subscribeSnapshots` for scoped UI observation.
+Root engine lifetime still requires explicit application shutdown; wrapper GC
+tests do not prove native backend/resource destruction on every platform.
+
 ## Usage (common code)
 
 ```kotlin

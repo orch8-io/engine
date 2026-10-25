@@ -164,6 +164,27 @@ class ScopedObservationTest {
     }
 
     @Test
+    fun callbackFailureReportingDoesNotInvokeAnUntrustedExceptionMessageGetter() = runTest {
+        val backend = ObservedRunBackend()
+        val run = Orch8CatalogRun(backend, StandardTestDispatcher(testScheduler))
+        var reported = 0
+        val subscription = run.subscribeSnapshots(object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) {
+                throw object : RuntimeException() {
+                    override val message: String get() = error("host exception getter invoked")
+                }
+            }
+            override fun onError(error: Orch8Exception) { assertEquals(Orch8ErrorKind.ENGINE, error.kind); reported++ }
+            override fun onComplete() = error("unexpected completion")
+        }, 100)
+        runCurrent()
+        assertEquals(1, reported)
+        advanceTimeBy(1000); runCurrent()
+        assertEquals(1, backend.reads)
+        subscription.close()
+    }
+
+    @Test
     fun invalidIntervalsNeverReachTheBackend() = runTest {
         val backend = ObservedRunBackend()
         val run = Orch8CatalogRun(backend, StandardTestDispatcher(testScheduler))

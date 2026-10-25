@@ -3372,3 +3372,57 @@ The host harness now normalizes and ad-hoc signs a private copy with an
 copy. An isolated library with an intentionally nonexistent producer path
 reproduces the loader abort before this fix and passes the real four-scope Swift
 workflow/subscription fixture afterward. The source library checksum is unchanged.
+
+### DME143 — Finish the KMP Swift observation boundary and own its teardown
+
+A second actual Swift/Kotlin/Native/Rust subprocess reproduced the legacy raw
+Flow abort: a root observer requesting a scoped instance correctly receives
+NotFound from native authorization, then terminates when that typed error crosses
+raw Flow.collect. Root instance, active-instance, delegation, lifecycle-event and
+pending-step streams now have typed Swift subscriptions with ordinary error and
+completion callbacks. Shared Kotlin keeps its Flow API; raw Objective-C exports
+are hidden after the complete callback replacements are supplied.
+
+All subscriptions share one callback/lifetime implementation with the scoped
+observer. Root subscriptions are children of an engine observation job. Engine
+close cancels their polling/collection and refuses new subscriptions; closing one
+subscription never cancels siblings or durable work. Callback error handling and
+retired-reference clearing also cover cancellation before the task starts.
+
+A controlled test found that returning a newly scheduled hot subscription could
+lose an event produced on the next line. Hot collectors now attach undispatched
+before return, then yield before delivery so callbacks still use IO. The
+readiness regression fails before this change and passes afterward. StateFlow's
+initial pending-step value and ordinary event non-replay semantics are preserved.
+
+A retained listener also pinned its common engine wrapper through the listener
+lambda's outer `this`. A JVM weak-reference regression reproduces that pin while
+retaining both the callback owner and readonly event flow. The listener now
+captures only its mutable flow state; an already accepted callback can settle
+without retaining or resurrecting the wrapper. This does not claim native
+backend/resource GC destruction on all platforms; application shutdown remains
+explicit.
+
+Behavioral tests cover terminal/error delivery, throwing error callbacks,
+independent cancellation, engine-wide stop, late events after close and immediate
+hot-stream readiness. The real Swift host test verifies legacy error/terminal
+subscriptions without aborting, absence of private events/pending steps through
+four scoped workflows, positive legacy event delivery and refusal after engine
+close. Generated callback names are verified by compiling the actual framework,
+not by protocol shape stubs. Native artifact relocation uses the repaired
+private-copy harness from PR329.
+
+
+The shared error boundary also reproduced a callback failure whose custom
+exception message getter threw before error delivery. Non-native callback
+failures now use a fixed diagnostic with the original cause; the SDK does not
+invoke that host getter. Cancellation is checked before each normal/completion
+delivery and before error reporting. The regression fails before this change.
+
+Final local evidence: 90 common/JVM tests and 80 Kotlin/Native common tests pass
+with no failures/skips. Actual Swift/Kotlin/Rust execution passes private-event
+exclusion, legacy completion/error/event delivery and shutdown refusal. The
+actual iOS framework build and Swift bridge typecheck, SDK packaging, docs and
+whitespace checks pass. No production Rust or generated UniFFI changes in this
+slice. Root SDK behavior, scoped observation and both language boundaries use
+the same tested callback lifetime implementation.
