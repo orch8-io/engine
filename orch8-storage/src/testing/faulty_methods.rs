@@ -313,6 +313,7 @@ fault_impl! {
         async fn try_acquire_trigger_poll_lease(&self, slug: &str, owner: &str, now: chrono::DateTime<chrono::Utc>, lease_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn create_credential(&self, credential: &orch8_types::credential::CredentialDef) -> Result<(), StorageError>;
         async fn get_credential(&self, tenant_id: Option<&TenantId>, id: &str) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError>;
+        async fn get_credential_for_claim(&self, instance_id: InstanceId, tenant_id: &TenantId, token: DateTime<Utc>, id: &str) -> Result<crate::ClaimedRead<Option<orch8_types::credential::CredentialDef>>, StorageError>;
         async fn list_credentials(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
         async fn list_all_credentials(&self, tenant_id: Option<&TenantId>) -> Result<Vec<orch8_types::credential::CredentialDef>, StorageError>;
         async fn update_credential(&self, credential: &orch8_types::credential::CredentialDef) -> Result<(), StorageError>;

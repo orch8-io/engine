@@ -11,6 +11,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, sqlite::SqliteRow};
 
+pub(crate) mod materialize;
+
 const MAX_INPUT_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct CatalogRunRequest<'a> {
@@ -46,6 +48,7 @@ pub(crate) struct CatalogRun {
     pub(crate) owner_epoch: i64,
     pub(crate) admitted_manifest_version: i64,
     pub(crate) admitted_manifest_digest: String,
+    pub(crate) request_digest: String,
     pub(crate) created_at: chrono::DateTime<chrono::Utc>,
     pub(crate) sequence_id: SequenceId,
     pub(crate) workflow: String,
@@ -81,6 +84,7 @@ fn decode(row: &SqliteRow) -> Result<CatalogRun, StorageError> {
             .parse()
             .map(SequenceId::from_uuid)
             .map_err(|_| invalid("invalid scoped sequence ID"))?,
+        request_digest: expected,
         account_id: row.try_get("account_id")?,
         catalog_id: row.try_get("catalog_id")?,
         owner_epoch: epoch,
@@ -247,7 +251,7 @@ impl MobileStorage {
     ) -> Result<bool, StorageError> {
         let mut tx = self.pool().begin().await?;
         fence_catalog(&mut tx, scope).await?;
-        let rows=sqlx::query("UPDATE mobile_catalog_run_requests SET state = 'cancelled' WHERE id = ?1 AND account_id = ?2 AND catalog_id = ?3 AND NOT EXISTS(SELECT 1 FROM task_instances WHERE id = ?1)")
+        let rows=sqlx::query("UPDATE mobile_catalog_run_requests SET state = 'cancelled' WHERE id = ?1 AND account_id = ?2 AND catalog_id = ?3 AND NOT EXISTS(SELECT 1 FROM task_instances WHERE id = ?1) AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_materializations WHERE request_id = ?1)")
             .bind(id.to_string()).bind(&scope.account.id).bind(&scope.id).execute(&mut *tx).await?.rows_affected();
         tx.commit().await?;
         Ok(rows == 1)
@@ -262,7 +266,7 @@ impl MobileStorage {
     ) -> Result<bool, StorageError> {
         let mut tx = self.pool().begin().await?;
         fence_catalog(&mut tx, scope).await?;
-        let rows=sqlx::query("DELETE FROM mobile_catalog_run_requests WHERE id = ?1 AND account_id = ?2 AND catalog_id = ?3 AND state = 'cancelled' AND NOT EXISTS(SELECT 1 FROM task_instances WHERE id = ?1)")
+        let rows=sqlx::query("DELETE FROM mobile_catalog_run_requests WHERE id = ?1 AND account_id = ?2 AND catalog_id = ?3 AND state = 'cancelled' AND NOT EXISTS(SELECT 1 FROM task_instances WHERE id = ?1) AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_materializations WHERE request_id = ?1)")
             .bind(id.to_string()).bind(&scope.account.id).bind(&scope.id).execute(&mut *tx).await?.rows_affected();
         tx.commit().await?;
         Ok(rows == 1)
@@ -295,3 +299,9 @@ mod policy_tests;
 
 #[cfg(test)]
 mod admission_tests;
+
+#[cfg(test)]
+mod materialize_tests;
+
+#[cfg(test)]
+mod materialize_edge_tests;

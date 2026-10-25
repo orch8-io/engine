@@ -1325,8 +1325,9 @@ pub(super) async fn execute_step_block(
     // snapshot created above (see its comment for why sharing with the
     // `when` guard is safe). Template/credential failures fail the
     // *instance*; infra errors propagate.
-    let defer_credentials =
-        crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
+    let local_only = handlers.requires_local_dispatch(&instance.tenant_id);
+    let defer_credentials = !local_only
+        && crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
     let mut prepared = match crate::handlers::step_block::prepare_step(
         storage.as_ref(),
         instance,
@@ -1425,33 +1426,52 @@ pub(super) async fn execute_step_block(
     // `$runtime`; hard placement (region, labels, residency) always goes to
     // the worker queue so it is enforced by the claim predicate.
     let mut resolved_params = resolved_params;
-    let hard_placed = match Box::pin(crate::step_placement::apply_step_placement(
-        storage.as_ref(),
-        instance,
-        step_def,
-        &mut resolved_params,
-        clock.now(),
-    ))
-    .await?
+    if local_only
+        && resolved_params
+            .get(orch8_types::worker::RUNTIME_REQUIREMENTS_PARAM)
+            .is_some()
     {
-        Ok(resolved) => resolved.is_some_and(|placement| placement.has_hard_constraints()),
-        Err(message) => {
-            crate::handlers::step_dispatch::record_remote_dispatch_rejection(
-                storage.as_ref(),
-                instance,
-                step_def,
-                attempt,
-                &message,
-            )
-            .await;
-            return fail_instance_with_error(storage, instance, webhook_config, cancel, &message)
+        return Err(EngineError::InvalidConfig(
+            "local catalog execution cannot request remote placement".into(),
+        ));
+    }
+    let hard_placed = if local_only {
+        false
+    } else {
+        match Box::pin(crate::step_placement::apply_step_placement(
+            storage.as_ref(),
+            instance,
+            step_def,
+            &mut resolved_params,
+            clock.now(),
+        ))
+        .await?
+        {
+            Ok(resolved) => resolved.is_some_and(|placement| placement.has_hard_constraints()),
+            Err(message) => {
+                crate::handlers::step_dispatch::record_remote_dispatch_rejection(
+                    storage.as_ref(),
+                    instance,
+                    step_def,
+                    attempt,
+                    &message,
+                )
                 .await;
+                return fail_instance_with_error(
+                    storage,
+                    instance,
+                    webhook_config,
+                    cancel,
+                    &message,
+                )
+                .await;
+            }
         }
     };
     let placed_remotely = hard_placed
         || orch8_types::worker::peek_runtime_requirements(&resolved_params)
             .is_ok_and(|requirements| requirements.is_remote_placement());
-    if placed_remotely || !handlers.contains(&step_def.handler) {
+    if !local_only && (placed_remotely || !handlers.contains(&step_def.handler)) {
         return match dispatch_to_external_worker(
             storage.as_ref(),
             instance,
@@ -1534,7 +1554,13 @@ pub(super) async fn execute_step_block(
 
     match result {
         Err(e @ EngineError::ClaimLost { .. }) => Err(e),
-        Err(e) if e.is_transient_storage() || matches!(e, EngineError::AdmissionBusy { .. }) => {
+        Err(e)
+            if e.is_transient_storage()
+                || matches!(
+                    e,
+                    EngineError::AdmissionBusy { .. } | EngineError::RuntimeUnavailable { .. }
+                ) =>
+        {
             Err(e)
         }
         Ok(block_output) => {

@@ -326,3 +326,39 @@ impl CredentialRow {
         })
     }
 }
+
+/// One snapshot binds both the scheduler claim and any catalog credential grant.
+pub(super) async fn get_for_claim(
+    store: &SqliteStorage,
+    instance: orch8_types::ids::InstanceId,
+    tenant: &TenantId,
+    token: chrono::DateTime<chrono::Utc>,
+    alias: &str,
+) -> Result<crate::ClaimedRead<Option<CredentialDef>>, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let valid:bool=sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT EXISTS(SELECT 1 FROM task_instances i WHERE i.id=?1 AND i.tenant_id=?2 AND i.state='running' AND i.claimed_at=?3 AND {})",
+        super::mobile_execution::ALLOWED.replace("task_instances.","i.")
+    ))).bind(instance.to_string()).bind(tenant.as_str()).bind(token.to_rfc3339()).fetch_one(&mut *tx).await?;
+    if !valid {
+        return Ok(crate::ClaimedRead::Lost);
+    }
+    let scoped: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE id=?1)")
+            .bind(instance.to_string())
+            .fetch_one(&mut *tx)
+            .await?;
+    let row: Option<CredentialRow> = if scoped {
+        sqlx::query_as("SELECT c.* FROM credentials c JOIN mobile_catalog_credential_grants g ON g.credential_id=c.id JOIN mobile_catalog_run_requests r ON r.account_id=g.account_id AND r.catalog_id=g.catalog_id AND r.owner_epoch=g.owner_epoch WHERE r.id=?1 AND g.name=?2 AND c.tenant_id=?3")
+            .bind(instance.to_string()).bind(alias).bind(tenant.as_str()).fetch_optional(&mut *tx).await?
+    } else {
+        sqlx::query_as("SELECT * FROM credentials WHERE id=?1 AND (tenant_id=?2 OR tenant_id='')")
+            .bind(alias)
+            .bind(tenant.as_str())
+            .fetch_optional(&mut *tx)
+            .await?
+    };
+    let credential = row.map(CredentialRow::into_credential).transpose()?;
+    tx.commit().await?;
+    Ok(crate::ClaimedRead::Value(credential))
+}

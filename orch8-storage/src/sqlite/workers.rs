@@ -24,6 +24,14 @@ pub(super) async fn insert_task(
     t: &WorkerTask,
     awaiting_dispatch: bool,
 ) -> Result<(), StorageError> {
+    let scoped: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE id=?1) OR EXISTS(SELECT 1 FROM task_instances i JOIN mobile_accounts a ON i.tenant_id='mobile-account-' || a.id WHERE i.id=?1)"
+    ).bind(t.instance_id.to_string()).fetch_one(&mut *conn).await?;
+    if scoped {
+        return Err(StorageError::Unsupported(
+            "catalog worker dispatch needs scoped worker provenance".into(),
+        ));
+    }
     sqlx::query(
         "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at,effect_id,continuity_epoch,lease_secs,carries_credentials,claimed_runtime_kind,awaiting_dispatch,tenant_id) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,(SELECT tenant_id FROM task_instances WHERE id = ?2)) \

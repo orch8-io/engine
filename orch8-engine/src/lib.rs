@@ -31,6 +31,7 @@ pub mod failover;
 pub mod federation;
 pub mod gc;
 pub mod handlers;
+pub mod input_schema;
 pub mod interceptors;
 pub mod jobs;
 pub mod lifecycle;

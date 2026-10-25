@@ -258,6 +258,39 @@ pub struct MobileEngine {
     credential: Arc<credential::Credential>,
 }
 
+impl MobileEngine {
+    /// Internal explicit-owner execution entry; public scoped SDK rollout is gated
+    /// on the remaining scoped read/lifecycle/worker surfaces.
+    #[allow(dead_code)] // Internal entry until the complete scoped SDK surface is ready.
+    pub(crate) async fn materialize_catalog_run(
+        &self,
+        scope: storage::scopes::CatalogScope,
+        id: orch8_types::ids::InstanceId,
+    ) -> Result<orch8_types::instance::TaskInstance, MobileError> {
+        self.ensure_open()?;
+        let builtins = self
+            .enabled_builtins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect();
+        self.catalog_handlers
+            .materialize(
+                scope,
+                id,
+                storage::scopes::runs::materialize::InstanceLimits::for_engine(
+                    self.config.max_concurrent_instances,
+                ),
+                handlers::scoped::materialize::RuntimeEnvironment {
+                    sdk: self.config.sdk_version.clone(),
+                    builtins,
+                },
+            )
+            .await
+    }
+}
+
 impl Drop for MobileEngine {
     fn drop(&mut self) {
         // Retained registries must lose local host admission even if they
@@ -468,7 +501,11 @@ impl MobileEngine {
         let catalog_handlers =
             handlers::scoped::CatalogHandlers::new(mobile_storage, storage.clone(), cancel.clone());
         let mut registry = builtins::registry_with(builtins::DEFAULT_BUILTINS);
-        catalog_handlers.install_resolver(&mut registry, builtins::DEFAULT_BUILTINS);
+        catalog_handlers.install_resolver_for_sdk(
+            &mut registry,
+            builtins::DEFAULT_BUILTINS,
+            &config.sdk_version,
+        );
         let engine = Arc::new(Self {
             storage,
             catalog_handlers,
@@ -1672,8 +1709,11 @@ impl MobileEngine {
                     self.cancel.clone(),
                 );
             }
-            self.catalog_handlers
-                .install_resolver(&mut next_registry, &next_enabled);
+            self.catalog_handlers.install_resolver_for_sdk(
+                &mut next_registry,
+                &next_enabled,
+                &self.config.sdk_version,
+            );
             (
                 std::mem::replace(&mut *registry, Arc::new(next_registry)),
                 std::mem::replace(&mut *foreign, next_foreign),

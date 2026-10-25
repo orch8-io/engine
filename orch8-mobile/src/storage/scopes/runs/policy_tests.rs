@@ -147,7 +147,8 @@ async fn scoped_lookup_never_inherits_ambient_native_or_disabled_builtin() {
     for name in ["ambient", "http_request", "send_signal"] {
         assert!(matches!(
             execute_step_dry(&backend, &registry, execution(&ctx, name)).await,
-            Err(orch8_engine::error::EngineError::HandlerNotFound(_))
+            Err(orch8_engine::error::EngineError::HandlerNotFound(_)
+                | orch8_engine::error::EngineError::RuntimeUnavailable { .. })
         ));
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);

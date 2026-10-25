@@ -206,6 +206,14 @@ impl SqliteStorage {
         Ok(())
     }
 
+    /// Read an instance in an adapter-owned ownership/admission transaction.
+    pub async fn get_instance_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: InstanceId,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        instances::get_on(tx, id).await
+    }
+
     /// Read within the same snapshot as an adapter's ownership checks.
     pub async fn get_sequence_in_transaction(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
@@ -2791,6 +2799,17 @@ impl crate::AdminStore for SqliteStorage {
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError> {
         credentials::get(self, tenant_id, id).await
+    }
+
+    async fn get_credential_for_claim(
+        &self,
+        instance_id: InstanceId,
+        tenant_id: &TenantId,
+        token: DateTime<Utc>,
+        id: &str,
+    ) -> Result<crate::ClaimedRead<Option<orch8_types::credential::CredentialDef>>, StorageError>
+    {
+        credentials::get_for_claim(self, instance_id, tenant_id, token, id).await
     }
 
     async fn list_all_credentials(

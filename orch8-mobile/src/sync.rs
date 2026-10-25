@@ -1288,7 +1288,7 @@ impl SyncOrchestrator {
 
 /// Numeric dotted-version comparison: missing components count as zero and
 /// any unparseable component fails closed.
-fn sdk_version_meets_min(sdk: &str, min: &str) -> bool {
+pub(crate) fn sdk_version_meets_min(sdk: &str, min: &str) -> bool {
     // Fail closed: a version string with an unparseable component must not
     // silently compare as if the component were absent. Keep consuming
     // both iterators after the first difference so a late invalid component

@@ -28,6 +28,11 @@ pub struct ResolvedHandler {
 #[async_trait::async_trait]
 pub trait HandlerResolver: Send + Sync {
     fn contains(&self, name: &str) -> bool;
+    /// Immutable embedding ownership can forbid worker/plugin fallback. This
+    /// selects a dispatch class; `resolve` must still prove the actual owner.
+    fn requires_local_dispatch(&self, _tenant: &TenantId) -> bool {
+        false
+    }
     async fn resolve(
         &self,
         lookup: HandlerLookup<'_>,
@@ -53,6 +58,12 @@ impl Selection<'_> {
     }
 }
 impl HandlerRegistry {
+    pub(crate) fn requires_local_dispatch(&self, tenant: &TenantId) -> bool {
+        self.resolver
+            .as_ref()
+            .is_some_and(|resolver| resolver.requires_local_dispatch(tenant))
+    }
+
     /// Install trusted contextual selection. Contextual entries take precedence
     /// over real handlers and mocks; direct `get()` remains an unscoped API.
     pub fn set_resolver(&mut self, resolver: Arc<dyn HandlerResolver>) {

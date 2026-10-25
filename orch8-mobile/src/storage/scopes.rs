@@ -8,6 +8,7 @@ use orch8_types::error::StorageError;
 use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
+mod credentials;
 pub(crate) mod runs;
 mod signed;
 mod transport;
@@ -20,6 +21,7 @@ struct CatalogAcceptance<'a> {
     version: i64,
     digest: &'a str,
     entries: &'a [(&'a str, i32, &'a str)],
+    execution: Option<&'a [crate::sync::ManifestSequenceEntry]>,
 }
 
 const RECONCILED_VERSION: &str = "catalog_reconciled_version";
@@ -216,16 +218,22 @@ impl MobileStorage {
         &self,
         account: &AccountScope,
     ) -> Result<(), StorageError> {
+        let mut tx = self.pool().begin().await?;
         let result = sqlx::query(
-            "UPDATE mobile_accounts SET active = 0 WHERE id = ?1 AND epoch = ?2 AND active = 1",
+            "UPDATE mobile_accounts SET active=0 WHERE id=?1 AND epoch=?2 AND active=1",
         )
         .bind(&account.id)
         .bind(account.epoch)
-        .execute(self.pool())
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() != 1 {
             return Err(invalid("mobile account scope is retired"));
         }
+        // Retire logical work without deleting original requests or effect
+        // evidence. Already-running host code retains its physical permit.
+        sqlx::query("UPDATE task_instances SET state='cancelled',next_fire_at=NULL,claimed_at=NULL,updated_at=?3 WHERE id IN (SELECT id FROM mobile_catalog_run_requests WHERE account_id=?1 AND owner_epoch=?2) AND state IN ('scheduled','running','waiting','paused') AND EXISTS(SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=task_instances.id AND task_instances.tenant_id='mobile-account-' || r.account_id AND task_instances.namespace='catalog-' || r.catalog_id AND task_instances.sequence_id=r.selected_sequence_id)")
+            .bind(&account.id).bind(account.epoch).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -366,6 +374,7 @@ impl MobileStorage {
                 version,
                 digest,
                 entries: &[],
+                execution: None,
             }),
         )
         .await
@@ -408,6 +417,27 @@ impl MobileStorage {
                 }
                 sqlx::query("INSERT INTO mobile_catalog_entry_history(account_id, catalog_id, name, version, body_digest) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(account_id, catalog_id, name, version) DO NOTHING")
                     .bind(&scope.account.id).bind(&scope.id).bind(name).bind(version).bind(digest).execute(&mut *tx).await?;
+            }
+        }
+        if let Some(accepted) = &acceptance
+            && let Some(entries) = accepted.execution
+        {
+            for entry in entries {
+                let mut required = entry.required_handlers.clone();
+                required.sort();
+                required.dedup();
+                if entry.min_sdk_version.len() > 256 || required.len() > 256 {
+                    return Err(invalid("catalog execution policy exceeds its limit"));
+                }
+                for name in &required {
+                    validate(name)?;
+                    if name.len() > 256 {
+                        return Err(invalid("invalid catalog required handler"));
+                    }
+                }
+                sqlx::query("INSERT INTO mobile_catalog_execution_policy(account_id,catalog_id,name,version,manifest_version,manifest_digest,min_sdk_version,required_handlers) VALUES (?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(account_id,catalog_id,name,version) DO UPDATE SET manifest_version=excluded.manifest_version,manifest_digest=excluded.manifest_digest,min_sdk_version=excluded.min_sdk_version,required_handlers=excluded.required_handlers")
+                    .bind(&scope.account.id).bind(&scope.id).bind(&entry.name).bind(entry.version).bind(accepted.version).bind(accepted.digest)
+                    .bind(&entry.min_sdk_version).bind(serde_json::to_string(&required)?).execute(&mut *tx).await?;
             }
         }
         sqlx::query(

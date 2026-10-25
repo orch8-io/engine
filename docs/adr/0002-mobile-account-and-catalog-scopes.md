@@ -3,10 +3,10 @@
 Date: 2026-10-24
 
 Status: the requirement is accepted by the user. Internal account/catalog
-identity, session epochs, isolated metadata/signing keys and owner-qualified
-workflow cache persistence are implemented;
-the remaining API/schema below is a proposed implementation contract. Public
-scoped sync and execution are not implemented yet.
+identity, session epochs, isolated metadata/signing keys, owner-qualified cache,
+credential grants and local run materialization are implemented internally.
+The remaining public API/schema below is an implementation contract; scoped SDK
+handles and the complete runtime surface are not implemented yet.
 
 ## Requirement and current evidence
 
@@ -34,7 +34,10 @@ verifies manifest audiences; the internal private sync path additionally checks 
 fresh response from the catalog's immutable trusted identity endpoint.
 It exposes no public SDK API and is not connected to legacy sync/execution.
 
-Retirement marks an account inactive. Reopen preserves its ID/data and increments
+Retirement marks an account inactive and cancels its matching nonterminal native
+instances in the same transaction, preserving requests, receipts and effect
+evidence. Already-running host work retains its physical admission. Reopen
+preserves the account's ID/data and increments
 its durable epoch; exhaustion fails closed. Metadata reads check owner and epoch
 in one snapshot. Mutations acquire SQLite's writer reservation with an epoch
 predicate before checking catalog membership and committing the entire batch.
@@ -121,12 +124,32 @@ same writer fence as insertion, with byte-accurate metadata counters and schema
 constraints. Retired/cancelled requests remain charged until explicit safe cleanup.
 Prepared requests pin definitions; withdrawal deprecates instead of deleting them.
 
-This is durable preparation, not scoped execution. No scheduler instance is
-created and a normal engine tick cannot dispatch it. Materialization must first
-install frozen handler/credential ownership and enforce account epochs, original
-admission context, current publication/capability policy and catalog boundaries
-for builtins. Core tenant/sub-tenant checks do not make a catalog namespace alone
-a security boundary. Public scoped start/dispatch remains gated on that work.
+Preparation alone creates no scheduler instance. The internal production
+materializer now converts that frozen request under its account/epoch writer
+fence, after validating local handler availability, input schema and signed
+SDK/handler policy outside the writer. It preserves original ID, definition,
+input and creation time. Global/account/catalog active counts serialize with the
+insert. A separate durable materialization receipt commits atomically and
+prevents rematerialization after native history GC; it cannot be forgotten as an
+unmaterialized cancellation.
+
+Explicit catalog credential aliases grant access only to account-owned physical
+credential records at the active epoch. Claim-bound lookup selects those grants
+in the same snapshot as frozen ownership; it cannot inherit tenant/global
+credentials or another catalog's grant. Encryption decorators forward and decrypt
+the authorized result. Credential creation/rotation stays with the configured
+backend; grants copy no secret material. Reopen needs explicit grants for the new
+epoch. Ordinary legacy/server credential authority remains unchanged.
+
+Signed acceptance persists each version's SDK minimum and required handlers with
+its key/replay transaction. New materialization checks the latest recorded policy
+for the selected, still-published version. A staged version survives an upgrade;
+explicit withdrawal blocks new materialization. An admitted run pins its policy.
+After restart an incompatible SDK or missing local binding defers without business
+retries, effect dispatch or worker fallback. Template-produced remote placement is
+refused before native entry. Child, recovery, lifecycle and remote-worker constructs
+whose scoped provenance is incomplete are refused by this internal materializer;
+those capabilities still need implementation before public scoped rollout.
 
 SQLite execution storage now applies an additional frozen-request/account-epoch
 predicate to scheduler eligibility, claim-bound step writes, claimed state/outbox
@@ -134,9 +157,10 @@ transitions and lease renewal. Registered account tenants require matching reque
 provenance; relabelling a request's native tenant, catalog namespace or definition
 cannot bypass it. Checks serialize with retirement and filter candidates before
 batch limits. Test-only native fixtures verify this prerequisite across pools.
-It does not authorize handler dispatch or introduce production materialization.
-Scoped reads/builtins, callbacks, child/delegation provenance and background
-signal/SLA/recovery work still need their ownership boundaries before rollout.
+These fences now support the internal materialization path; they alone do not
+authorize handler dispatch. Public scoped reads/lifecycle, child/delegation,
+independent hooks, background signal/SLA/recovery and SDK callback context still
+need complete ownership boundaries before rollout.
 
 Use one SQLite database with explicit owner keys and scoped SDK handles. Shared
 runtime resources stay bounded across accounts. Scope-specific state is selected
@@ -277,16 +301,20 @@ override in one catalog leaves another catalog's builtin pure. Scoped fallback
 uses an independent permitted builtin snapshot and cannot inherit an ambient
 legacy native callback. Selected native identity is weak and rechecked at entry,
 so suspended preparation does not pin accepted foreign references after close.
-Independent hooks/remote dispatch and earlier credential preparation still need
-scope-aware integration; this resolver alone is not a complete execution boundary.
+Claim-bound credential preparation is now catalog-aware. Contextual ownership
+forces local dispatch before placement/worker selection, and SQLite refuses
+unproven scoped worker payloads. Independent hooks and remote provenance remain
+gates; the resolver is one part of the complete boundary.
 
-This does not create production scoped instances or expose scoped SDK handles.
-Next carry frozen owners through actual materialization, remaining builtin/read
-boundaries, background recovery and listeners. Real flat/tree scheduler cases now
+Internal materialization now creates production-native instances and runs four
+scopes through the real scheduler. Public scoped SDK handles remain gated.
+Next complete scoped read/lifecycle and expiry/recovery, listeners, immutable SDK
+callback context, child/delegation/remote provenance, migration and resource/at-rest
+contracts before exposing the complete surface. Real flat/tree scheduler cases now
 verify scoped native capacity deferral and transient pre-dispatch claim recovery
 without business retry policies: one Prepared receipt/attempt survives contention
 until exactly one callback commits. Capability rejection cannot relabel dispatched
-work. Other admission and infrastructure boundaries still need their own evidence. Other callback classes and independent processes still need their
-resource-bound evidence.
+work. Other admission/infrastructure boundaries, callback classes and independent
+processes still need their resource-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open
 until their complete runtime and SDK evidence exists.
