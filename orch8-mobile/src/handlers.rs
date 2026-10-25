@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use orch8_engine::handlers::{HandlerRegistry, StepContext};
@@ -24,6 +25,7 @@ struct Callback {
     tracking_key: String,
     permits: Option<scoped::NativePermit>,
     binding: Option<Arc<scoped::Binding>>,
+    stop: CancellationToken,
 }
 
 /// Callback interface for host-registered step handlers.
@@ -42,6 +44,24 @@ pub trait EngineListener: Send + Sync {
     fn on_step_pending(&self, instance_id: String, step_name: String, handler: String);
 }
 
+#[cfg(test)]
+pub(crate) fn register_foreign_handler(
+    registry: &mut HandlerRegistry,
+    name: &str,
+    handler: Arc<dyn StepHandler>,
+    timeout: Duration,
+    stragglers: Arc<Stragglers>,
+) {
+    register_owned_foreign_handler(
+        registry,
+        name,
+        handler,
+        timeout,
+        stragglers,
+        CancellationToken::new(),
+    );
+}
+
 /// Register a foreign `StepHandler` into the engine's `HandlerRegistry`.
 /// Bridges the `UniFFI` callback interface to the engine's async handler signature.
 /// If the handler does not respond within `timeout`, the step returns a retryable
@@ -49,12 +69,14 @@ pub trait EngineListener: Send + Sync {
 /// as a device timeout. The native call cannot be interrupted, so it is tracked
 /// in `stragglers` until it returns (see [`crate::stragglers`]). Outer
 /// cancellation also quarantines a live native call; queued calls are aborted.
-pub(crate) fn register_foreign_handler(
+/// Local runtime shutdown refuses entry even while a durable claim is valid.
+pub(crate) fn register_owned_foreign_handler(
     registry: &mut HandlerRegistry,
     name: &str,
     handler: Arc<dyn StepHandler>,
     timeout: Duration,
     stragglers: Arc<Stragglers>,
+    stop: CancellationToken,
 ) {
     let handler_name = name.to_string();
     registry.register_with_deferred_effect_admission(name, move |ctx: StepContext| {
@@ -68,6 +90,7 @@ pub(crate) fn register_foreign_handler(
                 tracking_key: handler_name.clone(),
                 permits: None,
                 binding: None,
+                stop: stop.clone(),
             },
         )
     });
@@ -82,7 +105,12 @@ async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<
         tracking_key,
         permits,
         binding,
+        stop,
     } = callback;
+
+    if stop.is_cancelled() {
+        return Err(StepError::ClaimLost);
+    }
 
     if ctx.is_dry_run() {
         return Ok(serde_json::json!({
@@ -120,6 +148,7 @@ async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<
             tracking_key,
             _permits: permits,
             binding,
+            stop,
         },
     );
 

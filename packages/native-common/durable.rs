@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +25,9 @@ use orch8::{
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
+
+pub(crate) mod database;
+mod passes;
 
 /// Future returned by a host handler invocation.
 pub type InvokeFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
@@ -52,7 +56,9 @@ pub struct DurableEngine {
     handlers: Mutex<HandlerRegistrations>,
     engine: AsyncMutex<Option<Engine>>,
     sequences: Mutex<HashMap<String, Vec<Deployed>>>,
-    closed: Mutex<bool>,
+    closed: Arc<AtomicBool>,
+    passes: passes::Passes,
+    database: Mutex<Option<Arc<database::Owner>>>,
 }
 
 fn err(error: impl std::fmt::Display) -> String {
@@ -67,12 +73,22 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 impl DurableEngine {
     pub fn new(path: impl Into<String>) -> Self {
+        Self::with_pass_limit(
+            path,
+            orch8_types::config::SchedulerConfig::default().max_concurrent_steps as usize,
+        )
+    }
+
+    /// Trusted construction budget; bindings use the scheduler's own ceiling.
+    pub(crate) fn with_pass_limit(path: impl Into<String>, pass_limit: usize) -> Self {
         Self {
             path: path.into(),
             handlers: Mutex::new(HandlerRegistrations::default()),
             engine: AsyncMutex::new(None),
             sequences: Mutex::new(HashMap::new()),
-            closed: Mutex::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
+            passes: passes::Passes::new(pass_limit),
+            database: Mutex::new(None),
         }
     }
 
@@ -82,7 +98,7 @@ impl DurableEngine {
 
     /// Register a host handler. Fails once the engine has been used.
     pub fn register(&self, name: &str, invoke: Invoke) -> Result<(), String> {
-        let closed = *lock(&self.closed);
+        let closed = self.closed.load(Ordering::Acquire);
         if closed {
             return Err("engine is closed".into());
         }
@@ -113,12 +129,15 @@ impl DurableEngine {
         // Serialize initialization with close. Return a cheap Engine clone so
         // close can remove the owned cache and release idle database handles.
         let mut cached = self.engine.lock().await;
-        if *lock(&self.closed) {
+        if self.closed.load(Ordering::Acquire) {
             return Err("engine is closed".into());
         }
         if let Some(engine) = cached.as_ref() {
             return Ok(engine.clone());
         }
+        // Refuse a second owner before opening SQLite or running recovery.
+        // The owned build retains this reservation through cancellation.
+        let database = database::Owner::acquire(&self.path)?;
         let handlers = {
             let mut handlers = lock(&self.handlers);
             handlers.frozen = true;
@@ -132,18 +151,20 @@ impl DurableEngine {
             // by a crash, so resume it immediately on initialization.
             .stale_instance_threshold(Duration::ZERO);
         for (name, invoke) in handlers {
-            builder = builder.handler(&name, host_handler(invoke));
+            builder = builder.handler(&name, owned_host_handler(invoke, self.closed.clone()));
         }
-        let engine = builder.build().await.map_err(err)?;
+        let (engine, database) = database::initialize(database, builder.build()).await?;
+        *lock(&self.database) = database;
         *cached = Some(engine.clone());
         // The cached engine now owns the callbacks. A second copy would
         // unnecessarily retain host resources after the engine is closed.
         let registrations = std::mem::take(&mut lock(&self.handlers).entries);
         // close may have been called while storage was opening. Do not hand
         // the new engine to a caller after close stopped accepting work.
-        let closed = *lock(&self.closed);
+        let closed = self.closed.load(Ordering::Acquire);
         if closed {
             engine.close().await;
+            self.release_database();
             let retired = cached.take();
             drop(cached);
             drop(retired);
@@ -260,15 +281,39 @@ impl DurableEngine {
             })
             .transpose()?;
         let engine = self.engine().await?;
+        let mut observed_unparked = false;
         loop {
             // Validate the target and budget before a pass can dispatch other
             // queued instances. Waiting/paused targets still need a pass to
             // process queued signals; terminal targets cannot resume.
             let instance = engine.get_instance(id).await.map_err(err)?;
+            let parked = matches!(
+                instance.state,
+                InstanceState::Waiting | InstanceState::Paused
+            );
+            observed_unparked |= !parked;
             if instance.state.is_terminal() || deadline.is_some_and(|d| Instant::now() >= d) {
                 return self.snapshot(&engine, id).await;
             }
-            let tick = engine.tick_once().await.map_err(err)?;
+            if parked && observed_unparked {
+                return self.snapshot(&engine, id).await;
+            }
+            let allow_new = instance.state != InstanceState::Running;
+            let Some(pass) = self.passes.acquire(
+                engine.clone(),
+                id,
+                allow_new,
+                deadline,
+                lock(&self.database).clone(),
+            )?
+            else {
+                return self.snapshot(&engine, id).await;
+            };
+            let tick = match pass.wait_until(deadline).await? {
+                passes::Wait::Finished(tick) => tick,
+                passes::Wait::Refresh => continue,
+                passes::Wait::Deadline => return self.snapshot(&engine, id).await,
+            };
             let instance = engine.get_instance(id).await.map_err(err)?;
             let settled = instance.state.is_terminal()
                 || matches!(
@@ -339,13 +384,21 @@ impl DurableEngine {
             .map_err(err)
     }
 
+    fn release_database(&self) {
+        if let Some(owner) = lock(&self.database).take() {
+            owner.release();
+        }
+    }
+
     /// Stop accepting calls and release the database. Idempotent.
     pub async fn close(&self) {
-        *lock(&self.closed) = true;
+        self.closed.store(true, Ordering::Release);
+        self.passes.stop();
         let mut cached = self.engine.lock().await;
         if let Some(engine) = cached.as_ref() {
             engine.close().await;
         }
+        self.release_database();
         // Retain ownership until close completes so cancellation can retry.
         let retired_engine = cached.take();
         drop(cached);
@@ -358,6 +411,15 @@ impl DurableEngine {
         // can release the last host reference. Neither may hold lifecycle locks.
         drop(retired_engine);
         drop(retired_handlers);
+    }
+}
+
+impl Drop for DurableEngine {
+    fn drop(&mut self) {
+        // Signal the owned pass without blocking a host finalizer. Its
+        // coordinator requests engine shutdown and retains any live join.
+        self.closed.store(true, Ordering::Release);
+        self.passes.stop();
     }
 }
 
@@ -375,15 +437,26 @@ fn latest_outputs(outputs: Vec<orch8::BlockOutput>) -> Value {
     Value::Object(map)
 }
 
+#[cfg(test)]
 pub(crate) fn host_handler(
     invoke: Invoke,
-) -> impl Fn(StepContext) -> Pin<Box<dyn Future<Output = Result<Value, StepError>> + Send>>
-+ Send
-+ Sync
-+ 'static {
+) -> impl Fn(StepContext) -> InvokeStepFuture + Send + Sync + 'static {
+    owned_host_handler(invoke, Arc::new(AtomicBool::new(false)))
+}
+
+type InvokeStepFuture = Pin<Box<dyn Future<Output = Result<Value, StepError>> + Send>>;
+
+pub(crate) fn owned_host_handler(
+    invoke: Invoke,
+    closed: Arc<AtomicBool>,
+) -> impl Fn(StepContext) -> InvokeStepFuture + Send + Sync + 'static {
     move |ctx: StepContext| {
         let invoke = Arc::clone(&invoke);
+        let closed = Arc::clone(&closed);
         Box::pin(async move {
+            if closed.load(Ordering::Acquire) {
+                return Err(StepError::ClaimLost);
+            }
             ctx.verify_claim().await?;
             let outputs = ctx.storage.get_all_outputs(ctx.instance_id).await;
             // Loading the request envelope is an asynchronous phase. Its
@@ -399,7 +472,13 @@ pub(crate) fn host_handler(
                 "step_id": ctx.block_id.to_string(),
                 "attempt": ctx.attempt,
             });
-            let reply = invoke(request.to_string()).await.map_err(retryable)?;
+            let request = request.to_string();
+            // Runtime shutdown need not retire a durable account/claim. Fence
+            // factory entry with the local owner's retirement flag too.
+            if closed.load(Ordering::Acquire) {
+                return Err(StepError::ClaimLost);
+            }
+            let reply = invoke(request).await.map_err(retryable)?;
             decode_reply(&reply)
         })
     }

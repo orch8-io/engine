@@ -72,8 +72,11 @@ final class AsyncTokenProviderTests: XCTestCase {
         let provider = AsyncTokenProvider(initialToken: "dst_first", timeout: 30, budget: TokenFetchBudget(capacity: 2)) {
             entered.fulfill()
             do {
-                try await Task.sleep(nanoseconds: 120_000_000_000)
-                return "dst_late"
+                // A finite sleep may finish normally before a delayed observer
+                // requests cancellation. Keep the fetch pending until cancelled.
+                while true {
+                    try await Task.sleep(nanoseconds: 120_000_000_000)
+                }
             } catch {
                 cancelled.fulfill()
                 throw error

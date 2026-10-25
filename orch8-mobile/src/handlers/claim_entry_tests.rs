@@ -478,51 +478,64 @@ async fn native_policy_dry_run_never_enters_host() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancellation_during_durable_admission_keeps_uncertain_dispatch_evidence() {
+async fn cancellation_or_local_shutdown_during_admission_keeps_uncertain_dispatch_evidence() {
     use orch8_engine::{error::EngineError, handlers::step::execute_step_dry};
     use orch8_storage::testing::faulty::FaultStorage;
-    let (_sqlite, mut ctx) = claimed_context().await;
-    let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
-    ctx.storage = storage.clone();
-    // First CAS prepares; second begins the durable dispatch window.
-    let pause = faults.on("cas_effect_receipt").nth(2).pause();
-    let calls = Arc::new(AtomicUsize::new(0));
-    let stragglers = Arc::new(Stragglers::default());
-    let mut registry = HandlerRegistry::new();
-    register_foreign_handler(
-        &mut registry,
-        "queued",
-        Arc::new(Counter(calls.clone())),
-        Duration::from_secs(60),
-        stragglers.clone(),
-    );
-    let registry = Arc::new(registry);
-    let exec = execution(&ctx);
-    let s = storage.clone();
-    let h = registry.clone();
-    let first = tokio::spawn(async move { execute_step_dry(&s, &h, exec).await });
-    tokio::time::timeout(Duration::from_secs(5), pause.entered())
+    for local_stop in [false, true] {
+        let (_sqlite, mut ctx) = claimed_context().await;
+        let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
+        ctx.storage = storage.clone();
+        // First CAS prepares; second begins the durable dispatch window.
+        let pause = faults.on("cas_effect_receipt").nth(2).pause();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let stragglers = Arc::new(Stragglers::default());
+        let stop = tokio_util::sync::CancellationToken::new();
+        let mut registry = HandlerRegistry::new();
+        register_owned_foreign_handler(
+            &mut registry,
+            "queued",
+            Arc::new(Counter(calls.clone())),
+            Duration::from_secs(60),
+            stragglers.clone(),
+            stop.clone(),
+        );
+        let registry = Arc::new(registry);
+        let exec = execution(&ctx);
+        let s = storage.clone();
+        let h = registry.clone();
+        let first = tokio::spawn(async move { execute_step_dry(&s, &h, exec).await });
+        tokio::time::timeout(Duration::from_secs(5), pause.entered())
+            .await
+            .unwrap();
+        if local_stop {
+            stop.cancel();
+            pause.release();
+            assert!(matches!(
+                first.await.unwrap(),
+                Err(EngineError::ClaimLost { .. })
+            ));
+        } else {
+            first.abort();
+            assert!(first.await.unwrap_err().is_cancelled());
+            pause.release();
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while stragglers.blocks("queued") {
+                tokio::task::yield_now().await;
+            }
+        })
         .await
         .unwrap();
-    first.abort();
-    assert!(first.await.unwrap_err().is_cancelled());
-    pause.release();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while stragglers.blocks("queued") {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(
-        execute_step_dry(&storage, &registry, execution(&ctx)).await,
-        Err(EngineError::EffectBlocked {
-            state: orch8_types::continuity::EffectState::Unknown,
-            ..
-        })
-    ));
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(
+            execute_step_dry(&storage, &registry, execution(&ctx)).await,
+            Err(EngineError::EffectBlocked {
+                state: orch8_types::continuity::EffectState::Unknown,
+                ..
+            })
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -572,4 +585,43 @@ async fn native_admission_storage_failures_preserve_type_and_commit_ambiguity() 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_shutdown_during_claim_preflight_refuses_host_entry() {
+    use orch8_storage::testing::faulty::FaultStorage;
+    let (sqlite, mut ctx) = claimed_context().await;
+    let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
+    ctx.storage = storage;
+    let pause = faults.on("verify_instance_claim").pause();
+    let stop = tokio_util::sync::CancellationToken::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = HandlerRegistry::new();
+    register_owned_foreign_handler(
+        &mut registry,
+        "queued",
+        Arc::new(Counter(calls.clone())),
+        Duration::from_secs(60),
+        Arc::new(Stragglers::default()),
+        stop.clone(),
+    );
+    let callback = registry.get("queued").unwrap()(ctx.clone());
+    let task = tokio::spawn(callback);
+    tokio::time::timeout(Duration::from_secs(5), pause.entered())
+        .await
+        .unwrap();
+    stop.cancel();
+    pause.release();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(StepError::ClaimLost)), "{result:?}");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(
+        sqlite
+            .verify_instance_claim(ctx.instance_id, &ctx.tenant_id, ctx.claim_token.unwrap())
+            .await
+            .unwrap()
+    );
 }

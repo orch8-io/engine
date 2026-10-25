@@ -116,3 +116,25 @@ orch8_storage::backend_test!(async fn native_host_valid_and_trusted_unclaimed_ca
     assert_eq!(handler(ctx).await.unwrap()["accepted"], true);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 });
+
+orch8_storage::backend_test!(async fn retiring_native_owner_during_request_loading_refuses_factory_entry(b) {
+    use std::sync::atomic::AtomicBool;
+    let mut ctx = claimed_context(b.storage.clone()).await;
+    let id = ctx.instance_id;
+    let tenant = ctx.tenant_id.clone();
+    let token = ctx.claim_token.unwrap();
+    let (storage, faults) = FaultStorage::wrap(b.storage.clone());
+    ctx.storage = storage;
+    let pause = faults.on("get_all_outputs").times(1).pause();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicBool::new(false));
+    let call = durable::owned_host_handler(callback(calls.clone()), closed.clone())(ctx);
+    let task = tokio::spawn(call);
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered()).await.unwrap();
+    closed.store(true, Ordering::Release);
+    assert!(b.storage.verify_instance_claim(id, &tenant, token).await.unwrap(),
+        "local runtime retirement is independent of the durable instance claim");
+    pause.release();
+    assert!(matches!(task.await.unwrap(), Err(StepError::ClaimLost)));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+});

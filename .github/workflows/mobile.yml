@@ -377,7 +377,8 @@ jobs:
                       print(d["udid"]); sys.exit(0)
           sys.exit("no iPhone simulator available")
           ')"
-          xcodebuild test -scheme Orch8Mobile -destination "platform=iOS Simulator,id=${UDID}"
+          xcodebuild test -scheme Orch8Mobile -destination "platform=iOS Simulator,id=${UDID}" \
+            SWIFT_STRICT_CONCURRENCY=complete SWIFT_TREAT_WARNINGS_AS_ERRORS=YES
 
   flutter-tests:
     name: Flutter analyze and test

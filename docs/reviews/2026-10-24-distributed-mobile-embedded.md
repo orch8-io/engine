@@ -2365,3 +2365,116 @@ This does not force callback cancellation or establish process-wide callback
 capacity/fairness. Physical admission and resource bounds, complete in-flight run
 deadlines, scoped runtime/SDK integration and the remaining audit matrix stay
 open. No Python API, schema or callback envelope changes are introduced.
+
+
+### DME121 — Native run waited for the physical scheduler pass past its deadline
+
+Three bounded Rust regressions failed against the previous runner: finite run
+waiting, cancelled observer capacity, and close wakeup. The actual preceding
+Node and Python addons also exceeded the logical run deadline until their held
+host callback was released. Artifact hashes matched the recorded prior builds.
+
+A shared owner now retains each scheduler pass independently of logical run
+waiters. Admission is bounded by existing default scheduler concurrency, shares
+same-target work, and retains capacity through real pass completion. Close or
+owner drop signals shutdown and wakes logical waiters. A local owner flag is
+checked before host factory entry, independently of durable claim verification;
+this local retirement does not retire a durable account shared by another owner.
+Already-admitted successful work may still commit under its valid durable claim.
+
+Seven deadline contracts pass, covering finite waiting, cancellation, repeated
+short observers, close wakeup, ambiguous-effect reopen refusal, independent fast
+targets, and fast target completion within a batch containing held work. Four
+additional backend cases hold request loading across local retirement and prove
+no host factory entry while the durable claim remains valid. All 20 native claim
+contracts passed against required isolated PostgreSQL and encrypted wrappers.
+The full facade suite passed 182 test results plus three documentation tests;
+workspace/all-target Clippy with warnings denied passed. Actual macOS arm64
+addons passed five Node and seven Python runtime tests. Hosted CI must pass
+before merge.
+
+This bounds pass observation and pass admission, not arbitrary storage I/O or
+physical foreign callback capacity across step timeouts and engines. Callback
+queue fairness, process-wide physical limits, explicit account/catalog runtime
+integration, and the broader review matrix remain open. No production scoped
+SDK handle, schema change, or complete real-time API deadline is claimed.
+
+
+### DME122 — Multiple native owners could run immediate crash recovery
+
+Two baseline regressions admitted a second native handle to an existing SQLite
+file, including while the first owner held a running host callback. The native
+runner uses a zero stale threshold for immediate crash recovery, so this overlap
+violates its required exclusive recovery authority even within one process.
+
+Initialization now reserves a nonblocking operating-system lock before opening
+SQLite, freezing registrations or running recovery. Owned initialization retains
+its reservation through build I/O even if its observer is cancelled; successful observed builds transfer it to the native owner.
+Close releases it only after the shared storage pool closes. A detached scheduler
+pass also retains the reservation, so dropping the native object does not make
+live database work look abandoned. This does not retire any durable account.
+
+The lock uses a stable canonical-path companion; locking the SQLite data file
+itself conflicted with the actual macOS SQLite VFS and was rejected during
+validation. The companion is never unlinked automatically. Symlink aliases share
+it; Unix hard-linked databases fail closed. Deleting/renaming live files, other
+filesystem aliases and filesystems lacking advisory lock support remain outside
+the supported ownership contract. This is exclusive execution, not a shared
+multi-process SQLite scheduler or proof of all platform runtime behavior.
+
+Ownership contracts cover overlap/refusal and retry, a live original claim,
+independent-process exclusion, symlinks and hard-link refusal, object drop with a
+live pass, independent memory databases, failed-initialization release, and
+cancelled-build observation without surrendering the live reservation.
+The full facade suite passed 191 test results plus three documentation tests.
+Actual macOS arm64 addons passed all six Node and eight Python runtime tests;
+workspace/all-target lint with warnings denied passed. Formatting, docs and diff
+checks passed. Hosted CI must pass before merge. Process-wide physical callback
+limits, scoped account/catalog runtime integration and the remaining review matrix stay open.
+
+
+### DME123 — Mobile shutdown left retained and queued host admission live
+
+Two production-registry Rust regressions failed on baseline: a retained registry
+could invoke a callback after MobileEngine.shutdown, and a blocking-queued call
+could enter after shutdown while its logical waiter remained live. The original
+durable claim stayed valid. Runtime-local stop and account retirement therefore
+need separate authority; clearing the current registry or cancelling the UI
+operation cannot fence a captured registry or a pending database preflight.
+
+Production host registration now captures the engine cancellation token. The
+async adapter checks it before scheduling; physical admission checks it before
+claim verification, after that await, and again after deferred durable dispatch
+and its final claim check. Final engine drop also cancels local admission. An
+already-entered callback can still return its truthful result; this does not
+interrupt host code, reclaim physical capacity early, or retire an account used
+by another engine. Internal catalog routers require an explicit runtime token,
+refuse stopped registrations/reads/dispatch, and use the same physical gate.
+
+The added contracts cover retained registry entry, queued calls without waiter
+cancellation, stop during claim verification, final engine drop, entered callback
+completion, and another router using the same still-active account. The durable
+admission overlap test now covers both caller cancellation and local shutdown,
+with zero host entry and preserved unknown-effect refusal. The scoped
+queued-entry contract now exercises both durable retirement and local shutdown.
+All 540 mobile unit tests plus 109 integration/example/coverage tests passed with
+their required loopback servers. Workspace/all-target lint with warnings denied
+passed. All 32 production Swift wrapper tests passed with strict concurrency and
+warnings denied against fresh UniFFI bindings and the rebuilt actual macOS native
+library. This is not an iOS simulator run; hosted platform CI remains required.
+
+Hosted PR #311 also exposed a Swift test fixture with an independent natural
+completion: its 120-second cooperative sleep could finish instead of observing
+cancellation under delayed scheduling. The fixture now keeps sleeping until
+cancelled; the adapter, timeout and cancellation assertions are unchanged. This
+removes the competing completion path rather than extending the observation
+budget. Strict-concurrency validation also rejected the worker URLProtocol
+fixture's mutable static fields. They now live in one immutable, lock-owned
+Sendable state object; all accesses retain the existing lock and client calls
+remain outside it. The iOS CI invocation now denies concurrency warnings. Actual
+iOS simulator CI remains required.
+
+This is a local callback admission fix. Bounded destruction on account/runtime
+close, production scoped materialization, builtin/read/recovery/listener ownership,
+other callback classes and independent-process resource limits remain open.
+ADR-0002 S1-S12 and the full review matrix are not complete.

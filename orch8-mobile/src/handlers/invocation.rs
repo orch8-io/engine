@@ -44,6 +44,7 @@ pub(super) struct NativeOwnership {
     pub(super) tracking_key: String,
     pub(super) _permits: Option<super::scoped::NativePermit>,
     pub(super) binding: Option<Arc<super::scoped::Binding>>,
+    pub(super) stop: tokio_util::sync::CancellationToken,
 }
 
 // Declaration order matters: foreign references are released before quarantine
@@ -62,6 +63,9 @@ impl PhysicalCall {
         input: String,
         runtime: tokio::runtime::Handle,
     ) -> Result<String, StepError> {
+        if self.ownership.stop.is_cancelled() {
+            return Err(StepError::ClaimLost);
+        }
         let claim = &self.ownership.claim;
         let effect_admission = &self.ownership.effect_admission;
         let entry = &self.finish.0;
@@ -72,11 +76,12 @@ impl PhysicalCall {
         }
         // Cancellation may arrive while the database preflight is pending.
         // Check at host admission, after that await, before any native code.
-        if entry
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .detached
+        if self.ownership.stop.is_cancelled()
+            || entry
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detached
         {
             return Err(StepError::ClaimLost);
         }
@@ -87,11 +92,12 @@ impl PhysicalCall {
             if let Some(claim) = claim {
                 runtime.block_on(claim.verify())?;
             }
-            if entry
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .detached
+            if self.ownership.stop.is_cancelled()
+                || entry
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .detached
             {
                 return Err(StepError::ClaimLost);
             }
@@ -240,6 +246,7 @@ mod tests {
                     tracking_key: "queued".into(),
                     _permits: None,
                     binding: None,
+                    stop: tokio_util::sync::CancellationToken::new(),
                 },
             );
             drop(call);

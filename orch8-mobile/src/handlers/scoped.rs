@@ -124,16 +124,22 @@ pub(crate) struct CatalogHandlers {
     backend: Arc<dyn StorageBackend>,
     bindings: AsyncMutex<Bindings>,
     capacity: Arc<NativeCapacity>,
+    stop: tokio_util::sync::CancellationToken,
 }
 impl CatalogHandlers {
     /// Trusted runtime supplies the same backend used by its step executor.
     /// Decorators are allowed, but a context from another backend is refused.
-    pub(crate) fn new(storage: Arc<MobileStorage>, backend: Arc<dyn StorageBackend>) -> Arc<Self> {
+    pub(crate) fn new(
+        storage: Arc<MobileStorage>,
+        backend: Arc<dyn StorageBackend>,
+        stop: tokio_util::sync::CancellationToken,
+    ) -> Arc<Self> {
         Arc::new(Self {
             storage,
             backend,
             bindings: AsyncMutex::new(Bindings::default()),
             capacity: NativeCapacity::shared(),
+            stop,
         })
     }
     #[cfg(test)]
@@ -141,7 +147,7 @@ impl CatalogHandlers {
         storage: Arc<MobileStorage>,
         backend: Arc<dyn StorageBackend>,
     ) -> Arc<Self> {
-        let mut owner = Self::new(storage, backend);
+        let mut owner = Self::new(storage, backend, tokio_util::sync::CancellationToken::new());
         Arc::get_mut(&mut owner).unwrap().capacity = NativeCapacity::new();
         owner
     }
@@ -155,6 +161,11 @@ impl CatalogHandlers {
             .and_then(Weak::upgrade)
     }
 
+    /// Local runtime stop never retires the shared durable account epoch.
+    pub(crate) fn shutdown(&self) {
+        self.stop.cancel();
+    }
+
     pub(crate) async fn bind(
         &self,
         scope: &CatalogScope,
@@ -162,7 +173,8 @@ impl CatalogHandlers {
         handler: Arc<dyn StepHandler>,
         timeout: Duration,
     ) -> Result<(), StepError> {
-        if name.trim().is_empty()
+        if self.stop.is_cancelled()
+            || name.trim().is_empty()
             || name.len() > 256
             || name.chars().any(char::is_control)
             || timeout.is_zero()
@@ -177,6 +189,9 @@ impl CatalogHandlers {
             .catalog_metadata(scope, "native_handler_binding")
             .await
             .map_err(storage_error)?;
+        if self.stop.is_cancelled() {
+            return Err(StepError::ClaimLost);
+        }
         let key = (scope.clone(), name.to_owned());
         if bindings.live.contains_key(&key) || bindings.retiring.contains_key(&key) {
             return Err(unavailable());
@@ -212,14 +227,18 @@ impl CatalogHandlers {
         Ok(())
     }
     pub(crate) async fn names(&self, scope: &CatalogScope) -> Result<HashSet<String>, StepError> {
+        if self.stop.is_cancelled() {
+            return Err(StepError::ClaimLost);
+        }
         self.storage
             .catalog_metadata(scope, "native_handler_binding")
             .await
             .map_err(storage_error)?;
-        Ok(self
-            .bindings
-            .lock()
-            .await
+        let bindings = self.bindings.lock().await;
+        if self.stop.is_cancelled() {
+            return Err(StepError::ClaimLost);
+        }
+        Ok(bindings
             .live
             .keys()
             .filter(|(owner, _)| owner == scope)
@@ -289,7 +308,7 @@ impl CatalogHandlers {
         });
     }
     async fn invoke(&self, ctx: StepContext, name: &str) -> Result<serde_json::Value, StepError> {
-        if !Arc::ptr_eq(&ctx.storage, &self.backend) {
+        if self.stop.is_cancelled() || !Arc::ptr_eq(&ctx.storage, &self.backend) {
             return Err(StepError::ClaimLost);
         }
         let token = ctx.claim_token.ok_or(StepError::ClaimLost)?;
@@ -299,6 +318,9 @@ impl CatalogHandlers {
             .await
             .map_err(storage_error)?;
         let bindings = self.bindings.lock().await;
+        if self.stop.is_cancelled() {
+            return Err(StepError::ClaimLost);
+        }
         let binding = bindings
             .live
             .get(&(scope.clone(), name.to_owned()))
@@ -329,6 +351,7 @@ impl CatalogHandlers {
                 tracking_key,
                 permits,
                 binding: Some(binding),
+                stop: self.stop.clone(),
             },
         )
         .await

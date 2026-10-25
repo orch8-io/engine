@@ -17,6 +17,13 @@ use std::{
     time::Duration,
 };
 
+fn shared_hub(
+    storage: Arc<MobileStorage>,
+    backend: Arc<dyn StorageBackend>,
+) -> Arc<CatalogHandlers> {
+    CatalogHandlers::new(storage, backend, tokio_util::sync::CancellationToken::new())
+}
+
 struct Answer(&'static str, Arc<AtomicUsize>);
 impl StepHandler for Answer {
     fn execute(&self, _name: String, _input: String) -> Result<String, HandlerError> {
@@ -219,7 +226,7 @@ async fn live_account_slots_survive_retirement_reopen_and_independent_pools() {
     );
     let storage = Arc::new(MobileStorage::new(sqlite.clone()));
     let backend: Arc<dyn StorageBackend> = sqlite.clone();
-    let hub = CatalogHandlers::new(storage.clone(), backend);
+    let hub = shared_hub(storage.clone(), backend);
     let registry = make_registry(&hub);
     let alice = scope(&storage, "alice", "one").await;
     let alice_other = scope(&storage, "alice", "two").await;
@@ -275,7 +282,7 @@ async fn live_account_slots_survive_retirement_reopen_and_independent_pools() {
     );
     let new_storage = Arc::new(MobileStorage::new(independent.clone()));
     let new_backend: Arc<dyn StorageBackend> = independent;
-    let successor = CatalogHandlers::new(new_storage, new_backend.clone());
+    let successor = shared_hub(new_storage, new_backend.clone());
     let fresh_calls = Arc::new(AtomicUsize::new(0));
     successor
         .bind(
@@ -432,65 +439,75 @@ async fn physical_permits_cover_foreign_handler_destruction() {
 }
 
 #[test]
-fn scoped_callback_queued_before_retirement_cannot_enter_host() {
+fn scoped_callback_queued_before_retirement_or_local_shutdown_cannot_enter_host() {
     use std::{future::Future, task::Poll};
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .max_blocking_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    let (storage, sqlite) = runtime.block_on(fixture());
-    let owner = runtime.block_on(scope(&storage, "alice", "one"));
-    let hub = CatalogHandlers::isolated(storage.clone(), sqlite.clone());
-    let calls = Arc::new(AtomicUsize::new(0));
-    runtime
-        .block_on(hub.bind(
-            &owner,
-            "same",
-            Arc::new(Answer("alice", calls.clone())),
-            Duration::from_secs(60),
-        ))
-        .unwrap();
-    let registry = make_registry(&hub);
-    let ctx = runtime.block_on(running(&storage, &sqlite, &owner, "queued"));
-    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
-    let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let blocker = runtime.spawn_blocking(move || {
-        entered_tx.send(()).unwrap();
-        let _ = release_rx.recv_timeout(Duration::from_secs(10));
-    });
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    runtime.block_on(async {
-        let mut pending = Box::pin(registry.get("same").unwrap()(ctx));
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                std::future::poll_fn(|cx| {
-                    assert!(pending.as_mut().poll(cx).is_pending());
-                    Poll::Ready(())
-                })
-                .await;
-                if hub
-                    .account_gate(&owner)
-                    .is_some_and(|gate| gate.available_permits() == 0)
-                {
-                    break;
+    for retire_account in [true, false] {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let (storage, sqlite) = runtime.block_on(fixture());
+        let owner = runtime.block_on(scope(&storage, "alice", "one"));
+        let hub = CatalogHandlers::isolated(storage.clone(), sqlite.clone());
+        let calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .block_on(hub.bind(
+                &owner,
+                "same",
+                Arc::new(Answer("alice", calls.clone())),
+                Duration::from_secs(60),
+            ))
+            .unwrap();
+        let registry = make_registry(&hub);
+        let ctx = runtime.block_on(running(&storage, &sqlite, &owner, "queued"));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            entered_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        runtime.block_on(async {
+            let mut pending = Box::pin(registry.get("same").unwrap()(ctx));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    std::future::poll_fn(|cx| {
+                        assert!(pending.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    if hub
+                        .account_gate(&owner)
+                        .is_some_and(|gate| gate.available_permits() == 0)
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
+            })
+            .await
+            .unwrap();
+            if retire_account {
+                storage.retire_account_scope(&owner.account).await.unwrap();
+            } else {
+                hub.shutdown();
+                storage
+                    .catalog_metadata(&owner, "still-active")
+                    .await
+                    .unwrap();
             }
-        })
-        .await
-        .unwrap();
-        storage.retire_account_scope(&owner.account).await.unwrap();
-        release_tx.send(()).unwrap();
-        blocker.await.unwrap();
-        assert!(matches!(
-            pending.await,
-            Err(orch8_types::error::StepError::ClaimLost)
-        ));
-        tokio::task::spawn_blocking(|| ()).await.unwrap();
-    });
-    assert_eq!(calls.load(Ordering::SeqCst), 0);
+            release_tx.send(()).unwrap();
+            blocker.await.unwrap();
+            assert!(matches!(
+                pending.await,
+                Err(orch8_types::error::StepError::ClaimLost)
+            ));
+            tokio::task::spawn_blocking(|| ()).await.unwrap();
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
 }
 
 #[tokio::test]
@@ -814,4 +831,59 @@ fn queued_retirement_keeps_cleanup_owned_after_runtime_shutdown() {
     release.send(()).unwrap();
     observed.recv_timeout(Duration::from_secs(5)).unwrap();
     // The cleanup frame needs no async runtime/registry lock for its drop path.
+}
+
+#[tokio::test]
+async fn local_router_shutdown_does_not_retire_another_owner_of_the_same_account() {
+    let (storage, sqlite) = fixture().await;
+    let scope = scope(&storage, "alice", "one").await;
+    let hub = CatalogHandlers::isolated(storage.clone(), sqlite.clone());
+    let calls = Arc::new(AtomicUsize::new(0));
+    hub.bind(
+        &scope,
+        "same",
+        Arc::new(Answer("stopped", calls.clone())),
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let registry = make_registry(&hub);
+    let ctx = running(&storage, &sqlite, &scope, "local-stop").await;
+    hub.shutdown();
+    assert!(matches!(
+        registry.get("same").unwrap()(ctx.clone()).await,
+        Err(orch8_types::error::StepError::ClaimLost)
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert!(hub.names(&scope).await.is_err());
+    assert!(
+        hub.bind(
+            &scope,
+            "late",
+            Arc::new(Answer("late", calls.clone())),
+            Duration::from_secs(5)
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        hub.release_retired(&scope).await.is_err(),
+        "local stop must not pretend the durable epoch retired"
+    );
+    let successor = CatalogHandlers::isolated(storage.clone(), sqlite.clone());
+    successor
+        .bind(
+            &scope,
+            "same",
+            Arc::new(Answer("active", calls.clone())),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let active_registry = make_registry(&successor);
+    assert_eq!(
+        active_registry.get("same").unwrap()(ctx).await.unwrap(),
+        serde_json::json!({"owner":"active"})
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

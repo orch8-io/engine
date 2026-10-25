@@ -43,8 +43,18 @@ A runnable 3-step example with a simulated crash is in
 
 `timeoutMs` is a finite integer from 0 through 4,294,967,295. Zero returns
 the current snapshot without starting a scheduling pass. A missing or terminal
-target cannot dispatch other queued workflows. The current timeout checks run
-between passes; a pass already in progress is not interrupted.
+target cannot dispatch other queued workflows. Once a scheduling pass starts,
+the timeout bounds waiting for that pass: it returns a durable snapshot while
+the owned pass continues. Retrying observation shares live work. Pass admission
+is bounded by the scheduler's default concurrency (128); timeout or caller
+cancellation does not release a live pass's slot. Independent targets can make
+progress while another pass is held, and callers periodically recheck their
+own target within a mixed batch.
+
+The timeout does not cancel the workflow or its admitted pass. Lazy initialization
+and snapshot reads still require storage I/O and are outside this pass-wait
+budget. Closing the engine wakes run waiters and prevents new host factory entry;
+already-admitted host callbacks can still finish.
 
 Handlers receive `{ params, data, outputs, instanceId, stepId, attempt }`:
 `params` are the step's params with `{{ ... }}` templates resolved, `data` is
@@ -76,9 +86,17 @@ isolated in-memory dry run of built-in handlers) are still exported.
   up on the first call after reopening the file; call `start()` again with the
   same `idempotencyKey` (or keep the id) and `run()` it.
 - **Idempotency keys** make `start()` safe to repeat across restarts.
-- **One process per database file.** The engine assumes it is the file's only
-  owner (that is what makes immediate crash recovery safe). Do not open the
-  same file from two processes; use `orch8-server` with Postgres for that.
+- **One native owner per database file.** Initialization takes a nonblocking
+  operating-system lock before crash recovery. A second handle or process is
+  refused while that owner is live; retry after closing the first handle.
+  Close releases the lock after its SQLite pool closes. Dropping an engine with
+  a live owned pass retains authority until that pass ends. In-memory engines
+  are independent. Use `orch8-server` with Postgres for shared execution.
+- A persistent zero-byte `.orch8-owner` companion file holds the advisory lock.
+  Keep it beside the database and do not delete, replace or rename either file
+  while an engine is live. Symlink paths resolve to the same companion; Unix
+  hard-linked databases are refused. Other filesystem aliases and filesystems
+  without working advisory locks are outside the supported ownership contract.
 - `run()` ticks the whole engine, so other due instances progress too.
 
 ## Build
