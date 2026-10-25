@@ -55,3 +55,45 @@ pub(super) async fn cancel(
     transaction.commit().await?;
     Ok(Some(InstanceState::Cancelled))
 }
+
+pub(super) async fn complete(
+    storage: &PostgresStorage,
+    access: &MobileInstanceAccess,
+    expected_updated_at: chrono::DateTime<chrono::Utc>,
+    context: &orch8_types::context::ExecutionContext,
+    signal: &orch8_types::signal::Signal,
+) -> Result<bool, StorageError> {
+    require_legacy(access)?;
+    let step = crate::mobile_access::completion_step(signal)?;
+    let context_json = serde_json::to_value(context)?;
+    let mut transaction = storage.pool.begin().await?;
+    let target: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT i.id FROM task_instances i WHERE i.id=$1 AND i.tenant_id='mobile' AND i.state='waiting'
+         AND i.updated_at=$2 AND (
+           (NOT EXISTS(SELECT 1 FROM execution_tree n WHERE n.instance_id=i.id) AND i.context->'runtime'->>'current_step'=$3)
+           OR EXISTS(SELECT 1 FROM execution_tree n WHERE n.instance_id=i.id AND n.block_type='step' AND n.state='waiting' AND n.block_id=$3)
+         ) FOR UPDATE",
+    )
+    .bind(signal.instance_id.into_uuid())
+    .bind(expected_updated_at)
+    .bind(step)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    if target.is_none() {
+        return Ok(false);
+    }
+    let now = chrono::Utc::now();
+    sqlx::query("UPDATE task_instances SET context=$2,state='scheduled',claimed_at=NULL,next_fire_at=$3,updated_at=$3 WHERE id=$1")
+        .bind(signal.instance_id.into_uuid()).bind(context_json).bind(now)
+        .execute(&mut *transaction).await?;
+    let signal_type = signal.signal_type.to_string();
+    super::signals::bind_signal_insert(
+        sqlx::query(super::signals::SIGNAL_INSERT_SQL),
+        signal,
+        &signal_type,
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(true)
+}

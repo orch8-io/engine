@@ -3,7 +3,7 @@ use super::tests::fixture;
 use crate::{
     MobileError, lifecycle::InstanceLifecycleManager, storage::scopes::test_support::scoped_run,
 };
-use orch8_storage::InstanceStore;
+use orch8_storage::{InstanceStore, SignalStore};
 use orch8_types::instance::InstanceState;
 
 #[tokio::test]
@@ -238,7 +238,12 @@ async fn scoped_snapshot_uses_the_encryption_decorator_after_owner_authorization
     ));
     let mut context = sqlite.get_instance(id).await.unwrap().unwrap().context;
     context.data = serde_json::json!({"private":"ENCRYPTED_SCOPED_CANARY"});
+    context.runtime.current_step = Some(orch8_types::ids::BlockId::new("work"));
     backend.update_instance_context(id, &context).await.unwrap();
+    sqlite
+        .update_instance_state(id, InstanceState::Waiting, None)
+        .await
+        .unwrap();
     assert!(
         !sqlite
             .get_instance(id)
@@ -250,7 +255,7 @@ async fn scoped_snapshot_uses_the_encryption_decorator_after_owner_authorization
             .to_string()
             .contains("ENCRYPTED_SCOPED_CANARY")
     );
-    let hub = crate::handlers::scoped::CatalogHandlers::isolated(mobile.clone(), backend);
+    let hub = crate::handlers::scoped::CatalogHandlers::isolated(mobile.clone(), backend.clone());
     assert_eq!(
         hub.run_access(&scope, id)
             .snapshot()
@@ -260,6 +265,37 @@ async fn scoped_snapshot_uses_the_encryption_decorator_after_owner_authorization
             .context
             .data["private"],
         "ENCRYPTED_SCOPED_CANARY"
+    );
+    let view = hub.run_access(&scope, id);
+    let observed = view.snapshot().await.unwrap().unwrap().updated_at;
+    assert!(
+        view.complete_step(observed, "work", r#"{"answer":"ENCRYPTED_ANSWER_CANARY"}"#)
+            .await
+            .unwrap()
+    );
+    let stored = sqlite.get_instance(id).await.unwrap().unwrap();
+    assert!(
+        !stored
+            .context
+            .data
+            .to_string()
+            .contains("ENCRYPTED_ANSWER_CANARY")
+    );
+    let stored_signals = sqlite.get_pending_signals(id).await.unwrap();
+    assert_eq!(stored_signals.len(), 1);
+    assert!(
+        !stored_signals[0]
+            .payload
+            .to_string()
+            .contains("ENCRYPTED_ANSWER_CANARY")
+    );
+    assert_eq!(
+        backend.get_pending_signals(id).await.unwrap()[0].payload["answer"],
+        "ENCRYPTED_ANSWER_CANARY"
+    );
+    assert_eq!(
+        view.snapshot().await.unwrap().unwrap().context.data["answer"],
+        "ENCRYPTED_ANSWER_CANARY"
     );
     assert_eq!(
         hub.run_access(&scope, id).cancel().await.unwrap(),
@@ -541,5 +577,123 @@ async fn legacy_listener_callbacks_do_not_deliver_catalog_run_data_or_pending_st
             "additional foreign events were delivered"
         );
         drop(notifier.close());
+    }
+}
+
+async fn waiting_scoped_run(
+    mobile: &crate::storage::MobileStorage,
+    sqlite: &orch8_storage::sqlite::SqliteStorage,
+    account: &str,
+    catalog: &str,
+) -> orch8_types::ids::InstanceId {
+    let id = scoped_run(mobile, account, catalog).await;
+    let mut context = sqlite.get_instance(id).await.unwrap().unwrap().context;
+    context.runtime.current_step = Some(orch8_types::ids::BlockId::new("work"));
+    sqlite.update_instance_context(id, &context).await.unwrap();
+    sqlite
+        .update_instance_state(id, InstanceState::Waiting, None)
+        .await
+        .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn scoped_answers_require_the_original_owner_and_observed_waiting_version() {
+    let (mobile, sqlite) = fixture().await;
+    let hub = crate::handlers::scoped::CatalogHandlers::isolated(mobile.clone(), sqlite.clone());
+    let mut runs = Vec::new();
+    for account in ["alice", "bob"] {
+        for catalog in ["one", "two"] {
+            let id = waiting_scoped_run(&mobile, &sqlite, account, catalog).await;
+            let scope = owner(&mobile, account, catalog).await;
+            runs.push((scope, id));
+        }
+    }
+    for (index, (scope, id)) in runs.iter().enumerate() {
+        let view = hub.run_access(scope, *id);
+        let original = view.snapshot().await.unwrap().unwrap();
+        for (other, (_, target)) in runs.iter().enumerate() {
+            if index != other {
+                let foreign = sqlite.get_instance(*target).await.unwrap().unwrap();
+                assert!(
+                    !hub.run_access(scope, *target)
+                        .complete_step(foreign.updated_at, "work", r#"{"foreign":true}"#,)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        assert!(
+            view.complete_step(original.updated_at, "work", r#"{"answer":"OWNED"}"#)
+                .await
+                .unwrap()
+        );
+        let after = view.snapshot().await.unwrap().unwrap();
+        assert_eq!(after.state, InstanceState::Scheduled);
+        assert_eq!(after.context.data["answer"], "OWNED");
+        assert!(after.context.data.get("foreign").is_none());
+        sqlite
+            .update_instance_state(*id, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        assert!(
+            !view
+                .complete_step(original.updated_at, "work", r#"{"answer":"STALE"}"#)
+                .await
+                .unwrap()
+        );
+        assert_eq!(sqlite.get_pending_signals(*id).await.unwrap().len(), 1);
+    }
+    for receipt in hub.close() {
+        receipt.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn pending_scoped_answers_cannot_cross_retirement_or_cancellation() {
+    use orch8_storage::testing::faulty::FaultStorage;
+    use std::time::Duration;
+    for retire in [false, true] {
+        let (mobile, sqlite) = fixture().await;
+        let id = waiting_scoped_run(&mobile, &sqlite, "alice", "one").await;
+        let scope = owner(&mobile, "alice", "one").await;
+        let original = sqlite.get_instance(id).await.unwrap().unwrap();
+        let (backend, faults) = FaultStorage::wrap(sqlite.clone());
+        let hub = crate::handlers::scoped::CatalogHandlers::isolated(mobile.clone(), backend);
+        let view = hub.run_access(&scope, id);
+        let pause = faults.on("complete_mobile_step").nth(1).pause();
+        let task = tokio::spawn(async move {
+            view.complete_step(original.updated_at, "work", r#"{"answer":"LATE"}"#)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), pause.entered())
+            .await
+            .unwrap();
+        if retire {
+            mobile.retire_account_scope(&scope.account).await.unwrap();
+            assert!(owner(&mobile, "alice", "one").await.epoch() > scope.epoch());
+        } else {
+            assert_eq!(
+                hub.run_access(&scope, id).cancel().await.unwrap(),
+                Some(InstanceState::Cancelled)
+            );
+        }
+        let before = sqlite.get_instance(id).await.unwrap().unwrap();
+        pause.release();
+        assert!(
+            !tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+        let after = sqlite.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(after.state, InstanceState::Cancelled);
+        assert_eq!(after.context.data, before.context.data);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert!(sqlite.get_pending_signals(id).await.unwrap().is_empty());
+        for receipt in hub.close() {
+            receipt.await.unwrap();
+        }
     }
 }

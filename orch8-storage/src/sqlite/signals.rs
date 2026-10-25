@@ -13,14 +13,14 @@ use super::helpers::{begin_immediate, row_to_signal, ts};
 
 /// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
 /// [`enqueue_if_active`] so adding a column touches one place.
-const SIGNAL_INSERT_SQL: &str = "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at,delivered_at) \
+pub(super) const SIGNAL_INSERT_SQL: &str = "INSERT INTO signal_inbox (id,instance_id,signal_type,payload,delivered,created_at,delivered_at) \
      VALUES (?1,?2,?3,?4,?5,?6,?7)";
 const SIGNAL_ID_CHUNK_SIZE: usize = 500;
 
 /// Bind a `Signal` to [`SIGNAL_INSERT_SQL`] in canonical column order.
 /// Serialization errors surface as [`StorageError::Serialization`] before
 /// the query is ever issued.
-fn bind_signal_insert<'q>(
+pub(super) fn bind_signal_insert<'q>(
     q: sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>,
     s: &'q Signal,
 ) -> Result<sqlx::query::Query<'q, sqlx::Sqlite, sqlx::sqlite::SqliteArguments>, StorageError> {

@@ -12,7 +12,7 @@ use super::rows::SignalRow;
 
 /// Canonical INSERT for `signal_inbox`. Shared by [`enqueue`] and
 /// [`enqueue_if_active`] so adding a column touches one place.
-const SIGNAL_INSERT_SQL: &str = r"
+pub(super) const SIGNAL_INSERT_SQL: &str = r"
     INSERT INTO signal_inbox
         (id, instance_id, signal_type, payload, delivered, created_at, delivered_at)
     VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -21,7 +21,7 @@ const SIGNAL_INSERT_SQL: &str = r"
 /// Bind a `Signal` to [`SIGNAL_INSERT_SQL`] in canonical column order.
 /// Serializes `signal_type` up front so the returned `Query` borrows only
 /// from the provided `String` slot.
-fn bind_signal_insert<'q>(
+pub(super) fn bind_signal_insert<'q>(
     q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
     s: &'q Signal,
     signal_type_str: &'q str,

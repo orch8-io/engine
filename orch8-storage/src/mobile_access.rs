@@ -13,3 +13,22 @@ pub enum MobileInstanceAccess {
         session_epoch: i64,
     },
 }
+
+/// Validate the trusted command envelope independently of encrypted data.
+pub(crate) fn completion_step(
+    signal: &orch8_types::signal::Signal,
+) -> Result<&str, orch8_types::error::StorageError> {
+    use orch8_types::{error::StorageError, signal::SignalType};
+    if let SignalType::Custom(name) = &signal.signal_type
+        && let Some(step) = name
+            .strip_prefix("human_input:")
+            .filter(|step| !step.is_empty())
+        && !signal.delivered
+        && signal.delivered_at.is_none()
+    {
+        return Ok(step);
+    }
+    Err(StorageError::Query(
+        "invalid mobile step completion envelope".into(),
+    ))
+}
