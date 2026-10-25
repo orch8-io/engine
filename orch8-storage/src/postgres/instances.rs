@@ -5,7 +5,7 @@ use sqlx::Row;
 
 use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
-use orch8_types::ids::{InstanceId, SequenceId};
+use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 
 use super::PostgresStorage;
@@ -266,6 +266,28 @@ pub(super) async fn get(
 ) -> Result<Option<TaskInstance>, StorageError> {
     let mut conn = store.pool.acquire().await?;
     get_on(&mut conn, id).await
+}
+
+pub(super) const COORDINATION_ALLOWED: &str = "caller.tenant_id = $2
+    AND target.tenant_id = caller.tenant_id
+    AND (caller.sub_tenant IS NULL OR caller.sub_tenant = target.sub_tenant)";
+
+pub(super) async fn get_for_caller(
+    store: &PostgresStorage,
+    caller: InstanceId,
+    tenant: &TenantId,
+    target: InstanceId,
+) -> Result<Option<TaskInstance>, StorageError> {
+    let row = sqlx::query_as::<_, InstanceRow>(sqlx::AssertSqlSafe(format!(
+        "SELECT target.* FROM task_instances target JOIN task_instances caller ON caller.id = $1
+         WHERE target.id = $3 AND {COORDINATION_ALLOWED}"
+    )))
+    .bind(caller.into_uuid())
+    .bind(tenant.as_str())
+    .bind(target.into_uuid())
+    .fetch_optional(&store.pool)
+    .await?;
+    row.map(InstanceRow::into_instance).transpose()
 }
 
 pub(super) async fn get_on(

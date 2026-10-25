@@ -5,14 +5,11 @@
 //!
 //! # Concurrency
 //!
-//! The terminal-state check and signal INSERT run inside a single storage
-//! transaction via `StorageBackend::enqueue_signal_if_active`, closing the
-//! TOCTOU window where the target could transition to terminal between a
-//! pre-read and the INSERT. The handler still fetches the target once up
-//! front — but *only* for the cross-tenant guard, which must run before any
-//! write side effect. The read-path state of the target is NOT trusted: the
-//! atomic method re-reads state under a row lock (PG: `FOR UPDATE`; `SQLite`:
-//! write-txn semantics) and rejects terminal targets itself.
+//! `enqueue_signal_for_caller` rechecks durable caller/target ownership and
+//! target state in the insertion transaction. `SQLite` serializes with account
+//! retirement via its writer reservation. `PostgreSQL` locks both instance rows
+//! in ID order, including reciprocal signals. The initial authorized read also
+//! supports dry-run; it never authorizes a later write by itself.
 
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -41,20 +38,19 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
 
     let storage = ctx.storage.as_ref();
 
-    // Tenant check MUST happen before any write. Cross-tenant attempts must
-    // never leave side effects or leak target existence — so we do this read
-    // up front, even though the atomic path below re-checks state itself.
+    // The authorized read supports dry-run and rejects foreign/missing callers
+    // identically. Actual writes repeat ownership checks inside the transaction.
     //
     // SECURITY: not-found and cross-tenant MUST return the identical error so
     // an attacker cannot probe foreign instance existence by comparing error
     // messages.
     let target = storage
-        .get_instance(target_id)
+        .get_instance_for_caller(ctx.instance_id, &ctx.tenant_id, target_id)
         .await
         .map_err(|e| map_storage_err(&e))?;
 
     match target {
-        Some(ref t) if super::util::caller_may_access(&ctx, t).await? => {}
+        Some(_) => {}
         _ => return Err(permanent("target instance not found")),
     }
 
@@ -78,13 +74,17 @@ pub(crate) async fn handle_send_signal(ctx: StepContext) -> Result<Value, StepEr
         delivered_at: None,
     };
 
-    // Atomic: BEGIN → SELECT state (locked) → INSERT (or reject) → COMMIT.
+    // Atomic: lock → authorize caller/target → check state → INSERT → COMMIT.
     // Terminal state is surfaced as a dedicated `StorageError::TerminalTarget`
     // variant (distinct from generic `Conflict`, which would also match
     // idempotency-key dupes and constraint violations — those must stay
     // unambiguous for the handler).
-    match storage.enqueue_signal_if_active(&signal).await {
-        Ok(()) => Ok(json!({ "signal_id": signal.id.to_string() })),
+    match storage
+        .enqueue_signal_for_caller(ctx.instance_id, &ctx.tenant_id, &signal, ctx.claim_token)
+        .await
+    {
+        Ok(true) => Ok(json!({ "signal_id": signal.id.to_string() })),
+        Ok(false) => Err(StepError::ClaimLost),
         Err(StorageError::NotFound { .. }) => Err(permanent("target instance not found")),
         Err(StorageError::TerminalTarget { .. }) => Err(StepError::Permanent {
             message: "cannot send signal to terminal instance".to_string(),

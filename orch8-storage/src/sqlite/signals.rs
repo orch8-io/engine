@@ -89,6 +89,48 @@ pub(super) async fn enqueue_if_active(
     Ok(())
 }
 
+pub(super) async fn enqueue_for_caller(
+    storage: &SqliteStorage,
+    caller: InstanceId,
+    tenant: &TenantId,
+    signal: &Signal,
+    claim_token: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, StorageError> {
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let row: Option<(String, String, Option<String>)> = sqlx::query_as(AssertSqlSafe(format!(
+        "SELECT target.state, caller.state, caller.claimed_at FROM task_instances target JOIN task_instances caller ON caller.id = ?1
+         WHERE target.id = ?3 AND {}", super::mobile_execution::coordination_predicate()
+    )))
+    .bind(caller.to_string())
+    .bind(tenant.as_str())
+    .bind(signal.instance_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((state, caller_state, claimed_at)) = row else {
+        return Err(StorageError::NotFound {
+            entity: "task_instance",
+            id: signal.instance_id.to_string(),
+        });
+    };
+    if claim_token.is_some_and(|token| caller_state != "running" || claimed_at != Some(ts(token))) {
+        return Ok(false);
+    }
+    if InstanceState::from_str(&state)
+        .map_err(StorageError::Query)?
+        .is_terminal()
+    {
+        return Err(StorageError::TerminalTarget {
+            entity: "task_instance".into(),
+            id: signal.instance_id.to_string(),
+        });
+    }
+    bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal)?
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 pub(super) async fn get_pending(
     storage: &SqliteStorage,
     instance_id: InstanceId,

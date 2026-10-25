@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Durable coordination ownership
+
+- Authorize builtin instance queries and signal sends from a durable caller in
+  storage. SQLite checks matching account/catalog/epoch proofs for scoped rows;
+  legacy tenant/sub-tenant semantics remain unchanged across both native backends.
+- Recheck ownership, optional running caller claim and target state in the signal
+  insertion transaction. Retired accounts and stale executors cannot use an
+  earlier successful read to enqueue. Reciprocal PostgreSQL signals lock rows in
+  ID order. Unauthorized and missing targets remain indistinguishable.
+- Add required Rust `InstanceStore::get_instance_for_caller` and
+  `SignalStore::enqueue_signal_for_caller`. Custom backends must implement their
+  atomic ownership policy; encrypted and fault wrappers preserve it. HTTP/FFI
+  signatures and mobile's builtin allow-list are unchanged. This does not expose
+  production scoped execution or complete the scoped SDK rollout.
+
 ### Durable native effect admission
 
 - Keep native effect receipts prepared while callbacks are queued or checking

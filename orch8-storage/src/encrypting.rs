@@ -13,7 +13,7 @@ use uuid::Uuid;
 use orch8_types::context::ExecutionContext;
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::error::StorageError;
-use orch8_types::ids::InstanceId;
+use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
 
 use crate::StorageBackend;
@@ -1219,6 +1219,12 @@ passthrough_impl! {
             .await
     }
 
+    async fn get_instance_for_caller(&self, caller: InstanceId, tenant: &TenantId, target: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
+        let mut instance = self.inner.get_instance_for_caller(caller, tenant, target).await?;
+        if let Some(ref mut instance) = instance { self.decrypt_instance(instance)?; }
+        Ok(instance)
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         let mut inst = self.inner.get_instance(id).await?;
         if let Some(ref mut i) = inst {
@@ -1824,6 +1830,10 @@ passthrough_impl! {
     ) -> Result<(), StorageError> {
         let encrypted = self.encrypt_signal(signal)?;
         self.inner.enqueue_signal(encrypted.as_ref()).await
+    }
+    async fn enqueue_signal_for_caller(&self, caller: InstanceId, tenant: &TenantId, signal: &orch8_types::signal::Signal, claim_token: Option<DateTime<Utc>>) -> Result<bool, StorageError> {
+        let encrypted = self.encrypt_signal(signal)?;
+        self.inner.enqueue_signal_for_caller(caller, tenant, encrypted.as_ref(), claim_token).await
     }
     async fn enqueue_signal_if_active(
         &self,

@@ -1923,3 +1923,53 @@ shutdown wiring. Hosts must still call it after durable retirement and retry bus
 cleanup. General hub destruction, runtime shutdown integration, host-created
 reference cycles, cross-process bounds, builtin/read isolation and SDK lifecycle
 contracts remain open. No workflow/effect evidence is deleted.
+
+
+### DME108 — Coordination reads and signal writes require durable owners
+
+The four-scope regression failed against the preceding core handlers: a caller
+in Alice's first catalog received `found: true` for Alice's second catalog.
+Tenant/sub-tenant checks alone did not express the chosen catalog boundary.
+Mobile's public builtin allow-list still excludes these handlers; this regression
+uses the actual core registry over scoped native fixtures, before production
+scoped execution is exposed.
+
+`InstanceStore::get_instance_for_caller` now authorizes and reads in one storage
+statement. SQLite requires both native rows to satisfy their durable owner
+proofs, with matching account/catalog/epoch, or both to be legacy rows. It rejects
+retired epochs, proof/namespace/definition mismatch, cancelled admission proofs,
+and registered-account rows without a proof. PostgreSQL preserves tenant and
+caller sub-tenant confinement. Legacy namespace differences remain permitted.
+Missing and unauthorized callers/targets remain indistinguishable. Encryption
+wrappers decrypt only an authorized result; fault wrappers delegate the policy.
+
+`SignalStore::enqueue_signal_for_caller` repeats authorization inside its insert
+transaction. SQLite takes its writer reservation before checking both owner
+proofs, serializing with retirement across independent pools. PostgreSQL locks
+both endpoint rows in ID order before authorization/state checks, including
+reciprocal and self signals. Unauthorized terminal targets return not-found;
+authorized terminal targets retain their existing typed refusal. The core
+handlers use these operations; their earlier read cannot authorize a later write.
+The insert also verifies an optional exact running caller claim under those
+locks; a stale/waiting/completed/replaced claim returns false without inserting,
+and the handler returns typed `ClaimLost`. Trusted unclaimed callers retain the
+explicit `None` path. Custom Rust storage backends must implement both methods.
+Trusted raw storage
+operations remain available; these methods do not sandbox arbitrary host Rust.
+
+All sixteen contracts pass across plain/encrypted SQLite/Postgres on an
+isolated required Postgres. They cover durable caller existence, tenant/sub-tenant denial,
+legacy namespace compatibility, encrypted context/payload round trips, deletion
+between preflight and enqueue, terminal denial, reciprocal/self signals and
+running/replaced caller claims. Five mobile contracts cover real four-scope dispatch, cross-catalog signal refusal,
+forged legacy rows, relabelled proofs, cancelled admission proofs, retirement and
+reopen, and a queued writer in an independent pool. A query-plan regression checks
+point-index ownership lookup without historical scans. Final verification passed
+2,067 engine, 531 mobile and 232 storage library tests, workspace/all-target Clippy
+with warnings denied, formatting, documentation and diff checks. Hosted checks
+must pass on the submitted commit before merging.
+
+This closes the coordination-handler boundary only. Public scope handles,
+production materialization, instance-local builtin ownership, child/delegation
+resolution, API reads, lifecycle callbacks, shutdown wiring, independent-process
+bounds and the original distributed/mobile/embedded review matrix remain open.

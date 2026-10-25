@@ -1,7 +1,8 @@
 //! `query_instance` builtin: read another instance's context + state.
 //!
 //! Requires a durable caller in the execution tenant and obeys its sub-tenant
-//! boundary. Missing and unauthorized targets both return `{ found: false }`.
+//! boundary plus backend-owned scope proofs in one read. Missing and
+//! unauthorized callers/targets both return `{ found: false }`.
 //!
 //! Response shape (per design doc `2026-04-17-emit-event-design.md` §Handlers):
 //! `{ found, context?, state?, started_at?, completed_at?, current_node? }`.
@@ -65,15 +66,14 @@ pub(crate) async fn handle_query_instance(ctx: StepContext) -> Result<Value, Ste
     let storage = ctx.storage.as_ref();
 
     let target = storage
-        .get_instance(target_id)
+        .get_instance_for_caller(ctx.instance_id, &ctx.tenant_id, target_id)
         .await
         .map_err(|e| map_storage_err(&e))?;
 
     // SECURITY: not-found and cross-tenant MUST return the identical response
     // so an attacker cannot probe foreign instance existence.
-    let target = match target {
-        Some(t) if super::util::caller_may_access(&ctx, &t).await? => t,
-        _ => return Ok(json!({ "found": false })),
+    let Some(target) = target else {
+        return Ok(json!({ "found": false }));
     };
 
     let completed_at = if target.state.is_terminal() {

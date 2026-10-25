@@ -586,6 +586,17 @@ pub trait InstanceStore: Send + Sync + 'static {
         self.create_instances_batch(&clones).await
     }
 
+    /// Read a target only when a durable caller in `tenant` may coordinate
+    /// with it. Missing/unauthorized callers and targets return None. Enforce
+    /// tenant, caller sub-tenant confinement and backend-owned scope proofs in
+    /// the same storage read; namespace alone is not a scope capability.
+    async fn get_instance_for_caller(
+        &self,
+        caller: InstanceId,
+        tenant: &TenantId,
+        target: InstanceId,
+    ) -> Result<Option<TaskInstance>, StorageError>;
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
 
     /// Hot path. Uses `FOR UPDATE SKIP LOCKED` on Postgres.
@@ -1664,6 +1675,22 @@ pub trait SignalStore: Send + Sync + 'static {
     /// to the non-atomic [`Self::enqueue_signal`] path (same rule as the R4
     /// dedupe methods).
     async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError>;
+
+    /// Authorize the durable caller and enqueue under one transaction. Uses
+    /// the same owner policy as `InstanceStore::get_instance_for_caller`, with
+    /// authorization serialized against owner retirement and row changes.
+    /// Unauthorized is `NotFound` (including an unauthorized terminal target).
+    /// Authorized terminal targets retain the `TerminalTarget` distinction.
+    /// If a caller claim token is supplied, require its exact running claim
+    /// under that transaction too; false means claim loss with no insert.
+    /// `None` preserves trusted unclaimed callers. Reads never renew a lease.
+    async fn enqueue_signal_for_caller(
+        &self,
+        caller: InstanceId,
+        tenant: &TenantId,
+        signal: &Signal,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError>;
 
     async fn get_pending_signals(
         &self,

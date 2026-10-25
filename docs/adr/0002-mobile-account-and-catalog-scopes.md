@@ -248,9 +248,13 @@ host destruction (two globally, one per stable account). Eight contracts cover
 four scopes, colliding databases, retirement/reopen and independent pools.
 Registration caps are counts; explicit retired-epoch cleanup keeps detached
 bindings charged through physical reference destruction.
+Coordination query/signal handlers now use storage authorization that checks
+both durable owners; signal admission serializes that check with its write.
+This does not enable mobile's otherwise forbidden coordination builtins or
+complete instance-local builtin and public read isolation.
 This is not yet wired into production execution. Next wire account-close and
 shutdown lifecycle ownership to the cleanup primitive, then carry
-owners through actual materialization, builtin/read boundaries, recovery,
+owners through actual materialization, remaining builtin/read boundaries, recovery,
 listeners and every execution write. Other callback classes and independent
 processes still need shared-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open
