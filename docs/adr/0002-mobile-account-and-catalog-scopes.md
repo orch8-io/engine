@@ -252,9 +252,14 @@ Coordination query/signal handlers now use storage authorization that checks
 both durable owners; signal admission serializes that check with its write.
 This does not enable mobile's otherwise forbidden coordination builtins or
 complete instance-local builtin and public read isolation.
-This is not yet wired into production execution. Next wire account-close and
-shutdown lifecycle ownership to the cleanup primitive, then carry
-owners through actual materialization, remaining builtin/read boundaries, recovery,
+Production legacy host registrations now retain the runtime cancellation token
+through queued physical admission and database preflight. The internal scoped
+router requires an explicit runtime token and refuses local admission after stop
+without retiring its durable account. A second router for that account remains
+usable. This still does not wire scoped routing into production execution.
+Next wire account-close and shutdown lifecycle ownership to the bounded cleanup
+primitive, then carry owners through actual materialization, remaining builtin/read
+boundaries, recovery,
 listeners and every execution write. Other callback classes and independent
 processes still need shared-bound evidence.
 Public handles must not expose partially isolated execution. Keep all gates open

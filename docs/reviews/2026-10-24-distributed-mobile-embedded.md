@@ -2431,3 +2431,50 @@ Actual macOS arm64 addons passed all six Node and eight Python runtime tests;
 workspace/all-target lint with warnings denied passed. Formatting, docs and diff
 checks passed. Hosted CI must pass before merge. Process-wide physical callback
 limits, scoped account/catalog runtime integration and the remaining review matrix stay open.
+
+
+### DME123 — Mobile shutdown left retained and queued host admission live
+
+Two production-registry Rust regressions failed on baseline: a retained registry
+could invoke a callback after MobileEngine.shutdown, and a blocking-queued call
+could enter after shutdown while its logical waiter remained live. The original
+durable claim stayed valid. Runtime-local stop and account retirement therefore
+need separate authority; clearing the current registry or cancelling the UI
+operation cannot fence a captured registry or a pending database preflight.
+
+Production host registration now captures the engine cancellation token. The
+async adapter checks it before scheduling; physical admission checks it before
+claim verification, after that await, and again after deferred durable dispatch
+and its final claim check. Final engine drop also cancels local admission. An
+already-entered callback can still return its truthful result; this does not
+interrupt host code, reclaim physical capacity early, or retire an account used
+by another engine. Internal catalog routers require an explicit runtime token,
+refuse stopped registrations/reads/dispatch, and use the same physical gate.
+
+The added contracts cover retained registry entry, queued calls without waiter
+cancellation, stop during claim verification, final engine drop, entered callback
+completion, and another router using the same still-active account. The durable
+admission overlap test now covers both caller cancellation and local shutdown,
+with zero host entry and preserved unknown-effect refusal. The scoped
+queued-entry contract now exercises both durable retirement and local shutdown.
+All 540 mobile unit tests plus 109 integration/example/coverage tests passed with
+their required loopback servers. Workspace/all-target lint with warnings denied
+passed. All 32 production Swift wrapper tests passed with strict concurrency and
+warnings denied against fresh UniFFI bindings and the rebuilt actual macOS native
+library. This is not an iOS simulator run; hosted platform CI remains required.
+
+Hosted PR #311 also exposed a Swift test fixture with an independent natural
+completion: its 120-second cooperative sleep could finish instead of observing
+cancellation under delayed scheduling. The fixture now keeps sleeping until
+cancelled; the adapter, timeout and cancellation assertions are unchanged. This
+removes the competing completion path rather than extending the observation
+budget. Strict-concurrency validation also rejected the worker URLProtocol
+fixture's mutable static fields. They now live in one immutable, lock-owned
+Sendable state object; all accesses retain the existing lock and client calls
+remain outside it. The iOS CI invocation now denies concurrency warnings. Actual
+iOS simulator CI remains required.
+
+This is a local callback admission fix. Bounded destruction on account/runtime
+close, production scoped materialization, builtin/read/recovery/listener ownership,
+other callback classes and independent-process resource limits remain open.
+ADR-0002 S1-S12 and the full review matrix are not complete.

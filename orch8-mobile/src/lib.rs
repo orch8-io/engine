@@ -257,6 +257,14 @@ pub struct MobileEngine {
     credential: Arc<credential::Credential>,
 }
 
+impl Drop for MobileEngine {
+    fn drop(&mut self) {
+        // Retained registries must lose local host admission even if they
+        // outlive the engine. Durable account retirement is a separate action.
+        self.cancel.cancel();
+    }
+}
+
 /// A registered runtime node and its re-advertisement task.
 struct NodeSlot {
     client: Arc<node::NodeClient>,
@@ -1648,12 +1656,13 @@ impl MobileEngine {
             let mut next_registry = builtins::registry_with(&next_enabled);
             let timeout = Duration::from_millis(self.config.handler_timeout_ms);
             for (name, handler) in &next_foreign {
-                handlers::register_foreign_handler(
+                handlers::register_owned_foreign_handler(
                     &mut next_registry,
                     name,
                     Arc::clone(handler),
                     timeout,
                     Arc::clone(&self.stragglers),
+                    self.cancel.clone(),
                 );
             }
             (

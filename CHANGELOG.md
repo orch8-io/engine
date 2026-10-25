@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Mobile runtime callback shutdown
+
+- Carry local runtime cancellation through retained registries, queued native
+  calls, durable claim verification and deferred effect admission. Shutdown and
+  final engine drop refuse new host entry without retiring a shared account.
+- Keep already-entered callback results truthful and retain physical ownership
+  until return. Internal catalog routers take an explicit runtime stop token;
+  production scoped materialization and bounded retirement cleanup remain open.
+- Make the Swift cooperative cancellation fixture remain pending until cancelled
+  instead of racing its own natural completion under a delayed simulator.
+
 ### Native database recovery ownership
 
 - Take an operating-system ownership lock before opening a native SQLite engine

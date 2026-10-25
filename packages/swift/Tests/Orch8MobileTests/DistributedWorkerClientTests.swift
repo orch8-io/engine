@@ -209,37 +209,42 @@ final class DistributedWorkerClientTests: XCTestCase {
 }
 
 private final class WorkerURLProtocol: URLProtocol, @unchecked Sendable {
-    private static let lock = NSLock()
-    private static var responseStatus = 200
-    private static var responseData = Data()
-    private static var capturedRequest: URLRequest?
-    private static var queued: [(Int, Data)] = []
+    // URLSession invokes this fixture across threads. All mutable state is
+    // protected by this owner's lock, including snapshots before client calls.
+    private final class State: @unchecked Sendable {
+        let lock = NSLock()
+        var responseStatus = 200
+        var responseData = Data()
+        var capturedRequest: URLRequest?
+        var queued: [(Int, Data)] = []
+    }
+    private static let state = State()
 
     static func respond(status: Int, json: String) {
-        lock.lock()
-        responseStatus = status
-        responseData = Data(json.utf8)
-        queued = []
-        capturedRequest = nil
-        lock.unlock()
+        state.lock.lock()
+        state.responseStatus = status
+        state.responseData = Data(json.utf8)
+        state.queued = []
+        state.capturedRequest = nil
+        state.lock.unlock()
     }
 
     /// Answer successive requests with these responses, then the last one.
     static func respondSequence(_ responses: [(Int, String)]) {
-        lock.lock()
-        queued = responses.map { ($0.0, Data($0.1.utf8)) }
-        if let last = queued.last {
-            responseStatus = last.0
-            responseData = last.1
+        state.lock.lock()
+        state.queued = responses.map { ($0.0, Data($0.1.utf8)) }
+        if let last = state.queued.last {
+            state.responseStatus = last.0
+            state.responseData = last.1
         }
-        capturedRequest = nil
-        lock.unlock()
+        state.capturedRequest = nil
+        state.lock.unlock()
     }
 
     static func lastRequest() -> URLRequest? {
-        lock.lock()
-        defer { lock.unlock() }
-        return capturedRequest
+        state.lock.lock()
+        defer { state.lock.unlock() }
+        return state.capturedRequest
     }
 
     static func reset() {
@@ -254,14 +259,14 @@ private final class WorkerURLProtocol: URLProtocol, @unchecked Sendable {
         // to URLProtocol on iOS. Preserve the body for the wire-contract tests.
         var recordedRequest = request
         recordedRequest.httpBody = Self.requestBody(request, task: task)
-        Self.lock.lock()
-        Self.capturedRequest = recordedRequest
-        var status = Self.responseStatus
-        var data = Self.responseData
-        if !Self.queued.isEmpty {
-            (status, data) = Self.queued.removeFirst()
+        Self.state.lock.lock()
+        Self.state.capturedRequest = recordedRequest
+        var status = Self.state.responseStatus
+        var data = Self.state.responseData
+        if !Self.state.queued.isEmpty {
+            (status, data) = Self.state.queued.removeFirst()
         }
-        Self.lock.unlock()
+        Self.state.lock.unlock()
         let response = HTTPURLResponse(
             url: request.url!,
             statusCode: status,

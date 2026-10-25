@@ -451,3 +451,186 @@ fn enabling_an_existing_builtin_is_idempotent_with_a_shared_registry() {
         Err(MobileError::Shutdown)
     ));
 }
+
+struct CountedStep(Arc<AtomicUsize>);
+impl StepHandler for CountedStep {
+    fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok("{}".into())
+    }
+}
+
+fn native_claim(engine: &MobileEngine) -> orch8_engine::handlers::StepContext {
+    use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
+    engine.runtime.block_on(async {
+        let sequence = SequenceBuilder::new("mobile")
+            .step("step", "native")
+            .build();
+        engine.storage.create_sequence(&sequence).await.unwrap();
+        let instance = InstanceBuilder::for_sequence(&sequence).due_now().build();
+        engine.storage.create_instance(&instance).await.unwrap();
+        let claim = engine
+            .storage
+            .claim_due_instances(chrono::Utc::now(), 1, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        orch8_engine::handlers::StepContext {
+            effect_admission: None,
+            claim_token: claim.claimed_at,
+            instance_id: instance.id,
+            tenant_id: instance.tenant_id,
+            block_id: orch8_types::ids::BlockId::new("step"),
+            params: serde_json::json!({}),
+            context: Arc::new(orch8_types::context::ExecutionContext::default()),
+            attempt: 0,
+            storage: engine.storage.clone(),
+            wait_for_input: None,
+        }
+    })
+}
+
+#[test]
+fn shutdown_fences_a_retained_native_registry_with_a_live_durable_claim() {
+    let (engine, _directory) = engine();
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine
+        .register_handler("native".into(), Arc::new(CountedStep(calls.clone())))
+        .unwrap();
+    let context = native_claim(&engine);
+    let registry = engine.handlers.read().unwrap().clone();
+    engine.shutdown();
+    let result = engine
+        .runtime
+        .block_on(registry.get("native").unwrap()(context.clone()));
+    let claim_live = engine
+        .runtime
+        .block_on(context.storage.verify_instance_claim(
+            context.instance_id,
+            &context.tenant_id,
+            context.claim_token.unwrap(),
+        ))
+        .unwrap();
+    assert!(
+        claim_live,
+        "local shutdown must not retire durable account/claim ownership"
+    );
+    assert!(
+        matches!(result, Err(orch8_types::error::StepError::ClaimLost)),
+        "{result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shutdown_fences_a_queued_callback_without_requiring_its_waiter_to_cancel() {
+    use std::{future::Future, task::Poll};
+    let (engine, _directory) = engine();
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine
+        .register_handler("native".into(), Arc::new(CountedStep(calls.clone())))
+        .unwrap();
+    let context = native_claim(&engine);
+    let registry = engine.handlers.read().unwrap().clone();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    let blocker = runtime.spawn_blocking(move || {
+        entered.send(()).unwrap();
+        let _ = held.recv_timeout(Duration::from_secs(10));
+    });
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    let result = runtime.block_on(async {
+        let mut pending = Box::pin(registry.get("native").unwrap()(context));
+        std::future::poll_fn(|cx| {
+            assert!(pending.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        engine.shutdown();
+        release.send(()).unwrap();
+        blocker.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), pending)
+            .await
+            .unwrap()
+    });
+    assert!(
+        matches!(result, Err(orch8_types::error::StepError::ClaimLost)),
+        "{result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn dropping_engine_fences_its_retained_native_registry() {
+    let (engine, _directory) = engine();
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine
+        .register_handler("native".into(), Arc::new(CountedStep(calls.clone())))
+        .unwrap();
+    let context = native_claim(&engine);
+    let registry = engine.handlers.read().unwrap().clone();
+    let weak = Arc::downgrade(&engine);
+    drop(engine);
+    assert!(weak.upgrade().is_none());
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let result = runtime.block_on(registry.get("native").unwrap()(context));
+    assert!(
+        matches!(result, Err(orch8_types::error::StepError::ClaimLost)),
+        "{result:?}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn shutdown_preserves_the_result_of_an_already_entered_native_callback() {
+    struct HeldStep {
+        entered: std::sync::mpsc::Sender<()>,
+        release: StdMutex<std::sync::mpsc::Receiver<()>>,
+    }
+    impl StepHandler for HeldStep {
+        fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
+            self.entered.send(()).unwrap();
+            let _ = self
+                .release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10));
+            Ok(r#"{"settled":true}"#.into())
+        }
+    }
+    let (engine, _directory) = engine();
+    let (entered, started) = std::sync::mpsc::channel();
+    let (release, held) = std::sync::mpsc::channel();
+    engine
+        .register_handler(
+            "native".into(),
+            Arc::new(HeldStep {
+                entered,
+                release: StdMutex::new(held),
+            }),
+        )
+        .unwrap();
+    let context = native_claim(&engine);
+    let registry = engine.handlers.read().unwrap().clone();
+    let (finished, result) = std::sync::mpsc::channel();
+    drop(engine.runtime.handle().spawn(async move {
+        let _ = finished.send(registry.get("native").unwrap()(context).await);
+    }));
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
+    engine.shutdown();
+    release.send(()).unwrap();
+    assert_eq!(
+        result
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        serde_json::json!({"settled":true})
+    );
+}
