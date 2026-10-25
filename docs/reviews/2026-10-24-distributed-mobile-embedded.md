@@ -2365,3 +2365,36 @@ This does not force callback cancellation or establish process-wide callback
 capacity/fairness. Physical admission and resource bounds, complete in-flight run
 deadlines, scoped runtime/SDK integration and the remaining audit matrix stay
 open. No Python API, schema or callback envelope changes are introduced.
+
+
+### DME121 — Native run waited for the physical scheduler pass past its deadline
+
+Three bounded Rust regressions failed against the previous runner: finite run
+waiting, cancelled observer capacity, and close wakeup. The actual preceding
+Node and Python addons also exceeded the logical run deadline until their held
+host callback was released. Artifact hashes matched the recorded prior builds.
+
+A shared owner now retains each scheduler pass independently of logical run
+waiters. Admission is bounded by existing default scheduler concurrency, shares
+same-target work, and retains capacity through real pass completion. Close or
+owner drop signals shutdown and wakes logical waiters. A local owner flag is
+checked before host factory entry, independently of durable claim verification;
+this local retirement does not retire a durable account shared by another owner.
+Already-admitted successful work may still commit under its valid durable claim.
+
+Seven deadline contracts pass, covering finite waiting, cancellation, repeated
+short observers, close wakeup, ambiguous-effect reopen refusal, independent fast
+targets, and fast target completion within a batch containing held work. Four
+additional backend cases hold request loading across local retirement and prove
+no host factory entry while the durable claim remains valid. All 20 native claim
+contracts passed against required isolated PostgreSQL and encrypted wrappers.
+The full facade suite passed 182 test results plus three documentation tests;
+workspace/all-target Clippy with warnings denied passed. Actual macOS arm64
+addons passed five Node and seven Python runtime tests. Hosted CI must pass
+before merge.
+
+This bounds pass observation and pass admission, not arbitrary storage I/O or
+physical foreign callback capacity across step timeouts and engines. Callback
+queue fairness, process-wide physical limits, explicit account/catalog runtime
+integration, and the broader review matrix remain open. No production scoped
+SDK handle, schema change, or complete real-time API deadline is claimed.

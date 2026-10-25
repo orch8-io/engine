@@ -31,6 +31,38 @@ function runWorker(dir, mode) {
 
 const effects = (dir) => readFileSync(join(dir, 'effects.log'), 'utf8').trim().split('\n')
 
+test('run deadline returns while its host callback remains owned', withDir(async (dir) => {
+  const engine = await Engine.open(join(dir, 'app.db'))
+  let enter, release, run, entryTimer, waitTimer
+  const entered = new Promise((resolve) => { enter = resolve })
+  const held = new Promise((resolve) => { release = resolve })
+  let calls = 0
+  engine.handler('held', async () => { calls += 1; enter(); await held; return true })
+  try {
+    await engine.deploy({ name: 'deadline', blocks: [{ type: 'step', id: 'work', handler: 'held', timeout: 10000 }] })
+    const instance = await engine.start('deadline')
+    run = engine.run(instance, { timeoutMs: 1000 })
+    run.catch(() => {}) // Observe an early rejection while waiting for host entry.
+    await Promise.race([entered, new Promise((_, reject) => {
+      entryTimer = setTimeout(() => reject(new Error('host never entered')), 5000)
+    })])
+    const result = await Promise.race([run, new Promise((resolve) => {
+      waitTimer = setTimeout(() => resolve(null), 3000)
+    })])
+    release()
+    await run
+    assert.notEqual(result, null, 'run deadline waited for physical callback completion')
+    assert.notEqual(result.state, 'completed')
+    assert.equal((await engine.run(instance, { timeoutMs: 2000 })).state, 'completed')
+    assert.equal(calls, 1)
+  } finally {
+    clearTimeout(entryTimer); clearTimeout(waitTimer)
+    release()
+    if (run) await run.catch(() => {})
+    await engine.close()
+  }
+}))
+
 test('run preflight rejects invalid budgets and zero does not dispatch', withDir(async (dir) => {
   const engine = await Engine.open(join(dir, 'app.db'))
   const calls = []

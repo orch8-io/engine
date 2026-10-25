@@ -28,6 +28,50 @@ def effects(tmp: str) -> list:
 
 
 class DurableRestartTest(unittest.TestCase):
+    def test_run_deadline_returns_before_its_physical_callback(self):
+        code = """
+import threading
+from orch8_engine import Engine
+entered = threading.Event()
+release = threading.Event()
+returned = threading.Event()
+def host(ctx):
+    entered.set()
+    release.wait()
+    return True
+def watchdog():
+    if entered.wait(5) and not returned.wait(3):
+        release.set()
+engine = Engine.open(':memory:')
+engine.handler('held', host)
+engine.deploy({'name': 'deadline', 'blocks': [
+    {'type': 'step', 'id': 'work', 'handler': 'held', 'timeout': 10000}]})
+instance = engine.start('deadline')
+observer = threading.Thread(target=watchdog, daemon=True)
+observer.start()
+try:
+    result = engine.run(instance, timeout=1)
+    returned.set()
+    finished_before_release = not release.is_set()
+    assert entered.is_set(), 'fixture did not enter physical host work'
+finally:
+    release.set()
+    observer.join(6)
+try:
+    assert finished_before_release, 'run deadline waited for physical callback completion'
+    assert result['state'] != 'completed', result
+    assert engine.run(instance, timeout=2)['state'] == 'completed'
+    print('LOGICAL_RETURN_BEFORE_PHYSICAL_COMPLETION', flush=True)
+finally:
+    engine.close()
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, timeout=15,
+            env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("LOGICAL_RETURN_BEFORE_PHYSICAL_COMPLETION", result.stdout)
+
     def test_engine_collection_does_not_join_a_timed_out_host_callback(self):
         code = """
 import gc

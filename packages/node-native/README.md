@@ -43,8 +43,18 @@ A runnable 3-step example with a simulated crash is in
 
 `timeoutMs` is a finite integer from 0 through 4,294,967,295. Zero returns
 the current snapshot without starting a scheduling pass. A missing or terminal
-target cannot dispatch other queued workflows. The current timeout checks run
-between passes; a pass already in progress is not interrupted.
+target cannot dispatch other queued workflows. Once a scheduling pass starts,
+the timeout bounds waiting for that pass: it returns a durable snapshot while
+the owned pass continues. Retrying observation shares live work. Pass admission
+is bounded by the scheduler's default concurrency (128); timeout or caller
+cancellation does not release a live pass's slot. Independent targets can make
+progress while another pass is held, and callers periodically recheck their
+own target within a mixed batch.
+
+The timeout does not cancel the workflow or its admitted pass. Lazy initialization
+and snapshot reads still require storage I/O and are outside this pass-wait
+budget. Closing the engine wakes run waiters and prevents new host factory entry;
+already-admitted host callbacks can still finish.
 
 Handlers receive `{ params, data, outputs, instanceId, stepId, attempt }`:
 `params` are the step's params with `{{ ... }}` templates resolved, `data` is

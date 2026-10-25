@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Owned native scheduler passes
+
+- Let Node and Python run deadlines return a durable snapshot while retaining
+  ownership of an in-flight scheduler pass. Repeated or cancelled observers
+  share bounded live passes instead of replacing them or releasing capacity.
+- Keep independent and mixed-batch targets responsive around slow callbacks.
+  Close wakes logical waiters and refuses new host entry, while admitted work
+  retains its resources. Storage initialization and snapshot I/O remain outside
+  the pass-wait deadline.
+
 ### Python runtime retirement
 
 - Retire the native Python runtime without joining physical blocking callbacks
@@ -21,8 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   initialization. Check target existence, terminal state and budget before each
   pass so invalid or exhausted calls cannot dispatch unrelated queued work.
 - Validate Node timeout milliseconds and Python timeout seconds before execution;
-  zero observes the current snapshot without starting a pass. In-flight scheduler
-  passes are not yet bounded by the run deadline.
+  zero observes the current snapshot without starting a pass.
 
 ### Native callback finalization
 
