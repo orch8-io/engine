@@ -340,7 +340,7 @@ fn latest_outputs(outputs: Vec<orch8::BlockOutput>) -> Value {
     Value::Object(map)
 }
 
-fn host_handler(
+pub(crate) fn host_handler(
     invoke: Invoke,
 ) -> impl Fn(StepContext) -> Pin<Box<dyn Future<Output = Result<Value, StepError>> + Send>>
 + Send
@@ -349,11 +349,13 @@ fn host_handler(
     move |ctx: StepContext| {
         let invoke = Arc::clone(&invoke);
         Box::pin(async move {
-            let outputs = ctx
-                .storage
-                .get_all_outputs(ctx.instance_id)
-                .await
-                .map_err(|e| retryable(format!("loading step outputs: {e}")))?;
+            ctx.verify_claim().await?;
+            let outputs = ctx.storage.get_all_outputs(ctx.instance_id).await;
+            // Loading the request envelope is an asynchronous phase. Its
+            // initiating claim must still own execution before host entry,
+            // including when the load itself failed after ownership changed.
+            ctx.verify_claim().await?;
+            let outputs = outputs.map_err(|e| retryable(format!("loading step outputs: {e}")))?;
             let request = json!({
                 "params": ctx.params,
                 "data": ctx.context.data,

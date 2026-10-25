@@ -41,6 +41,7 @@ wasm = ["orch8-engine/wasm"]
 [dev-dependencies]
 axum = { workspace = true }
 bytes = { workspace = true }
+orch8-storage = { path = "../orch8-storage", features = ["test-util"] }
 
 [lints]
 workspace = true
