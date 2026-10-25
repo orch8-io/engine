@@ -26,6 +26,9 @@
     clippy::option_if_let_else
 )]
 
+mod mobile_access;
+pub use mobile_access::LEGACY_MOBILE_OWNER_SQL;
+
 mod ai;
 mod alert_rules;
 mod api_keys;
@@ -949,6 +952,21 @@ impl crate::InstanceStore for SqliteStorage {
         target: InstanceId,
     ) -> Result<Option<TaskInstance>, StorageError> {
         instances::get_for_caller(self, caller, tenant, target).await
+    }
+
+    async fn get_mobile_instance(
+        &self,
+        access: &crate::MobileInstanceAccess,
+        id: InstanceId,
+    ) -> Result<Option<TaskInstance>, StorageError> {
+        mobile_access::get(self, access, id).await
+    }
+    async fn cancel_mobile_instance(
+        &self,
+        access: &crate::MobileInstanceAccess,
+        id: InstanceId,
+    ) -> Result<Option<InstanceState>, StorageError> {
+        mobile_access::cancel(self, access, id).await
     }
 
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {

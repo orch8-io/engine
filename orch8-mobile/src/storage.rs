@@ -409,14 +409,15 @@ impl MobileStorage {
         &self,
         limit: u32,
     ) -> Result<Vec<(ActiveInstanceProjection, String)>, StorageError> {
-        let rows = sqlx::query_as::<_, ActiveInstanceProjectionRow>(
+        let rows = sqlx::query_as::<_, ActiveInstanceProjectionRow>(sqlx::AssertSqlSafe(format!(
             "SELECT i.id, i.state, i.created_at, COALESCE(s.name, '') AS sequence_name
              FROM task_instances i
              LEFT JOIN sequences s ON s.id = i.sequence_id
-             WHERE i.state IN ('scheduled', 'running', 'waiting', 'paused')
+             WHERE i.state IN ('scheduled', 'running', 'waiting', 'paused') AND ({})
              ORDER BY i.updated_at DESC
              LIMIT ?1",
-        )
+            legacy_sync::OWNER,
+        )))
         .bind(i64::from(limit))
         .fetch_all(self.pool())
         .await?;
@@ -457,27 +458,22 @@ impl MobileStorage {
     /// `LIMIT 100 ORDER BY updated_at DESC` silently dropped every transition
     /// beyond the newest hundred when more than 100 instances finished between
     /// two scans, so older completions were never reported.
-    pub(crate) async fn list_terminal_instance_states(
-        &self,
-    ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
-        self.terminal_instance_states(false).await
-    }
-
     pub(crate) async fn list_sync_terminal_instance_states(
         &self,
     ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
-        self.terminal_instance_states(true).await
+        self.list_terminal_instance_states().await
     }
 
-    async fn terminal_instance_states(
+    /// The legacy notification/dedup domain. Catalog callbacks need their own
+    /// owner/session-bound projection and cannot reuse a global listener.
+    pub(crate) async fn list_terminal_instance_states(
         &self,
-        legacy_only: bool,
     ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
         let mut all = Vec::new();
         let mut after = String::new();
         loop {
             let page = self
-                .list_terminal_instance_states_page(&after, SCAN_PAGE, legacy_only)
+                .list_terminal_instance_states_page(&after, SCAN_PAGE)
                 .await?;
             let full = page.len() == SCAN_PAGE as usize;
             if let Some((id, _)) = page.last() {
@@ -494,19 +490,17 @@ impl MobileStorage {
         &self,
         after: &str,
         limit: u32,
-        legacy_only: bool,
     ) -> Result<Vec<(InstanceId, InstanceState)>, StorageError> {
         let rows: Vec<(String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT i.id, i.state FROM task_instances i
              WHERE i.state IN ('completed', 'failed', 'cancelled')
-               AND i.id > ?1 AND (?3=0 OR ({}))
+               AND i.id > ?1 AND ({})
              ORDER BY i.id
              LIMIT ?2",
             legacy_sync::OWNER,
         )))
         .bind(after)
         .bind(i64::from(limit))
-        .bind(legacy_only)
         .fetch_all(self.pool())
         .await?;
 
@@ -550,15 +544,16 @@ impl MobileStorage {
         after: &str,
         limit: u32,
     ) -> Result<Vec<WaitingStepProjection>, StorageError> {
-        let rows: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT id, sequence_id, json_extract(context, '$.runtime.current_step')
-             FROM task_instances
-             WHERE state = 'waiting'
-               AND json_type(context, '$.runtime.current_step') = 'text'
-               AND id > ?1
-             ORDER BY id
-             LIMIT ?2",
-        )
+        let rows: Vec<(String, String, String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT i.id, i.sequence_id,
+                    CASE WHEN json_valid(i.context) THEN json_extract(i.context, '$.runtime.current_step') END
+             FROM task_instances i
+             WHERE i.state = 'waiting' AND ({})
+               AND CASE WHEN json_valid(i.context) THEN json_type(i.context, '$.runtime.current_step') = 'text' ELSE 0 END
+               AND i.id > ?1
+             ORDER BY i.id
+             LIMIT ?2", legacy_sync::OWNER,
+        )))
         .bind(after)
         .bind(i64::from(limit))
         .fetch_all(self.pool())

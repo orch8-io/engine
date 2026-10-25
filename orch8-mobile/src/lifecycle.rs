@@ -183,38 +183,16 @@ impl InstanceLifecycleManager {
     pub async fn cancel_instance(&self, instance_id: &str) -> Result<(), MobileError> {
         let id = parse_instance_id(instance_id)?;
 
-        // CAS from the observed state (L3-14): a blind write would overwrite
-        // a completion that landed after the read. Retry a few times if the
-        // engine moves the instance meanwhile; an already-terminal instance
-        // keeps its final state.
-        let mut attempts = 0;
-        loop {
-            let inst =
-                self.storage
-                    .get_instance(id)
-                    .await?
-                    .ok_or_else(|| MobileError::NotFound {
-                        message: format!("instance '{instance_id}' not found"),
-                    })?;
-            if inst.state.is_terminal() {
-                debug!(instance_id = %instance_id, state = %inst.state, "cancel ignored: instance already terminal");
-                return Ok(());
-            }
-            if self
-                .storage
-                .conditional_update_instance_state(id, inst.state, InstanceState::Cancelled, None)
-                .await?
-            {
-                break;
-            }
-            attempts += 1;
-            if attempts >= 5 {
-                return Err(MobileError::Storage {
-                    message: format!(
-                        "instance '{instance_id}' kept changing state; cancel not applied"
-                    ),
-                });
-            }
+        let final_state = self
+            .storage
+            .cancel_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
+            .await?
+            .ok_or_else(|| MobileError::NotFound {
+                message: format!("instance '{instance_id}' not found"),
+            })?;
+        if final_state != InstanceState::Cancelled {
+            debug!(instance_id, state = %final_state, "cancel ignored: instance already terminal");
+            return Ok(());
         }
 
         if let Err(error) = self.mobile_storage.remove_dedup(instance_id).await {
@@ -241,7 +219,7 @@ impl InstanceLifecycleManager {
 
         let inst = self
             .storage
-            .get_instance(id)
+            .get_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
             .await?
             .ok_or_else(|| MobileError::NotFound {
                 message: format!("instance '{instance_id}' not found"),
@@ -311,7 +289,7 @@ impl InstanceLifecycleManager {
         let id = parse_instance_id(instance_id)?;
         let inst = self
             .storage
-            .get_instance(id)
+            .get_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
             .await?
             .ok_or_else(|| MobileError::NotFound {
                 message: format!("instance '{instance_id}' not found"),

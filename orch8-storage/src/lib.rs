@@ -1,6 +1,8 @@
 mod child_adoption;
 mod child_lookup;
+mod mobile_access;
 pub use child_adoption::ChildAdoption;
+pub use mobile_access::MobileInstanceAccess;
 pub mod api_key_cache;
 #[cfg(feature = "artifacts")]
 pub mod artifacts;
@@ -605,6 +607,27 @@ pub trait InstanceStore: Send + Sync + 'static {
         tenant: &TenantId,
         target: InstanceId,
     ) -> Result<Option<TaskInstance>, StorageError>;
+
+    /// Read under the durable mobile owner/session proof in the same database
+    /// snapshot as the row. Catalog history remains readable after a legitimate
+    /// session reopen, while stale handles and foreign catalogs return None.
+    /// Backends without mobile catalog persistence must refuse that descriptor;
+    /// never fall back to a global by-id read. Decorators preserve decryption.
+    async fn get_mobile_instance(
+        &self,
+        access: &MobileInstanceAccess,
+        id: InstanceId,
+    ) -> Result<Option<TaskInstance>, StorageError>;
+
+    /// Atomically authorize and cancel mobile work, preserving an existing
+    /// terminal result. Returns its final terminal state, or None for a missing,
+    /// foreign or stale-execution target. Retirement must serialize with the
+    /// mutation. Reading historical work does not grant permission to revive it.
+    async fn cancel_mobile_instance(
+        &self,
+        access: &MobileInstanceAccess,
+        id: InstanceId,
+    ) -> Result<Option<InstanceState>, StorageError>;
 
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
 

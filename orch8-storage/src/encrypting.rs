@@ -1238,6 +1238,15 @@ passthrough_impl! {
         Ok(instance)
     }
 
+    async fn get_mobile_instance(&self, access: &crate::MobileInstanceAccess, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
+        let mut instance = self.inner.get_mobile_instance(access, id).await?;
+        if let Some(ref mut instance) = instance { self.decrypt_instance(instance)?; }
+        Ok(instance)
+    }
+    async fn cancel_mobile_instance(&self, access: &crate::MobileInstanceAccess, id: InstanceId) -> Result<Option<orch8_types::instance::InstanceState>, StorageError> {
+        self.inner.cancel_mobile_instance(access,id).await
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         let mut inst = self.inner.get_instance(id).await?;
         if let Some(ref mut i) = inst {

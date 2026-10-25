@@ -2979,3 +2979,47 @@ still asserts the blocked destructor's physical/registration charges, another
 account's progress, observer independence and late cleanup's epoch isolation.
 No runtime admission or cleanup invariant was relaxed. The repaired case passed
 50 consecutive scheduling stress runs before the full suite was repeated.
+
+### DME135 — Run reads, cancellation and legacy notifications need owner boundaries
+
+Real catalog materializations exposed a second ownership gap: legacy lifecycle
+get/list returned scoped runs and their private context, legacy cancellation
+cancelled them, and legacy step completion merged output into their waiting
+context. A real global listener also received scoped completion data. These
+reproductions use two accounts and two catalogs rather than fabricated tenant
+strings alone.
+
+Storage now requires an explicit mobile access descriptor at the read/cancel
+boundary. SQLite authorizes the actual read in one snapshot against the active
+account session, catalog request, materialization receipt and original native
+identity. Cancellation proves authority inside the same immediate transaction
+as its state change, clears claim/wake metadata and preserves existing terminal
+states. Fresh sessions can read earlier execution history; stale sessions lose
+authority, and fresh sessions cannot mutate nonterminal work from an old epoch.
+These descriptors are supplied by trusted runtime handles, not workflow JSON or
+network bearer credentials. PostgreSQL supports the explicit legacy tenant and
+rejects unsupported catalog access without a global-read fallback.
+
+Internal run views bind their original account/catalog/session and weak runtime
+reference. Closing a view or runtime prevents result delivery without retiring
+the account or cancelling durable work. Reads pass through the encryption
+decorator after backend authorization; cancellation never rewrites context.
+Both methods are explicit fault-injection boundaries for decorator/race tests.
+
+Legacy lifecycle reads, active lists, cancellation, approval reads and listener
+projections now share the positive legacy-owner policy. Terminal hydration
+rechecks that policy. Waiting projections guard JSON extraction, so malformed
+foreign context cannot suppress legitimate legacy events. This closes the
+legacy access paths; it does not add scoped approval or scoped listener APIs.
+
+Eleven focused mobile regressions pass, including cross-account/catalog denial,
+retirement while storage is paused, old-session rejection, fresh-session history,
+view/runtime close during reads, encrypted access, inconsistent native identity,
+missing materialization receipts, and real legacy listener isolation. Eight
+plain/encrypted SQLite/PostgreSQL integration legs pass with PostgreSQL required
+and actually running. All 623 mobile unit tests and 109 integration checks pass.
+Workspace/all-target Clippy passes with warnings denied. All 239 storage unit
+tests and 32 strict-concurrency Swift tests linked to the rebuilt macOS native
+library pass; fresh generation matches all five committed binding copies.
+Public foreign run handles, scoped approval/listener delivery and the remaining
+ADR S1–S12 rollout are still open.
