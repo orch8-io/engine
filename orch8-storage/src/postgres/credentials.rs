@@ -320,3 +320,28 @@ impl CredentialRow {
         })
     }
 }
+
+/// Legacy server credential authority, bound to one original claim snapshot.
+pub(super) async fn get_for_claim(
+    store: &PostgresStorage,
+    instance: orch8_types::ids::InstanceId,
+    tenant: &TenantId,
+    token: chrono::DateTime<chrono::Utc>,
+    id: &str,
+) -> Result<crate::ClaimedRead<Option<CredentialDef>>, StorageError> {
+    let mut tx = store
+        .pool
+        .begin_with("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        .await?;
+    let valid:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=$1 AND tenant_id=$2 AND state='running' AND claimed_at=$3)")
+        .bind(instance.into_uuid()).bind(tenant.as_str()).bind(token).fetch_one(&mut *tx).await?;
+    if !valid {
+        tx.rollback().await?;
+        return Ok(crate::ClaimedRead::Lost);
+    }
+    let row:Option<CredentialRow>=sqlx::query_as("SELECT id,tenant_id,name,kind,value,expires_at,refresh_url,refresh_token,enabled,description,created_at,updated_at FROM credentials WHERE id=$1 AND (tenant_id=$2 OR tenant_id='')")
+        .bind(id).bind(tenant.as_str()).fetch_optional(&mut *tx).await?;
+    let credential = row.map(CredentialRow::into_credential).transpose()?;
+    tx.commit().await?;
+    Ok(crate::ClaimedRead::Value(credential))
+}

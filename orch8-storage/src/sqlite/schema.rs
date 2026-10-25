@@ -579,6 +579,29 @@ CREATE INDEX IF NOT EXISTS idx_mobile_catalog_workflows_cached
 
 -- Durable scoped requests are not scheduler instances until a scoped
 -- dispatcher has installed its immutable handler/credential ownership.
+CREATE TABLE IF NOT EXISTS mobile_catalog_credential_grants (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    name TEXT NOT NULL CHECK(length(name) > 0 AND length(CAST(name AS BLOB)) <= 128),
+    owner_epoch INTEGER NOT NULL CHECK(owner_epoch > 0),
+    credential_id TEXT NOT NULL REFERENCES credentials(id) ON DELETE CASCADE,
+    PRIMARY KEY(account_id, catalog_id, name),
+    FOREIGN KEY(account_id, catalog_id) REFERENCES mobile_catalogs(account_id, id)
+);
+
+CREATE TABLE IF NOT EXISTS mobile_catalog_execution_policy (
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    manifest_version INTEGER NOT NULL,
+    manifest_digest TEXT NOT NULL CHECK(length(manifest_digest)=64),
+    min_sdk_version TEXT NOT NULL CHECK(length(CAST(min_sdk_version AS BLOB)) <= 256),
+    required_handlers TEXT NOT NULL,
+    PRIMARY KEY(account_id,catalog_id,name,version),
+    FOREIGN KEY(account_id,catalog_id) REFERENCES mobile_catalogs(account_id,id)
+);
+
 CREATE TABLE IF NOT EXISTS mobile_catalog_run_requests (
     id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL,
@@ -609,8 +632,18 @@ CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_owner
     ON mobile_catalog_run_requests(account_id, catalog_id, id);
 CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_pin
     ON mobile_catalog_run_requests(sequence_id) WHERE state = 'prepared';
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_epoch ON mobile_catalog_run_requests(account_id,owner_epoch,id);
 CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_usage
     ON mobile_catalog_run_requests(account_id, catalog_id, input_bytes);
+
+CREATE TABLE IF NOT EXISTS mobile_catalog_run_materializations (
+    request_id TEXT PRIMARY KEY REFERENCES mobile_catalog_run_requests(id) ON DELETE CASCADE,
+    request_fingerprint TEXT NOT NULL CHECK(length(request_fingerprint)=64),
+    definition_fingerprint TEXT NOT NULL CHECK(length(definition_fingerprint)=64),
+    min_sdk_version TEXT NOT NULL,
+    required_handlers TEXT NOT NULL,
+    materialized_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
@@ -1583,4 +1616,4 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 54;
+pub(super) const SCHEMA_VERSION: i64 = 55;

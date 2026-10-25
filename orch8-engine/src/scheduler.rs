@@ -718,12 +718,19 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                         tracing::warn!(%instance_id, %error, "failed to hand back stopped claim");
                     }
                 }
-                Ok(Err(EngineError::AdmissionBusy { .. })) => {
+                Ok(Err(
+                    error @ (EngineError::AdmissionBusy { .. }
+                    | EngineError::RuntimeUnavailable { .. }),
+                )) => {
                     transient_retries::clear(&storage, instance_id);
                     // Physical contention is normal flow control, not a failed
                     // host attempt or a recurring infrastructure fault. A stuck
                     // callback retains its charge; waiting work remains durable.
-                    let fire_at = clock_outer.now() + chrono::Duration::milliseconds(250);
+                    let delay = match error {
+                        EngineError::RuntimeUnavailable { .. } => chrono::Duration::seconds(60),
+                        _ => chrono::Duration::milliseconds(250),
+                    };
+                    let fire_at = clock_outer.now() + delay;
                     if let Err(error) = storage
                         .conditional_update_claimed_instance_state(
                             instance_id,
@@ -3817,7 +3824,13 @@ async fn process_instance_tree(
         // reach `process_tick`'s transient arm and be rescheduled with
         // backoff, not fail the instance permanently.
         Err(e @ EngineError::ClaimLost { .. }) => return Err(e),
-        Err(e) if e.is_transient_storage() || matches!(e, EngineError::AdmissionBusy { .. }) => {
+        Err(e)
+            if e.is_transient_storage()
+                || matches!(
+                    e,
+                    EngineError::AdmissionBusy { .. } | EngineError::RuntimeUnavailable { .. }
+                ) =>
+        {
             return Err(e);
         }
         Err(e) => {

@@ -24,6 +24,10 @@ pub enum EngineError {
     #[error("native admission capacity is occupied for instance {instance_id}")]
     AdmissionBusy { instance_id: InstanceId },
 
+    /// A retained run needs a compatible local SDK/binding before proceeding.
+    #[error("local runtime is unavailable for instance {instance_id}")]
+    RuntimeUnavailable { instance_id: InstanceId },
+
     #[error("handler not found: {0}")]
     HandlerNotFound(String),
 

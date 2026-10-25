@@ -40,6 +40,7 @@ fn storage_error(error: orch8_types::error::StorageError) -> StepError {
 }
 
 mod lifecycle;
+pub(crate) mod materialize;
 mod pending;
 mod physical;
 mod registrations;

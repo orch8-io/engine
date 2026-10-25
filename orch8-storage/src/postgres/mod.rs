@@ -2573,6 +2573,17 @@ impl crate::AdminStore for PostgresStorage {
         credentials::get(self, tenant_id, id).await
     }
 
+    async fn get_credential_for_claim(
+        &self,
+        instance_id: InstanceId,
+        tenant_id: &TenantId,
+        token: DateTime<Utc>,
+        id: &str,
+    ) -> Result<crate::ClaimedRead<Option<orch8_types::credential::CredentialDef>>, StorageError>
+    {
+        credentials::get_for_claim(self, instance_id, tenant_id, token, id).await
+    }
+
     async fn list_all_credentials(
         &self,
         tenant_id: Option<&TenantId>,

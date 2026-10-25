@@ -222,7 +222,8 @@ async fn resolve_claimed_walk(
                 .verify(storage, tenant)
                 .await
                 .map_err(ClaimedResolutionError::Infrastructure)?;
-            let result = resolve_string_classified(storage, tenant.as_str(), reference).await;
+            let result =
+                resolve_string_classified(storage, tenant.as_str(), reference, Some(claim)).await;
             claim
                 .verify(storage, tenant)
                 .await
@@ -235,6 +236,11 @@ async fn resolve_claimed_walk(
                 }
                 CredentialLookupError::Credential(error) => {
                     ClaimedResolutionError::Credential(error)
+                }
+                CredentialLookupError::ClaimLost(instance_id) => {
+                    ClaimedResolutionError::Infrastructure(crate::error::EngineError::ClaimLost {
+                        instance_id,
+                    })
                 }
             })? {
                 *value = resolved;
@@ -260,6 +266,7 @@ async fn resolve_claimed_walk(
 /// resolution exposes the existing `StepError` classification.
 #[derive(Debug)]
 enum CredentialLookupError {
+    ClaimLost(orch8_types::ids::InstanceId),
     Storage {
         credential_id: String,
         source: orch8_types::error::StorageError,
@@ -270,6 +277,7 @@ enum CredentialLookupError {
 impl CredentialLookupError {
     fn into_step_error(self) -> StepError {
         match self {
+            Self::ClaimLost(_) => StepError::ClaimLost,
             Self::Credential(error) => error,
             Self::Storage {
                 credential_id,
@@ -299,7 +307,7 @@ async fn resolve_string(
     tenant_id: &str,
     s: &str,
 ) -> Result<Option<Value>, StepError> {
-    resolve_string_classified(storage, tenant_id, s)
+    resolve_string_classified(storage, tenant_id, s, None)
         .await
         .map_err(CredentialLookupError::into_step_error)
 }
@@ -308,22 +316,36 @@ async fn resolve_string_classified(
     storage: &dyn StorageBackend,
     tenant_id: &str,
     s: &str,
+    claim: Option<crate::control::ExecutionClaim>,
 ) -> Result<Option<Value>, CredentialLookupError> {
     let Some((id, key)) = parse_reference(s).map_err(CredentialLookupError::Credential)? else {
         return Ok(None);
     };
 
-    // Storage selects this tenant or the existing global scope. Claimed
-    // preparation changes error recovery, not credential lookup authority.
-    let owned_tenant =
-        (!tenant_id.is_empty()).then(|| orch8_types::ids::TenantId::unchecked(tenant_id));
-    let credential = storage
-        .get_credential(owned_tenant.as_ref(), id)
-        .await
-        .map_err(|source| CredentialLookupError::Storage {
-            credential_id: id.to_owned(),
-            source,
-        })?;
+    let lookup_error = |source| CredentialLookupError::Storage {
+        credential_id: id.to_owned(),
+        source,
+    };
+    let credential = if let Some(claim) = claim {
+        let tenant = orch8_types::ids::TenantId::unchecked(tenant_id);
+        match storage
+            .get_credential_for_claim(claim.instance_id, &tenant, claim.token, id)
+            .await
+            .map_err(lookup_error)?
+        {
+            orch8_storage::ClaimedRead::Lost => {
+                return Err(CredentialLookupError::ClaimLost(claim.instance_id));
+            }
+            orch8_storage::ClaimedRead::Value(value) => value,
+        }
+    } else {
+        let owned_tenant =
+            (!tenant_id.is_empty()).then(|| orch8_types::ids::TenantId::unchecked(tenant_id));
+        storage
+            .get_credential(owned_tenant.as_ref(), id)
+            .await
+            .map_err(lookup_error)?
+    };
     let credential = credential.ok_or_else(|| {
         CredentialLookupError::Credential(StepError::Permanent {
             message: format!("credentials: no credential registered with id '{id}'"),

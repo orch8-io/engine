@@ -2840,6 +2840,19 @@ pub trait AdminStore: Send + Sync + 'static {
         id: &str,
     ) -> Result<Option<orch8_types::credential::CredentialDef>, StorageError>;
 
+    /// Claim-bound credential preparation. Adapters must implement this
+    /// explicitly; decorators must retain the inner authorization capability.
+    /// Catalog-aware stores enforce frozen account/catalog/epoch grants in the
+    /// same snapshot as the claim. Legacy server stores preserve their existing
+    /// tenant/global credential rules after verifying the original claim.
+    async fn get_credential_for_claim(
+        &self,
+        instance_id: InstanceId,
+        tenant_id: &TenantId,
+        token: DateTime<Utc>,
+        id: &str,
+    ) -> Result<ClaimedRead<Option<orch8_types::credential::CredentialDef>>, StorageError>;
+
     async fn list_credentials(
         &self,
         tenant_id: Option<&TenantId>,

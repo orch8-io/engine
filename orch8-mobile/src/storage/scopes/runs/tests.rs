@@ -686,7 +686,7 @@ async fn staging_cleanup_does_not_erase_an_id_that_has_materialized_elsewhere() 
     let instance:orch8_types::instance::TaskInstance=serde_json::from_value(serde_json::json!({
         "id":run.id,"sequence_id":run.sequence_id,"tenant_id":definition.tenant_id,"namespace":definition.namespace,
         "state":orch8_types::instance::InstanceState::Cancelled,"priority":"Normal","timezone":"UTC","metadata":{},
-        "context":orch8_types::context::ExecutionContext::default(),"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()
+        "context":orch8_types::context::ExecutionContext {data:run.input.clone(),..Default::default()},"created_at":run.created_at,"updated_at":run.created_at
     })).unwrap();
     sqlite.create_instance(&instance).await.unwrap();
     assert!(!storage.cancel_catalog_run(&scope, run.id).await.unwrap());
@@ -699,19 +699,23 @@ async fn staging_cleanup_does_not_erase_an_id_that_has_materialized_elsewhere() 
     assert!(storage.catalog_run(&scope, run.id).await.unwrap().is_some());
 }
 
-// Test-only stand-in for future materialization. No production scoped API emits
-// native instances yet: handler/builtin ownership must be installed first.
+// Raw test fixture for storage/router contracts, with a synthetic pinned policy.
+// End-to-end materialization cases use the actual runtime admission entry.
 pub(super) async fn native_fixture(
     sqlite: &SqliteStorage,
     run: &CatalogRun,
 ) -> orch8_types::instance::TaskInstance {
     let definition = sqlite.get_sequence(run.sequence_id).await.unwrap().unwrap();
+    let identity = super::materialize::fingerprint_run(run).unwrap();
+    let body = super::materialize::fingerprint_definition(&definition).unwrap();
     let instance = serde_json::from_value(serde_json::json!({
         "id":run.id,"sequence_id":run.sequence_id,"tenant_id":definition.tenant_id,"namespace":definition.namespace,
         "state":"scheduled","priority":"Normal","timezone":"UTC","metadata":{},
-        "context":orch8_types::context::ExecutionContext::default(),"created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()
+        "context":orch8_types::context::ExecutionContext {data:run.input.clone(),..Default::default()},"created_at":run.created_at,"updated_at":run.created_at
     })).unwrap();
     sqlite.create_instance(&instance).await.unwrap();
+    sqlx::query("INSERT INTO mobile_catalog_run_materializations(request_id,request_fingerprint,definition_fingerprint,min_sdk_version,required_handlers,materialized_at) VALUES (?1,?2,?3,'0.0.0','[]',?4)")
+        .bind(run.id.to_string()).bind(identity).bind(body).bind(chrono::Utc::now().to_rfc3339()).execute(sqlite.pool()).await.unwrap();
     instance
 }
 
@@ -771,7 +775,17 @@ async fn execution_scope_retirement_fences_existing_claim_writes_and_reopen() {
     );
     assert_eq!(
         sqlite.get_instance(run.id).await.unwrap().unwrap().state,
-        orch8_types::instance::InstanceState::Running
+        orch8_types::instance::InstanceState::Cancelled
+    );
+    assert!(
+        sqlite
+            .get_instance(run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .claimed_at
+            .is_none(),
+        "retired logical work must not retain an active scheduler claim"
     );
     assert_successor_can_execute(&storage, &sqlite).await;
 }

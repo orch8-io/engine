@@ -178,6 +178,7 @@ impl MobileStorage {
                 version: manifest.manifest_version,
                 digest: &digest,
                 entries: &entries,
+                execution: Some(&manifest.sequences),
             }),
         )
         .await?;

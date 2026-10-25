@@ -2422,6 +2422,17 @@ passthrough_impl! {
         Ok(cred)
     }
 
+    async fn get_credential_for_claim(
+        &self, instance_id: orch8_types::ids::InstanceId,
+        tenant_id: &orch8_types::ids::TenantId, token: chrono::DateTime<chrono::Utc>, id: &str,
+    ) -> Result<crate::ClaimedRead<Option<orch8_types::credential::CredentialDef>>, StorageError> {
+        let mut result = self.inner.get_credential_for_claim(instance_id, tenant_id, token, id).await?;
+        if let crate::ClaimedRead::Value(Some(credential)) = &mut result {
+            self.decrypt_credential(credential)?;
+        }
+        Ok(result)
+    }
+
     async fn list_all_credentials(
         &self,
         tenant_id: Option<&orch8_types::ids::TenantId>,

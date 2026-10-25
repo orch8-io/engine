@@ -57,7 +57,7 @@ async fn lost_claim_never_begins_credential_preparation() {
     )
     .await;
     assert_eq!(
-        faults.calls("get_credential"),
+        faults.calls("get_credential_for_claim"),
         0,
         "stale preparation must not ask for a secret"
     );
@@ -95,7 +95,7 @@ async fn claim_loss_while_loading_templates_prevents_credentials() {
     pause.release();
     let result = task.await.unwrap();
     assert_eq!(
-        faults.calls("get_credential"),
+        faults.calls("get_credential_for_claim"),
         0,
         "template I/O cannot authorize a later secret lookup"
     );
@@ -123,7 +123,7 @@ async fn deferred_credential_fallback_retains_the_original_claim() {
         .resolve_deferred_credentials(guarded.as_ref(), &instance, instance.claimed_at.unwrap())
         .await;
     assert_eq!(
-        faults.calls("get_credential"),
+        faults.calls("get_credential_for_claim"),
         0,
         "fallback credential resolution cannot use a retired evaluation"
     );
@@ -160,7 +160,7 @@ orch8_storage::backend_test!(async fn claim_loss_inside_credential_lookup_stops_
     let (storage,instance,_)=source_on(b.storage.clone()).await;
     credential(storage.as_ref(),&instance.tenant_id).await;
     let (guarded,faults)=FaultStorage::wrap(storage.clone());
-    let pause=faults.on("get_credential").times(1).pause();
+    let pause=faults.on("get_credential_for_claim").times(1).pause();
     let claim=crate::control::ExecutionClaim{instance_id:instance.id,token:instance.claimed_at.unwrap()};
     let original=serde_json::json!({"a":"credentials://one","b":"credentials://one"});
     let mut value=original.clone();let tenant=instance.tenant_id.clone();
@@ -173,7 +173,7 @@ orch8_storage::backend_test!(async fn claim_loss_inside_credential_lookup_stops_
     pause.release();
     let (result,value)=task.await.unwrap();
     assert!(matches!(result,Err(crate::credentials::ClaimedResolutionError::Infrastructure(EngineError::ClaimLost{..}))));
-    assert_eq!(faults.calls("get_credential"),1);assert_eq!(value,original);
+    assert_eq!(faults.calls("get_credential_for_claim"),1);assert_eq!(value,original);
 });
 
 orch8_storage::backend_test!(async fn failed_ownership_read_stays_infrastructural_and_can_recover(b) {
@@ -184,7 +184,7 @@ orch8_storage::backend_test!(async fn failed_ownership_read_stays_infrastructura
     let claim=crate::control::ExecutionClaim{instance_id:instance.id,token:instance.claimed_at.unwrap()};
     let mut value=serde_json::json!({"a":"credentials://one"});let original=value.clone();
     assert!(matches!(crate::credentials::resolve_claimed_in_value(guarded.as_ref(),&instance.tenant_id,claim,&mut value).await,Err(crate::credentials::ClaimedResolutionError::Infrastructure(EngineError::Storage(_)))));
-    assert_eq!(value,original);assert_eq!(faults.calls("get_credential"),0);
+    assert_eq!(value,original);assert_eq!(faults.calls("get_credential_for_claim"),0);
     crate::credentials::resolve_claimed_in_value(guarded.as_ref(),&instance.tenant_id,claim,&mut value).await.unwrap();
     assert_eq!(value["a"],"CLAIMED_CREDENTIAL_CANARY");
 });
@@ -198,7 +198,7 @@ orch8_storage::backend_test!(async fn refreshed_instance_cannot_replace_the_prep
     let (guarded,faults)=FaultStorage::wrap(storage);
     let result=prepare_step(guarded.as_ref(),&fresh,&step,&OutputsSnapshot::new(),false,&crate::embed_sandbox::SandboxPolicy::default(),original).await;
     assert!(matches!(result,Err(PrepareError::Infra(EngineError::ClaimLost{..}))));
-    assert_eq!(faults.calls("get_credential"),0);
+    assert_eq!(faults.calls("get_credential_for_claim"),0);
 });
 
 async fn credential_storage_outage_recovers(storage: Arc<dyn StorageBackend>, tree: bool) {
@@ -240,9 +240,12 @@ async fn credential_storage_outage_recovers(storage: Arc<dyn StorageBackend>, tr
     let id = engine.start(&sequence).await;
     let instance = storage.get_instance(id).await.unwrap().unwrap();
     credential(storage.as_ref(), &instance.tenant_id).await;
-    faults.on("get_credential").times(1).fail_transient();
+    faults
+        .on("get_credential_for_claim")
+        .times(1)
+        .fail_transient();
     engine.tick().await;
-    assert_eq!(faults.injected("get_credential"), 1);
+    assert_eq!(faults.injected("get_credential_for_claim"), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         storage.get_instance(id).await.unwrap().unwrap().state,
@@ -290,7 +293,7 @@ orch8_storage::backend_test!(async fn deferred_credential_lookup_preserves_stora
         step_context:instance.context.clone(), resolved_params:original.clone(),
         resolved_cache_key:None,carries_credentials:true,credentials_deferred:true,
     };
-    faults.on("get_credential").times(1).fail_transient();
+    faults.on("get_credential_for_claim").times(1).fail_transient();
     let error=prepared.resolve_deferred_credentials(guarded.as_ref(),&instance,instance.claimed_at.unwrap()).await;
     assert!(matches!(error,Err(PrepareError::Infra(ref error)) if error.is_transient_storage()));
     assert_eq!(prepared.resolved_params,original);assert!(prepared.credentials_deferred);
@@ -298,7 +301,7 @@ orch8_storage::backend_test!(async fn deferred_credential_lookup_preserves_stora
     assert_eq!(prepared.resolved_params["credential"],"CLAIMED_CREDENTIAL_CANARY");
     assert!(!prepared.credentials_deferred);
     prepared.credentials_deferred=true;prepared.resolved_params=original.clone();
-    faults.on("get_credential").times(1).fail_permanent();
+    faults.on("get_credential_for_claim").times(1).fail_permanent();
     let error=prepared.resolve_deferred_credentials(guarded.as_ref(),&instance,instance.claimed_at.unwrap()).await;
     assert!(matches!(error,Err(PrepareError::Infra(EngineError::Storage(ref error))) if !error.is_transient()));
     assert_eq!(prepared.resolved_params,original);assert!(prepared.credentials_deferred);

@@ -2659,3 +2659,82 @@ not introduced. These changes cover ordinary/scoped mobile native callback entry
 not every independently
 scheduled foreign callback class. Scoped materialization, credential/read/recovery/
 listener integration, public SDK handles and all ADR S1-S12 gates remain open.
+
+
+### DME128 — Scoped execution needs materialization, credential grants and durable receipts
+
+A real-scheduler baseline showed the internal scoped path expanding a global
+credential into a native callback. Account/catalog routing after preparation did
+not protect the earlier tenant-or-global lookup. Public scoped APIs were already
+gated, but turning the test-only native fixture into production admission without
+this boundary would have exposed private material across catalogs.
+
+Claimed preparation now uses an explicit storage capability. SQLite binds the
+original claim, frozen account/catalog/epoch and credential grant in one snapshot;
+it never falls back to a global or sibling-catalog credential. PostgreSQL retains
+legacy tenant/global authority inside an original-claim read snapshot. Encryption
+and fault decorators forward the capability explicitly. The method is required on
+storage adapters rather than silently inheriting a weaker default. Trusted direct
+operator lookup retains its original semantics.
+
+Catalog grants reference existing account-owned credential records through bounded
+aliases and an epoch fence. They copy no secret values. The configured backend
+continues to create/rotate/encrypt the physical record. Grants can be shared across
+catalogs only by explicit authorization; revocation affects that catalog's future
+reads, and a reopened account needs fresh epoch grants.
+
+The internal MobileEngine entry now materializes the durable request. An owned
+operation retains process/account physical admission through validation and SQL
+settlement, independent of its observer. Input schema, DSL structure and executable
+handler checks run outside the writer reservation. The CPU closure owns admission
+through completion even if its async observer disappears. The writer rechecks the
+request/definition fingerprints, active epoch, publication and runtime policy,
+then counts global/account/catalog active work and inserts the native instance.
+ID, chosen definition, input and original creation time come from the request;
+workflow parameters cannot choose ownership, execution mode or claim evidence.
+
+An independent materialization receipt commits with the instance. It survives
+native history GC and prevents an old request from becoming a second execution.
+Cancellation/forget of an unmaterialized request cannot remove that marker. A
+failed receipt insert rolls back the instance too; independent pools cannot
+oversubscribe the same admission ceiling. Idempotent existing receipts do not
+need a second publication decision or active-instance charge.
+
+Signed acceptance now stores per-version minimum SDK and required-handler policy
+with the key/replay fence. Retained versions keep their signed policy across an
+upgrade, while explicit withdrawal blocks new materialization. Admission pins the
+policy to its receipt. Incompatible SDK or missing native bindings after restart
+remain Scheduled with a 60-second runtime deferral, without consuming business
+attempts or creating effect evidence. A compatible runtime can resume them.
+
+Contextual ownership selects local dispatch before placement and worker fallback.
+Template-produced `$runtime` placement is refused before effect/host entry. SQLite
+also refuses scoped worker payloads until worker provenance is implemented.
+Unimplemented independent lifecycle hooks, recovery/compensation, child and remote
+constructs are refused by the internal admission validator; they are remaining
+work, not claimed scope support.
+
+Account retirement now atomically cancels its matching nonterminal native rows
+and clears their claims without deleting request, materialization or effect
+records. A held native-host test confirms its Dispatched receipt and physical
+account charge remain while the host is running; stale completion cannot revive
+the cancelled instance. Local engine stop remains separate from durable retirement.
+
+Validation passed 591 mobile unit tests plus 109 integration/example/coverage,
+2,116 engine library and 232 storage library tests. The claimed-preparation matrix
+passed all 31 cases with PostgreSQL required, including 14 real plain/encrypted
+PostgreSQL cases. The temporary RAM-backed service was removed afterward.
+Workspace/all-target Clippy passed with warnings denied, and standalone Node and
+Python native workspaces passed locked/offline checks. Fresh UniFFI bindings and
+the rebuilt macOS native library passed all 32 Swift wrapper tests with strict
+concurrency and warnings denied. Formatting, documentation and SDK packaging
+checks passed; hosted CI must pass the exact candidate.
+
+Four accounts/catalog combinations now execute through actual materialization and
+the real scheduler, including colliding operation/credential aliases. This is an
+internal local-execution integration, not public SDK rollout. Full scoped reads,
+expiry/recovery, listeners, immutable host callback context, child/delegation and
+remote-worker ownership, legacy migration, complete persistent-resource/at-rest
+contracts and platform scope-handle evidence remain required. Existing grants'
+encrypted-read/output tests do not prove encryption of every scoped request/history
+record. ADR S1-S12 and the overall distributed/mobile/embedded review remain open.

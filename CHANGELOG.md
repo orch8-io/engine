@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal scoped run materialization
+
+- Convert frozen account/catalog requests into native instances under one writer
+  fence, with input/structure/runtime-policy validation, atomic active quotas and
+  original admission identity. Durable receipts prevent rematerialization after GC.
+- Resolve credential aliases through explicit catalog/epoch grants and original
+  claims; preserve encrypted results and legacy server credential authority.
+- Pin signed SDK/handler requirements, defer incompatible/restoring runtimes, and
+  refuse implicit worker/plugin fallback. Retirement cancels owned logical work
+  while preserving receipts, effect evidence and live physical callback charges.
+- Keep public scoped SDK APIs gated on remaining lifecycle, recovery, listener,
+  callback-context, child/delegation and remote provenance integration.
+
 ### Native admission recovery
 
 - Reschedule scoped native capacity contention without consuming workflow retries
