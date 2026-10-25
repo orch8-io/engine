@@ -1392,6 +1392,16 @@ impl crate::OutputStore for SqliteStorage {
         claimed_writes::output(self, output, claim_token).await
     }
 
+    async fn get_block_output_claimed(
+        &self,
+        instance_id: InstanceId,
+        tenant: &TenantId,
+        block_id: &BlockId,
+        claim_token: DateTime<Utc>,
+    ) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError> {
+        outputs::get_claimed(self, instance_id, tenant, block_id, claim_token).await
+    }
+
     async fn get_block_output(
         &self,
         instance_id: InstanceId,
@@ -3318,6 +3328,17 @@ impl crate::ResourceStore for SqliteStorage {
         claim_token: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
         claimed_writes::cache(self, instance_id, key, value, claim_token).await
+    }
+
+    async fn get_instance_kv_claimed(
+        &self,
+        instance_id: InstanceId,
+        tenant: &TenantId,
+        key: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<crate::ClaimedRead<Option<serde_json::Value>>, StorageError> {
+        self.get_instance_kv_claimed_impl(instance_id, tenant, key, claim_token)
+            .await
     }
 
     async fn get_instance_kv(

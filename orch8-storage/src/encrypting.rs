@@ -1635,6 +1635,11 @@ passthrough_impl! {
         let encrypted = self.encrypt_block_output(output)?;
         self.inner.save_block_output_claimed(encrypted.as_ref(), claim_token).await
     }
+    async fn get_block_output_claimed(&self, instance_id: InstanceId, tenant: &TenantId, block_id: &orch8_types::ids::BlockId, claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<orch8_types::output::BlockOutput>>, StorageError> {
+        let mut read = self.inner.get_block_output_claimed(instance_id, tenant, block_id, claim_token).await?;
+        if let crate::ClaimedRead::Value(Some(ref mut output)) = read { self.decrypt_block_output(output)?; }
+        Ok(read)
+    }
     async fn get_block_output(
         &self,
         instance_id: InstanceId,
@@ -2692,6 +2697,12 @@ passthrough_impl! {
     async fn set_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError> {
         let encrypted = self.encrypt_json_value(value)?;
         self.inner.set_instance_kv_claimed(instance_id, key, &encrypted, claim_token).await
+    }
+    async fn get_instance_kv_claimed(&self, instance_id: InstanceId, tenant: &TenantId, key: &str, claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<serde_json::Value>>, StorageError> {
+        match self.inner.get_instance_kv_claimed(instance_id, tenant, key, claim_token).await? {
+            crate::ClaimedRead::Value(Some(value)) => Ok(crate::ClaimedRead::Value(Some(self.decrypt_json_value(&value)?))),
+            other => Ok(other),
+        }
     }
     async fn get_instance_kv(
         &self,

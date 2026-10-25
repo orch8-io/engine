@@ -426,6 +426,15 @@ impl Drop for ManifestLockGuard {
 // Sub-trait 2: InstanceStore
 // ============================================================================
 
+/// Result of a resource read and its running-claim check in one snapshot.
+/// `Value(None)` is an authorized missing resource; `Lost` must not become a
+/// cache miss or authorize dispatch. This is a Rust capability result, not wire data.
+#[derive(Debug)]
+pub enum ClaimedRead<T> {
+    Lost,
+    Value(T),
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait InstanceStore: Send + Sync + 'static {
@@ -1354,6 +1363,16 @@ pub trait OutputStore: Send + Sync + 'static {
         output: &BlockOutput,
         claim_token: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
+
+    /// Read under the exact running claim, tenant and backend owner fence in
+    /// one storage snapshot. Missing values differ from claim loss. No renewal.
+    async fn get_block_output_claimed(
+        &self,
+        instance_id: InstanceId,
+        tenant: &TenantId,
+        block_id: &BlockId,
+        claim_token: DateTime<Utc>,
+    ) -> Result<ClaimedRead<Option<BlockOutput>>, StorageError>;
 
     async fn get_block_output(
         &self,
@@ -3205,6 +3224,16 @@ pub trait ResourceStore: Send + Sync + 'static {
         value: &serde_json::Value,
         claim_token: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
+
+    /// Read under the exact running claim, tenant and backend owner fence in
+    /// one storage snapshot. Missing values differ from claim loss. No renewal.
+    async fn get_instance_kv_claimed(
+        &self,
+        instance_id: InstanceId,
+        tenant: &TenantId,
+        key: &str,
+        claim_token: DateTime<Utc>,
+    ) -> Result<ClaimedRead<Option<serde_json::Value>>, StorageError>;
 
     async fn get_instance_kv(
         &self,

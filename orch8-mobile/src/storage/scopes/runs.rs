@@ -277,3 +277,6 @@ mod callback_tests;
 
 #[cfg(test)]
 mod coordination_tests;
+
+#[cfg(test)]
+mod read_tests;

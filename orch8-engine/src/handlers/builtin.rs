@@ -958,15 +958,7 @@ async fn handle_get_state(ctx: StepContext) -> Result<Value, StepError> {
             message: "get_state: `key` (string) is required".into(),
             details: None,
         })?;
-    let value = ctx
-        .storage
-        .get_instance_kv(ctx.instance_id, key)
-        .await
-        .map_err(|e| StepError::Retryable {
-            message: format!("get_state storage error: {e}"),
-            details: None,
-        })?
-        .unwrap_or(Value::Null);
+    let value = ctx.get_state(key).await?.unwrap_or(Value::Null);
     Ok(json!({"key": key, "value": value}))
 }
 

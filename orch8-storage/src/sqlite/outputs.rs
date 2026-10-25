@@ -53,6 +53,36 @@ pub(super) async fn get(
     row.as_ref().map(row_to_output).transpose()
 }
 
+pub(super) async fn get_claimed(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    tenant: &TenantId,
+    block_id: &BlockId,
+    claim_token: DateTime<Utc>,
+) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError> {
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "SELECT output.* FROM task_instances LEFT JOIN block_outputs output
+         ON output.instance_id = task_instances.id AND output.block_id = ?3
+         WHERE task_instances.id = ?1 AND task_instances.tenant_id = ?2
+         AND task_instances.state = 'running' AND task_instances.claimed_at = ?4 AND {}
+         ORDER BY output.created_at DESC, output.id DESC LIMIT 1",
+        super::mobile_execution::ALLOWED
+    )))
+    .bind(instance_id.to_string())
+    .bind(tenant.as_str())
+    .bind(block_id.as_str())
+    .bind(ts(claim_token))
+    .fetch_optional(&storage.pool)
+    .await?;
+    match row {
+        None => Ok(crate::ClaimedRead::Lost),
+        Some(row) if row.try_get::<Option<String>, _>("id")?.is_none() => {
+            Ok(crate::ClaimedRead::Value(None))
+        }
+        Some(row) => Ok(crate::ClaimedRead::Value(Some(row_to_output(&row)?))),
+    }
+}
+
 const GET_BATCH_CHUNK_SIZE: usize = 400;
 
 pub(super) async fn get_batch(

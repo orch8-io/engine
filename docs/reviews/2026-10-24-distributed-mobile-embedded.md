@@ -1973,3 +1973,42 @@ This closes the coordination-handler boundary only. Public scope handles,
 production materialization, instance-local builtin ownership, child/delegation
 resolution, API reads, lifecycle callbacks, shutdown wiring, independent-process
 bounds and the original distributed/mobile/embedded review matrix remain open.
+
+
+### DME109 — Claimed reads bypassed ownership through cache and KV paths
+
+Three behavioral regressions failed against the preceding code: an executor with
+its original token retained after transition to Waiting could obtain a memoized
+block output, a step-cache value and builtin get_state data. Memoization/cache
+returned before output persistence could detect claim loss, and get_state used a
+raw KV read.
+
+New required Rust storage operations `get_block_output_claimed` and
+`get_instance_kv_claimed` combine tenant, exact running token, backend owner proof
+and resource lookup in one SQL snapshot. SQLite applies the durable mobile epoch
+predicate; PostgreSQL checks the running tenant claim. `ClaimedRead::Lost` is
+separate from an authorized missing value, including JSON null. Native wrappers
+preserve the result and decrypt only authorized values. Reads do not renew leases.
+
+Step memoization and cache returns use these operations when a claim is supplied.
+A failed claimed cache read cannot become a cache miss and dispatch a handler.
+StepContext.get_state and the get_state builtin use the same claim-bound KV read,
+with typed transient/permanent storage errors. Explicit unclaimed calls and
+trusted raw storage operations retain their legacy behavior. Custom Rust backends
+must implement both operations; HTTP/FFI signatures are unchanged.
+
+Twenty contracts pass across plain/encrypted SQLite/Postgres with isolated,
+required Postgres. They cover the three reproduced bypasses, missing versus null,
+latest-output ordering on tied timestamps, encrypted cache/output returns,
+non-running states, wrong tenants/tokens, absent owners and failed-read refusal
+before handler entry. An independent-pool mobile test checks old-epoch KV/output
+reads after retirement and reopen, without deleting evidence or renewing leases.
+Final library validation passed 2,067 engine, 532 mobile and 232 storage tests.
+The retirement regression also passed after extracting its fixture helper.
+Workspace/all-target Clippy with warnings denied, formatting, documentation and
+diff checks passed. Hosted checks must pass on the submitted commit before merge.
+
+These checks cover the claimed read paths named above. They do not sandbox host
+Rust, revoke values already delivered, or complete public scoped read APIs,
+parameter/memory/agent read audits, callback lifecycle wiring, materialization or
+the original distributed/mobile/embedded completion matrix.
