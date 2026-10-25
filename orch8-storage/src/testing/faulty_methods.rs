@@ -42,6 +42,7 @@ fault_impl! {
         async fn get_instance_for_caller(&self, caller: InstanceId, tenant: &TenantId, target: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn get_mobile_instance(&self, access: &MobileInstanceAccess, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn cancel_mobile_instance(&self, access: &MobileInstanceAccess, id: InstanceId) -> Result<Option<InstanceState>, StorageError>;
+        async fn complete_mobile_step(&self, access: &MobileInstanceAccess, expected_updated_at: DateTime<Utc>, context: &orch8_types::context::ExecutionContext, signal: &orch8_types::signal::Signal) -> Result<bool, StorageError>;
         async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn claim_due_instances(&self, now: DateTime<Utc>, limit: u32, max_per_tenant: u32) -> Result<Vec<TaskInstance>, StorageError>;
         async fn has_due_higher_priority(&self, now: DateTime<Utc>, priority: orch8_types::instance::Priority) -> Result<bool, StorageError>;

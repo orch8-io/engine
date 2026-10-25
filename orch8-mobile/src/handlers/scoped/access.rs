@@ -70,4 +70,33 @@ impl CatalogRunAccess {
         self.ensure_open(&runtime)?;
         result.map_err(Into::into)
     }
+
+    /// The caller carries the version from its waiting snapshot. A reply from
+    /// an earlier activation cannot approve a later wait with the same name.
+    pub(crate) async fn complete_step(
+        &self,
+        expected_updated_at: chrono::DateTime<chrono::Utc>,
+        step_name: &str,
+        output: &str,
+    ) -> Result<bool, MobileError> {
+        let runtime = self.runtime()?;
+        let result = runtime
+            .backend
+            .get_mobile_instance(&self.access, self.id)
+            .await;
+        self.ensure_open(&runtime)?;
+        let Some(instance) = result? else {
+            return Ok(false);
+        };
+        if instance.updated_at != expected_updated_at {
+            return Ok(false);
+        }
+        let (context, signal) = crate::lifecycle::prepare_step_answer(instance, step_name, output)?;
+        let result = runtime
+            .backend
+            .complete_mobile_step(&self.access, expected_updated_at, &context, &signal)
+            .await;
+        self.ensure_open(&runtime)?;
+        result.map_err(Into::into)
+    }
 }

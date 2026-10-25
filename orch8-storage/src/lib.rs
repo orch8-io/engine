@@ -629,6 +629,18 @@ pub trait InstanceStore: Send + Sync + 'static {
         id: InstanceId,
     ) -> Result<Option<InstanceState>, StorageError>;
 
+    /// Commit a mobile waiting-step answer as one owner- and version-checked
+    /// transaction: context, signal and wake state all change or none do.
+    /// The signal must name the currently waiting step. Decorators encrypt both
+    /// context data and signal payload before forwarding the same operation.
+    async fn complete_mobile_step(
+        &self,
+        access: &MobileInstanceAccess,
+        expected_updated_at: DateTime<Utc>,
+        context: &orch8_types::context::ExecutionContext,
+        signal: &Signal,
+    ) -> Result<bool, StorageError>;
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
 
     /// Hot path. Uses `FOR UPDATE SKIP LOCKED` on Postgres.

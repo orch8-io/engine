@@ -1247,6 +1247,12 @@ passthrough_impl! {
         self.inner.cancel_mobile_instance(access,id).await
     }
 
+    async fn complete_mobile_step(&self, access: &crate::MobileInstanceAccess, expected_updated_at: DateTime<Utc>, context: &ExecutionContext, signal: &orch8_types::signal::Signal) -> Result<bool, StorageError> {
+        let context = self.encrypt_context(signal.instance_id, context)?;
+        let signal = self.encrypt_signal(signal)?;
+        self.inner.complete_mobile_step(access, expected_updated_at, context.as_ref(), signal.as_ref()).await
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         let mut inst = self.inner.get_instance(id).await?;
         if let Some(ref mut i) = inst {

@@ -969,6 +969,16 @@ impl crate::InstanceStore for SqliteStorage {
         mobile_access::cancel(self, access, id).await
     }
 
+    async fn complete_mobile_step(
+        &self,
+        access: &crate::MobileInstanceAccess,
+        expected_updated_at: DateTime<Utc>,
+        context: &orch8_types::context::ExecutionContext,
+        signal: &orch8_types::signal::Signal,
+    ) -> Result<bool, StorageError> {
+        mobile_access::complete(self, access, expected_updated_at, context, signal).await
+    }
+
     async fn get_instance(&self, id: InstanceId) -> Result<Option<TaskInstance>, StorageError> {
         instances::get(self, id).await
     }

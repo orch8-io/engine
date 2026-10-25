@@ -225,57 +225,22 @@ impl InstanceLifecycleManager {
                 message: format!("instance '{instance_id}' not found"),
             })?;
 
-        if inst.state != InstanceState::Waiting {
-            return Err(MobileError::InvalidInput {
-                message: format!("instance is in {:?} state, expected Waiting", inst.state),
-            });
-        }
-
-        let payload: serde_json::Value = serde_json::from_str(output)?;
-
-        // Merge output into instance context so it's immediately available.
-        let mut context = inst.context;
-        if let serde_json::Value::Object(map) = &payload {
-            for (k, v) in map {
-                context.data[k] = v.clone();
-            }
-        } else {
-            context.data[step_name] = payload.clone();
-        }
-        // CAS on `updated_at` (L3-14): a concurrent tick's context merge or a
-        // cancel since the read must not be overwritten.
+        let observed = inst.updated_at;
+        let (context, signal) = prepare_step_answer(inst, step_name, output)?;
         if !self
             .storage
-            .update_instance_context_cas(id, &context, inst.updated_at)
+            .complete_mobile_step(
+                &orch8_storage::MobileInstanceAccess::Legacy,
+                observed,
+                &context,
+                &signal,
+            )
             .await?
         {
             return Err(MobileError::InvalidInput {
                 message: format!("instance '{instance_id}' changed concurrently; retry"),
             });
         }
-
-        let signal = orch8_types::signal::Signal {
-            id: uuid::Uuid::now_v7(),
-            instance_id: id,
-            signal_type: orch8_types::signal::SignalType::Custom(format!(
-                "human_input:{step_name}"
-            )),
-            payload,
-            delivered: false,
-            created_at: chrono::Utc::now(),
-            delivered_at: None,
-        };
-        self.storage.enqueue_signal(&signal).await?;
-        // Only wake it if it is still parked; a cancel that won the race
-        // stands (the signal is then simply never consumed).
-        self.storage
-            .conditional_update_instance_state(
-                id,
-                InstanceState::Waiting,
-                InstanceState::Scheduled,
-                Some(chrono::Utc::now()),
-            )
-            .await?;
 
         debug!(instance_id = %instance_id, step_name = %step_name, "enqueued human_input signal");
         Ok(())
@@ -404,6 +369,50 @@ fn parse_instance_id(s: &str) -> Result<InstanceId, MobileError> {
         message: format!("invalid instance ID '{s}': {e}"),
     })?;
     Ok(InstanceId::from_uuid(uuid))
+}
+
+/// Shared validation for legacy and owner-bound waiting-step answers.
+pub(crate) fn prepare_step_answer(
+    inst: TaskInstance,
+    step_name: &str,
+    output: &str,
+) -> Result<
+    (
+        orch8_types::context::ExecutionContext,
+        orch8_types::signal::Signal,
+    ),
+    MobileError,
+> {
+    if inst.state != InstanceState::Waiting {
+        return Err(MobileError::InvalidInput {
+            message: format!("instance is in {:?} state, expected Waiting", inst.state),
+        });
+    }
+
+    let payload: serde_json::Value = serde_json::from_str(output)?;
+    let mut context = inst.context;
+    let data = context
+        .data
+        .as_object_mut()
+        .ok_or_else(|| MobileError::InvalidInput {
+            message: "waiting instance context data must be an object".into(),
+        })?;
+    if let serde_json::Value::Object(map) = &payload {
+        data.extend(map.iter().map(|(key, value)| (key.clone(), value.clone())));
+    } else {
+        data.insert(step_name.to_owned(), payload.clone());
+    }
+
+    let signal = orch8_types::signal::Signal {
+        id: uuid::Uuid::now_v7(),
+        instance_id: inst.id,
+        signal_type: orch8_types::signal::SignalType::Custom(format!("human_input:{step_name}")),
+        payload,
+        delivered: false,
+        created_at: chrono::Utc::now(),
+        delivered_at: None,
+    };
+    Ok((context, signal))
 }
 
 #[cfg(test)]
@@ -862,6 +871,19 @@ mod tests {
 
         // Manually set state to Waiting (simulating scheduler pause).
         let parsed = parse_instance_id(&id).unwrap();
+        let mut context = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap()
+            .context;
+        context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+        lifecycle
+            .storage
+            .update_instance_context(parsed, &context)
+            .await
+            .unwrap();
         lifecycle
             .storage
             .update_instance_state(parsed, InstanceState::Waiting, Some(chrono::Utc::now()))
@@ -880,6 +902,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_step_signal_failure_does_not_partially_merge_output() {
+        let (lifecycle, mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let id = lifecycle
+            .start("seq", r#"{"name":"Alice"}"#, None)
+            .await
+            .unwrap();
+        let parsed = parse_instance_id(&id).unwrap();
+        let mut context = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap()
+            .context;
+        context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+        lifecycle
+            .storage
+            .update_instance_context(parsed, &context)
+            .await
+            .unwrap();
+        lifecycle
+            .storage
+            .update_instance_state(parsed, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        let before = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_mobile_answer BEFORE INSERT ON signal_inbox BEGIN SELECT RAISE(ABORT, 'answer persistence failed'); END")
+            .execute(mobile.pool()).await.unwrap();
+        assert!(
+            lifecycle
+                .complete_step(&id, "s1", r#"{"age":30}"#)
+                .await
+                .is_err()
+        );
+        let after = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after.context.data, before.context.data,
+            "failed answer partially changed workflow data"
+        );
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.state, InstanceState::Waiting);
+    }
+
+    #[tokio::test]
+    async fn complete_step_rejects_a_different_waiting_step_without_changes() {
+        let (lifecycle, _mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        let id = lifecycle.start("seq", "{}", None).await.unwrap();
+        let parsed = parse_instance_id(&id).unwrap();
+        let mut context = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap()
+            .context;
+        context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+        lifecycle
+            .storage
+            .update_instance_context(parsed, &context)
+            .await
+            .unwrap();
+        lifecycle
+            .storage
+            .update_instance_state(parsed, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        let before = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            lifecycle
+                .complete_step(&id, "different", r#"{"injected":true}"#)
+                .await,
+            Err(MobileError::InvalidInput { .. })
+        ));
+        let after = lifecycle
+            .storage
+            .get_instance(parsed)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.context.data, before.context.data);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.state, InstanceState::Waiting);
+    }
+
+    #[tokio::test]
     async fn complete_step_rejects_non_waiting() {
         let (lifecycle, _mobile_storage, _dir) = setup().await;
         seed_sequence(&lifecycle.storage, "seq").await;
@@ -889,6 +1013,63 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("expected Waiting"), "unexpected error: {err}");
+    }
+
+    #[tokio::test]
+    async fn complete_step_refuses_non_object_context_without_panicking_or_mutating() {
+        let (lifecycle, _mobile, _dir) = setup().await;
+        seed_sequence(&lifecycle.storage, "seq").await;
+        for data in ["[]", "null", "false", "42", r#""text""#] {
+            let id = lifecycle.start("seq", data, None).await.unwrap();
+            let parsed = parse_instance_id(&id).unwrap();
+            let mut context = lifecycle
+                .storage
+                .get_instance(parsed)
+                .await
+                .unwrap()
+                .unwrap()
+                .context;
+            context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+            lifecycle
+                .storage
+                .update_instance_context(parsed, &context)
+                .await
+                .unwrap();
+            lifecycle
+                .storage
+                .update_instance_state(parsed, InstanceState::Waiting, None)
+                .await
+                .unwrap();
+            let before = lifecycle
+                .storage
+                .get_instance(parsed)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                lifecycle
+                    .complete_step(&id, "s1", r#"{"answer":true}"#)
+                    .await,
+                Err(MobileError::InvalidInput { .. })
+            ));
+            let after = lifecycle
+                .storage
+                .get_instance(parsed)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.context.data, before.context.data);
+            assert_eq!(after.updated_at, before.updated_at);
+            assert_eq!(after.state, InstanceState::Waiting);
+            assert!(
+                lifecycle
+                    .storage
+                    .get_pending_signals(parsed)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]

@@ -2405,6 +2405,19 @@ mod tests {
         let parsed_id = parse_instance_id(&instance_id).unwrap();
         let rt = runtime::MobileRuntime::new(4).unwrap();
         rt.block_on(async {
+            let mut context = engine
+                .storage
+                .get_instance(parsed_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .context;
+            context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+            engine
+                .storage
+                .update_instance_context(parsed_id, &context)
+                .await
+                .unwrap();
             engine
                 .storage
                 .update_instance_state(parsed_id, InstanceState::Waiting, Some(chrono::Utc::now()))
@@ -2467,6 +2480,91 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("expected Waiting"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parallel_human_waits_can_be_answered_in_either_order() {
+        let (engine, _dir) = make_engine_with_noop();
+        let step = |id: &str| {
+            serde_json::json!({
+                "type":"step", "id":id, "handler":"noop", "params":{},
+                "wait_for_input":{"prompt":"Approve?", "timeout":60000,
+                    "choices":[{"label":"Yes","value":"yes"}], "store_as":id}
+            })
+        };
+        let sequence = serde_json::json!({
+            "id":uuid::Uuid::now_v7().to_string(), "tenant_id":"mobile",
+            "namespace":"default", "name":"parallel-answers", "version":1,
+            "blocks":[{"type":"parallel", "id":"both",
+                "branches":[[step("left")],[step("right")]]}],
+            "created_at":chrono::Utc::now().to_rfc3339()
+        });
+        engine
+            .load_sequence_from_json(sequence.to_string())
+            .unwrap();
+        let id = engine
+            .start("parallel-answers".into(), "{}".into(), None)
+            .unwrap();
+        let parsed = parse_instance_id(&id).unwrap();
+        for _ in 0..20 {
+            engine.tick_once().unwrap();
+            if engine.get_instance(id.clone()).unwrap().state == InstanceStateKind::Waiting {
+                break;
+            }
+        }
+        let row = engine
+            .runtime
+            .block_on(engine.storage.get_instance(parsed))
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.state, InstanceState::Waiting);
+        let pending = engine
+            .runtime
+            .block_on(engine.storage.get_execution_tree(parsed))
+            .unwrap();
+        assert_eq!(
+            pending
+                .iter()
+                .filter(
+                    |node| node.block_type == orch8_types::execution::BlockType::Step
+                        && node.state == orch8_types::execution::NodeState::Waiting
+                )
+                .count(),
+            2
+        );
+        let advertised = row.context.runtime.current_step.unwrap();
+        let other = if advertised.as_str() == "left" {
+            "right"
+        } else {
+            "left"
+        };
+        engine
+            .complete_step(id.clone(), other.into(), r#"{"value":"yes"}"#.into())
+            .unwrap();
+        for _ in 0..20 {
+            engine.tick_once().unwrap();
+            if engine.get_instance(id.clone()).unwrap().state == InstanceStateKind::Waiting {
+                break;
+            }
+        }
+        engine
+            .complete_step(
+                id.clone(),
+                advertised.to_string(),
+                r#"{"value":"yes"}"#.into(),
+            )
+            .unwrap();
+        for _ in 0..20 {
+            engine.tick_once().unwrap();
+            if engine.get_instance(id.clone()).unwrap().state == InstanceStateKind::Completed {
+                break;
+            }
+        }
+        assert_eq!(
+            engine.get_instance(id).unwrap().state,
+            InstanceStateKind::Completed
+        );
+        engine.shutdown();
     }
 
     // ------------------------------------------------------------------

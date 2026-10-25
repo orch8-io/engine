@@ -2980,6 +2980,15 @@ account's progress, observer independence and late cleanup's epoch isolation.
 No runtime admission or cleanup invariant was relaxed. The repaired case passed
 50 consecutive scheduling stress runs before the full suite was repeated.
 
+A later hosted workspace run exposed an independent zero-timeout fixture race:
+it expected a noop to complete within zero milliseconds even though claim
+verification can suspend before the handler. That deadline may correctly fail.
+The fixture now uses a permanently pending handler on a temporary file database
+and checks bounded failure. All 100 engine edge-case tests, 100 isolated timeout
+stress runs and targeted Clippy pass. Production runtime code is unchanged.
+Stress also exposed a separate in-memory SQLite connection-lifetime issue,
+tracked below rather than treated as fixed by changing this fixture's database.
+
 ### DME135 — Run reads, cancellation and legacy notifications need owner boundaries
 
 Real catalog materializations exposed a second ownership gap: legacy lifecycle
@@ -3023,3 +3032,63 @@ tests and 32 strict-concurrency Swift tests linked to the rebuilt macOS native
 library pass; fresh generation matches all five committed binding copies.
 Public foreign run handles, scoped approval/listener delivery and the remaining
 ADR S1–S12 rollout are still open.
+
+### DME136 — Waiting-step answers need one owner-bound commit
+
+Two real legacy lifecycle regressions reproduced additional mutation gaps.
+Rejecting the signal insert left newly merged answer fields in workflow data,
+and naming a different step still merged output and woke the waiting instance.
+The signal failure reproduction uses an actual SQLite insertion trigger.
+
+The required storage completion operation now checks mobile ownership, waiting
+state, observed row version and the current step inside the same transaction
+that updates context, inserts the signal and schedules the next tick. A failed
+insert rolls all changes back. Context and signal encryption are forwarded as
+one operation; foreign/terminal/stale rows cannot be mutated. Legacy completion
+also validates its pending step and refuses non-object context instead of
+indexing arbitrary JSON. Its existing output-merge behavior is preserved for
+accepted answers.
+
+The internal catalog run view additionally requires the version from the
+caller's waiting snapshot, rather than silently accepting a reply against a
+newer snapshot. It retains its original runtime/session and rechecks local close
+before publishing results. This does not add a version argument to the existing
+legacy foreign API; a new public scoped reply contract remains part of the SDK
+rollout. The engine's human-choice validation still occurs when consuming the
+answer signal.
+
+The initial stricter implementation incorrectly used the shared `current_step`
+stamp as authority for every workflow. A real two-branch human-input workflow
+proved that this rejects a valid pending branch: tree evaluators share that
+telemetry slot. Completion now authorizes a durable waiting step node for tree
+workflows and uses the current-step stamp only when no execution tree exists.
+A completed tree branch cannot regain authority from a stale shared stamp.
+The real workflow can answer both branches in either order and finish normally.
+
+All 16 plain/encrypted SQLite/PostgreSQL completion regression legs pass with
+PostgreSQL required and running. They verify successful context/signal/wake
+commits, stale versions and replay, wrong steps, foreign/terminal targets, and
+full rollback after a signal-ID collision. Scoped mobile tests verify four
+account/catalog combinations and retirement/cancellation while the completion
+operation is paused before storage authorization. All 629 mobile unit tests and
+109 integration checks pass, as do all 239 storage unit tests. Workspace/all-target
+Clippy, formatting, documentation and SDK packaging checks also pass.
+Fresh native generation matches all five
+committed binding copies. All 33 strict-concurrency Swift wrapper tests pass
+against the rebuilt macOS library, including real committed-binding calls that
+complete both parallel branches in either order and prove an unknown step makes
+no context/state/version changes. Hosted CI remains pending for this change.
+
+### DME137 — In-memory SQLite state can disappear after connection recycling (open)
+
+An isolated stress run of the zero-timeout test failed after 17 passes with
+`no such table: task_instances` in the evaluator. The timeout encloses
+asynchronous claim verification; cancellation can recycle SQLite's sole pooled
+in-memory connection, whose destruction also destroys that database. This is
+separate from the deadline fixture's nondeterministic completion expectation.
+The file-backed fixture isolates that test; it does not fix memory storage.
+
+Add a deterministic physical-connection retirement regression and retain memory
+database lifetime independently of a recycled pooled connection. The fix must
+also preserve pool-alias lifetime and explicit bounded close, rather than
+retaining a permanent global keeper connection. This finding remains open.
