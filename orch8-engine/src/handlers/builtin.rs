@@ -360,7 +360,7 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("llm_call", super::llm::handle_llm_call);
     registry.register("tool_call", super::tool_call::handle_tool_call);
     registry.register("mcp_call", super::mcp::handle_mcp_call);
-    registry.register("agent", super::agent::handle_agent);
+    registry.register_with_deferred_effect_admission("agent", super::agent::handle_agent);
     registry.register("embed", super::memory::handle_embed);
     registry.register("memory_store", super::memory::handle_memory_store);
     registry.register("memory_search", super::memory::handle_memory_search);
