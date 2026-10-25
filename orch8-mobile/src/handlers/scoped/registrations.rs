@@ -88,7 +88,7 @@ fn gate<K: Eq + Hash>(
 
 // Account/catalog keys omit the epoch. The owning Binding declares this after
 // the foreign object, retaining its charges through final host destruction.
-pub(super) struct Permit {
+pub(in crate::handlers) struct Permit {
     _catalog: OwnedSemaphorePermit,
     _account: OwnedSemaphorePermit,
     _global: OwnedSemaphorePermit,

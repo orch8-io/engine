@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Owned scoped callback retirement
+
+- Connect scoped host-reference cleanup to mobile engine shutdown and final drop.
+  A bounded process executor continues cleanup after observer cancellation or
+  caller runtime teardown, sharing physical account/process admission with calls.
+- Retain registration charges through callback/destructor panic payload disposal
+  and Apple autorelease-pool draining. Returned callback panic errors omit the
+  host panic payload.
+- Let confirmed retired account epochs queue cleanup behind live callbacks.
+  Pending registrations release their host references without waiting for DB
+  preflight and cannot publish after retirement. Local runtime stop preserves
+  durable accounts used by another owner. Public scoped APIs remain gated.
+
 ### Shared scoped handler registration limits
 
 - Retain process, stable-account and catalog registration charges across router

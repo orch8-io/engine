@@ -2510,3 +2510,62 @@ heap/caller allocation bounds. They do not route arbitrary foreign destruction
 through bounded cleanup, expose public scoped execution, or prove cross-process
 callback capacity. Bounded account/runtime close and all remaining ADR/runtime/SDK
 gates stay open. The broader review is still in progress.
+
+
+### DME125 — Scoped shutdown retained host objects or destroyed them on the caller
+
+Both initial regressions failed: final router drop synchronously entered a held
+foreign destructor, and shutdown retained idle registered host objects while the
+router remained referenced. Scoped cleanup had an explicit retired-epoch helper,
+but runtime ownership and final drop did not drive it. That helper also depended
+on the caller's Tokio blocking pool.
+
+A bounded process-owned retirement executor now owns accepted reference release.
+It has two workers and shares physical global/two and stable-account/one permits
+with native callbacks. Every nonempty queued group owns distinct accepted
+registration charges, bounding pending references/groups by the process limit.
+It skips busy accounts, gives ready cleanup priority over fresh callbacks, sleeps
+on admission/change notifications, and tolerates reentrant destruction and Rust
+panic payloads that themselves panic. Observers only watch completion; dropping
+them or shutting down their Tokio runtime does not abort physical cleanup.
+
+Production MobileEngine construction owns the scoped router. Shutdown and final
+engine/router drop transfer its accepted references to retirement without storage
+I/O or foreign destruction under the registry mutex. Local shutdown does not
+retire a durable account used by another runtime. Confirmed retired epochs have
+a queued cleanup operation that waits behind live callbacks without requiring a
+caller retry after admission; repeated observers retain the same completion.
+Old-epoch cleanup cannot detach reopened-epoch bindings.
+
+The registry now uses short synchronous critical sections. Pending registration
+references reside in that registry, with weak operation identities retained to
+prevent address reuse. Shutdown can release accepted host references even while
+DB connection acquisition is blocked. Weak account/epoch fences prevent a
+preflight that read before retirement from publishing after cleanup. Cancelled
+preflight transfers its accepted references to the same retirement executor.
+
+Callback bodies, panic-payload disposal and reference releases drain an Apple
+autorelease pool before returning physical admission. Registration charges are
+retained through that drain. The thread-local pool token is confined to one
+synchronous stack and is neither Send nor Sync; only its small audited runtime
+boundary permits unsafe code. Two actual NSObject/zeroing-weak canaries prove
+normal and unwind draining. Apple documents this requirement for long-lived
+secondary threads in its [autorelease-pool guidance](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/MemoryMgmt/Articles/mmAutoreleasePools.html).
+Callback panic payloads no longer escape the physical call frame or appear in
+returned permanent-error messages.
+
+The final macOS suite passed 562 unit tests plus 109 integration/example/coverage
+tests; workspace/all-target Clippy with warnings denied passed. Coverage includes
+blocked DB preflight, cancellation, repeated close, queued cleanup after runtime
+teardown, held calls/destructors, another account progressing, retired/reopened
+epochs, reentrant drop, nested panic payloads and real engine shutdown/drop wiring.
+The rebuilt macOS native library and freshly generated UniFFI bindings passed
+all 32 Swift wrapper tests with strict concurrency and warnings denied. Hosted
+CI must pass on this exact candidate before merge; iOS validation is separate.
+
+This bounds engine-owned accepted references and synchronous native work, not
+arbitrary host heap allocations or work a host starts outside its callback.
+Arbitrary non-returning host code keeps its physical charges. Other callback
+classes, full scoped materialization/builtin/read/recovery/listener ownership,
+actual scoped SDK/platform cases, legacy migration and independent-process
+resource limits remain open. ADR S1-S12 and the overall review are not complete.

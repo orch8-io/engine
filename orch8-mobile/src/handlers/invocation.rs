@@ -63,20 +63,82 @@ impl PhysicalCall {
         input: String,
         runtime: tokio::runtime::Handle,
     ) -> Result<String, StepError> {
-        if self.ownership.stop.is_cancelled() {
-            return Err(StepError::ClaimLost);
-        }
-        let claim = &self.ownership.claim;
-        let effect_admission = &self.ownership.effect_admission;
-        let entry = &self.finish.0;
-        // Borrow the proof for verification: its owner/backend must remain
-        // captured until physical native completion, even after detach.
+        let Self {
+            handler,
+            _binding: binding,
+            finish,
+            mut ownership,
+        } = self;
+        let permits = ownership._permits.take();
+        let registration = binding
+            .as_ref()
+            .map(|binding| binding.registration_charge());
+        // Only owned Rust strings/errors leave this pool. Foreign references,
+        // panic payloads and Apple temporaries finish before admission returns.
+        let result = super::pool::run(|| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                invoke_native(handler.as_ref(), &ownership, &finish, name, input, runtime)
+            }));
+            let result = match result {
+                Ok(result) => result,
+                Err(payload) => {
+                    super::pool::dispose_panic(payload);
+                    Err(StepError::Permanent {
+                        message: "handler task panicked".into(),
+                        details: None,
+                    })
+                }
+            };
+            super::pool::release(handler);
+            super::pool::release(binding);
+            result
+        });
+        drop(registration);
+        drop(ownership);
+        drop(permits);
+        drop(finish);
+        result
+    }
+}
+
+fn invoke_native(
+    handler: &dyn StepHandler,
+    ownership: &NativeOwnership,
+    finish: &FinishOnDrop,
+    name: String,
+    input: String,
+    runtime: tokio::runtime::Handle,
+) -> Result<String, StepError> {
+    if ownership.stop.is_cancelled() {
+        return Err(StepError::ClaimLost);
+    }
+    let claim = &ownership.claim;
+    let effect_admission = &ownership.effect_admission;
+    let entry = &finish.0;
+    // Borrow the proof for verification: its owner/backend must remain
+    // captured until physical native completion, even after detach.
+    if let Some(claim) = claim {
+        runtime.block_on(claim.verify())?;
+    }
+    // Cancellation may arrive while the database preflight is pending.
+    // Check at host admission, after that await, before any native code.
+    if ownership.stop.is_cancelled()
+        || entry
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .detached
+    {
+        return Err(StepError::ClaimLost);
+    }
+    if let Some(admission) = effect_admission {
+        runtime.block_on(admission.admit())?;
+        // The durable dispatch itself can wait on storage. Recheck the
+        // claim/cancellation afterward; this window stays conservative.
         if let Some(claim) = claim {
             runtime.block_on(claim.verify())?;
         }
-        // Cancellation may arrive while the database preflight is pending.
-        // Check at host admission, after that await, before any native code.
-        if self.ownership.stop.is_cancelled()
+        if ownership.stop.is_cancelled()
             || entry
                 .state
                 .lock()
@@ -85,36 +147,17 @@ impl PhysicalCall {
         {
             return Err(StepError::ClaimLost);
         }
-        if let Some(admission) = effect_admission {
-            runtime.block_on(admission.admit())?;
-            // The durable dispatch itself can wait on storage. Recheck the
-            // claim/cancellation afterward; this window stays conservative.
-            if let Some(claim) = claim {
-                runtime.block_on(claim.verify())?;
-            }
-            if self.ownership.stop.is_cancelled()
-                || entry
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .detached
-            {
-                return Err(StepError::ClaimLost);
-            }
-        }
-        self.handler
-            .execute(name, input)
-            .map_err(|error| match error {
-                HandlerError::Retryable { message } => StepError::Retryable {
-                    message,
-                    details: None,
-                },
-                HandlerError::Permanent { message } => StepError::Permanent {
-                    message,
-                    details: None,
-                },
-            })
     }
+    handler.execute(name, input).map_err(|error| match error {
+        HandlerError::Retryable { message } => StepError::Retryable {
+            message,
+            details: None,
+        },
+        HandlerError::Permanent { message } => StepError::Permanent {
+            message,
+            details: None,
+        },
+    })
 }
 
 pub(super) struct NativeInvocation {

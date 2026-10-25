@@ -218,6 +218,7 @@ pub struct InstanceState_ {
 pub struct MobileEngine {
     // --- Core engine state ---
     storage: Arc<dyn StorageBackend>,
+    catalog_handlers: Arc<handlers::scoped::CatalogHandlers>,
     handlers: StdRwLock<Arc<HandlerRegistry>>,
     config: MobileEngineConfig,
     scheduler_config: orch8_types::config::SchedulerConfig,
@@ -262,6 +263,7 @@ impl Drop for MobileEngine {
         // Retained registries must lose local host admission even if they
         // outlive the engine. Durable account retirement is a separate action.
         self.cancel.cancel();
+        self.catalog_handlers.shutdown();
     }
 }
 
@@ -462,8 +464,12 @@ impl MobileEngine {
 
         info!(db_path = %db_path, "mobile engine initialized");
 
+        let cancel = CancellationToken::new();
+        let catalog_handlers =
+            handlers::scoped::CatalogHandlers::new(mobile_storage, storage.clone(), cancel.clone());
         let engine = Arc::new(Self {
             storage,
+            catalog_handlers,
             handlers: StdRwLock::new(Arc::new(builtins::registry_with(
                 builtins::DEFAULT_BUILTINS,
             ))),
@@ -471,7 +477,7 @@ impl MobileEngine {
             scheduler_config,
             semaphore,
             sequence_cache,
-            cancel: CancellationToken::new(),
+            cancel,
             runtime: rt,
             notifier: Arc::new(notifier::MobileNotifier::new()),
             tick_controller: tick_controller::TickController::new(),
@@ -1136,6 +1142,7 @@ impl MobileEngine {
     pub fn shutdown(&self) {
         info!("mobile engine shutting down");
         self.cancel.cancel();
+        self.catalog_handlers.shutdown();
         self.tick_controller.cancel_loop();
         let retired_provider = self.credential.close();
         let retired_listener = self.notifier.close();

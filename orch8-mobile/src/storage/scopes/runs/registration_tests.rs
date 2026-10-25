@@ -20,6 +20,17 @@ async fn bind(hub: &CatalogHandlers, owner: &CatalogScope, name: &str) -> Result
         .await
 }
 
+async fn close(hub: Arc<CatalogHandlers>) {
+    let receipts = hub.close();
+    drop(hub);
+    for receipt in receipts {
+        tokio::time::timeout(Duration::from_secs(5), receipt)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn sibling_router_cannot_multiply_catalog_registration_allowance() {
     let (storage, sqlite) = fixture().await;
@@ -32,7 +43,7 @@ async fn sibling_router_cannot_multiply_catalog_registration_allowance() {
             .unwrap();
     }
     let overlap = bind(&successor, &owner, "new-runtime").await;
-    drop(hub);
+    close(hub).await;
     if overlap.is_err() {
         bind(&successor, &owner, "new-runtime").await.unwrap();
     }
@@ -88,7 +99,7 @@ async fn global_registration_allowance_is_shared_across_router_replacements() {
     let successor = hub.sibling();
     let owner = scope(&storage, "another-account", "one").await;
     let overlap = bind(&successor, &owner, "new-runtime").await;
-    drop(hub);
+    close(hub).await;
     if overlap.is_err() {
         bind(&successor, &owner, "new-runtime").await.unwrap();
     }
@@ -197,10 +208,10 @@ async fn concurrent_routers_cannot_overbook_the_last_catalog_slot() {
         "{results:?}"
     );
     if results[0].is_ok() {
-        drop(left);
+        close(left).await;
         bind(&right, &owner, "last").await.unwrap();
     } else {
-        drop(right);
+        close(right).await;
         bind(&left, &owner, "last").await.unwrap();
     }
 }
@@ -237,6 +248,7 @@ async fn refused_registration_rolls_back_other_scope_and_process_charges() {
 
 #[tokio::test]
 async fn production_router_construction_shares_registration_ownership() {
+    let _serial = CatalogHandlers::shared_test_gate().lock_owned().await;
     let (storage, sqlite) = fixture().await;
     let owner = scope(&storage, "alice", "one").await;
     let hub = CatalogHandlers::new(
@@ -255,7 +267,7 @@ async fn production_router_construction_shares_registration_ownership() {
             .unwrap();
     }
     let overlap = bind(&successor, &owner, "another-router").await;
-    drop(hub);
+    close(hub).await;
     if overlap.is_err() {
         bind(&successor, &owner, "another-router").await.unwrap();
     }
@@ -263,4 +275,5 @@ async fn production_router_construction_shares_registration_ownership() {
         overlap.is_err(),
         "production constructors selected independent registration budgets"
     );
+    close(successor).await;
 }

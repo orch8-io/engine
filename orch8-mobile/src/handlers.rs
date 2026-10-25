@@ -12,6 +12,7 @@ use crate::error::HandlerError;
 use crate::stragglers::{Stragglers, device_timeout_error};
 
 mod invocation;
+mod pool;
 use invocation::{NativeClaim, NativeInvocation, NativeOwnership};
 // Internal scoped dispatcher; public scoped execution is still gated.
 #[allow(dead_code)]
@@ -153,8 +154,8 @@ async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<
     );
 
     let result = match tokio::time::timeout(timeout, call.result()).await {
-        Ok(joined) => joined.map_err(|e| StepError::Permanent {
-            message: format!("handler task panicked: {e}"),
+        Ok(joined) => joined.map_err(|_error| StepError::Permanent {
+            message: "handler task panicked".into(),
             details: None,
         }),
         Err(_elapsed) => {
@@ -601,6 +602,22 @@ mod tests {
             !stragglers.blocks("foreign"),
             "released once the call returned"
         );
+    }
+
+    #[tokio::test]
+    async fn returned_panic_error_does_not_include_the_host_panic_payload() {
+        struct Secret;
+        impl StepHandler for Secret {
+            fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
+                panic!("NATIVE_PANIC_PRIVATE_CANARY");
+            }
+        }
+        let result = invoke(Arc::new(Secret), Duration::from_secs(5)).await;
+        let Err(StepError::Permanent { message, .. }) = result else {
+            panic!("expected permanent panic error");
+        };
+        assert!(message.contains("handler task panicked"));
+        assert!(!message.contains("NATIVE_PANIC_PRIVATE_CANARY"));
     }
 }
 
