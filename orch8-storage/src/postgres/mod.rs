@@ -1268,6 +1268,13 @@ impl crate::OutputStore for PostgresStorage {
         outputs::get_latest_completed(self, instance_id).await
     }
 
+    async fn get_latest_diagnostic_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_latest_diagnostic(self, instance_id).await
+    }
+
     async fn get_all_outputs(
         &self,
         instance_id: InstanceId,

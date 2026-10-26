@@ -23,6 +23,8 @@ orch8_storage::backend_test!(kinds = [sqlite, postgres], async fn current_output
     assert_eq!(projected.len(), 2049);
     assert_eq!(projected.first().unwrap().block_id.as_str(), "step-0000");
     assert_eq!(projected.last().unwrap().block_id.as_str(), "step-2048");
+    let diagnostics = b.storage.get_latest_diagnostic_outputs(instance.id).await.unwrap();
+    assert_eq!(diagnostics.iter().map(|row| row.id).collect::<Vec<_>>(), projected.iter().map(|row| row.id).collect::<Vec<_>>());
 });
 
 orch8_storage::backend_test!(async fn current_outputs_match_history_projection(b) {
@@ -31,6 +33,7 @@ orch8_storage::backend_test!(async fn current_outputs_match_history_projection(b
     let instance = InstanceBuilder::for_sequence(&sequence).due_now().build();
     b.storage.create_instance(&instance).await.unwrap();
     assert!(b.storage.get_latest_completed_outputs(instance.id).await.unwrap().is_empty());
+    assert!(b.storage.get_latest_diagnostic_outputs(instance.id).await.unwrap().is_empty());
     let at = Utc::now();
     let make = |id: u128, block: &str, reference: Option<&str>, offset: i64| BlockOutput {
         id: Uuid::from_u128(id), instance_id: instance.id, block_id: BlockId::new(block),
@@ -58,14 +61,20 @@ orch8_storage::backend_test!(async fn current_outputs_match_history_projection(b
     b.storage.save_block_output(&foreign).await.unwrap();
     if matches!(b.kind, orch8_storage::testing::backends::BackendKind::Postgres | orch8_storage::testing::backends::BackendKind::EncryptedPostgres) {
         // PostgreSQL's partitioned key also includes the instance identity.
-        let mut collision = foreign.clone();
-        collision.id = Uuid::from_u128(4);
-        b.storage.save_block_output(&collision).await.unwrap();
+        for id in [4,100] {
+            let mut collision = foreign.clone();
+            collision.id = Uuid::from_u128(id);
+            b.storage.save_block_output(&collision).await.unwrap();
+        }
     }
 
     let projected = b.storage.get_latest_completed_outputs(instance.id).await.unwrap();
     let expected: Vec<_> = [4,9,10,11,12,13,14,15,16,455].into_iter().map(Uuid::from_u128).collect();
     assert_eq!(projected.iter().map(|row| row.id).collect::<Vec<_>>(),expected);
+    let diagnostics = b.storage.get_latest_diagnostic_outputs(instance.id).await.unwrap();
+    let expected_diagnostics: Vec<_> = [7,9,10,11,12,13,14,15,16,455,100].into_iter().map(Uuid::from_u128).collect();
+    assert_eq!(diagnostics.iter().map(|row| row.id).collect::<Vec<_>>(), expected_diagnostics);
+    assert!(diagnostics.iter().all(|row| row.output["_sentinel"] == true), "diagnostic projections must decrypt selected payloads");
     assert!(projected.iter().all(|row| row.output["_sentinel"] == true), "business fields are not sentinel metadata");
     assert_eq!(b.storage.get_all_outputs(instance.id).await.unwrap().len(), rows.len()+256, "history remains intact");
     assert_eq!(b.storage.get_latest_completed_outputs(other.id).await.unwrap()[0].id, foreign.id);

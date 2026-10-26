@@ -361,7 +361,7 @@ impl DurableEngine {
 
     async fn snapshot(&self, engine: &Engine, id: InstanceId) -> Result<String, String> {
         let instance = engine.get_instance(id).await.map_err(err)?;
-        let outputs = latest_outputs(engine.block_outputs(id).await.map_err(err)?, true);
+        let outputs = latest_outputs(engine.current_block_outputs(id).await.map_err(err)?, true);
         Ok(json!({
             "id": id.to_string(),
             "state": instance.state,

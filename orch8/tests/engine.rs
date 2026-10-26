@@ -850,6 +850,11 @@ async fn facade_is_tenant_scoped_on_shared_storage() {
         Err(orch8::Error::NotFound(_))
     ));
     assert!(matches!(
+        beta.current_block_outputs(id).await,
+        Err(orch8::Error::NotFound(_))
+    ));
+    assert!(alpha.current_block_outputs(id).await.unwrap().is_empty());
+    assert!(matches!(
         beta.send_signal(id, SignalType::Cancel, serde_json::json!({}))
             .await,
         Err(orch8::Error::NotFound(_))

@@ -361,6 +361,17 @@ impl Engine {
         Ok(instance.id)
     }
 
+    /// Current result per block, including retry diagnostics. In-progress
+    /// markers and interceptor/SLA metadata are excluded. Ordered by creation
+    /// time and UUID, with historical payloads omitted by the storage query.
+    pub async fn current_block_outputs(
+        &self,
+        id: InstanceId,
+    ) -> Result<Vec<orch8_types::output::BlockOutput>, Error> {
+        self.scoped_instance(id).await?;
+        Ok(self.inner.storage.get_latest_diagnostic_outputs(id).await?)
+    }
+
     /// List every block output recorded for an instance so far, in storage
     /// order. Useful for progress reporting while an instance runs (each
     /// completed step persists one output row) and for inspecting results

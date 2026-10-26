@@ -4395,3 +4395,65 @@ facade. Freshly rebuilt actual bindings pass all 13 packed Node tests and all
 and migration safety checks pass. Native diagnostic snapshots still have their separate
 history/diagnostic contract; per-payload byte bounds and the wider review matrix
 remain open. No published version, FFI ABI or release publication changes.
+
+### DME170 — Native snapshots still decoded superseded execution history
+
+[PRE-EXISTING, HIGH] Native `get()` and the snapshot returned by `run()` loaded
+all block-output history before retaining the latest visible values. The
+per-step business projection did not cover this diagnostic view, which also
+exposes the latest retry error while another attempt is scheduled. The actual
+native-core regression failed because damaged obsolete JSON was decoded before
+a valid current retry result could be returned.
+
+A separate indexed diagnostic projection now preserves retry rows, excluding
+in-progress/interceptor/SLA records before selecting each winner. The storage
+queries share their key-stream and dialect logic with the business projection,
+with literal eligibility predicates and a matching diagnostic index in migration
+126. The Rust facade exposes tenant-checked `current_block_outputs`; the native
+snapshot uses that current view. Selected damaged payloads still fail closed.
+Custom backends retain a correct history-based fallback.
+
+The nine storage contracts now exercise both views, including 2,049 distinct
+blocks, encrypted reads, foreign instance UUID collisions and marker/timestamp
+semantics. Actual plans pass indexed-read bounds on 1,536 business/retry/trace
+rows. The facade tenant test passes, as do all 41 native callback/claim/preflight/
+deadline tests, including the new damaged-history/current-diagnostic regression.
+All 15 migration contracts and strict all-target storage/engine/facade Clippy pass.
+Fresh actual bindings pass 14 packed Node tests and 20 Python extension tests
+with zero failures/skips. Node checks scheduled retry diagnostics without starting
+the next attempt; Python exercises damaged old/internal JSON through public
+`get` and zero-deadline `run`, then requires failure for a damaged selected result.
+
+These current-row read bounds do not impose a per-payload byte quota. Capsule
+exports and explicit historical APIs retain their separate history contracts;
+bounded export materialization, native byte quotas and the broader review matrix
+remain open. Public snapshot shape, published versions and FFI ABI are unchanged;
+no release was published.
+
+PR350's KMP/Apple bridge job 121787448101 was cancelled before runner assignment
+(runner id 0, no steps). The authorized retry created live job 121798193932 on the
+same tested head; its merge gate was restarted only after the replacement was
+visible. The retry succeeded and PR350 merged with all 25 checks and tested-tree
+equality proved. PR349 had already passed the same merge proof.
+
+### DME171 — Online prebuild guidance targeted a partitioned parent
+
+The newly written, unreleased migration 125 comment suggested concurrent index
+creation on `block_outputs`, which migration 074 partitions by instance. The
+PostgreSQL 14 baseline rejects that command (SQLSTATE 0A000). PostgreSQL documents
+[concurrent leaf builds followed by parent attachment](https://www.postgresql.org/docs/14/sql-createindex.html).
+
+The corrected 125/126 headers point to an executable psql prebuild. It discovers
+leaf tables, uses schema-qualified catalog ownership, skips completed valid
+parents and refuses invalid parent/prebuild indexes. Builds run in autocommit;
+the ordinary transactional migrations attach matching valid leaves. The change
+to 125 is comment-only and precedes release; no released migration is modified.
+
+A permanent regression creates and removes its own schema, uses migration 074's
+actual 16-leaf table definition, prebuilds 32 indexes, and applies both parent
+migrations transactionally. It verifies parent validity, attachment of the same
+32 index identities and unchanged physical file nodes, repeatability and retained
+data. A deliberately failed concurrent unique index (SQLSTATE 23505) verifies
+refusal, explicit repair and successful retry. It passes on PostgreSQL 14.23.
+The unit CI job now installs the psql client and runs this check against its test
+database. Workflow lint, documentation and migration-safety checks pass.

@@ -31,6 +31,34 @@ function runWorker(dir, mode) {
 
 const effects = (dir) => readFileSync(join(dir, 'effects.log'), 'utf8').trim().split('\n')
 
+test('current snapshots retain retry diagnostics while a later attempt is scheduled', withDir(async (dir) => {
+  const engine = await Engine.open(join(dir, 'app.db'))
+  let calls = 0
+  engine.handler('retry_snapshot', () => {
+    calls += 1
+    throw new Error('node retry diagnostic')
+  })
+  try {
+    await engine.deploy({ name: 'snapshot', blocks: [{
+      type: 'step', id: 'work', handler: 'retry_snapshot',
+      retry: { max_attempts: 3, initial_backoff: 3600000, max_backoff: 3600000 },
+    }] })
+    const instance = await engine.start('snapshot')
+    const deadline = performance.now() + 5000
+    let snapshot
+    do {
+      snapshot = await engine.run(instance, { timeoutMs: 100 })
+      if (snapshot.state === 'scheduled' && JSON.stringify(snapshot.outputs.work ?? null).includes('node retry diagnostic')) break
+    } while (performance.now() < deadline)
+    assert.equal(snapshot.state, 'scheduled')
+    assert.match(JSON.stringify(snapshot.outputs.work ?? null), /node retry diagnostic/)
+    assert.deepEqual((await engine.get(instance)).outputs, snapshot.outputs)
+    assert.equal(calls, 1, 'reading a diagnostic must not start the next attempt')
+  } finally {
+    await engine.close()
+  }
+}))
+
 test('a second native handle cannot open a live database owner', withDir(async (dir) => {
   const path = join(dir, 'app.db')
   const first = await Engine.open(path)

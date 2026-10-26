@@ -74,7 +74,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 125;
+pub const STORAGE_SCHEMA_VERSION: u32 = 126;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -1444,6 +1444,19 @@ pub trait OutputStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<BlockOutput>, StorageError> {
         Ok(current_outputs::from_history(
+            self.get_all_outputs(instance_id).await?,
+        ))
+    }
+
+    /// Latest current result per block, including retry diagnostics. Excludes
+    /// in-progress markers and interceptor/SLA metadata before choosing each
+    /// winner. Ordered by `(created_at, id)`; the provided database backends
+    /// select rows before decoding payloads. Intended for current snapshots.
+    async fn get_latest_diagnostic_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        Ok(current_outputs::diagnostic_from_history(
             self.get_all_outputs(instance_id).await?,
         ))
     }

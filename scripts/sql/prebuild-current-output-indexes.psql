@@ -1,0 +1,53 @@
+-- Run once before migrations 125/126, in psql with autocommit enabled.
+-- Leaf builds are concurrent; the migrations attach matching indexes when
+-- creating their partitioned parents. Do not use --single-transaction.
+\set ON_ERROR_STOP on
+\set AUTOCOMMIT on
+
+DO $preflight$
+DECLARE
+    table_namespace oid;
+    invalid_indexes text;
+BEGIN
+    SELECT relnamespace INTO table_namespace FROM pg_class
+    WHERE oid = 'block_outputs'::regclass AND relkind = 'p';
+    IF table_namespace IS NULL THEN
+        RAISE EXCEPTION 'Expected partitioned block_outputs (migration 074)';
+    END IF;
+    SELECT string_agg(i.indexrelid::regclass::text, ', ') INTO invalid_indexes
+    FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE i.indrelid IN (
+        SELECT relid FROM pg_partition_tree('block_outputs'::regclass)
+    ) AND NOT i.indisvalid
+      AND (c.relname IN ('idx_block_outputs_current', 'idx_block_outputs_diagnostics')
+        OR substr(c.relname::text, 1, 10) IN ('orch8_boc_', 'orch8_bod_'));
+    IF invalid_indexes IS NOT NULL THEN
+        RAISE EXCEPTION 'Repair invalid output prebuild indexes before retrying: %', invalid_indexes;
+    END IF;
+END
+$preflight$;
+
+WITH wanted(parent_name, tag, predicate) AS (
+    VALUES
+      ('idx_block_outputs_current', 'boc',
+       $p$(output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__')) AND substr(block_id, 1, 13) <> '_interceptor:' AND substr(block_id, 1, 5) <> '_sla:'$p$),
+      ('idx_block_outputs_diagnostics', 'bod',
+       $p$(output_ref IS NULL OR output_ref <> '__in_progress__') AND substr(block_id, 1, 13) <> '_interceptor:' AND substr(block_id, 1, 5) <> '_sla:'$p$)
+), root AS (
+    SELECT relnamespace FROM pg_class WHERE oid = 'block_outputs'::regclass
+)
+SELECT format(
+    'CREATE INDEX CONCURRENTLY IF NOT EXISTS %I ON %s (instance_id, block_id, created_at DESC, id DESC) WHERE %s;',
+    'orch8_' || wanted.tag || '_' || leaf.relid::oid,
+    leaf.relid,
+    wanted.predicate
+)
+FROM pg_partition_tree('block_outputs'::regclass) leaf
+CROSS JOIN wanted CROSS JOIN root
+WHERE leaf.isleaf AND NOT EXISTS (
+    SELECT 1 FROM pg_class c JOIN pg_index i ON i.indexrelid = c.oid
+    WHERE c.relnamespace = root.relnamespace
+      AND c.relname = wanted.parent_name AND i.indisvalid
+)
+ORDER BY leaf.relid::oid, wanted.tag
+\gexec
