@@ -485,8 +485,8 @@ async fn cancellation_or_local_shutdown_during_admission_keeps_uncertain_dispatc
         let (_sqlite, mut ctx) = claimed_context().await;
         let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
         ctx.storage = storage.clone();
-        // First CAS prepares; second begins the durable dispatch window.
-        let pause = faults.on("cas_effect_receipt").nth(2).pause();
+        // Preparation uses CAS; owned dispatch is the final admission window.
+        let pause = faults.on("dispatch_effect_receipt_owned").nth(1).pause();
         let calls = Arc::new(AtomicUsize::new(0));
         let stragglers = Arc::new(Stragglers::default());
         let stop = tokio_util::sync::CancellationToken::new();
@@ -547,11 +547,17 @@ async fn native_admission_storage_failures_preserve_type_and_commit_ambiguity() 
         let (storage, faults) = FaultStorage::wrap(ctx.storage.clone());
         ctx.storage = storage.clone();
         if ambiguous {
-            faults.on("cas_effect_receipt").nth(2).fail_after_commit(
-                orch8_types::error::StorageError::Connection("ambiguous native admission".into()),
-            );
+            faults
+                .on("dispatch_effect_receipt_owned")
+                .nth(1)
+                .fail_after_commit(orch8_types::error::StorageError::Connection(
+                    "ambiguous native admission".into(),
+                ));
         } else {
-            faults.on("cas_effect_receipt").nth(2).fail_transient();
+            faults
+                .on("dispatch_effect_receipt_owned")
+                .nth(1)
+                .fail_transient();
         }
         let calls = Arc::new(AtomicUsize::new(0));
         let mut registry = HandlerRegistry::new();

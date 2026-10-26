@@ -4582,3 +4582,51 @@ activation/redelivery case. Strict all-target Clippy passes for types, storage,
 engine, facade and mobile; format, diff and documentation checks pass. Hosted
 checks on the exact PR head remain the merge gate; this is not a full platform
 artifact or release certification.
+
+
+### DME175 — Prepared effects could dispatch after their authority expired
+
+Portable receipt review exposed a prerequisite race: final dispatch compared only
+the receipt's prepared state. A retained native admission could advance it after
+its instance paused or continuity entered `transferring`. Both regressions first
+reproduced successful dispatch after that fence. A replaced scheduler claim could
+likewise be adopted unless the original token traveled through preparation.
+
+A new storage operation checks captured tenant/instance, continuity owner runtime
+and epoch, live state, and original claim in the same transaction as receipt
+admission. SQLite also checks durable mobile account/catalog ownership. PostgreSQL
+locks ownership and instance rows before reading and transitioning the receipt;
+guarded calls coordinate with the existing duplicate-dispatch lock. A blocked
+writer regression observes the PostgreSQL lock wait before committing a changed
+owner or claim, then requires stale admission and unchanged prepared evidence.
+
+Engine step and worker enqueue paths forward their captured claim;
+native admissions retain it without reloading a replacement. Explicit unclaimed
+public step helpers and worker recovery keep their documented no-claim mode,
+while still requiring live instance and continuity ownership. A safely rejected
+prepared admission reports claim loss and remains prepared; its fresh owner can
+reuse it. Already dispatched/unknown evidence retains its existing classification.
+
+Both guarded and unguarded dispatch use the authority transaction. Unguarded
+receipt lookup uses its primary key; invariant evidence is not loaded for an
+empty guard set. Receipt identity cannot be substituted during admission, including replacement
+of a prepared row under the same logical ID. Native
+cancellation and before/after-commit fault tests target this new atomic boundary.
+Shared step admission removes duplicate dry-run/claim plumbing from enqueue and
+tree-handler paths. Mailbox delegation remains a grant-authorized unclaimed
+action: its stored waiting proxy timestamp is not a scheduler lease. The durable
+proxy reload/retry case is exercised, rather than relying on its unstored fixture. Custom backends fail closed until they implement owned dispatch.
+
+This closes an admission prerequisite for portable effect recovery. It does not
+yet carry full receipts across runtimes or establish an atomic source export cut;
+those remain required alongside pending events, waits, family state, source byte
+bounds and the full scoped/platform completion matrix.
+
+
+DME175 validation: 103 passing targeted results (10 storage authority/concurrency,
+17 engine guard, 24 distributed-worker/delegation, 11 mobile native-admission,
+41 facade native claim/deadline/capacity/preflight), strict all-target Clippy for
+storage/engine/facade/mobile, and fresh actual 14 Node plus 20 Python tests. The
+proxy retry now reloads durable storage as the API does; a stale fixture could
+otherwise conceal treating a waiting timestamp as a live claim. Format, diff and
+documentation checks pass. Full platform/release certification remains open.

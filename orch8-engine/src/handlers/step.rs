@@ -346,7 +346,7 @@ async fn run_step_core(
     {
         None
     } else {
-        let mut guard = crate::effect_guard::EffectGuard::prepare(
+        let mut guard = crate::effect_guard::EffectGuard::prepare_with_claim(
             storage.as_ref(),
             &exec.tenant_id,
             exec.instance_id,
@@ -354,6 +354,7 @@ async fn run_step_core(
             &exec.handler_name,
             &exec.params,
             exec.attempt,
+            exec.claim_token,
         )
         .await?;
         if !deferred_effect && let Some(guard) = &mut guard {
