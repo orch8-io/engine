@@ -11,17 +11,15 @@ import Orch8Mobile
 @objc(Orch8Module)
 class Orch8Module: RCTEventEmitter {
     private let lock = NSLock()
-    private let initLock = NSLock()
     private var hasListeners = false
-    private var _engine: MobileEngine?
+    private let lifecycle = NativeEngineLifecycle<MobileEngine>(dispose: { $0.shutdown() })
+    private var invalidated = false
     private var handlerTimeoutMs: UInt64 = 30_000
     private let workQueue = DispatchQueue(label: "io.orch8.reactnative.work", qos: .utility, attributes: .concurrent)
     let pending = PendingHandlerCalls()
 
-    private var engine: MobileEngine? {
-        lock.lock(); defer { lock.unlock() }
-        return _engine
-    }
+    private var engine: MobileEngine? { lifecycle.engine }
+    private var isInvalidated: Bool { lock.lock(); defer { lock.unlock() }; return invalidated }
 
     override func supportedEvents() -> [String] {
         [
@@ -46,23 +44,19 @@ class Orch8Module: RCTEventEmitter {
     /// Releases the engine when the React bridge is torn down (reload, app
     /// teardown) so the SQLite file and worker threads are not leaked.
     override func invalidate() {
-        lock.lock()
-        let engine = _engine
-        _engine = nil
-        hasListeners = false
-        lock.unlock()
-        pending.failAll("React Native bridge invalidated")
-        if let engine {
-            workQueue.async { engine.shutdown() }
-        }
+        lock.lock(); invalidated = true; hasListeners = false; lock.unlock()
+        lifecycle.shutdown(permanent: true, retired: {
+            self.pending.failAll("React Native bridge invalidated")
+        }, complete: {})
         super.invalidate()
     }
 
     /// Emits a JS event; returns false when no JS listener is attached so
     /// callers can fail fast instead of waiting for the handler timeout.
     @discardableResult
-    func emit(_ name: String, _ body: [String: Any]) -> Bool {
-        lock.lock(); let listening = hasListeners; lock.unlock()
+    func emit(scope: NativeEngineScope, _ name: String, _ body: [String: Any]) -> Bool {
+        guard scope.isCurrent else { return false }
+        lock.lock(); let listening = hasListeners && !invalidated; lock.unlock()
         guard listening else { return false }
         sendEvent(withName: name, body: body)
         return true
@@ -168,31 +162,19 @@ class Orch8Module: RCTEventEmitter {
             syncApiKey: config["syncApiKey"] as? String ?? ""
         )
 
-        workQueue.async {
-            do {
-                // Serialize re-initialization and release the SQLite file held
-                // by a previous engine before opening a new one on the same path.
-                self.initLock.lock()
-                defer { self.initLock.unlock() }
-                self.lock.lock()
-                let previous = self._engine
-                self._engine = nil
-                self.lock.unlock()
-                if let previous {
-                    self.pending.failAll("engine re-initialized")
-                    previous.shutdown()
-                }
-                let engine = try MobileEngine(dbPath: dbPath, config: cfg)
-                engine.setListener(listener: RNEngineListener(module: self))
-                self.lock.lock()
-                self._engine = engine
-                self.handlerTimeoutMs = cfg.handlerTimeoutMs
-                self.lock.unlock()
-                resolve(nil)
-            } catch {
-                Orch8Errors.reject(reject, error, legacyCode: "INIT_ERROR")
-            }
-        }
+        lifecycle.initialize(retired: { [weak self] in
+            self?.pending.failAll("engine re-initialized")
+        }, create: {
+            try MobileEngine(dbPath: dbPath, config: cfg)
+        }, configure: { [weak self] engine, scope in
+            guard let self, !self.isInvalidated else { throw NativeEngineLifecycleError.retired }
+            engine.setListener(listener: RNEngineListener(module: self, scope: scope))
+            self.lock.lock(); self.handlerTimeoutMs = cfg.handlerTimeoutMs; self.lock.unlock()
+        }, complete: { [weak self] error in
+            guard let self, !self.isInvalidated else { return }
+            if let error { Orch8Errors.reject(reject, error, legacyCode: "INIT_ERROR") }
+            else { resolve(nil) }
+        })
     }
 
     @objc(shutdown:rejecter:)
@@ -200,15 +182,12 @@ class Orch8Module: RCTEventEmitter {
         _ resolve: @escaping RCTPromiseResolveBlock,
         rejecter reject: @escaping RCTPromiseRejectBlock
     ) {
-        lock.lock()
-        let engine = _engine
-        _engine = nil
-        lock.unlock()
-        pending.failAll("engine shut down")
-        workQueue.async {
-            engine?.shutdown()
+        lifecycle.shutdown(permanent: false, retired: {
+            self.pending.failAll("engine shut down")
+        }, complete: { [weak self] in
+            guard let self, !self.isInvalidated else { return }
             resolve(nil)
-        }
+        })
     }
 
     @objc(resume:rejecter:)
@@ -281,7 +260,7 @@ class Orch8Module: RCTEventEmitter {
     ) {
         lock.lock(); let timeout = handlerTimeoutMs; lock.unlock()
         withEngine(reject) { engine in
-            try engine.registerHandler(name: name, handler: RNStepHandler(module: self, timeoutMs: timeout))
+            try engine.registerHandler(name: name, handler: RNStepHandler(module: self, timeoutMs: timeout, scope: try lifecycle.scope(for: engine)))
             resolve(nil)
         }
     }
@@ -299,7 +278,7 @@ class Orch8Module: RCTEventEmitter {
     ) {
         lock.lock(); let timeout = handlerTimeoutMs; lock.unlock()
         withEngine(reject) { engine in
-            engine.setTokenProvider(provider: RNTokenProvider(module: self, initialToken: initialToken, timeoutMs: timeout))
+            engine.setTokenProvider(provider: RNTokenProvider(module: self, initialToken: initialToken, timeoutMs: timeout, scope: try lifecycle.scope(for: engine)))
             resolve(nil)
         }
     }
@@ -735,18 +714,20 @@ final class PendingHandlerCalls: @unchecked Sendable {
 /// with `resolveStep` or `handlerTimeoutMs` elapses (retryable failure).
 final class RNStepHandler: StepHandler, @unchecked Sendable {
     private weak var module: Orch8Module?
+    private let scope: NativeEngineScope
     private let timeoutMs: UInt64
 
-    init(module: Orch8Module, timeoutMs: UInt64) {
+    init(module: Orch8Module, timeoutMs: UInt64, scope: NativeEngineScope) {
         self.module = module
+        self.scope = scope
         self.timeoutMs = timeoutMs
     }
 
     func execute(stepName: String, input: String) throws -> String {
-        guard let module else { throw HandlerError.Retryable(message: "React Native module released") }
+        guard scope.isCurrent, let module else { throw HandlerError.Retryable(message: "React Native module released") }
         let requestId = UUID().uuidString
         module.pending.open(requestId)
-        guard module.emit("orch8:executeStep", [
+        guard module.emit(scope: scope, "orch8:executeStep", [
             "requestId": requestId,
             "stepName": stepName,
             "input": input,
@@ -757,6 +738,7 @@ final class RNStepHandler: StepHandler, @unchecked Sendable {
         guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
             throw HandlerError.Retryable(message: "JS handler '\(stepName)' timed out after \(timeoutMs) ms")
         }
+        guard scope.isCurrent else { throw HandlerError.Retryable(message: "engine retired") }
         if let error = outcome.error {
             throw outcome.permanent
                 ? HandlerError.Permanent(message: error)
@@ -771,32 +753,36 @@ final class RNStepHandler: StepHandler, @unchecked Sendable {
 /// on a Rust blocking thread, so waiting here never blocks JS or the UI.
 final class RNTokenProvider: TokenProvider, @unchecked Sendable {
     private weak var module: Orch8Module?
+    private let scope: NativeEngineScope
     private let timeoutMs: UInt64
     private let lock = NSLock()
     private var token: String
 
-    init(module: Orch8Module, initialToken: String, timeoutMs: UInt64) {
+    init(module: Orch8Module, initialToken: String, timeoutMs: UInt64, scope: NativeEngineScope) {
         self.module = module
+        self.scope = scope
         self.token = initialToken
         self.timeoutMs = timeoutMs
     }
 
     func currentToken() -> String {
+        guard scope.isCurrent else { return "" }
         lock.lock(); defer { lock.unlock() }
         return token
     }
 
     func refreshToken() throws -> String {
-        guard let module else { throw MobileError.Engine(message: "React Native module released") }
+        guard scope.isCurrent, let module else { throw MobileError.Engine(message: "React Native module released") }
         let requestId = UUID().uuidString
         module.pending.open(requestId)
-        guard module.emit("orch8:refreshToken", ["requestId": requestId]) else {
+        guard module.emit(scope: scope, "orch8:refreshToken", ["requestId": requestId]) else {
             module.pending.cancel(requestId)
             throw MobileError.Engine(message: "No JS runtime available for token refresh")
         }
         guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
             throw MobileError.Engine(message: "JS token provider timed out after \(timeoutMs) ms")
         }
+        guard scope.isCurrent else { throw MobileError.Shutdown(message: "engine retired") }
         if let error = outcome.error { throw MobileError.Engine(message: error) }
         guard let fresh = outcome.output, !fresh.isEmpty else {
             throw MobileError.Engine(message: "JS token provider returned an empty token")
@@ -815,27 +801,29 @@ final class StaticTokenProvider: TokenProvider, @unchecked Sendable {
 
 final class RNEngineListener: EngineListener, @unchecked Sendable {
     private weak var module: Orch8Module?
+    private let scope: NativeEngineScope
 
-    init(module: Orch8Module) {
+    init(module: Orch8Module, scope: NativeEngineScope) {
         self.module = module
+        self.scope = scope
     }
 
     func onInstanceCompleted(instanceId: String, output: String) {
-        module?.emit("orch8:instanceCompleted", [
+        module?.emit(scope: scope, "orch8:instanceCompleted", [
             "instanceId": instanceId,
             "output": output,
         ])
     }
 
     func onInstanceFailed(instanceId: String, error: String) {
-        module?.emit("orch8:instanceFailed", [
+        module?.emit(scope: scope, "orch8:instanceFailed", [
             "instanceId": instanceId,
             "error": error,
         ])
     }
 
     func onStepPending(instanceId: String, stepName: String, handler: String) {
-        module?.emit("orch8:stepPending", [
+        module?.emit(scope: scope, "orch8:stepPending", [
             "instanceId": instanceId,
             "stepName": stepName,
             "handler": handler,

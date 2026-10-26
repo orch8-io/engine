@@ -3817,3 +3817,42 @@ or skips. Strict all-target core/mobile Clippy passes with warnings denied.
 The final worker preparation tests also verify an actual rejected release
 request, rather than only checking its absent start/outcome state. Workspace
 formatting, binding parity, SDK packaging, docs and whitespace checks pass.
+
+### DME153 — Fence Apple bridge initialization and release native ownership
+
+The React Native and Flutter Apple bridges could finish constructing and publish
+an engine after framework invalidation/detach. Their construction lock serialized
+initializers but did not permanently close the bridge. Retained listeners and
+credential callbacks also lacked a generation fence.
+
+Both packages now use the same independently shipped lifecycle controller.
+Reservations synchronously revoke the previous generation, while a serial lane
+constructs, configures, retires and releases native owners outside the state
+lock. Publication checks the reservation again after configuration. Permanent
+detach refuses subsequent initialization and disposes an in-flight candidate.
+Replacement releases the old ARC owner before constructing its successor.
+Scopes weakly reference the controller, so a retained callback cannot keep the
+engine alive. Ordinary engine operations use the independent work queue.
+
+Handlers, listeners and token providers carry the issued generation; retired
+callbacks and late replies are refused. Flutter checks queued events and obtains
+its method channel on the platform thread, and detachment unregisters both
+channel handlers. React Native invalidation fails pending replies and suppresses
+later lifecycle completions.
+
+Seven Foundation-only lifecycle tests run independently against each package's
+controller copy. They cover queued supersession, detach during construction and
+configuration, configuration failure/retry, replacement ARC ordering, lock
+reentry and weak ownership. A separate test compiles the actual Swift SDK against
+the same-commit Rust library, retains 17 closed controllers and scopes, reopens
+one file database with stable runtime identity, and verifies native peer release.
+Both copies keep file descriptors at 4 before and after the loop on macOS.
+
+CI also compiles the full Swift SDK, both actual iOS adapter source sets, and the
+React Native Objective-C extern declarations against iOS 16 simulator SDK APIs.
+Official React Native 0.88.0 and pinned Flutter engine frameworks are downloaded
+with SHA-256 verification; companion React headers come from its locked npm
+package. Swift warnings remain fatal, with only upstream Clang nullability and
+incomplete-umbrella diagnostics suppressed. This validates native compilation
+and host-runtime retirement, not device UI attach/detach integration or complete
+ADR-0002 readiness. No Rust/UniFFI protocol or release artifact is changed.

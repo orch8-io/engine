@@ -5,7 +5,7 @@ The development Rust/UniFFI surface exposes `MobileAccount`, `MobileCatalog` and
 typed objects and records. This API is not in the published v0.7.1 native binary.
 Use generated bindings with the native library built from the same source.
 The [common KMP facade](../packages/kmp/README.md#multiple-accounts-and-catalogs-development-sources)
-wraps these objects through direct JVM/Android adapters and a protocol-4 Swift
+wraps these objects through direct JVM/Android adapters and a protocol-6 Swift
 bridge. Release artifacts and pins, RN/Flutter facade integration, native scoped event
 listeners, account-owned worker/delegation and authenticated outcome reporting
 remain rollout requirements. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) S1–S12 are not complete.
@@ -74,12 +74,27 @@ state means missing or inconsistent evidence; it is not an execution outcome.
 Use `forget_cancelled_request` only to release a cancelled never-materialized
 request. Materialized executions keep their durable effect evidence.
 
+After the app/backend acknowledges a completed run, call
+`archive_after_acknowledgement` (`archiveAfterAcknowledgement` in Swift/Kotlin)
+with the acknowledgement reference. This explicit operation releases hot request
+admission and stored input while retaining compact operation-key deduplication and
+outcome receipts. The reference is supplied by the trusted host; the engine does
+not authenticate a backend acknowledgement. Retrying the same reference returns
+the original receipt; changing it is refused. Active or never-materialized runs
+cannot be archived. If native state was already purged, the receipt preserves
+that uncertainty instead of inventing an outcome. Archive does not delete native
+effect evidence or replace native instance garbage collection.
+
 ## Bounds
 
 Native scoped request admission shares durable ceilings of 4096 records/64 MiB
 globally, 1024 records/16 MiB per account, and 256 records/4 MiB per catalog.
-Each input is at most 1 MiB. Cancelled requests remain charged until explicitly
-forgotten. Existing physical handler, registration, token callback and execution
+Each input is at most 1 MiB. Completed runs remain charged until explicitly
+archived after acknowledgement; cancelled never-materialized requests remain
+charged until explicitly forgotten. Cold archive receipts have separate ceilings
+of 65,536 records/64 MiB globally, 32,768 records/32 MiB per account, and 16,384
+records/16 MiB per catalog. Exhaustion refuses new archives without evicting old
+deduplication or outcome evidence. Existing physical handler, registration, token callback and execution
 limits still apply. Reopening a session does not free an unsettled callback's
 capacity. Catalog sync shares one coordinator per engine, with one operation per
 account and two globally. Admission follows both the owned logical sync and the

@@ -10,17 +10,14 @@ import Orch8Mobile
 /// main thread.
 public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
     private let lock = NSLock()
-    private let initLock = NSLock()
-    private var _engine: MobileEngine?
+    private let lifecycle = NativeEngineLifecycle<MobileEngine>(dispose: { $0.shutdown() })
     private var handlerTimeoutMs: UInt64 = 30_000
     private var eventSink: FlutterEventSink?
+    private var eventChannel: FlutterEventChannel?
     fileprivate var channel: FlutterMethodChannel?
     private let workQueue = DispatchQueue(label: "io.orch8.flutter.work", qos: .utility, attributes: .concurrent)
 
-    private var engine: MobileEngine? {
-        lock.lock(); defer { lock.unlock() }
-        return _engine
-    }
+    private var engine: MobileEngine? { lifecycle.engine }
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(name: "io.orch8/mobile", binaryMessenger: registrar.messenger())
@@ -28,6 +25,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
 
         let instance = Orch8FlutterPlugin()
         instance.channel = channel
+        instance.eventChannel = eventChannel
         registrar.addMethodCallDelegate(instance, channel: channel)
         eventChannel.setStreamHandler(instance)
         // Publishing makes Flutter call `detachFromEngine(for:)` on teardown.
@@ -38,15 +36,12 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
     /// calls handlers that cannot answer (each would burn a retry attempt) and
     /// releases the SQLite file before a later attach opens another engine.
     public func detachFromEngine(for registrar: FlutterPluginRegistrar) {
-        lock.lock()
-        let engine = _engine
-        _engine = nil
-        lock.unlock()
+        channel?.setMethodCallHandler(nil)
         channel = nil
+        eventChannel?.setStreamHandler(nil)
+        eventChannel = nil
         eventSink = nil
-        if let engine {
-            workQueue.async { engine.shutdown() }
-        }
+        lifecycle.shutdown(permanent: true, retired: {}, complete: {})
     }
 
     // MARK: - Dispatch
@@ -55,6 +50,15 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         let args = call.arguments as? [String: Any] ?? [:]
         if call.method == "initialize" {
             handleInitialize(args, result: result)
+            return
+        }
+        if call.method == "shutdown" {
+            lifecycle.shutdown(permanent: false, retired: {}, complete: { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self, !self.lifecycle.isClosed else { return }
+                    result(nil)
+                }
+            })
             return
         }
         guard let engine = engine else {
@@ -70,7 +74,10 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
             } catch {
                 reply = Orch8Support.flutterError(error)
             }
-            DispatchQueue.main.async { result(reply) }
+            DispatchQueue.main.async {
+                guard !self.lifecycle.isClosed else { return }
+                result(reply)
+            }
         }
     }
 
@@ -81,17 +88,13 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
             lock.lock(); let timeout = handlerTimeoutMs; lock.unlock()
             try engine.registerHandler(
                 name: try a.string("name"),
-                handler: FlutterStepHandler(plugin: self, timeoutMs: timeout)
+                handler: FlutterStepHandler(plugin: self, timeoutMs: timeout, scope: try lifecycle.scope(for: engine))
             )
             return nil
         case "resume":
             engine.resume(); return nil
         case "pause":
             engine.pause(); return nil
-        case "shutdown":
-            lock.lock(); _engine = nil; lock.unlock()
-            engine.shutdown()
-            return nil
         case "tickOnce":
             let r = try engine.tickOnce()
             return [
@@ -186,7 +189,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
                 throw InvalidArgument(message: "token must not be empty")
             }
             let timeoutMs = (a["refreshTimeoutMs"] as? NSNumber)?.uint64Value ?? 30_000
-            engine.setTokenProvider(provider: FlutterTokenProvider(plugin: self, token: token, timeoutMs: timeoutMs))
+            engine.setTokenProvider(provider: FlutterTokenProvider(plugin: self, token: token, timeoutMs: timeoutMs, scope: try lifecycle.scope(for: engine)))
             return nil
         case "registerNode":
             let r = try engine.registerNode(capabilities: NodeCapabilities(
@@ -323,34 +326,25 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
             syncApiKey: args["syncApiKey"] as? String ?? ""
         )
 
-        workQueue.async {
-            let reply: Any?
-            do {
-                // Serialize re-initialization and release the SQLite file held
-                // by a previous engine before opening a new one on the same path.
-                self.initLock.lock()
-                defer { self.initLock.unlock() }
-                self.lock.lock()
-                let previous = self._engine
-                self._engine = nil
-                self.lock.unlock()
-                previous?.shutdown()
-                let engine = try MobileEngine(dbPath: dbPath, config: config)
-                engine.setListener(listener: FlutterEngineListener(plugin: self))
-                self.lock.lock()
-                self._engine = engine
-                self.handlerTimeoutMs = config.handlerTimeoutMs
-                self.lock.unlock()
-                reply = nil
-            } catch {
-                reply = Orch8Support.flutterError(error, legacyCode: "INIT_ERROR")
+        lifecycle.initialize(retired: {}, create: {
+            try MobileEngine(dbPath: dbPath, config: config)
+        }, configure: { [weak self] engine, scope in
+            guard let self else { throw NativeEngineLifecycleError.retired }
+            engine.setListener(listener: FlutterEngineListener(plugin: self, scope: scope))
+            self.lock.lock(); self.handlerTimeoutMs = config.handlerTimeoutMs; self.lock.unlock()
+        }, complete: { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, !self.lifecycle.isClosed else { return }
+                result(error.map { Orch8Support.flutterError($0, legacyCode: "INIT_ERROR") })
             }
-            DispatchQueue.main.async { result(reply) }
-        }
+        })
     }
 
-    fileprivate func sendEvent(_ event: [String: Any]) {
-        DispatchQueue.main.async { self.eventSink?(event) }
+    fileprivate func sendEvent(scope: NativeEngineScope, _ event: [String: Any]) {
+        DispatchQueue.main.async { [weak self] in
+            guard scope.isCurrent else { return }
+            self?.eventSink?(event)
+        }
     }
 
     private static func stateWire(_ state: InstanceStateKind) -> String {
@@ -404,20 +398,27 @@ extension Orch8FlutterPlugin: FlutterStreamHandler {
 /// blocks the engine thread until it answers or `handlerTimeoutMs` elapses.
 final class FlutterStepHandler: StepHandler, @unchecked Sendable {
     private weak var plugin: Orch8FlutterPlugin?
+    private let scope: NativeEngineScope
     private let timeoutMs: UInt64
 
-    init(plugin: Orch8FlutterPlugin, timeoutMs: UInt64) {
+    init(plugin: Orch8FlutterPlugin, timeoutMs: UInt64, scope: NativeEngineScope) {
         self.plugin = plugin
+        self.scope = scope
         self.timeoutMs = timeoutMs
     }
 
     func execute(stepName: String, input: String) throws -> String {
-        guard let channel = plugin?.channel else {
+        guard scope.isCurrent, let plugin else {
             throw HandlerError.Retryable(message: "Flutter channel not attached")
         }
         let done = DispatchSemaphore(value: 0)
         let box = ResultBox()
         DispatchQueue.main.async {
+            guard self.scope.isCurrent, let channel = plugin.channel else {
+                box.set(FlutterError(code: "SHUTDOWN", message: "engine retired", details: nil))
+                done.signal()
+                return
+            }
             channel.invokeMethod("executeStep", arguments: ["stepName": stepName, "input": input]) { reply in
                 box.set(reply)
                 done.signal()
@@ -427,6 +428,7 @@ final class FlutterStepHandler: StepHandler, @unchecked Sendable {
         guard done.wait(timeout: .now() + .milliseconds(millis)) == .success else {
             throw HandlerError.Retryable(message: "Dart handler '\(stepName)' timed out after \(timeoutMs) ms")
         }
+        guard scope.isCurrent else { throw HandlerError.Retryable(message: "engine retired") }
         switch box.get() {
         case let output as String:
             return output
@@ -455,28 +457,36 @@ private final class ResultBox: @unchecked Sendable {
 /// `timeoutMs`.
 final class FlutterTokenProvider: TokenProvider, @unchecked Sendable {
     private weak var plugin: Orch8FlutterPlugin?
+    private let scope: NativeEngineScope
     private let timeoutMs: UInt64
     private let lock = NSLock()
     private var token: String
 
-    init(plugin: Orch8FlutterPlugin, token: String, timeoutMs: UInt64) {
+    init(plugin: Orch8FlutterPlugin, token: String, timeoutMs: UInt64, scope: NativeEngineScope) {
         self.plugin = plugin
+        self.scope = scope
         self.token = token
         self.timeoutMs = timeoutMs
     }
 
     func currentToken() -> String {
+        guard scope.isCurrent else { return "" }
         lock.lock(); defer { lock.unlock() }
         return token
     }
 
     func refreshToken() throws -> String {
-        guard let channel = plugin?.channel else {
+        guard scope.isCurrent, let plugin else {
             throw MobileError.Engine(message: "Flutter channel not attached")
         }
         let done = DispatchSemaphore(value: 0)
         let box = ResultBox()
         DispatchQueue.main.async {
+            guard self.scope.isCurrent, let channel = plugin.channel else {
+                box.set(FlutterError(code: "SHUTDOWN", message: "engine retired", details: nil))
+                done.signal()
+                return
+            }
             channel.invokeMethod("refreshToken", arguments: nil) { reply in
                 box.set(reply)
                 done.signal()
@@ -486,6 +496,7 @@ final class FlutterTokenProvider: TokenProvider, @unchecked Sendable {
         guard done.wait(timeout: .now() + .milliseconds(millis)) == .success else {
             throw MobileError.Engine(message: "token provider timed out after \(timeoutMs) ms")
         }
+        guard scope.isCurrent else { throw MobileError.Shutdown(message: "engine retired") }
         switch box.get() {
         case let fresh as String where !fresh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
             lock.lock(); token = fresh; lock.unlock()
@@ -507,13 +518,15 @@ final class StaticTokenProvider: TokenProvider, @unchecked Sendable {
 
 final class FlutterEngineListener: EngineListener, @unchecked Sendable {
     private weak var plugin: Orch8FlutterPlugin?
+    private let scope: NativeEngineScope
 
-    init(plugin: Orch8FlutterPlugin) {
+    init(plugin: Orch8FlutterPlugin, scope: NativeEngineScope) {
         self.plugin = plugin
+        self.scope = scope
     }
 
     func onInstanceCompleted(instanceId: String, output: String) {
-        plugin?.sendEvent([
+        plugin?.sendEvent(scope: scope, [
             "type": "instanceCompleted",
             "instanceId": instanceId,
             "output": output,
@@ -521,7 +534,7 @@ final class FlutterEngineListener: EngineListener, @unchecked Sendable {
     }
 
     func onInstanceFailed(instanceId: String, error: String) {
-        plugin?.sendEvent([
+        plugin?.sendEvent(scope: scope, [
             "type": "instanceFailed",
             "instanceId": instanceId,
             "error": error,
@@ -529,7 +542,7 @@ final class FlutterEngineListener: EngineListener, @unchecked Sendable {
     }
 
     func onStepPending(instanceId: String, stepName: String, handler: String) {
-        plugin?.sendEvent([
+        plugin?.sendEvent(scope: scope, [
             "type": "stepPending",
             "instanceId": instanceId,
             "stepName": stepName,

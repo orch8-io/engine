@@ -7,6 +7,7 @@ import Orch8Mobile
 /// code (`ORCH8_ERROR`, `INIT_ERROR`) is kept in `userInfo.legacyCode`.
 enum Orch8Errors {
     static func kind(_ error: Error) -> String {
+        if error is NativeEngineLifecycleError { return "shutdown" }
         if let e = error as? MobileError {
             switch e {
             case .Engine: return "engine"

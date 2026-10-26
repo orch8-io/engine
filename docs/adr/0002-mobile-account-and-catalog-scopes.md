@@ -5,8 +5,11 @@ Date: 2026-10-24
 Status: the requirement is accepted by the user. Internal account/catalog
 identity, session epochs, isolated metadata/signing keys, owner-qualified cache,
 credential grants and local run materialization are implemented internally.
-The remaining public API/schema below is an implementation contract; scoped SDK
-handles and the complete runtime surface are not implemented yet.
+Development Rust/UniFFI, Swift and KMP APIs now expose typed account, catalog and
+run handles, including acknowledged archive receipts. The complete runtime and
+SDK rollout remains an implementation contract; S1–S12 below are not complete.
+See [the current scoped API](../SDK_SCOPED_NATIVE.md) for implemented boundaries
+and remaining rollout requirements.
 
 ## Requirement and current evidence
 
@@ -15,12 +18,13 @@ workflow catalogs through explicit scopes. Account/catalog identity must remain
 stable through credential refresh. Scope selection must be visible at the API
 boundary and carried through asynchronous work, storage, callbacks, and recovery.
 
-Current sync metadata, signing-key records, local sequence names, and removal
+Legacy sync metadata, signing-key records, local sequence names, and removal
 reconciliation use global mobile state. Existing `mobile/default` storage cannot
 prove account/catalog ownership. Token strings, callback addresses, current UI
 account, and unverified JWT claims are insufficient stable ownership keys.
 DME077/078 add bounded owned sync runs and atomic metadata commits as a shared
-foundation. They do not provide scoped ownership.
+foundation. Subsequent scoped storage and development APIs add explicit ownership;
+legacy records are not automatically adopted into an account or catalog.
 
 ## Proposed ownership model
 
@@ -32,7 +36,8 @@ Descriptors come from trusted host context, not bearer-token parsing. This
 storage layer does not itself authenticate remote credentials. Signed ingestion
 verifies manifest audiences; the internal private sync path additionally checks a
 fresh response from the catalog's immutable trusted identity endpoint.
-It exposes no public SDK API and is not connected to legacy sync/execution.
+The development SDK exposes this model through explicit account/catalog handles;
+legacy sync does not implicitly select an account or adopt its data.
 
 Retirement marks an account inactive and cancels its matching nonterminal native
 instances in the same transaction, preserving requests, receipts and effect
