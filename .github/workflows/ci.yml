@@ -99,6 +99,32 @@ jobs:
           cargo deny --locked --manifest-path packages/python-native/Cargo.toml check advisories
           cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories
 
+  node-runtime:
+    name: Node native runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SQLX_OFFLINE: true
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
+        with:
+          toolchain: "1.97.0"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: node-native-runtime
+      - name: Build current Node native addon
+        run: cargo build --locked --manifest-path packages/node-native/Cargo.toml
+      - name: Test packed addon with real host callbacks and process restarts
+        run: bash scripts/check-node-native.sh "$CARGO_TARGET_DIR/debug/liborch8_node.so"
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
