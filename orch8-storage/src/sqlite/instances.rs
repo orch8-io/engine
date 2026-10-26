@@ -1335,6 +1335,16 @@ pub(super) async fn list_instance_gc_candidates(
            AND NOT EXISTS ( \
                SELECT 1 FROM task_instances c \
                WHERE c.parent_instance_id = t.id) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM effect_receipts r \
+               WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \
+                 AND r.state IN ('dispatched', 'unknown')) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM continuity_executions ce \
+               JOIN effect_receipts r ON r.tenant_id = ce.tenant_id \
+                 AND r.continuity_id = ce.continuity_id \
+               WHERE ce.tenant_id = t.tenant_id AND json_extract(ce.record, '$.current_instance_id') = t.id \
+                 AND r.state IN ('dispatched', 'unknown')) \
          ORDER BY t.updated_at ASC LIMIT ?2",
     )
     .bind(ts(cutoff))
@@ -1402,6 +1412,16 @@ pub(super) async fn purge_terminal_instances(
                SELECT 1 FROM task_instances p \
                WHERE p.id = t.parent_instance_id \
                  AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM effect_receipts r \
+               WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \
+                 AND r.state IN ('dispatched', 'unknown')) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM continuity_executions ce \
+               JOIN effect_receipts r ON r.tenant_id = ce.tenant_id \
+                 AND r.continuity_id = ce.continuity_id \
+               WHERE ce.tenant_id = t.tenant_id AND json_extract(ce.record, '$.current_instance_id') = t.id \
+                 AND r.state IN ('dispatched', 'unknown')) \
            AND t.id IN (",
         &requested,
     )

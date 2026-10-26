@@ -1101,6 +1101,12 @@ CREATE INDEX IF NOT EXISTS idx_effect_receipts_continuity
     ON effect_receipts(tenant_id, continuity_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_effect_receipts_unresolved_instance
     ON effect_receipts(tenant_id, continuity_id, instance_id, state, created_at DESC);
+-- Preserve ambiguous effects during instance retention (Postgres migration 124).
+CREATE INDEX IF NOT EXISTS idx_effect_receipts_instance_gc
+    ON effect_receipts(tenant_id, instance_id, state);
+CREATE INDEX IF NOT EXISTS idx_effect_receipts_ambiguous_gc
+    ON effect_receipts(tenant_id, continuity_id)
+    WHERE state IN ('dispatched', 'unknown');
 
 CREATE TABLE IF NOT EXISTS provenance_entries (
     id TEXT PRIMARY KEY,

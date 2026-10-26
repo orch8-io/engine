@@ -73,7 +73,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 123;
+pub const STORAGE_SCHEMA_VERSION: u32 = 124;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -3515,6 +3515,8 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// family is in the batch, so listing it would let blocked parents at the
     /// head of the oldest-first scan starve retention (D-01). Children go
     /// first; the parent becomes a candidate on a later pass.
+    /// Dispatched or unknown effect receipts also retain their instance and
+    /// the current instance of their continuity, including historical effects.
     async fn list_instance_gc_candidates(
         &self,
         cutoff: DateTime<Utc>,
@@ -3524,9 +3526,12 @@ pub trait ResourceStore: Send + Sync + 'static {
     /// Delete the given instances and all of their instance-keyed history in
     /// one transaction. Re-checks under row locks: ids that are no longer
     /// terminal (e.g. retried from the DLQ), whose parent became live, or that
-    /// still have a child outside the set are skipped. Besides the
-    /// `ON DELETE CASCADE` children and the explicitly-deleted `step_logs` /
-    /// `usage_events` / `instance_kv_state` / parent-scoped dedupe rows, this
+    /// still have a child outside the set are skipped. Also skips instances
+    /// with dispatched/unknown effects or whose continuity contains such
+    /// effects. Reconciliation must resolve
+    /// these receipts before their evidence can be removed by retention.
+    /// Besides the `ON DELETE CASCADE` children and explicitly-deleted
+    /// `step_logs` / `usage_events` / `instance_kv_state` / parent-scoped dedupe rows, this
     /// removes the worker-task attempt evidence (L1-02), event waits (L1-04)
     /// and the continuity record whose
     /// current instance is purged, with its receipts, placements, provenance
