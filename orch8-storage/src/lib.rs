@@ -4144,6 +4144,30 @@ pub trait ContinuityStore: Send + Sync + 'static {
         checkpoint: &orch8_types::checkpoint::Checkpoint,
     ) -> Result<InstanceId, StorageError>;
 
+    /// Atomically import the checkpoint and complete output history with the
+    /// paused instance and immutable capsule binding. Replays return the first
+    /// instance without modifying its history. Output identities must already
+    /// be remapped to the destination instance.
+    ///
+    /// Custom backends must implement the transaction before accepting output
+    /// evidence; the fallback never publishes a partially restored instance.
+    async fn import_capsule_instance_with_outputs(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance: &TaskInstance,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+        outputs: &[orch8_types::output::BlockOutput],
+    ) -> Result<InstanceId, StorageError> {
+        if !outputs.is_empty() {
+            return Err(StorageError::Unsupported(
+                "atomic capsule output import".into(),
+            ));
+        }
+        self.import_capsule_instance(capsule_id, destination_runtime_id, instance, checkpoint)
+            .await
+    }
+
     /// Idempotently bind a capsule to an instance hosted by an external
     /// runtime. Unlike `import_capsule_instance`, this records control-plane
     /// evidence only; the instance and checkpoint remain in the destination

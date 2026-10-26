@@ -72,3 +72,23 @@ impl InstanceSnapshot {
         Ok(ordered)
     }
 }
+
+/// Check ownership before opening the capsule publication transaction.
+pub(crate) fn validate_capsule_output_import(
+    instance: &orch8_types::instance::TaskInstance,
+    checkpoint: &orch8_types::checkpoint::Checkpoint,
+    outputs: &[orch8_types::output::BlockOutput],
+) -> Result<(), orch8_types::error::StorageError> {
+    use orch8_types::error::StorageError;
+    let mut ids = std::collections::HashSet::with_capacity(outputs.len());
+    if checkpoint.instance_id != instance.id
+        || outputs
+            .iter()
+            .any(|output| output.instance_id != instance.id || !ids.insert(output.id))
+    {
+        return Err(StorageError::Constraint(
+            "capsule checkpoint/output ownership or duplicate output identity".into(),
+        ));
+    }
+    Ok(())
+}

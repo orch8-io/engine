@@ -789,6 +789,16 @@ passthrough_impl! {
             }
             self.inner.import_capsule_instance(capsule_id, destination_runtime_id, encrypted_instance.as_ref(), &encrypted_checkpoint).await
         }
+        async fn import_capsule_instance_with_outputs(&self, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance: &orch8_types::instance::TaskInstance, checkpoint: &orch8_types::checkpoint::Checkpoint, outputs: &[orch8_types::output::BlockOutput]) -> Result<orch8_types::ids::InstanceId, StorageError> {
+            crate::restore::validate_capsule_output_import(instance, checkpoint, outputs)?;
+            let encrypted_instance = self.encrypt_instance(instance)?;
+            let mut encrypted_checkpoint = checkpoint.clone();
+            if !FieldEncryptor::is_encrypted(&encrypted_checkpoint.checkpoint_data) {
+                encrypted_checkpoint.checkpoint_data = self.encrypt_json_value(&encrypted_checkpoint.checkpoint_data)?;
+            }
+            let encrypted_outputs = outputs.iter().map(|output| self.encrypt_block_output(output).map(std::borrow::Cow::into_owned)).collect::<Result<Vec<_>, _>>()?;
+            self.inner.import_capsule_instance_with_outputs(capsule_id, destination_runtime_id, encrypted_instance.as_ref(), &encrypted_checkpoint, &encrypted_outputs).await
+        }
         async fn record_external_capsule_import(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId, imported_at: chrono::DateTime<chrono::Utc>) -> Result<orch8_types::ids::InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, capabilities: &orch8_types::continuity::RuntimeCapabilities) -> Result<(), StorageError>;

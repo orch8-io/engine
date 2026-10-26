@@ -38,7 +38,10 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
             .unwrap()
             .with_artifact_store(artifacts),
     );
-    let sequence = mk_sequence(vec![mk_step("work", "noop")]);
+    let sequence = mk_sequence(vec![
+        mk_step("completed", "must-not-replay"),
+        mk_step("work", "noop"),
+    ]);
     source.create_sequence(&sequence).await.unwrap();
     destination.create_sequence(&sequence).await.unwrap();
     let mut instance = mk_instance_with_ctx(sequence.id, json!({"portable": true}));
@@ -54,6 +57,29 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         })
         .await
         .unwrap();
+    // Completed output evidence must survive quarantine import; the scheduler
+    // uses these rows to avoid replaying completed work.
+    let completed = orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: instance.id,
+        block_id: BlockId::new("completed"),
+        output: json!({"receipt": "already-applied"}),
+        output_ref: None,
+        output_size: 29,
+        attempt: 1,
+        created_at: Utc::now(),
+    };
+    // Deliberately disagree with insertion order at the same timestamp.
+    let mut completed = completed;
+    completed.id = uuid::Uuid::from_u128(3);
+    let mut older = completed.clone();
+    older.id = uuid::Uuid::from_u128(1);
+    older.output = json!({"receipt":"old"});
+    let mut middle = older.clone();
+    middle.id = uuid::Uuid::from_u128(2);
+    source.save_block_output(&completed).await.unwrap();
+    source.save_block_output(&older).await.unwrap();
+    source.save_block_output(&middle).await.unwrap();
     let source_runtime = RuntimeId::new();
     let destination_runtime = RuntimeId::new();
     let continuity = ContinuityExecution {
@@ -118,12 +144,109 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
     .await
     .unwrap();
     assert_eq!(portable_import.id, destination_instance_id);
+    let restored = isolated.get_all_outputs(portable_import.id).await.unwrap();
+    assert_eq!(
+        restored.len(),
+        3,
+        "import discarded completed output evidence"
+    );
+    assert_eq!(
+        isolated
+            .get_block_output(portable_import.id, &completed.block_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .output,
+        completed.output
+    );
+    assert_eq!(restored[0].instance_id, portable_import.id);
+    assert_ne!(restored[0].id, completed.id);
+    isolated
+        .update_instance_state(
+            portable_import.id,
+            InstanceState::Scheduled,
+            Some(Utc::now()),
+        )
+        .await
+        .unwrap();
+    let handlers = Arc::new(common::registry());
+    let semaphore = common::semaphore(4);
+    let config = common::default_config();
+    let cache = common::cache();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    for _ in 0..10 {
+        orch8_engine::scheduler::tick_once(
+            &isolated, &handlers, &semaphore, &config, &cache, &cancel,
+        )
+        .await
+        .unwrap();
+        if isolated
+            .get_instance(portable_import.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state
+            == InstanceState::Completed
+        {
+            break;
+        }
+    }
+    assert_eq!(
+        isolated
+            .get_instance(portable_import.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Completed,
+        "completed step was replayed instead of continuing at work"
+    );
+    assert_eq!(
+        isolated
+            .get_all_outputs(portable_import.id)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|row| row.block_id == completed.block_id)
+            .count(),
+        3
+    );
+
     assert!(
         isolated
             .get_artifact(&signed.manifest.payload_artifact.key)
             .await
             .unwrap()
             .is_none()
+    );
+
+    let (same_store, _) = verify_and_import_paused_capsule(
+        source.as_ref(),
+        &signed,
+        CapsuleImportRequest {
+            tenant_id: &instance.tenant_id,
+            destination_runtime_id: destination_runtime,
+            destination_instance_id: None,
+            expected_epoch: ExecutionEpoch::initial(),
+            trusted_public_keys: &trusted,
+            now: Utc::now(),
+        },
+        &encryptor,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        source.get_all_outputs(same_store.id).await.unwrap().len(),
+        3
+    );
+    assert_eq!(
+        source
+            .get_block_output(same_store.id, &completed.block_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .output,
+        completed.output
     );
 
     let (imported, payload) = verify_and_import_paused_capsule(
