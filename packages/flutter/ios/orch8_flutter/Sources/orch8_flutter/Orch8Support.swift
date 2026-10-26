@@ -9,6 +9,7 @@ import Orch8Mobile
 /// pre-0.8 code (`ORCH8_ERROR` / `INIT_ERROR`).
 enum Orch8Support {
     static func kind(_ error: Error) -> String {
+        if error is NativeEngineLifecycleError { return "shutdown" }
         if let e = error as? MobileError {
             switch e {
             case .Engine: return "engine"
