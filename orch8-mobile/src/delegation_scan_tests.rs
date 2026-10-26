@@ -750,3 +750,176 @@ async fn legacy_retention_does_not_delete_scoped_or_unverified_delegations() {
             .unwrap();
     assert_eq!(retained, vec!["d-0000", "d-0001"]);
 }
+
+#[tokio::test]
+async fn stopped_pump_does_not_claim_discovered_tasks() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let pump = pump(storage.clone(), RuntimeId::new()).await;
+    seed_discovery(&storage, RuntimeId::new()).await;
+    pump.stop();
+    pump.run_once().await;
+    let claimed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM worker_tasks WHERE worker_id IS NOT NULL")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(claimed, 0, "stopped pump admitted discovered work");
+    let recorded: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mobile_delegations")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(recorded, 0);
+}
+
+#[tokio::test]
+async fn stop_while_discovery_waits_for_database_does_not_claim_afterward() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let pump = pump(storage.clone(), RuntimeId::new()).await;
+    seed_discovery(&storage, RuntimeId::new()).await;
+    assert_eq!(storage.pool().options().get_max_connections(), 1);
+    let connection = storage.pool().acquire().await.unwrap();
+    let mut pass = Box::pin(pump.run_once());
+    tokio::select! {
+        biased;
+        () = &mut pass => panic!("pass bypassed the held database connection"),
+        () = std::future::ready(()) => {}
+    }
+    pump.stop();
+    drop(connection);
+    tokio::time::timeout(Duration::from_secs(5), pass)
+        .await
+        .unwrap();
+    let claimed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM worker_tasks WHERE worker_id IS NOT NULL")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(claimed, 0, "a suspended discovery phase ignored stop");
+}
+
+#[tokio::test]
+async fn stop_while_park_waits_for_writer_cannot_claim_a_task() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let pump = pump(storage.clone(), RuntimeId::new()).await;
+    let id = seed_discovery(&storage, RuntimeId::new()).await;
+    let task = storage.get_worker_task(id).await.unwrap().unwrap();
+    let connection = storage.pool().acquire().await.unwrap();
+    let mut park = Box::pin(pump.park(&task));
+    tokio::select! {
+        biased;
+        result = &mut park => panic!("park bypassed held writer: {result:?}"),
+        () = std::future::ready(()) => {}
+    }
+    pump.stop();
+    drop(connection);
+    tokio::time::timeout(Duration::from_secs(5), park)
+        .await
+        .unwrap()
+        .unwrap();
+    pump.reject_unclaimed(&task, "must not fail retired work")
+        .await
+        .unwrap();
+    let retained = storage.get_worker_task(id).await.unwrap().unwrap();
+    assert!(retained.worker_id.is_none());
+    assert_eq!(retained.claim_epoch, 0);
+}
+
+#[tokio::test]
+async fn stop_between_http_phases_records_the_reply_without_dispatching_the_next_phase() {
+    for phase in ["sequences", "continuity/executions", "continuity/grants"] {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let expiry = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        let server = crate::test_support::spawn_control_plane_gated(
+            Arc::new(move |_, path, _| {
+                let body = if path.ends_with("/continuity/executions") {
+                    json!({"continuity_id":"continuity", "epoch":1, "tenant_id":"tenant"})
+                } else if path.ends_with("/continuity/grants") {
+                    json!({"signed_grant":{"grant":{"id":"grant", "expires_at":expiry}}})
+                } else {
+                    json!({})
+                };
+                (200, body)
+            }),
+            Some((format!("/{phase}"), gate.clone())),
+        )
+        .await;
+        let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let pump = pump_at(storage.clone(), RuntimeId::new(), server.base.clone()).await;
+        seed_open(storage.pool(), 1).await;
+        sqlx::query("UPDATE mobile_delegations SET destination_runtime_id=?1,sub_sequence_id=?2,continuity_id=?3,parent_epoch=?4,tenant_id='tenant',kind=?5,handler='noop',block_id='work',local_task_id=?6,claim_epoch=1")
+            .bind(RuntimeId::new().to_string())
+            .bind(if phase=="sequences" { None } else { Some(uuid::Uuid::now_v7().to_string()) })
+            .bind(if phase=="continuity/grants" {Some("continuity")} else {None})
+            .bind(if phase=="continuity/grants" {Some(1i64)} else {None})
+            .bind(if phase=="sequences" {"step"} else {"explicit"})
+            .bind(uuid::Uuid::now_v7().to_string())
+            .execute(storage.pool()).await.unwrap();
+        assert_eq!(
+            pump.load_open().await.unwrap().len(),
+            1,
+            "invalid {phase} fixture"
+        );
+        let entered = pump.clone();
+        let pass = tokio::spawn(async move { entered.run_once().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.count(&format!("/{phase}")) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pump.stop();
+        // Extra permits ensure an erroneous next phase fails by observation,
+        // rather than hanging this test behind a second mock request.
+        gate.add_permits(10);
+        tokio::time::timeout(Duration::from_secs(5), pass)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "stop after {phase} dispatched another phase"
+        );
+        let record = DelegationPump::status(storage.pool(), "d-0000")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.state, "preparing");
+        if phase == "continuity/executions" {
+            let continuity: Option<String> = sqlx::query_scalar(
+                "SELECT continuity_id FROM mobile_delegations WHERE delegation_id='d-0000'",
+            )
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+            assert_eq!(continuity.as_deref(), Some("continuity"));
+        }
+        let successor = DelegationPump::new(
+            pump.client.clone(),
+            storage.clone(),
+            storage.pool().clone(),
+            pump.options.clone(),
+            Arc::new(Notify::new()),
+        )
+        .unwrap();
+        assert!(
+            !successor.is_stopped(),
+            "stopping one pump retired its active node"
+        );
+        successor.run_once().await;
+        let record = DelegationPump::status(storage.pool(), "d-0000")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.state, "delegated",
+            "successor could not resume {phase}"
+        );
+        assert_eq!(
+            server.count("/continuity/executions"),
+            usize::from(phase != "continuity/grants"),
+            "parent registration was replayed after persisted reply"
+        );
+    }
+}

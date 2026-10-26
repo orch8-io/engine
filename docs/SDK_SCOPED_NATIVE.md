@@ -99,6 +99,12 @@ cannot be archived. If native state was already purged, the receipt preserves
 that uncertainty instead of inventing an outcome. Archive does not delete native
 effect evidence or replace native instance garbage collection.
 
+Stopping legacy delegation prevents new discovery claims and later network
+phases. A reply to an already admitted request can still be recorded for safe
+restart. Node unregistration, replacement and engine shutdown/drop retire that
+node's worker/pump admission, including clients captured before slot removal.
+Stopping one pump leaves its active node usable for an explicit successor.
+
 ## Bounds
 
 Native scoped request admission shares durable ceilings of 4096 records/64 MiB

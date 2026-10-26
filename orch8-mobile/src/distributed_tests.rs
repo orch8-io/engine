@@ -463,3 +463,117 @@ fn registered_node_worker_executes_remote_task_end_to_end() {
     assert!(!engine.worker_stats().running);
     engine.shutdown();
 }
+
+#[test]
+fn unregister_node_retires_its_delegation_pump() {
+    let server_runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = server_runtime.block_on(spawn_control_plane(Arc::new(|_, _, _| (200, json!({})))));
+    let engine = MobileEngine::new(
+        ":memory:".into(),
+        MobileEngineConfig {
+            device_id: "phone-stop".into(),
+            ..MobileEngineConfig::default()
+        },
+    )
+    .unwrap();
+    let client = node::NodeClient::new_unchecked(
+        server.base.clone(),
+        crate::credential::Credential::new("key".into()),
+        "phone-stop".into(),
+        orch8_types::continuity::RuntimeId::new(),
+        node::Advertisement {
+            handlers: vec!["noop".into()],
+            caps: NodeCapabilities::default(),
+            draining: false,
+        },
+    );
+    engine
+        .register_handler(
+            "noop".into(),
+            Arc::new(CountingHandler(Arc::new(AtomicUsize::new(0)))),
+        )
+        .unwrap();
+    let late_deps = worker::WorkerDeps {
+        client: client.clone(),
+        store: engine.claims.clone(),
+        registry: engine.handlers.read().unwrap().clone(),
+        foreign_handlers: std::collections::HashSet::new(),
+        storage: engine.storage.clone(),
+        signals: worker::HostSignals {
+            foreground: engine.foreground.clone(),
+            power_state: engine.tick_controller.power_state_handle(),
+        },
+        stragglers: engine.stragglers.clone(),
+    };
+    engine.register_with_client(client.clone()).unwrap();
+    engine
+        .start_delegation(DelegationOptions {
+            tenant_id: "tenant".into(),
+            poll_interval_ms: 2000,
+            ttl_secs: 600,
+        })
+        .unwrap();
+    let pump = engine.current_delegation().unwrap();
+    engine.unregister_node();
+    assert!(
+        pump.is_stopped(),
+        "unregistered node retained live delegation admission"
+    );
+    assert!(!engine.delegation_stats().running);
+    let late_worker = worker::Worker::new(late_deps, WorkerOptions::default()).unwrap();
+    assert!(
+        late_worker.is_stopped(),
+        "captured old client created a live worker"
+    );
+    let late_pump = delegation::DelegationPump::new(
+        client,
+        engine.storage.clone(),
+        engine.node_pool.clone(),
+        DelegationOptions {
+            tenant_id: "tenant".into(),
+            poll_interval_ms: 2000,
+            ttl_secs: 600,
+        },
+        engine.tick_controller.work_handle(),
+    )
+    .unwrap();
+    assert!(
+        late_pump.is_stopped(),
+        "captured old client created a live delegation pump"
+    );
+    engine.shutdown();
+}
+
+#[test]
+fn dropping_engine_retires_captured_node_admission() {
+    let server_runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = server_runtime.block_on(spawn_control_plane(Arc::new(|_, _, _| (200, json!({})))));
+    let engine = MobileEngine::new(
+        ":memory:".into(),
+        MobileEngineConfig {
+            device_id: "drop-node".into(),
+            ..MobileEngineConfig::default()
+        },
+    )
+    .unwrap();
+    let client = node::NodeClient::new_unchecked(
+        server.base.clone(),
+        crate::credential::Credential::new("key".into()),
+        "drop-node".into(),
+        orch8_types::continuity::RuntimeId::new(),
+        node::Advertisement {
+            handlers: vec!["noop".into()],
+            caps: NodeCapabilities::default(),
+            draining: false,
+        },
+    );
+    engine.register_with_client(client.clone()).unwrap();
+    let captured = client.admission_token();
+    assert!(!captured.is_cancelled());
+    drop(engine);
+    assert!(
+        captured.is_cancelled(),
+        "engine drop left captured node admission live"
+    );
+    assert!(client.admission_token().is_cancelled());
+}

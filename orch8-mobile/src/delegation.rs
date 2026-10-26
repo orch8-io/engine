@@ -475,13 +475,14 @@ impl DelegationPump {
                 detail: "delegation ttl_secs must be between 1 and 86400".into(),
             });
         }
+        let stop = client.admission_token();
         Ok(Arc::new(Self {
             client,
             storage,
             pool,
             options,
             wake: Notify::new(),
-            stop: CancellationToken::new(),
+            stop,
             scheduler_work,
             gate: RetryGate::default(),
             force_pass: AtomicBool::new(false),
@@ -527,6 +528,14 @@ impl DelegationPump {
         self.stop.is_cancelled()
     }
 
+    fn ensure_active(&self) -> Result<(), MobileError> {
+        if self.is_stopped() {
+            Err(MobileError::shutdown())
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn stats(&self) -> DelegationStats {
         DelegationStats {
             running: !self.is_stopped(),
@@ -541,8 +550,14 @@ impl DelegationPump {
     /// One pass: park newly delegable local steps, advance delegations that
     /// the control plane has not accepted yet, and read outcomes.
     pub(crate) async fn run_once(&self) {
+        if self.is_stopped() {
+            return;
+        }
         if let Err(error) = self.discover().await {
             warn!(%error, "delegation discovery failed");
+        }
+        if self.is_stopped() {
+            return;
         }
         let records = match self.load_open().await {
             Ok(records) => records,
@@ -603,11 +618,17 @@ impl DelegationPump {
     // ------------------------------------------------------------------
 
     async fn discover(&self) -> Result<(), MobileError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
         let own = self.client.runtime_id();
         let candidates = scan::next_page(&self.pool, &scan::DISCOVERY, PUMP_BATCH)
             .await
             .map_err(|error| storage_err(&error))?;
         for row in candidates {
+            if self.is_stopped() {
+                break;
+            }
             let id: String = row.try_get("id").map_err(|error| storage_err(&error))?;
             let requirements: String = row
                 .try_get("requirements")
@@ -648,6 +669,9 @@ impl DelegationPump {
     /// Claim the parked local task for the pump and record its delegation in
     /// one local transaction, before anything touches the network.
     async fn park(&self, task: &WorkerTask) -> Result<(), MobileError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
         let (kind, sub_sequence_id, input) = if task.handler_name == DELEGATION_HANDLER {
             let Some(sequence) = task.params.get("sequence_id").and_then(Value::as_str) else {
                 return self
@@ -674,9 +698,12 @@ impl DelegationPump {
         let delegation_id = uuid::Uuid::now_v7().to_string();
         let mut tx = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| storage_err(&error))?;
+        if self.is_stopped() {
+            return Ok(());
+        }
         let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claimed_at = ?2,
              heartbeat_at = ?2, claim_epoch = claim_epoch + 1
@@ -735,19 +762,31 @@ impl DelegationPump {
     /// A placed step that can never be delegated: claim it and fail it
     /// permanently (the step definition itself is wrong).
     async fn reject_unclaimed(&self, task: &WorkerTask, message: &str) -> Result<(), MobileError> {
+        if self.is_stopped() {
+            return Ok(());
+        }
+        let mut tx = self
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| storage_err(&error))?;
+        if self.is_stopped() {
+            return Ok(());
+        }
         let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claim_epoch = claim_epoch + 1
              WHERE id = ?2 AND state = 'pending' AND {}", owner::native("worker_tasks.instance_id")
         )))
         .bind(PUMP_WORKER_ID)
         .bind(task.id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| storage_err(&error))?
         .rows_affected();
         if claimed != 1 {
             return Ok(());
         }
+        tx.commit().await.map_err(|error| storage_err(&error))?;
         let Some(task) = self.storage.get_worker_task(task.id).await? else {
             return Ok(());
         };
@@ -896,6 +935,7 @@ impl DelegationPump {
     // network call, so splitting it would only scatter that ordering.
     #[allow(clippy::too_many_lines)]
     async fn advance(&self, mut record: Record) -> Result<(), MobileError> {
+        self.ensure_active()?;
         if chrono::Utc::now() >= record.deadline_at {
             let reason = format!(
                 "delegation could not be placed before its deadline: {}",
@@ -930,6 +970,8 @@ impl DelegationPump {
             }
         }
 
+        self.ensure_active()?;
+
         // 2. Sub-sequence: an isolated step runs as a published one-step
         //    sequence with a deterministic id.
         if record.sub_sequence_id.is_none() {
@@ -942,6 +984,8 @@ impl DelegationPump {
             .await?;
             record.sub_sequence_id = Some(sequence);
         }
+
+        self.ensure_active()?;
 
         // 3. The local parent's continuity identity on the control plane.
         if record.continuity_id.is_none() {
@@ -980,6 +1024,8 @@ impl DelegationPump {
             record.tenant_id = tenant;
         }
 
+        self.ensure_active()?;
+
         // 4. A destination-bound one-time grant (reused until consumed).
         if record.grant.is_none() {
             let (status, body) = self
@@ -1012,6 +1058,8 @@ impl DelegationPump {
             record.grant = Some(body);
             record.expires_at = expires_at;
         }
+
+        self.ensure_active()?;
 
         // 5. The claim. Its response can be lost; the delegation is then
         //    confirmed by reading it back.
@@ -1118,6 +1166,7 @@ impl DelegationPump {
     }
 
     async fn live_runtimes(&self) -> Result<Option<Vec<RuntimeCapabilities>>, MobileError> {
+        self.ensure_active()?;
         if let Some((fetched_at, runtimes)) = self
             .runtimes_cache
             .lock()
@@ -1182,6 +1231,7 @@ impl DelegationPump {
     /// (idempotently), which also works against servers that predate
     /// control-plane publishing.
     async fn ensure_step_sequence(&self, record: &Record) -> Result<String, MobileError> {
+        self.ensure_active()?;
         let handler = record.handler.clone().unwrap_or_default();
         let block = record.block_id.clone().unwrap_or_else(|| "step".into());
         let id = orch8_engine::delegation::step_sequence_id(self.tenant(), &handler, &block);
@@ -1196,6 +1246,7 @@ impl DelegationPump {
             )
             .await?;
         if (200..300).contains(&status) || status == 409 {
+            self.ensure_active()?;
             let (read, _) = self.client.get_json(&format!("sequences/{id}")).await?;
             if read == 200 {
                 return Ok(id.to_string());
@@ -1211,6 +1262,7 @@ impl DelegationPump {
     // ------------------------------------------------------------------
 
     async fn read_delegation(&self, delegation_id: &str) -> Result<(u16, Value), MobileError> {
+        self.ensure_active()?;
         self.client
             .get_json(&format!(
                 "continuity/delegations/{delegation_id}?tenant_id={}",

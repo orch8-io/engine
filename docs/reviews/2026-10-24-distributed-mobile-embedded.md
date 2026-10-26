@@ -27,7 +27,7 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; internal authenticated private sync verified; public runtime/SDK integration remains open |
-| Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; legacy delegation admission/replay ownership is now under regression validation (DME163); account-authenticated transfer and acceptance remain open |
+| Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; legacy admission/replay ownership (DME163) and local node/stop admission (DME164) verified; account-authenticated transfer and acceptance remain open |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
 | Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Reviewing; post-storage claim entry, physical callback count ownership through timeout/retirement (DME161), and safe Node/Python failure diagnostics (DME159/162) covered; byte bounds and platform parity remain open |
 | Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal plus typed RN/Flutter scoped development facades covered; release artifact parity and full platform runtime E2E remain open |
@@ -4171,3 +4171,45 @@ mobile Clippy also passes with warnings denied.
 This confines the original device protocol; it does not implement account-owned
 workers, remote provenance, delegation grants or authenticated scoped outcome
 reporting. Those ADR S8/S12 requirements and the remaining matrix stay open.
+
+
+### DME164 — Delegation discovery and later HTTP phases survived local stop
+
+Three baseline regressions confirm the lifecycle gap. A pump stopped before a
+pass still claimed 50 newly discovered tasks. A pass first suspended behind its
+SQLite connection did the same after stop. The public unregister_node operation
+stopped the remote worker but left its delegation pump active. Dropping an
+engine or replacing a node also lacked an admission generation for clients that
+had already been captured by a concurrently starting worker/pump.
+
+Each NodeClient now owns a cancellation parent for local admission. Workers and
+pumps derive independent child tokens. Unregistration, replacement with a
+different client, shutdown and final engine drop retire the parent. A retained
+client cannot construct a live late worker/pump; stopping a single child does
+not retire its active node or prevent an explicit successor. Re-advertising the
+same client keeps its existing admission identity. Already-running worker
+settlement keeps its existing policy.
+
+The pump checks stop before discovery and after suspended discovery phases.
+Parked-task claim and permanent-rejection paths reserve the SQLite writer before
+the final stop check. Stop therefore cannot wake a pending database phase into a
+new claim. The HTTP state machine checks before subsequent sequence-publication,
+parent-registration, grant and claim phases, including readback requests.
+Replies to already-admitted requests are still journaled; accepted work and
+recovery evidence are not erased merely because the observer stopped.
+
+Six regressions cover stopped and suspended discovery, writer-waiting claim and
+rejection, actual public node unregistration, late worker/pump construction,
+engine drop and gated HTTP phase transitions. The HTTP test separately stops
+after sequence publication, parent registration and grant creation, observes no
+next request, and resumes with a new pump from the durable journal. A persisted
+parent registration is not repeated. Existing worker late-poll release and
+physical callback ownership tests remain part of the full mobile suite.
+
+The final source passes all 692 mobile unit tests and 109 integration tests with
+zero failures or skips. Strict all-target mobile Clippy, documentation, SDK
+packaging/version and whitespace checks pass.
+
+No wire/UniFFI API, schema, SDK version or publication changes. This fixes local
+node-generation admission, not stable authenticated account ownership for remote
+journals/delegation or the remaining scoped-worker/reporting requirements.
