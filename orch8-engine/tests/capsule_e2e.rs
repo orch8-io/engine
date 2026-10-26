@@ -1,5 +1,3 @@
-use sha2::Digest as _;
-use std::fmt::Write as _;
 use std::sync::Arc;
 
 use chrono::{Duration, Utc};
@@ -139,15 +137,9 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         .await
         .unwrap();
     let mut foreign_manifest = signed.manifest.clone();
-    let mut foreign_hash = String::new();
-    for byte in sha2::Sha256::digest(
-        orch8_publisher::manifest::canonical_json(&foreign_sequence)
-            .unwrap()
-            .as_bytes(),
-    ) {
-        write!(&mut foreign_hash, "{byte:02x}").unwrap();
-    }
-    foreign_manifest.sequence.content_sha256 = foreign_hash;
+    foreign_manifest.sequence.content_sha256 =
+        orch8_engine::capsule::sequence_content_hash(&foreign_sequence, foreign_manifest.schema)
+            .unwrap();
     let foreign_signed =
         orch8_publisher::capsule::sign_capsule_manifest(foreign_manifest, &signing_key).unwrap();
     let foreign_import_id = orch8_types::ids::InstanceId::new();
@@ -177,6 +169,28 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
             .unwrap()
             .is_none()
     );
+    let mut wrong_version = signed.manifest.clone();
+    wrong_version.sequence.version += 1;
+    let wrong_version =
+        orch8_publisher::capsule::sign_capsule_manifest(wrong_version, &signing_key).unwrap();
+    assert!(matches!(
+        verify_and_import_paused_capsule_bytes(
+            isolated.as_ref(),
+            &wrong_version,
+            &sealed,
+            CapsuleImportRequest {
+                tenant_id: &instance.tenant_id,
+                destination_runtime_id: destination_runtime,
+                destination_instance_id: None,
+                expected_epoch: ExecutionEpoch::initial(),
+                trusted_public_keys: &trusted,
+                now: Utc::now()
+            },
+            &encryptor
+        )
+        .await,
+        Err(CapsuleServiceError::PayloadIdentityMismatch)
+    ));
     let destination_instance_id = orch8_types::ids::InstanceId::new();
     let (portable_import, _) = verify_and_import_paused_capsule_bytes(
         isolated.as_ref(),

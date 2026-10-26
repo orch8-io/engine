@@ -4544,6 +4544,23 @@ source materialization and clock skew remain open. Full scoped/platform evidence
 and the broader distributed/mobile/embedded completion audit remain required.
 
 
+Hosted [unit job 121843823267](https://github.com/orch8-io/engine/actions/runs/40400239722/job/121843823267)
+exposed a cross-backend fingerprint defect: the source SQLite definition retained
+nanoseconds in `created_at`, but PostgreSQL persisted lower timestamp precision.
+The original macOS clock only exercised microseconds. The transfer fixture now
+forces `123_456_789` nanoseconds on every host and reproduced the hosted failures
+locally on both PostgreSQL variants before the fix.
+
+Schema 1.1 fingerprints now exclude only backend-managed sequence creation time,
+with all other definition fields still covered. The legacy 1.0 complete-document
+hash remains unchanged. A focused contract regression proves creation-time
+independence and sensitivity to executable parameters, tenant and version.
+Import also checks the signed sequence version explicitly. Both PostgreSQL
+transfers now pass with forced nanoseconds; signature/tenant/version rejection
+and facade/mobile compatibility remain checked. Hosted CI must rerun on the new
+head; the failed source revision is not retried unchanged.
+
+
 ### DME174 — Capsule import omitted destination sequence ownership
 
 The exporter checked sequence ownership, but the importer checked only the

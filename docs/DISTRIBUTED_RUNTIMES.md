@@ -138,6 +138,9 @@ node is upgraded no row is ever left awaiting dispatch.
   A 1.0 reader rejects 1.1 before decrypting. New readers accept legacy flat
   capsules without externalized references, but refuse legacy composite state
   that cannot be reconstructed safely; export a fresh 1.1 capsule instead.
+  The 1.1 sequence fingerprint covers the canonical definition excluding only
+  storage-managed `created_at`, whose precision varies across backends. Tenant,
+  ID, version and execution fields remain covered; legacy 1.0 hashes are unchanged.
 - The scheduler never advances an instance whose execution is `transferring`
   (it re-checks every 30 s) or has been handed to another instance/runtime
   (the source parks in `waiting`).

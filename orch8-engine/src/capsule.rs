@@ -104,6 +104,39 @@ fn sha256_hex(bytes: &[u8]) -> String {
     output
 }
 
+/// Sequence fingerprint for the selected capsule wire schema. In 1.1 the
+/// executable document excludes only backend-managed `created_at`: SQL stores
+/// have different timestamp precision. Legacy 1.0 retains its exact full JSON.
+pub fn sequence_content_hash(
+    sequence: &orch8_types::sequence::SequenceDefinition,
+    schema: CapsuleSchemaVersion,
+) -> Result<String, CapsuleServiceError> {
+    if !CapsuleSchemaVersion::CURRENT.can_read(schema) {
+        return Err(
+            orch8_types::continuity::ContinuityError::UnsupportedSchema {
+                offered_major: schema.major,
+                offered_minor: schema.minor,
+            }
+            .into(),
+        );
+    }
+    let encoded = if schema == CapsuleSchemaVersion::V1 {
+        canonical_json(sequence)
+    } else {
+        let mut document = serde_json::to_value(sequence)
+            .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
+        document
+            .as_object_mut()
+            .ok_or_else(|| {
+                CapsuleServiceError::Serialization("sequence must serialize as an object".into())
+            })?
+            .remove("created_at");
+        canonical_json(&document)
+    }
+    .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
+    Ok(sha256_hex(encoded.as_bytes()))
+}
+
 fn capsule_aad(
     tenant_id: &TenantId,
     continuity_id: orch8_types::continuity::ContinuityId,
@@ -254,8 +287,7 @@ pub async fn export_paused_capsule_manifest(
     let artifact = storage
         .put_artifact(instance.id, CAPSULE_CONTENT_TYPE, Bytes::from(sealed))
         .await?;
-    let sequence_json = canonical_json(&sequence)
-        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
+    let sequence_hash = sequence_content_hash(&sequence, CapsuleSchemaVersion::CURRENT)?;
     let checkpoint_json = canonical_json(&checkpoint)
         .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
     let requirements_json = canonical_json(&request.requirements)
@@ -278,7 +310,7 @@ pub async fn export_paused_capsule_manifest(
         sequence: SequenceIdentity {
             id: sequence.id,
             version: sequence.version,
-            content_sha256: sha256_hex(sequence_json.as_bytes()),
+            content_sha256: sequence_hash,
         },
         checkpoint: CheckpointIdentity {
             block_id,
@@ -374,9 +406,10 @@ pub async fn verify_and_import_paused_capsule_bytes(
     if &sequence.tenant_id != request.tenant_id {
         return Err(CapsuleServiceError::OwnershipMismatch);
     }
-    let sequence_json = canonical_json(&sequence)
-        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
-    if sha256_hex(sequence_json.as_bytes()) != signed.manifest.sequence.content_sha256 {
+    if sequence.version != signed.manifest.sequence.version
+        || sequence_content_hash(&sequence, signed.manifest.schema)?
+            != signed.manifest.sequence.content_sha256
+    {
         return Err(CapsuleServiceError::PayloadIdentityMismatch);
     }
     if payload.execution_state.is_none()
@@ -450,4 +483,53 @@ fn remap_capsule_outputs(
         output.instance_id = destination;
     }
     Ok(outputs)
+}
+
+#[cfg(test)]
+mod sequence_hash_tests {
+    use super::*;
+    use chrono::Timelike;
+    use orch8_storage::testing::fixtures::SequenceBuilder;
+
+    #[test]
+    fn portable_sequence_hash_ignores_only_creation_time_and_keeps_legacy_contract() {
+        let mut sequence = SequenceBuilder::new("portable-identity")
+            .step("work", "noop")
+            .build();
+        sequence.created_at = sequence.created_at.with_nanosecond(123_456_789).unwrap();
+        let mut rounded = sequence.clone();
+        rounded.created_at = sequence.created_at.with_nanosecond(123_456_000).unwrap();
+        let current = sequence_content_hash(&sequence, CapsuleSchemaVersion::CURRENT).unwrap();
+        assert_eq!(
+            current,
+            sequence_content_hash(&rounded, CapsuleSchemaVersion::CURRENT).unwrap()
+        );
+        assert_eq!(
+            sequence_content_hash(&sequence, CapsuleSchemaVersion::V1).unwrap(),
+            sha256_hex(canonical_json(&sequence).unwrap().as_bytes())
+        );
+        assert_ne!(
+            sequence_content_hash(&sequence, CapsuleSchemaVersion::V1).unwrap(),
+            sequence_content_hash(&rounded, CapsuleSchemaVersion::V1).unwrap()
+        );
+        rounded.version += 1;
+        assert_ne!(
+            current,
+            sequence_content_hash(&rounded, CapsuleSchemaVersion::CURRENT).unwrap()
+        );
+        rounded = sequence.clone();
+        rounded.tenant_id = TenantId::new("different-tenant").unwrap();
+        assert_ne!(
+            current,
+            sequence_content_hash(&rounded, CapsuleSchemaVersion::CURRENT).unwrap()
+        );
+        rounded = sequence.clone();
+        if let orch8_types::sequence::BlockDefinition::Step(step) = &mut rounded.blocks[0] {
+            step.params = serde_json::json!({"changed":true});
+        }
+        assert_ne!(
+            current,
+            sequence_content_hash(&rounded, CapsuleSchemaVersion::CURRENT).unwrap()
+        );
+    }
 }

@@ -1,5 +1,5 @@
 //! A transferred composite must resume its frozen collection and tree cursor.
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use ed25519_dalek::SigningKey;
 use orch8_engine::{
     capsule::{
@@ -42,7 +42,7 @@ async fn assert_foreach_transfer(destination: Option<Arc<dyn StorageBackend>>) {
         FieldEncryptor::from_bytes(&[24; 32]),
     ));
     let destination = destination.unwrap_or_else(|| source.clone());
-    let sequence = common::mk_sequence(vec![BlockDefinition::ForEach(Box::new(ForEachDef {
+    let mut sequence = common::mk_sequence(vec![BlockDefinition::ForEach(Box::new(ForEachDef {
         id: BlockId::new("each"),
         collection: "items".into(),
         item_var: "item".into(),
@@ -50,6 +50,9 @@ async fn assert_foreach_transfer(destination: Option<Arc<dyn StorageBackend>>) {
         max_iterations: 10,
         retain_iterations: None,
     }))]);
+    // Linux clocks can produce nanoseconds that PostgreSQL cannot store.
+    // Force that precision on every host so cross-backend identity is tested.
+    sequence.created_at = sequence.created_at.with_nanosecond(123_456_789).unwrap();
     source.create_sequence(&sequence).await.unwrap();
     if !Arc::ptr_eq(&source, &destination) {
         destination.create_sequence(&sequence).await.unwrap();

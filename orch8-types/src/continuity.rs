@@ -452,6 +452,8 @@ impl CapsuleRequirements {
 pub struct SequenceIdentity {
     pub id: SequenceId,
     pub version: i32,
+    /// Capsule 1.1 hashes the canonical definition excluding storage-only
+    /// `created_at`; 1.0 hashes the complete definition for legacy readers.
     pub content_sha256: String,
 }
 
