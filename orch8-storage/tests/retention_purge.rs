@@ -137,6 +137,267 @@ async fn create(storage: &dyn StorageBackend, raw: &RawPool, inst: &TaskInstance
     .await;
 }
 
+async fn effect_gc_fixture(
+    backend: &TestBackend,
+    historical: bool,
+) -> (TaskInstance, EffectReceipt) {
+    let storage = backend.storage.as_ref();
+    let tenant = TenantId::unchecked(format!("t-gc-effect-{}", Uuid::new_v4()));
+    let seq = sequence(&tenant);
+    storage.create_sequence(&seq).await.unwrap();
+    let done = instance(&tenant, seq.id, InstanceState::Completed, None);
+    create(storage, &backend.raw, &done).await;
+    let previous = instance(&tenant, seq.id, InstanceState::Running, None);
+    create(storage, &backend.raw, &previous).await;
+    let continuity_id = ContinuityId::new();
+    storage
+        .create_continuity_execution(&ContinuityExecution {
+            continuity_id,
+            tenant_id: tenant.clone(),
+            current_instance_id: done.id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: y2000(),
+        })
+        .await
+        .unwrap();
+    let receipt = EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: tenant.clone(),
+        continuity_id,
+        epoch: ExecutionEpoch::initial(),
+        instance_id: if historical { previous.id } else { done.id },
+        block_id: BlockId::new("charge"),
+        kind: EffectKind::Http,
+        state: EffectState::Prepared,
+        destination_fingerprint: "payments.example".into(),
+        idempotency_key: None,
+        request_sha256: "a".repeat(64),
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at: y2000(),
+        updated_at: y2000(),
+    };
+    storage.create_effect_receipt(&receipt).await.unwrap();
+    (done, receipt)
+}
+
+/// A terminal instance can still own an externally ambiguous effect, including
+/// one dispatched by an earlier instance of the same continuity. Recheck after
+/// candidate selection, and allow retention again once reconciliation resolves it.
+#[tokio::test]
+async fn purge_preserves_ambiguous_effect_evidence() {
+    let mut failures = Vec::new();
+    for backend in backends().await {
+        let storage = backend.storage.as_ref();
+        for historical in [false, true] {
+            for ambiguous in [EffectState::Dispatched, EffectState::Unknown] {
+                let (done, mut receipt) = effect_gc_fixture(&backend, historical).await;
+                let tenant = receipt.tenant_id.clone();
+                let candidates = storage
+                    .list_instance_gc_candidates(Utc::now(), 10_000)
+                    .await
+                    .unwrap();
+                assert!(candidates.contains(&done.id), "prepared intent permits GC");
+                receipt.state = ambiguous;
+                assert!(
+                    storage
+                        .cas_effect_receipt(&tenant, receipt.id, EffectState::Prepared, &receipt)
+                        .await
+                        .unwrap()
+                );
+                let candidates = storage
+                    .list_instance_gc_candidates(Utc::now(), 10_000)
+                    .await
+                    .unwrap();
+                let deleted = storage.purge_terminal_instances(&[done.id]).await.unwrap();
+                if candidates.contains(&done.id) || deleted != 0 {
+                    failures.push(format!("{} historical={historical} state={ambiguous:?}: listed={}, deleted={deleted}", backend.name(), candidates.contains(&done.id)));
+                    continue;
+                }
+                receipt.state = EffectState::Verified;
+                assert!(
+                    storage
+                        .cas_effect_receipt(&tenant, receipt.id, ambiguous, &receipt)
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(
+                    storage.purge_terminal_instances(&[done.id]).await.unwrap(),
+                    1
+                );
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[tokio::test]
+async fn effect_retention_preserves_families_without_starving_other_tenants() {
+    for backend in backends().await {
+        let storage = backend.storage.as_ref();
+        let (done, mut receipt) = effect_gc_fixture(&backend, false).await;
+        let parent = instance(
+            &done.tenant_id,
+            done.sequence_id,
+            InstanceState::Completed,
+            None,
+        );
+        create(storage, &backend.raw, &parent).await;
+        match &backend.raw {
+            RawPool::Sqlite(pool) => {
+                sqlx::query("UPDATE task_instances SET parent_instance_id = ?1 WHERE id = ?2")
+                    .bind(parent.id.to_string())
+                    .bind(done.id.to_string())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            RawPool::Postgres(pool) => {
+                sqlx::query("UPDATE task_instances SET parent_instance_id = $1 WHERE id = $2")
+                    .bind(parent.id.into_uuid())
+                    .bind(done.id.into_uuid())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+        }
+        receipt.state = EffectState::Unknown;
+        assert!(
+            storage
+                .cas_effect_receipt(
+                    &receipt.tenant_id,
+                    receipt.id,
+                    EffectState::Prepared,
+                    &receipt
+                )
+                .await
+                .unwrap()
+        );
+        let other_tenant = TenantId::unchecked(format!("t-gc-other-{}", Uuid::new_v4()));
+        let seq = sequence(&other_tenant);
+        storage.create_sequence(&seq).await.unwrap();
+        let free = instance(&other_tenant, seq.id, InstanceState::Completed, None);
+        create(storage, &backend.raw, &free).await;
+        backend
+            .raw
+            .backdate(
+                "task_instances",
+                "updated_at",
+                "id",
+                &free.id.to_string(),
+                y2000() + chrono::Duration::days(1),
+            )
+            .await;
+        // A receipt belongs to its tenant, even when its supplied instance id
+        // names another tenant's row. It must not pin that tenant's history.
+        let mut foreign_reference = receipt.clone();
+        foreign_reference.id = EffectId::new();
+        foreign_reference.instance_id = free.id;
+        storage
+            .create_effect_receipt(&foreign_reference)
+            .await
+            .unwrap();
+        assert_eq!(
+            storage
+                .list_instance_gc_candidates(Utc::now(), 1)
+                .await
+                .unwrap(),
+            vec![free.id]
+        );
+        assert_eq!(
+            storage
+                .purge_terminal_instances(&[parent.id, done.id, free.id])
+                .await
+                .unwrap(),
+            1
+        );
+        for item in [&mut receipt, &mut foreign_reference] {
+            item.state = EffectState::Verified;
+            assert!(
+                storage
+                    .cas_effect_receipt(&item.tenant_id, item.id, EffectState::Unknown, item)
+                    .await
+                    .unwrap()
+            );
+        }
+        assert_eq!(
+            storage
+                .purge_terminal_instances(&[parent.id, done.id])
+                .await
+                .unwrap(),
+            2
+        );
+    }
+}
+
+#[tokio::test]
+async fn postgres_purge_rechecks_after_concurrent_effect_dispatch() {
+    let Some(backend) = TestBackend::postgres().await else {
+        return;
+    };
+    let (done, mut receipt) = effect_gc_fixture(&backend, true).await;
+    // Dispatch locks matching receipts by creation time then id. Force the
+    // opposite id order so GC cannot introduce a lock-order inversion.
+    let mut later = receipt.clone();
+    later.id = EffectId::from_uuid(Uuid::nil());
+    later.created_at += chrono::Duration::seconds(1);
+    backend.storage.create_effect_receipt(&later).await.unwrap();
+    let mut writer = backend.pg_pool().begin().await.unwrap();
+    let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    receipt.state = EffectState::Dispatched;
+    sqlx::query("UPDATE effect_receipts SET state = 'dispatched', record = $1 WHERE id = $2")
+        .bind(serde_json::to_value(&receipt).unwrap())
+        .bind(receipt.id.into_uuid())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let storage = Arc::clone(&backend.storage);
+    let purge = tokio::spawn(async move { storage.purge_terminal_instances(&[done.id]).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))",
+            ).bind(writer_pid).fetch_one(backend.pg_pool()).await.unwrap();
+            if blocked { break; }
+            assert!(!purge.is_finished(), "purge must lock receipts before deciding");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("purge must reach the held receipt lock");
+    sqlx::query("UPDATE effect_receipts SET updated_at = updated_at WHERE id = $1")
+        .bind(later.id.into_uuid())
+        .execute(&mut *writer)
+        .await
+        .expect("GC must use dispatch's receipt lock order without deadlocking");
+    writer.commit().await.unwrap();
+    assert_eq!(purge.await.unwrap().unwrap(), 0);
+    receipt.state = EffectState::Verified;
+    assert!(
+        backend
+            .storage
+            .cas_effect_receipt(
+                &receipt.tenant_id,
+                receipt.id,
+                EffectState::Dispatched,
+                &receipt
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        backend
+            .storage
+            .purge_terminal_instances(&[done.id])
+            .await
+            .unwrap(),
+        1
+    );
+}
+
 /// The purge removes the instance and everything keyed by it — including
 /// the continuity scope (receipts), worker-task attempt evidence and event
 /// waits that have no FK to `task_instances` — and skips instances whose

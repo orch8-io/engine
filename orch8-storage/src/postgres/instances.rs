@@ -1497,6 +1497,16 @@ pub(super) async fn list_instance_gc_candidates(
            AND NOT EXISTS ( \
                SELECT 1 FROM task_instances c \
                WHERE c.parent_instance_id = t.id) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM effect_receipts r \
+               WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \
+                 AND r.state IN ('dispatched', 'unknown')) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM continuity_executions ce \
+               JOIN effect_receipts r ON r.tenant_id = ce.tenant_id \
+                 AND r.continuity_id = ce.continuity_id \
+               WHERE ce.tenant_id = t.tenant_id AND ce.record->>'current_instance_id' = t.id::text \
+                 AND r.state IN ('dispatched', 'unknown')) \
          ORDER BY t.updated_at ASC LIMIT $2",
     )
     .bind(cutoff)
@@ -1527,6 +1537,66 @@ const CONTINUITY_CHILD_TABLES: &[&str] = &[
     "compensation_runs",
 ];
 
+/// Fence existing effect evidence, then recheck ambiguity on a fresh snapshot.
+async fn lock_gc_effects_and_filter_candidates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ids: &[uuid::Uuid],
+) -> Result<Vec<(uuid::Uuid, String)>, StorageError> {
+    // Lock matching continuities before their receipts. The continuity FK
+    // prevents new receipts being inserted into a scope we are deleting;
+    // receipt locks also fence a Prepared -> Dispatched transition while GC
+    // decides whether to retain its evidence. Use a fresh statement below
+    // after any lock wait, so a concurrent committed transition is visible.
+    let scopes: Vec<(String, uuid::Uuid)> = sqlx::query_as(
+        "SELECT ce.tenant_id, ce.continuity_id FROM continuity_executions ce \
+         JOIN ( \
+           SELECT current.tenant_id, current.continuity_id FROM task_instances t \
+           JOIN continuity_executions current ON current.tenant_id = t.tenant_id \
+             AND current.record->>'current_instance_id' = t.id::text \
+           WHERE t.id = ANY($1) \
+           UNION \
+           SELECT r.tenant_id, r.continuity_id FROM task_instances t \
+           JOIN effect_receipts r ON r.tenant_id = t.tenant_id AND r.instance_id = t.id \
+           WHERE t.id = ANY($1) \
+         ) scopes USING (tenant_id, continuity_id) \
+         ORDER BY ce.tenant_id, ce.continuity_id FOR UPDATE OF ce",
+    )
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+    let scope_tenants: Vec<&str> = scopes.iter().map(|(tenant, _)| tenant.as_str()).collect();
+    let scope_ids: Vec<uuid::Uuid> = scopes.iter().map(|(_, id)| *id).collect();
+    // Match guarded dispatch's receipt order to avoid a lock-order inversion.
+    sqlx::query(
+        "SELECT r.id FROM effect_receipts r \
+         JOIN UNNEST($1::text[], $2::uuid[]) AS scope(tenant_id, continuity_id) \
+           USING (tenant_id, continuity_id) \
+         ORDER BY r.created_at, r.id FOR UPDATE OF r",
+    )
+    .bind(&scope_tenants)
+    .bind(&scope_ids)
+    .execute(&mut **tx)
+    .await?;
+    let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT t.id, t.tenant_id FROM task_instances t WHERE t.id = ANY($1) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM effect_receipts r \
+               WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \
+                 AND r.state IN ('dispatched', 'unknown')) \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM continuity_executions ce \
+               JOIN effect_receipts r ON r.tenant_id = ce.tenant_id \
+                 AND r.continuity_id = ce.continuity_id \
+               WHERE ce.tenant_id = t.tenant_id AND ce.record->>'current_instance_id' = t.id::text \
+                 AND r.state IN ('dispatched', 'unknown'))",
+    )
+    .bind(ids)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    Ok(rows)
+}
+
 /// See [`crate::ResourceStore::purge_terminal_instances`].
 pub(super) async fn purge_terminal_instances(
     store: &PostgresStorage,
@@ -1553,7 +1623,8 @@ pub(super) async fn purge_terminal_instances(
     .bind(&requested)
     .fetch_all(&mut *tx)
     .await?;
-    let mut rows: Vec<(uuid::Uuid, String)> = locked;
+    let locked_ids: Vec<uuid::Uuid> = locked.iter().map(|(id, _)| *id).collect();
+    let mut rows = lock_gc_effects_and_filter_candidates(&mut tx, &locked_ids).await?;
 
     // `task_instances.parent_instance_id` is a plain (NO ACTION) FK: a parent
     // with a child outside this batch cannot be deleted, and trying would

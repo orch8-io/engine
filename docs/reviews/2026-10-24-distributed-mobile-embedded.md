@@ -4312,3 +4312,42 @@ pass with zero failures/skips. This changes only the two capacity fixtures;
 production bindings, callback limits, schemas, ABI and versions are unchanged.
 The KMP observer source and its 116 JVM/native tests and strict Swift bridge
 verification remain unchanged. PR348 must pass all checks on its updated head.
+
+### DME168 — Terminal retention could erase an unresolved external outcome
+
+[PRE-EXISTING, HIGH] SQLite and PostgreSQL selected old terminal instances even
+when their effects were Dispatched or Unknown. Purge then deleted the continuity
+and all its receipts, including ambiguous effects from a historical instance.
+The new regression reproduced deletion in all eight backend/state/history cases.
+A logical terminal state does not establish an external outcome.
+
+Candidate selection now excludes ambiguous direct effects and ambiguous effects
+anywhere in the continuity being deleted, before the batch limit. Purge repeats
+both tenant-qualified checks. SQLite holds its existing immediate writer lock.
+PostgreSQL locks the matching continuities and their existing receipts before a
+fresh ambiguity check; an in-flight Prepared-to-Dispatched update cannot commit
+unobserved between the check and deletion. Continuity FK locks also fence new
+receipt insertion into the scopes being removed. Protected children keep their
+parents through the existing family-pruning logic.
+
+Prepared and Planned intents have not crossed the dispatch boundary and do not
+pin retention. Committed, Verified, Compensated and Abandoned outcomes also
+permit cleanup. Reconciliation of Unknown/Dispatched to Verified restores GC
+eligibility. Two additive indexes support instance receipt lookups and ambiguous
+continuity lookups; migration 124 includes online pre-creation instructions and
+a matching down migration. Released migrations are unchanged.
+
+The seven-test retention suite passes on SQLite and required isolated PostgreSQL,
+including historical ambiguity, post-selection state changes, tenant isolation,
+batch-limit starvation, whole-family retention and later reconciliation. A
+PostgreSQL race fixture holds an uncommitted dispatch update, observes GC waiting
+on its lock, commits the dispatch, and requires GC to retain the evidence. A second receipt
+with reversed UUID/creation ordering reproduced a deadlock with id-only GC
+locking; GC now follows dispatch's creation-time/id order, and the fixture
+requires the writer to acquire its second receipt without deadlocking.
+The full storage suite passes with required isolated PostgreSQL (four existing
+ignored documentation examples). After the private locking-helper extraction,
+all seven retention tests pass again, strict all-target storage Clippy passes,
+and all 30 mobile lifecycle tests pass. Migration immutability/destructive-DDL,
+documentation and formatting checks pass.
+The wider long-running engine and scoped mobile completion matrix remains open.
