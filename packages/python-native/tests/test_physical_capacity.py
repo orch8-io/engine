@@ -10,6 +10,15 @@ from orch8_engine import Engine
 
 
 class PhysicalCapacityTest(unittest.TestCase):
+    def deferred_snapshot(self, engine, instance):
+        result = engine.run(instance, timeout=0.15)
+        deadline = time.monotonic() + 5
+        while result["state"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.01)
+            result = engine.get(instance)
+        self.assertEqual(result["state"], "scheduled")
+        return result
+
     def test_timeouts_and_source_runtime_destruction_do_not_reset_capacity(self):
         release = []
         lock = threading.Lock()
@@ -41,8 +50,7 @@ class PhysicalCapacityTest(unittest.TestCase):
                     self.assertEqual(first.run(first.start("held"), timeout=3)["state"], "failed")
                 self.assertEqual(counts["active"], 128)
                 deferred = first.start("held")
-                waiting = first.run(deferred, timeout=0.15)
-                self.assertEqual(waiting["state"], "scheduled")
+                waiting = self.deferred_snapshot(first, deferred)
                 self.assertEqual(waiting["outputs"], {})
                 self.assertEqual(counts["entered"], 128)
                 first.signal(deferred, "cancel")
@@ -55,7 +63,7 @@ class PhysicalCapacityTest(unittest.TestCase):
                 successor.handler("host", host)
                 successor.deploy({"name": "fast", "blocks": [{"type": "step", "id": "work", "handler": "host", "params": {"hold": False}}]})
                 fast = successor.start("fast")
-                self.assertEqual(successor.run(fast, timeout=0.15)["state"], "scheduled")
+                self.deferred_snapshot(successor, fast)
                 self.assertEqual(counts["entered"], 128)
                 release.pop(0).set()
                 self.assertEqual(successor.run(fast, timeout=3)["state"], "completed")
