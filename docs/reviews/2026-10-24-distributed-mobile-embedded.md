@@ -3624,3 +3624,46 @@ repeated close and typed post-close errors remain correct. Documentation,
 packaging, binding parity and whitespace checks pass. The descriptor measurement
 is Unix-host coverage and does not claim an equivalent OS resource counter on
 every platform. Android consumer compilation remains a required hosted CI gate.
+
+
+### DME149 — Retire Android framework bridge owners deterministically
+
+The React Native and Flutter Android bridges shut down the native engine without
+closing its generated UniFFI owner. Replacement and framework detach could retain
+native runtime resources. React Native invalidation also raced initialization,
+allowing a candidate to publish after its JS runtime had disappeared. Flutter
+constructed and shut down the engine while holding the initialization lock, and
+its terminated work executor could not serve a reused plugin attachment.
+
+Both independently distributed bridges now have a matching internal lifecycle
+controller. A dedicated serial lane constructs and disposes native owners outside
+the state lock. Initialization, shutdown and terminal detach synchronously revoke
+publication eligibility; superseded candidates are disposed exactly once. Every
+retired owner closes in finally even if logical shutdown fails. Normal engine
+work retains a separate lane so host callback reentry does not wait behind its
+own lifecycle operation. Completion callbacks run outside the state lock.
+
+Generation scopes weakly reference the lifecycle controller. Retired callbacks
+refuse event delivery and cached credentials, including Flutter callbacks posted
+to the main queue before detach. Late handler/token replies cannot refresh the
+retired generation. React Native retires pending replies on replacement/shutdown
+and converts work-pool admission races to Shutdown. Flutter creates fresh work
+and lifecycle owners on reattachment and gates old asynchronous replies against
+the attachment that accepted them.
+
+Each bridge has five deterministic lifecycle regression tests using the actual
+generated MobileEngine NoHandle test constructor: supersession and scope
+retirement, detach during construction, configuration failure followed by a
+successful retry, shutdown failure with mandatory disposal and one completion,
+and cross-thread lock acquisition during construction/closed completion.
+Both native Android modules compile and all ten tests pass against the current
+three-ABI AAR, producer-generated Maven POM, React Native 0.88.0 and the real
+Flutter embedding. These are host JVM ownership tests; Android device execution
+and framework-driven attach/detach integration remain separate coverage.
+
+The Mobile workflow now runs this consumer check after publishing its current
+commit's AAR to an isolated local Maven repository. Exclusive dependency routing
+prevents fallback to a released Orch8 AAR. Flutter embedding acquisition pins its
+engine commit and verifies the extracted jar's SHA-256; no protocol stubs or
+external package publication are involved. Rust, UniFFI and protocol 6 are
+unchanged. This gate supplements the existing JavaScript/Dart checks.

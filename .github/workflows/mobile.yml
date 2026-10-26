@@ -358,6 +358,16 @@ jobs:
           gradle -p packages/kmp -Porch8.kmp.targets=android \
             "-Porch8.dist.repo=$RUNNER_TEMP/orch8-paired-maven" compileDebugKotlinAndroid
 
+      - name: Test Android React Native and Flutter bridges against this commit's AAR
+        env:
+          ORCH8_MOBILE_VERSION: 0.0.0-ci-${{ github.sha }}
+        run: |
+          python3 scripts/fetch-flutter-embedding.py "$RUNNER_TEMP/orch8-flutter/flutter.jar"
+          gradle -p tests/android-bridges \
+            "-Porch8.dist.repo=$RUNNER_TEMP/orch8-paired-maven" \
+            "-Porch8.flutter.jar=$RUNNER_TEMP/orch8-flutter/flutter.jar" \
+            :reactNative:testDebugUnitTest :flutter:testDebugUnitTest
+
       - name: Upload AAR
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

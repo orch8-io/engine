@@ -45,15 +45,20 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
     private var eventSink: EventChannel.EventSink? = null
     private var appContext: Context? = null
 
-    @Volatile private var engine: MobileEngine? = null
+    private var lifecycle = NativeEngineLifecycle()
+    private val engine: MobileEngine? get() = lifecycle.engine
 
     @Volatile private var handlerTimeoutMs: Long = 30_000
     internal val main = Handler(Looper.getMainLooper())
-    private val work: ExecutorService = Executors.newCachedThreadPool { r ->
+    private var work: ExecutorService = Executors.newCachedThreadPool { r ->
         Thread(r, "orch8-flutter-work").apply { isDaemon = true }
     }
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        if (lifecycle.isClosed) {
+            lifecycle = NativeEngineLifecycle()
+            work = Executors.newCachedThreadPool { task -> Thread(task, "orch8-flutter-work").apply { isDaemon = true } }
+        }
         appContext = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, "io.orch8/mobile").also {
             it.setMethodCallHandler(this)
@@ -72,21 +77,10 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         // The Dart isolate is gone: shut the engine down so it stops calling
         // handlers that can no longer answer (each would burn a retry attempt)
         // and releases the SQLite file before a re-attach opens another engine.
-        val eng = synchronized(initLock) {
-            val e = engine
-            engine = null
-            e
-        }
-        work.execute {
-            try {
-                eng?.shutdown()
-            } catch (ignored: Throwable) {
-            }
-        }
+        lifecycle.shutdown(true, {}) { /* No Dart isolate remains to receive a reply. */ }
         work.shutdown()
     }
 
-    private val initLock = Any()
 
     private fun orch8Kind(e: Throwable): String = when (e) {
         is MobileException.Engine -> "engine"
@@ -123,8 +117,8 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         eventSink = null
     }
 
-    private fun emit(event: Map<String, Any?>) {
-        main.post { eventSink?.success(event) }
+    private fun emit(scope: NativeEngineLifecycle.Scope, event: Map<String, Any?>) {
+        main.post { if (scope.isCurrent()) eventSink?.success(event) }
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -133,7 +127,17 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
             handleInitialize(args, result)
             return
         }
-        val eng = engine
+        if (call.method == "shutdown") {
+            val owner = lifecycle
+            owner.shutdown(false, {}) { error -> main.post {
+                if (lifecycle === owner && !owner.isClosed) {
+                    if (error == null) result.success(null) else rejectOrch8(result, error)
+                }
+            } }
+            return
+        }
+        val owner = lifecycle
+        val eng = owner.engine
         if (eng == null) {
             result.error("ENGINE_NOT_INITIALIZED", "Call initialize() first.", null)
             return
@@ -141,11 +145,16 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         work.execute {
             try {
                 val reply = dispatch(call.method, args, eng)
-                main.post { if (reply === NotImplemented) result.notImplemented() else result.success(reply) }
+                main.post {
+                    if (lifecycle === owner && !owner.isClosed) {
+                        if (reply === NotImplemented) result.notImplemented() else result.success(reply)
+                    }
+                }
             } catch (e: IllegalArgumentException) {
-                main.post { result.error("INVALID_ARGUMENT", e.message, null) }
+                main.post { if (lifecycle === owner && !owner.isClosed) result.error("INVALID_ARGUMENT", e.message, null) }
             } catch (e: Exception) {
-                main.post { rejectOrch8(result, e) }
+                val failure = if (e is IllegalStateException && owner.engine !== eng) MobileException.Shutdown("engine retired") else e
+                main.post { if (lifecycle === owner && !owner.isClosed) rejectOrch8(result, failure) }
             }
         }
     }
@@ -187,16 +196,11 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
 
     private fun dispatch(method: String, a: Map<*, *>, eng: MobileEngine): Any? = when (method) {
         "registerHandler" -> {
-            eng.registerHandler(a.requireStr("name"), FlutterStepHandler(this, handlerTimeoutMs))
+            eng.registerHandler(a.requireStr("name"), FlutterStepHandler(this, handlerTimeoutMs, lifecycle.scopeOf(eng)))
             null
         }
         "resume" -> eng.resume().let { null }
         "pause" -> eng.pause().let { null }
-        "shutdown" -> {
-            engine = null
-            eng.shutdown()
-            null
-        }
         "tickOnce" -> eng.tickOnce().let {
             mapOf(
                 "instancesAdvanced" to it.instancesAdvanced.toInt(),
@@ -270,7 +274,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         "setTokenProvider" -> {
             val token = a.requireStr("token")
             require(token.isNotBlank()) { "token must not be empty" }
-            eng.setTokenProvider(FlutterTokenProvider(this, token, a.long("refreshTimeoutMs") ?: 30_000L))
+            eng.setTokenProvider(FlutterTokenProvider(this, token, a.long("refreshTimeoutMs") ?: 30_000L, lifecycle.scopeOf(eng)))
             null
         }
         "registerNode" -> eng.registerNode(
@@ -419,24 +423,15 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
             deviceId = args.str("deviceId") ?: "",
             syncApiKey = args.str("syncApiKey") ?: "",
         )
-        work.execute {
-            try {
-                synchronized(initLock) {
-                    // Release the SQLite file held by a previous engine before
-                    // opening a new one on the same path.
-                    val previous = engine
-                    engine = null
-                    previous?.shutdown()
-                    val eng = MobileEngine(dbPath, cfg)
-                    eng.setListener(FlutterEngineListener(::emit))
-                    handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
-                    engine = eng
-                }
-                main.post { result.success(null) }
-            } catch (e: Exception) {
-                main.post { rejectOrch8(result, e, "INIT_ERROR") }
+        val owner = lifecycle
+        owner.initialize(dbPath, cfg, {}, { eng, scope ->
+            eng.setListener(FlutterEngineListener { event -> emit(scope, event) })
+            handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
+        }) { error -> main.post {
+            if (lifecycle === owner && !owner.isClosed) {
+                if (error == null) result.success(null) else rejectOrch8(result, error, "INIT_ERROR")
             }
-        }
+        } }
     }
 
     /**
@@ -446,6 +441,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
     private class FlutterStepHandler(
         private val plugin: Orch8FlutterPlugin,
         private val timeoutMs: Long,
+        private val scope: NativeEngineLifecycle.Scope,
     ) : StepHandler {
         private sealed class Reply {
             class Ok(val value: Any?) : Reply()
@@ -454,10 +450,12 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         }
 
         override fun execute(stepName: String, input: String): String {
+            if (!scope.isCurrent()) throw HandlerException.Retryable("engine retired")
             val channel = plugin.channel ?: throw HandlerException.Retryable("Flutter channel not attached")
             val done = CountDownLatch(1)
             val reply = AtomicReference<Reply>()
             plugin.main.post {
+                if (!scope.isCurrent()) { reply.set(Reply.Err("SHUTDOWN", "engine retired")); done.countDown(); return@post }
                 channel.invokeMethod(
                     "executeStep",
                     mapOf("stepName" to stepName, "input" to input),
@@ -479,6 +477,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
             if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
                 throw HandlerException.Retryable("Dart handler '$stepName' timed out after $timeoutMs ms")
             }
+            if (!scope.isCurrent()) throw HandlerException.Retryable("engine retired")
             return when (val r = reply.get()) {
                 is Reply.Ok -> r.value as? String ?: "{}"
                 is Reply.Err ->
@@ -503,16 +502,19 @@ private class FlutterTokenProvider(
     private val plugin: Orch8FlutterPlugin,
     initial: String,
     private val timeoutMs: Long,
+    private val scope: NativeEngineLifecycle.Scope,
 ) : TokenProvider {
     @Volatile private var token: String = initial
 
-    override fun currentToken(): String = token
+    override fun currentToken(): String = if (scope.isCurrent()) token else ""
 
     override fun refreshToken(): String {
+        if (!scope.isCurrent()) throw MobileException.Shutdown("engine retired")
         val channel = plugin.channel ?: throw MobileException.Engine("Flutter channel not attached")
         val done = CountDownLatch(1)
         val reply = AtomicReference<Any?>()
         plugin.main.post {
+            if (!scope.isCurrent()) { reply.set(MobileException.Shutdown("engine retired")); done.countDown(); return@post }
             channel.invokeMethod(
                 "refreshToken",
                 null,
@@ -535,6 +537,7 @@ private class FlutterTokenProvider(
         if (!done.await(timeoutMs, TimeUnit.MILLISECONDS)) {
             throw MobileException.Engine("token provider timed out after $timeoutMs ms")
         }
+        if (!scope.isCurrent()) throw MobileException.Shutdown("engine retired")
         return when (val r = reply.get()) {
             is String -> if (r.isBlank()) throw MobileException.Engine("token provider returned an empty token") else r.also { token = it }
             is MobileException -> throw r

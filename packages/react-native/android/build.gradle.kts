@@ -61,6 +61,8 @@ if (findProperty("orch8.addMavenRepository")?.toString() != "false") {
 }
 
 dependencies {
+    testImplementation(kotlin("test-junit"))
+    testImplementation("junit:junit:4.13.2")
     // Version supplied by the React Native Gradle plugin.
     implementation("com.facebook.react:react-android")
     implementation("io.orch8:orch8-mobile:$orch8NativeVersion")
