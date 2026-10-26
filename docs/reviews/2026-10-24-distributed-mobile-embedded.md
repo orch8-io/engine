@@ -3426,3 +3426,20 @@ actual iOS framework build and Swift bridge typecheck, SDK packaging, docs and
 whitespace checks pass. No production Rust or generated UniFFI changes in this
 slice. Root SDK behavior, scoped observation and both language boundaries use
 the same tested callback lifetime implementation.
+
+### DME144 — Remove the midnight-only false assumption from cron CI
+
+The full Postgres E2E run passed 1587/1588 tests, but failed the cron-update
+assertion at 23:59 UTC (job 121328635262). A daily-midnight expression and an
+every-minute expression legitimately share their next midnight occurrence;
+increasing frequency does not always move next_fire_at strictly earlier.
+A deterministic Rust test confirms this exact boundary.
+
+The HTTP regression now starts with a disabled UTC schedule about twelve hours
+away, updates it to every minute, and checks both the stored expression and a
+future fire within one minute of the update. This proves rescheduling rather
+than weakening the comparison at the coincident boundary. Cleanup runs even
+when an assertion fails. The targeted Rust boundary test, TypeScript typecheck
+and all seven cron edge-case tests pass against the actual server and an isolated
+SQLite database; Postgres coverage awaits the new full CI head. Production cron
+behavior is unchanged.
