@@ -14,7 +14,7 @@
 //! the root key) the SDK logs a warning once.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock as StdRwLock, Weak};
+use std::sync::{Arc, OnceLock, RwLock as StdRwLock, Weak};
 use std::time::Duration;
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -39,6 +39,15 @@ const REFRESH_TIMEOUT: Duration = Duration::from_secs(20);
 // and manifest getter work to half of that pool so stale auth callbacks alone
 // cannot occupy it. Both paths share these permits.
 const MAX_PHYSICAL_TOKEN_CALLS: usize = 2;
+// A closed engine may leave non-cooperative host calls physically alive. New
+// owners must not reset their aggregate admission. Keep the local two-call
+// limit as well, so one engine cannot consume this entire process allowance.
+const MAX_PROCESS_TOKEN_CALLS: usize = 32;
+
+fn process_token_slots() -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_PROCESS_TOKEN_CALLS))))
+}
 /// First retry delay after a refresh that failed or returned the same token;
 /// doubles per consecutive failure up to [`REFRESH_BACKOFF_MAX`].
 const REFRESH_BACKOFF_BASE: Duration = Duration::from_secs(5);
@@ -51,6 +60,7 @@ pub(crate) struct Credential {
     warned_operator: AtomicBool,
     refresh_timeout_ms: AtomicU64,
     physical_token_slots: Arc<Semaphore>,
+    process_token_slots: Arc<Semaphore>,
 }
 
 struct CredentialState {
@@ -115,6 +125,13 @@ impl CredentialState {
     }
 }
 
+// Local shutdown closes only the local gate. The process gate is never closed
+// by an owner; its permits follow physical work through foreign destruction.
+struct TokenCallPermit {
+    _local: OwnedSemaphorePermit,
+    _process: OwnedSemaphorePermit,
+}
+
 // Owned by the blocking closure, including while queued. Timeout/cancellation
 // cannot free physical admission before the closure returns or is dropped.
 struct PhysicalRefresh {
@@ -122,7 +139,7 @@ struct PhysicalRefresh {
     // re-enter, so retain capacity until the provider is fully destroyed.
     provider: Arc<dyn TokenProvider>,
     running: Arc<AtomicBool>,
-    _slot: OwnedSemaphorePermit,
+    _slot: TokenCallPermit,
 }
 
 impl Drop for PhysicalRefresh {
@@ -134,7 +151,7 @@ impl Drop for PhysicalRefresh {
 // Retain admission through foreign destruction as well as the getter itself.
 struct PhysicalManifestToken {
     provider: Arc<dyn TokenProvider>,
-    _slot: OwnedSemaphorePermit,
+    _slot: TokenCallPermit,
 }
 
 struct ManifestTokenWait {
@@ -188,6 +205,7 @@ impl Credential {
                 refresh_failure: None,
             }),
             physical_token_slots: Arc::new(Semaphore::new(MAX_PHYSICAL_TOKEN_CALLS)),
+            process_token_slots: process_token_slots(),
             warned_operator: AtomicBool::new(false),
             refresh_timeout_ms: AtomicU64::new(
                 u64::try_from(REFRESH_TIMEOUT.as_millis()).unwrap_or(u64::MAX),
@@ -291,6 +309,25 @@ impl Credential {
         provider
     }
 
+    fn reserve_token_call(&self) -> Result<TokenCallPermit, MobileError> {
+        let exhausted = |error| match error {
+            tokio::sync::TryAcquireError::Closed => MobileError::Shutdown,
+            tokio::sync::TryAcquireError::NoPermits => MobileError::ResourceLimit {
+                message: "token callback capacity exhausted".into(),
+            },
+        };
+        let local = Arc::clone(&self.physical_token_slots)
+            .try_acquire_owned()
+            .map_err(exhausted)?;
+        let process = Arc::clone(&self.process_token_slots)
+            .try_acquire_owned()
+            .map_err(exhausted)?;
+        Ok(TokenCallPermit {
+            _local: local,
+            _process: process,
+        })
+    }
+
     /// Manifest sources belong to one sync, independently of the node owner,
     /// but share the engine's physical foreign-token callback admission.
     pub(crate) async fn current_manifest_token(
@@ -298,14 +335,7 @@ impl Credential {
         provider: Arc<dyn TokenProvider>,
         cancelled: &CancellationToken,
     ) -> Result<String, MobileError> {
-        let slot = Arc::clone(&self.physical_token_slots)
-            .try_acquire_owned()
-            .map_err(|error| match error {
-                tokio::sync::TryAcquireError::Closed => MobileError::Shutdown,
-                tokio::sync::TryAcquireError::NoPermits => MobileError::ResourceLimit {
-                    message: "token callback capacity exhausted".into(),
-                },
-            })?;
+        let slot = self.reserve_token_call()?;
         let physical = PhysicalManifestToken {
             provider,
             _slot: slot,
@@ -502,7 +532,7 @@ impl Credential {
                 debug!("token refresh suppressed by backoff");
                 return false;
             }
-            let Ok(slot) = Arc::clone(&self.physical_token_slots).try_acquire_owned() else {
+            let Ok(slot) = self.reserve_token_call() else {
                 // No queue and no negative-cache penalty: a different owner
                 // can recover as soon as an old physical call actually ends.
                 debug!("token refresh physical capacity exhausted");

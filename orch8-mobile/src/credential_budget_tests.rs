@@ -205,7 +205,9 @@ impl Drop for HeldDestructor {
 
 #[tokio::test]
 async fn physical_budget_remains_held_through_foreign_provider_destruction() {
-    let credential = Credential::new(String::new());
+    let process_slots = Arc::new(Semaphore::new(LIMIT));
+    let mut credential = Credential::new(String::new());
+    Arc::get_mut(&mut credential).unwrap().process_token_slots = Arc::clone(&process_slots);
     credential.set_refresh_timeout(Duration::from_secs(10));
     let entered = Arc::new(AtomicUsize::new(0));
     let dropping = Arc::new(AtomicUsize::new(0));
@@ -233,15 +235,18 @@ async fn physical_budget_remains_held_through_foreign_provider_destruction() {
         body_release.send(()).unwrap();
         wait_until(|| dropping.load(Ordering::SeqCst) == index + 1).await;
     }
+    drop(credential.close());
+    let mut successor = Credential::new(String::new());
+    Arc::get_mut(&mut successor).unwrap().process_token_slots = process_slots;
     let calls = Arc::new(AtomicUsize::new(0));
-    let generation = install_probe(&credential, &calls);
-    let admitted = credential.refresh_generation(&generation).await;
+    let generation = install_probe(&successor, &calls);
+    let admitted = successor.refresh_generation(&generation).await;
     let exhausted_calls = calls.load(Ordering::SeqCst);
     for release in drop_releases {
         release.send(()).unwrap();
     }
     wait_until(|| dropped.load(Ordering::SeqCst) == LIMIT).await;
-    let recovered = recover(&credential, &generation).await;
+    let recovered = recover(&successor, &generation).await;
     assert!(
         !admitted,
         "returned callback bodies must not free capacity while foreign destruction still runs"
@@ -262,7 +267,9 @@ async fn callback_and_foreign_destructor_panics_return_physical_capacity() {
             panic!("expected callback panic")
         }
     }
-    let credential = Credential::new(String::new());
+    let mut credential = Credential::new(String::new());
+    let process_slots = Arc::new(Semaphore::new(LIMIT));
+    Arc::get_mut(&mut credential).unwrap().process_token_slots = Arc::clone(&process_slots);
     for _ in 0..LIMIT + 2 {
         credential.set_provider(Arc::new(Panics));
         assert!(
@@ -295,6 +302,7 @@ async fn callback_and_foreign_destructor_panics_return_physical_capacity() {
     body_release.send(()).unwrap();
     wait_until(|| dropping.load(Ordering::SeqCst) == 1).await;
     let held = credential.physical_token_slots.available_permits();
+    let process_held = process_slots.available_permits();
     drop_release.send(()).unwrap();
     wait_until(|| credential.physical_token_slots.available_permits() == LIMIT).await;
     assert_eq!(
@@ -302,6 +310,8 @@ async fn callback_and_foreign_destructor_panics_return_physical_capacity() {
         LIMIT - 1,
         "foreign destruction retains the permit while blocked"
     );
+    assert_eq!(process_held, LIMIT - 1);
+    wait_until(|| process_slots.available_permits() == LIMIT).await;
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     assert!(credential.refresh_generation(&generation).await);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -322,7 +332,9 @@ fn timeout_of_a_queued_refresh_returns_its_slot_without_later_host_invocation() 
     });
     ready.recv_timeout(Duration::from_secs(5)).unwrap();
     runtime.block_on(async {
-        let credential = Credential::new(String::new());
+        let mut credential = Credential::new(String::new());
+        let process_slots = Arc::new(Semaphore::new(LIMIT));
+        Arc::get_mut(&mut credential).unwrap().process_token_slots = Arc::clone(&process_slots);
         credential.set_refresh_timeout(Duration::from_secs(10));
         let calls = Arc::new(AtomicUsize::new(0));
         let generation = install_probe(&credential, &calls);
@@ -346,6 +358,7 @@ fn timeout_of_a_queued_refresh_returns_its_slot_without_later_host_invocation() 
         assert!(credential.refresh_generation(&generation).await);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(credential.physical_token_slots.available_permits(), LIMIT);
+        assert_eq!(process_slots.available_permits(), LIMIT);
     });
 }
 
@@ -401,4 +414,130 @@ fn saturated_refreshes_leave_the_smallest_mobile_runtime_able_to_run_other_work(
         );
         assert!(started <= LIMIT);
     });
+}
+
+#[tokio::test]
+async fn closed_credentials_cannot_reset_process_token_capacity() {
+    // A small private process budget avoids blocking unrelated parallel tests.
+    let slots = Arc::new(Semaphore::new(LIMIT));
+    assert_retired_owner_capacity(LIMIT, || {
+        let mut owner = Credential::new(String::new());
+        Arc::get_mut(&mut owner).unwrap().process_token_slots = Arc::clone(&slots);
+        owner
+    })
+    .await;
+}
+
+#[test]
+fn default_credential_owners_share_process_capacity_across_close() {
+    const CHILD: &str = "ORCH8_TOKEN_CAPACITY_PROBE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        // Isolate the real process-wide ceiling from unrelated parallel tests.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(MAX_PROCESS_TOKEN_CALLS + 1)
+            .build()
+            .unwrap();
+        runtime.block_on(assert_retired_owner_capacity(
+            MAX_PROCESS_TOKEN_CALLS,
+            || Credential::new(String::new()),
+        ));
+        return;
+    }
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "credential::budget_tests::default_credential_owners_share_process_capacity_across_close", "--nocapture"])
+        .env(CHILD, "1")
+        .output().unwrap();
+    assert!(
+        result.status.success(),
+        "default process capacity probe failed:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
+struct ManifestProbe(Arc<AtomicUsize>);
+impl TokenProvider for ManifestProbe {
+    fn current_token(&self) -> String {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        "dst_manifest".into()
+    }
+    fn refresh_token(&self) -> Result<String, crate::MobileError> {
+        unreachable!()
+    }
+}
+
+async fn assert_retired_owner_capacity(limit: usize, make_owner: impl Fn() -> Arc<Credential>) {
+    let entered = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let mut releases = Vec::new();
+    for index in 0..limit {
+        let owner = make_owner();
+        let (release, gate) = channel();
+        releases.push(release);
+        owner.set_provider(Arc::new(HeldCallback {
+            entered: Arc::clone(&entered),
+            finished: Arc::clone(&finished),
+            gate: Mutex::new(gate),
+        }));
+        let generation = owner.snapshot().generation;
+        let request_owner = Arc::clone(&owner);
+        let request =
+            tokio::spawn(async move { request_owner.refresh_generation(&generation).await });
+        wait_until(|| entered.load(Ordering::SeqCst) == index + 1).await;
+        drop(owner.close());
+        assert!(!request.await.unwrap());
+        drop(owner);
+    }
+    let successor = make_owner();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let generation = install_probe(&successor, &calls);
+    let admitted_while_retired_calls_live = successor.refresh_generation(&generation).await;
+    let calls_before_release = calls.load(Ordering::SeqCst);
+    let getter_calls = Arc::new(AtomicUsize::new(0));
+    let manifest_provider: Arc<dyn TokenProvider> =
+        Arc::new(ManifestProbe(Arc::clone(&getter_calls)));
+    let cancelled = CancellationToken::new();
+    let manifest_while_retired_calls_live = successor
+        .current_manifest_token(Arc::clone(&manifest_provider), &cancelled)
+        .await;
+    let getters_before_release = getter_calls.load(Ordering::SeqCst);
+    let local_slots_after_refusal = successor.available_token_slots();
+    // Always release old host code before assertions, including on the baseline.
+    for release in releases {
+        release.send(()).unwrap();
+    }
+    wait_until(|| finished.load(Ordering::SeqCst) == limit).await;
+    let recovered = recover(&successor, &generation).await;
+    assert!(
+        !admitted_while_retired_calls_live,
+        "a new credential bypassed live retired callbacks"
+    );
+    assert_eq!(
+        calls_before_release, 0,
+        "capacity refusal must not enter foreign code"
+    );
+    assert!(matches!(
+        manifest_while_retired_calls_live,
+        Err(crate::MobileError::ResourceLimit { .. })
+    ));
+    assert_eq!(
+        getters_before_release, 0,
+        "manifest getters share process admission with refresh"
+    );
+    assert_eq!(
+        local_slots_after_refusal, LIMIT,
+        "global refusal must return local admission"
+    );
+    assert!(
+        recovered,
+        "physical return must restore successor admission"
+    );
+    assert_eq!(
+        successor
+            .current_manifest_token(manifest_provider, &cancelled)
+            .await
+            .unwrap(),
+        "dst_manifest"
+    );
 }
