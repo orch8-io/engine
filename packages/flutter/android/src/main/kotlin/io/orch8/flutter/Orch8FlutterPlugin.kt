@@ -46,6 +46,35 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
     private var appContext: Context? = null
 
     private var lifecycle = NativeEngineLifecycle()
+    private val scoped = MobileScopedBridge()
+    private val scopedPending = PendingHandlerCalls()
+    private val scopedCallbacks = object : MobileScopedCallbacks {
+        override val scopedPending get() = this@Orch8FlutterPlugin.scopedPending
+        override fun emitScoped(scope: NativeEngineLifecycle.Scope, name: String, body: Map<String, Any?>): Boolean {
+            if (!scope.isCurrent()) return false
+            val id = body["requestId"] as? String ?: return false
+            val pending = scopedPending
+            val method = if (name == "orch8:scopedExecuteStep") "scopedExecuteStep" else "scopedRefreshToken"
+            main.post {
+                val target = channel
+                if (!scope.isCurrent() || target == null) {
+                    pending.resolve(id, null, "Flutter bridge retired", false)
+                } else {
+                    target.invokeMethod(method, body, object : MethodChannel.Result {
+                        override fun success(result: Any?) {
+                            if (result is String) pending.resolve(id, result, null, false)
+                            else pending.resolve(id, null, "invalid host callback reply", false)
+                        }
+                        override fun error(code: String, message: String?, details: Any?) {
+                            pending.resolve(id, null, message ?: "host callback failed", code == "ORCH8_CATALOG_PERMANENT")
+                        }
+                        override fun notImplemented() { pending.resolve(id, null, "host callback unavailable", false) }
+                    })
+                }
+            }
+            return true
+        }
+    }
     private val engine: MobileEngine? get() = lifecycle.engine
 
     @Volatile private var handlerTimeoutMs: Long = 30_000
@@ -77,7 +106,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         // The Dart isolate is gone: shut the engine down so it stops calling
         // handlers that can no longer answer (each would burn a retry attempt)
         // and releases the SQLite file before a re-attach opens another engine.
-        lifecycle.shutdown(true, {}) { /* No Dart isolate remains to receive a reply. */ }
+        lifecycle.shutdown(true, {}) { scoped.prune() }
         work.shutdown()
     }
 
@@ -138,11 +167,14 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         }
         if (call.method == "shutdown") {
             val owner = lifecycle
-            owner.shutdown(false, {}) { error -> main.post {
+            owner.shutdown(false, {}) { error ->
+                scoped.prune()
+                main.post {
                 if (lifecycle === owner && !owner.isClosed) {
                     if (error == null) result.success(null) else rejectOrch8(result, error)
                 }
-            } }
+                }
+            }
             return
         }
         val owner = lifecycle
@@ -204,6 +236,10 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
     }
 
     private fun dispatch(method: String, a: Map<*, *>, eng: MobileEngine): Any? = when (method) {
+        "scopedCall" -> scoped.call(eng, lifecycle.scopeOf(eng), scopedCallbacks,
+            a["handle"] as? String ?: throw IllegalArgumentException("missing scoped handle"),
+            a["method"] as? String ?: throw IllegalArgumentException("missing scoped method"),
+            a["argsJson"] as? String ?: throw IllegalArgumentException("missing scoped arguments"))
         "registerHandler" -> {
             eng.registerHandler(a.requireStr("name"), FlutterStepHandler(this, handlerTimeoutMs, lifecycle.scopeOf(eng)))
             null
@@ -436,11 +472,14 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         owner.initialize(dbPath, cfg, {}, { eng, scope ->
             eng.setListener(FlutterEngineListener { event -> emit(scope, event) })
             handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
-        }) { error -> main.post {
-            if (lifecycle === owner && !owner.isClosed) {
-                if (error == null) result.success(null) else rejectOrch8(result, error, "INIT_ERROR")
+        }) { error ->
+            scoped.prune()
+            main.post {
+                if (lifecycle === owner && !owner.isClosed) {
+                    if (error == null) result.success(null) else rejectOrch8(result, error, "INIT_ERROR")
+                }
             }
-        } }
+        }
     }
 
     /**

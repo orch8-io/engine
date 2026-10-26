@@ -1,6 +1,6 @@
 import Foundation
 
-/// Outstanding native-to-JS handler calls, keyed by request id.
+/// Outstanding native-to-host handler calls, keyed by request id.
 final class PendingHandlerCalls: @unchecked Sendable {
     struct Outcome {
         let output: String?
@@ -48,7 +48,7 @@ final class PendingHandlerCalls: @unchecked Sendable {
     }
 
     /// Rust bounds the operation. The physical foreign call stays charged until
-    /// JS settles; a native timeout cannot cancel an arbitrary JS promise.
+    /// the host settles; a native timeout cannot cancel an arbitrary host promise.
     func waitForSettlement(_ id: String) -> Outcome? {
         lock.lock()
         let slot = slots[id]

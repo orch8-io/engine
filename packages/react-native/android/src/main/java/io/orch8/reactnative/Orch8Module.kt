@@ -26,11 +26,8 @@ import io.orch8.mobile.StepHandler
 import io.orch8.mobile.TokenProvider
 import io.orch8.mobile.WorkerOptions
 import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 /**
  * React Native bridge over the Orch8Mobile UniFFI surface.
@@ -55,7 +52,12 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     }
     internal val pending = PendingHandlerCalls()
     internal val scopedPending = PendingHandlerCalls()
-    private val scoped = RNScopedBridge()
+    private val scoped = MobileScopedBridge()
+    private val scopedCallbacks = object : MobileScopedCallbacks {
+        override val scopedPending get() = this@Orch8Module.scopedPending
+        override fun emitScoped(scope: NativeEngineLifecycle.Scope, name: String, body: Map<String, Any?>): Boolean =
+            sendEvent(scope, name, Arguments.makeNativeMap(body))
+    }
 
     override fun getName(): String = "Orch8Module"
 
@@ -175,7 +177,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun scopedCall(handle: String, method: String, argsJson: String, promise: Promise) = background(promise) { eng ->
         val scope = lifecycle.scopeOf(eng)
-        val reply = scoped.call(eng, scope, this, handle, method, argsJson)
+        val reply = scoped.call(eng, scope, scopedCallbacks, handle, method, argsJson)
         if (!scope.isCurrent()) throw MobileException.Shutdown("engine retired")
         promise.resolve(reply)
     }
@@ -563,61 +565,6 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         lifecycle.shutdown(true, {}) { scoped.prune() }
         work.shutdown()
         super.invalidate()
-    }
-}
-
-/** Outstanding native-to-JS handler calls, keyed by request id. */
-internal class PendingHandlerCalls {
-    class Outcome(val output: String?, val error: String?, val permanent: Boolean)
-
-    private class Slot {
-        val latch = CountDownLatch(1)
-
-        @Volatile var outcome: Outcome? = null
-    }
-
-    private val slots = ConcurrentHashMap<String, Slot>()
-
-    fun open(id: String) {
-        slots[id] = Slot()
-    }
-
-    fun await(id: String, timeoutMs: Long): Outcome? {
-        val slot = slots[id] ?: return null
-        val done = slot.latch.await(timeoutMs, TimeUnit.MILLISECONDS)
-        slots.remove(id)
-        return if (done) slot.outcome else null
-    }
-
-    // Rust times out the logical operation, while its foreign call remains
-    // physically charged until the JS promise settles.
-    fun awaitSettlement(id: String): Outcome? {
-        val slot = slots[id] ?: return null
-        var interrupted = false
-        while (true) {
-            try { slot.latch.await(); break }
-            catch (_: InterruptedException) { interrupted = true }
-        }
-        slots.remove(id)
-        if (interrupted) Thread.currentThread().interrupt()
-        return slot.outcome
-    }
-
-    fun cancel(id: String) {
-        slots.remove(id)
-    }
-
-    fun resolve(id: String, output: String?, error: String?, permanent: Boolean) {
-        val slot = slots[id] ?: return // timed out or unknown
-        synchronized(slot) {
-            if (slot.outcome != null) return
-            slot.outcome = Outcome(output, error, permanent)
-        }
-        slot.latch.countDown()
-    }
-
-    fun failAll(message: String) {
-        for (id in slots.keys.toList()) resolve(id, null, message, false)
     }
 }
 

@@ -5,8 +5,8 @@ Date: 2026-10-24
 Status: the requirement is accepted by the user. Internal account/catalog
 identity, session epochs, isolated metadata/signing keys, owner-qualified cache,
 credential grants and local run materialization are implemented internally.
-Development Rust/UniFFI, Swift and KMP APIs now expose typed account, catalog and
-run handles, including acknowledged archive receipts. The complete runtime and
+Development Rust/UniFFI, Swift, KMP, React Native and Flutter APIs now expose typed
+account, catalog and run handles, including acknowledged archive receipts. The complete runtime and
 SDK rollout remains an implementation contract; S1–S12 below are not complete.
 See [the current scoped API](../SDK_SCOPED_NATIVE.md) for implemented boundaries
 and remaining rollout requirements.

@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/services.dart';
 
 export 'src/errors.dart';
+part 'src/scoped.dart';
 
 class Orch8Config {
   final String? dbPath;
@@ -635,6 +636,9 @@ typedef StepHandler = FutureOr<String> Function(String stepName, String input);
 class Orch8 {
   static const MethodChannel _channel = MethodChannel('io.orch8/mobile');
   static const EventChannel _eventChannel = EventChannel('io.orch8/events');
+  final _scopes = _ScopedClient(_channel);
+
+  Future<Orch8Account> openAccount(AccountIdentity identity) => _scopes.openAccount(identity);
 
   final Map<String, StepHandler> _handlers = {};
   Future<String> Function()? _fetchToken;
@@ -656,6 +660,7 @@ class Orch8 {
       get onStepPending => _pendingController.stream;
 
   Future<void> initialize([Orch8Config config = const Orch8Config()]) async {
+    _scopes.reset();
     _channel.setMethodCallHandler(_handleMethodCall);
     _setupEventChannel();
     await _channel.invokeMethod('initialize', config.toMap());
@@ -915,6 +920,7 @@ class Orch8 {
   }
 
   Future<void> shutdown() async {
+    _scopes.reset();
     await _channel.invokeMethod('shutdown');
     _eventSubscription?.cancel();
     _completedController.close();
@@ -923,6 +929,9 @@ class Orch8 {
   }
 
   Future<dynamic> _handleMethodCall(MethodCall call) async {
+    if (call.method == 'scopedExecuteStep' || call.method == 'scopedRefreshToken') {
+      return _scopes.callback(call);
+    }
     if (call.method == 'refreshToken') {
       final fetchToken = _fetchToken;
       if (fetchToken == null) {

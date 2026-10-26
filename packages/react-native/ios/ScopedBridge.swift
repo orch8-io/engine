@@ -2,13 +2,13 @@ import CoreFoundation
 import Foundation
 import Orch8Mobile
 
-protocol RNScopedCallbacks: AnyObject {
+protocol MobileScopedCallbacks: AnyObject {
     var scopedPending: PendingHandlerCalls { get }
     @discardableResult func emit(scope: NativeEngineScope, _ name: String, _ body: [String: Any]) -> Bool
 }
 
 /// Bounded, generation-qualified native views. Entries never retain the root engine.
-final class RNScopedBridge: @unchecked Sendable {
+final class MobileScopedBridge: @unchecked Sendable {
     private enum Node {
         case account(MobileAccount)
         case catalog(MobileCatalog)
@@ -119,11 +119,11 @@ final class RNScopedBridge: @unchecked Sendable {
         return value
     }
     func call(
-        engine: MobileEngine, scope: NativeEngineScope, module: RNScopedCallbacks, handle: String,
+        engine: MobileEngine, scope: NativeEngineScope, module: MobileScopedCallbacks, handle: String,
         method: String, argsJson: String
     ) throws -> String {
         prune()
-        guard argsJson.utf8.count <= 2 * 1024 * 1024,
+        guard argsJson.utf8.count <= 4 * 1024 * 1024,
             let data = argsJson.data(using: .utf8),
             let args = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { throw MobileError.InvalidInput(detail: "scoped arguments must be a bounded JSON object") }
@@ -143,6 +143,7 @@ final class RNScopedBridge: @unchecked Sendable {
                             subject: args.string("subject")))), scope)
         } else {
             let entry = try lookup(handle)
+            guard entry.scope === scope else { throw MobileError.Shutdown(detail: "scope belongs to another engine") }
             switch (entry.node, method) {
             case (.account(let v), "openCatalog"):
                 result = try insert(
@@ -187,7 +188,8 @@ final class RNScopedBridge: @unchecked Sendable {
                 let limit = try args.positiveNumber("limit", maximum: 128)
                 var cursor: MobileCatalogHistoryCursor?
                 if let id = args["cursor"] as? String {
-                    guard case .cursor(let value, let account, let catalog, let epoch) = try lookup(id).node,
+                    let cursorEntry = try lookup(id)
+                    guard cursorEntry.scope === scope, case .cursor(let value, let account, let catalog, let epoch) = cursorEntry.node,
                         account == v.accountId(), catalog == v.catalogId(), epoch == v.sessionEpoch()
                     else {
                         throw MobileError.InvalidInput(detail: "cursor belongs to another catalog session")
@@ -206,13 +208,13 @@ final class RNScopedBridge: @unchecked Sendable {
                 let timeout = try args.positiveNumber("timeoutMs", maximum: 9_007_199_254_740_991)
                 try v.registerHandler(
                     name: args.string("name"),
-                    handler: RNScopedHandler(
+                    handler: MobileScopedHandler(
                         module: module, scope: scope, catalog: v, key: args.string("callbackKey")),
                     timeoutMs: UInt64(timeout))
                 result = nil
             case (.catalog(let v), "sync"):
                 let synced = try v.sync(
-                    tokenProvider: RNScopedTokens(
+                    tokenProvider: MobileScopedTokens(
                         module: module, scope: scope, key: args.string("providerKey"),
                         token: args.string("initialToken")))
                 result = [
@@ -305,12 +307,12 @@ extension Dictionary where Key == String, Value == Any {
         return Int32(try positiveNumber("version", maximum: Int64(Int32.max)))
     }
 }
-private final class RNScopedHandler: MobileCatalogStepHandler, @unchecked Sendable {
-    private weak var module: RNScopedCallbacks?
+private final class MobileScopedHandler: MobileCatalogStepHandler, @unchecked Sendable {
+    private weak var module: MobileScopedCallbacks?
     private let scope: NativeEngineScope
     private let account: String, catalog: String, epoch: Int64, key: String
     init(
-        module: RNScopedCallbacks, scope: NativeEngineScope, catalog: MobileCatalog, key: String
+        module: MobileScopedCallbacks, scope: NativeEngineScope, catalog: MobileCatalog, key: String
     ) {
         self.module = module
         self.scope = scope
@@ -339,7 +341,7 @@ private final class RNScopedHandler: MobileCatalogStepHandler, @unchecked Sendab
                 ])
         else {
             module.scopedPending.cancel(id)
-            throw HandlerError.Retryable(detail: "JS runtime unavailable")
+            throw HandlerError.Retryable(detail: "host runtime unavailable")
         }
         guard let reply = module.scopedPending.waitForSettlement(id), scope.isCurrent else {
             throw HandlerError.Retryable(detail: "catalog handler unavailable or retired")
@@ -351,13 +353,13 @@ private final class RNScopedHandler: MobileCatalogStepHandler, @unchecked Sendab
         return reply.output ?? "{}"
     }
 }
-private final class RNScopedTokens: TokenProvider, @unchecked Sendable {
-    private weak var module: RNScopedCallbacks?
+private final class MobileScopedTokens: TokenProvider, @unchecked Sendable {
+    private weak var module: MobileScopedCallbacks?
     private let scope: NativeEngineScope
     private let key: String
     private let lock = NSLock()
     private var token: String
-    init(module: RNScopedCallbacks, scope: NativeEngineScope, key: String, token: String) {
+    init(module: MobileScopedCallbacks, scope: NativeEngineScope, key: String, token: String) {
         self.module = module
         self.scope = scope
         self.key = key
@@ -376,7 +378,7 @@ private final class RNScopedTokens: TokenProvider, @unchecked Sendable {
         guard module.emit(scope: scope, "orch8:scopedRefreshToken", ["providerKey": key, "requestId": id])
         else {
             module.scopedPending.cancel(id)
-            throw MobileError.Engine(detail: "JS runtime unavailable")
+            throw MobileError.Engine(detail: "host runtime unavailable")
         }
         guard let reply = module.scopedPending.waitForSettlement(id), scope.isCurrent else {
             throw MobileError.Shutdown(detail: "token callback unavailable or retired")

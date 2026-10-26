@@ -22,8 +22,13 @@ import org.json.JSONTokener
 import java.lang.ref.WeakReference
 import java.util.UUID
 
+internal interface MobileScopedCallbacks {
+    val scopedPending: PendingHandlerCalls
+    fun emitScoped(scope: NativeEngineLifecycle.Scope, name: String, body: Map<String, Any?>): Boolean
+}
+
 /** Native views retain weak engine identity; opaque IDs are never account selectors. */
-internal class RNScopedBridge {
+internal class MobileScopedBridge {
     private sealed interface Node {
         fun close()
         class Account(val native: MobileAccount) : Node { override fun close() = native.close() }
@@ -97,9 +102,9 @@ internal class RNScopedBridge {
         if (entry == null || !entry.scope.isCurrent()) throw MobileException.Shutdown("scope view disposed or retired")
         return entry
     }
-    fun call(engine: MobileEngine, scope: NativeEngineLifecycle.Scope, module: Orch8Module, handle: String, method: String, argsJson: String): String {
+    fun call(engine: MobileEngine, scope: NativeEngineLifecycle.Scope, module: MobileScopedCallbacks, handle: String, method: String, argsJson: String): String {
         prune()
-        if (argsJson.length > 2 * 1024 * 1024 || argsJson.toByteArray(Charsets.UTF_8).size > 2 * 1024 * 1024)
+        if (argsJson.length > 4 * 1024 * 1024 || argsJson.toByteArray(Charsets.UTF_8).size > 4 * 1024 * 1024)
             throw MobileException.InvalidInput("scoped arguments must be a bounded JSON object")
         val args = try {
             val parser = JSONTokener(argsJson)
@@ -115,6 +120,7 @@ internal class RNScopedBridge {
             insert(Node.Account(engine.openAccount(MobileAccountIdentity(args.string("accountKey"), args.string("issuer"), args.string("subject")))), scope)
         } else {
             val entry = lookup(handle)
+            if (entry.scope !== scope) throw MobileException.Shutdown("scope belongs to another engine")
             when (val node = entry.node) {
                 is Node.Account -> when (method) {
                     "openCatalog" -> insert(Node.Catalog(node.native.openCatalog(MobileCatalogConfiguration(args.string("catalogKey"), args.string("source"), args.string("signingAuthority"), args.string("manifestUrl"), args.string("identityUrl")))), scope, handle)
@@ -128,16 +134,18 @@ internal class RNScopedBridge {
                     "run" -> insert(Node.Run(node.native.run(args.string("instanceId"))), scope, handle)
                     "registerHandler" -> {
                         val timeout = args.positive("timeoutMs", 9_007_199_254_740_991)
-                        node.native.registerHandler(args.string("name"), RNScopedHandler(module, scope, node.native, args.string("callbackKey")), timeout.toULong())
+                        node.native.registerHandler(args.string("name"), MobileScopedHandler(module, scope, node.native, args.string("callbackKey")), timeout.toULong())
                         null
                     }
                     "sync" -> {
-                        val value = node.native.sync(RNScopedTokens(module, scope, args.string("providerKey"), args.string("initialToken")))
+                        val value = node.native.sync(MobileScopedTokens(module, scope, args.string("providerKey"), args.string("initialToken")))
                         JSONObject().put("added", value.added.toLong()).put("updated", value.updated.toLong()).put("removed", value.removed.toLong()).put("skipped", value.skipped.toLong()).put("signatureFailures", value.signatureFailures.toLong())
                     }
                     "history" -> {
                         val cursor = if (args.isNull("cursor")) null else {
-                            val candidate = lookup(args.string("cursor")).node as? Node.Cursor ?: throw MobileException.InvalidInput("invalid cursor")
+                            val cursorEntry = lookup(args.string("cursor"))
+                            if (cursorEntry.scope !== scope) throw MobileException.InvalidInput("cursor belongs to another engine")
+                            val candidate = cursorEntry.node as? Node.Cursor ?: throw MobileException.InvalidInput("invalid cursor")
                             if (candidate.account != node.native.accountId() || candidate.catalog != node.native.catalogId() || candidate.epoch != node.native.sessionEpoch())
                                 throw MobileException.InvalidInput("cursor belongs to another catalog session")
                             candidate.native
@@ -181,7 +189,7 @@ private fun JSONObject.positive(name: String, maximum: Long): Long {
     if (value !in 1..maximum || number.toDouble() != value.toDouble()) throw MobileException.InvalidInput("invalid positive integer: $name")
     return value
 }
-private class RNScopedHandler(module: Orch8Module, private val scope: NativeEngineLifecycle.Scope, catalog: MobileCatalog, private val key: String) : MobileCatalogStepHandler {
+private class MobileScopedHandler(module: MobileScopedCallbacks, private val scope: NativeEngineLifecycle.Scope, catalog: MobileCatalog, private val key: String) : MobileCatalogStepHandler {
     private val module = WeakReference(module)
     private val account = catalog.accountId()
     private val catalogId = catalog.catalogId()
@@ -191,20 +199,20 @@ private class RNScopedHandler(module: Orch8Module, private val scope: NativeEngi
         if (context.accountId != account || context.catalogId != catalogId || context.ownerEpoch != epoch) throw HandlerException.Permanent("callback owner mismatch")
         val id = UUID.randomUUID().toString()
         owner.scopedPending.open(id)
-        val payload = com.facebook.react.bridge.Arguments.createMap().apply {
-            putString("callbackKey", key); putString("requestId", id); putString("stepName", stepName); putString("inputJson", input)
-            putMap("context", com.facebook.react.bridge.Arguments.createMap().apply {
-                putString("accountId", context.accountId); putString("catalogId", context.catalogId); putString("ownerEpoch", context.ownerEpoch.toString()); putString("runId", context.runId); putString("blockId", context.blockId); putDouble("attempt", context.attempt.toDouble()); putString("effectId", context.effectId)
-            })
-        }
-        if (!owner.sendEvent(scope, "orch8:scopedExecuteStep", payload)) { owner.scopedPending.cancel(id); throw HandlerException.Retryable("JS runtime unavailable") }
-        val reply = owner.scopedPending.awaitSettlement(id) ?: throw HandlerException.Retryable("catalog handler timed out")
+        val payload = mapOf<String, Any?>(
+            "callbackKey" to key, "requestId" to id, "stepName" to stepName, "inputJson" to input,
+            "context" to mapOf("accountId" to context.accountId, "catalogId" to context.catalogId,
+                "ownerEpoch" to context.ownerEpoch.toString(), "runId" to context.runId,
+                "blockId" to context.blockId, "attempt" to context.attempt.toLong(), "effectId" to context.effectId)
+        )
+        if (!owner.emitScoped(scope, "orch8:scopedExecuteStep", payload)) { owner.scopedPending.cancel(id); throw HandlerException.Retryable("host runtime unavailable") }
+        val reply = owner.scopedPending.awaitSettlement(id) ?: throw HandlerException.Retryable("catalog callback unavailable")
         if (!scope.isCurrent()) throw HandlerException.Retryable("engine retired")
         reply.error?.let { if (reply.permanent) throw HandlerException.Permanent(it) else throw HandlerException.Retryable(it) }
         return reply.output ?: "{}"
     }
 }
-private class RNScopedTokens(module: Orch8Module, private val scope: NativeEngineLifecycle.Scope, private val key: String, token: String) : TokenProvider {
+private class MobileScopedTokens(module: MobileScopedCallbacks, private val scope: NativeEngineLifecycle.Scope, private val key: String, token: String) : TokenProvider {
     private val module = WeakReference(module)
     @Volatile private var token = token
     override fun currentToken(): String = if (scope.isCurrent()) token else ""
@@ -212,9 +220,9 @@ private class RNScopedTokens(module: Orch8Module, private val scope: NativeEngin
         val owner = module.get()?.takeIf { scope.isCurrent() } ?: throw MobileException.Shutdown("engine retired")
         val id = UUID.randomUUID().toString()
         owner.scopedPending.open(id)
-        val payload = com.facebook.react.bridge.Arguments.createMap().apply { putString("providerKey", key); putString("requestId", id) }
-        if (!owner.sendEvent(scope, "orch8:scopedRefreshToken", payload)) { owner.scopedPending.cancel(id); throw MobileException.Engine("JS runtime unavailable") }
-        val reply = owner.scopedPending.awaitSettlement(id) ?: throw MobileException.Engine("token refresh timed out")
+        val payload = mapOf<String, Any?>("providerKey" to key, "requestId" to id)
+        if (!owner.emitScoped(scope, "orch8:scopedRefreshToken", payload)) { owner.scopedPending.cancel(id); throw MobileException.Engine("host runtime unavailable") }
+        val reply = owner.scopedPending.awaitSettlement(id) ?: throw MobileException.Engine("token callback unavailable")
         if (!scope.isCurrent()) throw MobileException.Shutdown("engine retired")
         reply.error?.let { throw MobileException.Engine(it) }
         val fresh = reply.output?.takeIf { it.isNotEmpty() } ?: throw MobileException.Engine("empty token")
