@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlin.test.Test
@@ -18,7 +21,7 @@ import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
-private class FakeBackend : EngineBackend {
+internal class FakeBackend : EngineBackend {
     override fun openAccount(identity: AccountIdentity): io.orch8.kmp.internal.AccountBackend = error("unexpected scoped account call")
 
     val handlers = mutableMapOf<String, BlockingStepHandler>()
@@ -28,6 +31,7 @@ private class FakeBackend : EngineBackend {
     val states = ArrayDeque<InstanceState>()
     var cancelled = mutableListOf<String>()
     var shutdown = false
+    var instanceFailure: Orch8Exception? = null
     var instanceReads = 0
     var activeReads = 0
     var delegationReads = 0
@@ -70,6 +74,7 @@ private class FakeBackend : EngineBackend {
 
     override fun getInstance(instanceId: String): InstanceSnapshot {
         instanceReads++
+        instanceFailure?.let { throw it }
         val state = if (states.size > 1) states.removeFirst() else states.first()
         return InstanceSnapshot(instanceId, "field-inspection", state, "{}", "c", "u")
     }
@@ -203,6 +208,13 @@ private class FakeBackend : EngineBackend {
     override fun delegationStats() = DelegationStats(true, 1, 1, 0, 0, 1)
 }
 
+private open class TestObservationLifecycle : Orch8ObservationObserver {
+    val errors = mutableListOf<Orch8Exception>()
+    var completions = 0
+    override fun onError(error: Orch8Exception) { errors += error }
+    override fun onComplete() { completions++ }
+}
+
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class Orch8EngineTest {
     @Test
@@ -282,6 +294,104 @@ class Orch8EngineTest {
         assertEquals(0, backend.instanceReads)
         assertEquals(0, backend.activeReads)
         assertEquals(0, backend.delegationReads)
+    }
+
+    @Test
+    fun instanceSubscriptionStopsAfterTerminalAndErrorCallbacksCannotEscape() = runTest {
+        val backend = FakeBackend()
+        backend.states.addAll(listOf(InstanceState.RUNNING, InstanceState.COMPLETED))
+        val engine = Orch8Engine(backend, StandardTestDispatcher(testScheduler))
+        val seen = mutableListOf<InstanceState>()
+        val observer = object : TestObservationLifecycle(), InstanceSnapshotObserver {
+            override fun onInstance(snapshot: InstanceSnapshot) { seen += snapshot.state }
+        }
+        val subscription = engine.subscribeInstance("i1", observer, 100)
+        runCurrent(); advanceTimeBy(100); runCurrent()
+        assertEquals(listOf(InstanceState.RUNNING, InstanceState.COMPLETED), seen)
+        assertEquals(1, observer.completions)
+        assertTrue(observer.errors.isEmpty())
+        subscription.close(); advanceTimeBy(1000); runCurrent()
+        assertEquals(2, backend.instanceReads)
+        backend.instanceFailure = Orch8Exception(Orch8ErrorKind.NOT_FOUND, "missing")
+        val failed = object : TestObservationLifecycle(), InstanceSnapshotObserver {
+            override fun onInstance(snapshot: InstanceSnapshot) = error("unexpected snapshot")
+            override fun onError(error: Orch8Exception) { super.onError(error); error("broken error callback") }
+        }
+        val broken = engine.subscribeInstance("missing", failed)
+        runCurrent()
+        assertEquals(Orch8ErrorKind.NOT_FOUND, failed.errors.single().kind)
+        assertEquals(0, failed.completions)
+        broken.close(); engine.close()
+    }
+
+    @Test
+    fun engineCloseStopsEveryOwnedStreamAndLateEventsCannotReachObservers() = runTest {
+        val backend = FakeBackend()
+        backend.delegationStates.add(DelegationState.DELEGATED)
+        val engine = Orch8Engine(backend, StandardTestDispatcher(testScheduler))
+        val events = mutableListOf<EngineEvent>()
+        val pending = mutableListOf<List<PendingStep>>()
+        val eventObserver = object : TestObservationLifecycle(), EngineEventObserver {
+            override fun onEvent(event: EngineEvent) { events += event }
+        }
+        val stepObserver = object : TestObservationLifecycle(), PendingStepsObserver {
+            override fun onSteps(steps: List<PendingStep>) { pending += steps }
+        }
+        val activeObserver = object : TestObservationLifecycle(), ActiveInstancesObserver {
+            override fun onInstances(instances: List<InstanceSummary>) = Unit
+        }
+        val delegationObserver = object : TestObservationLifecycle(), DelegationStatusObserver {
+            override fun onStatus(status: DelegationStatus) = Unit
+        }
+        val subscriptions = listOf(engine.subscribeEvents(eventObserver), engine.subscribePendingSteps(stepObserver),
+            engine.subscribeActiveInstances(activeObserver, 100), engine.subscribeDelegation("d-1", delegationObserver, 100))
+        runCurrent()
+        backend.sink(EngineEvent.StepPending("i1", "approve", "echo")); runCurrent()
+        assertEquals(1, events.size)
+        assertEquals(listOf(emptyList(), listOf(PendingStep("i1", "approve", "echo"))), pending)
+        assertEquals(1, backend.activeReads); assertEquals(1, backend.delegationReads)
+        engine.close(); runCurrent()
+        backend.sink(EngineEvent.InstanceCompleted("i1", "{}"))
+        advanceTimeBy(1000); runCurrent()
+        assertEquals(1, events.size); assertEquals(2, pending.size)
+        assertEquals(1, backend.activeReads); assertEquals(1, backend.delegationReads)
+        assertTrue(listOf(eventObserver, stepObserver, activeObserver, delegationObserver).all { it.errors.isEmpty() && it.completions == 0 })
+        assertEquals(Orch8ErrorKind.SHUTDOWN,
+            assertFailsWith<Orch8Exception> { engine.subscribeEvents(eventObserver) }.kind)
+        subscriptions.forEach { it.close() }
+    }
+
+    @Test
+    fun returnedEventSubscriptionIsReadyBeforeTheNextProducerCall() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, StandardTestDispatcher(testScheduler))
+        val seen = mutableListOf<EngineEvent>()
+        val subscription = engine.subscribeEvents(object : TestObservationLifecycle(), EngineEventObserver {
+            override fun onEvent(event: EngineEvent) { seen += event }
+        })
+        val event = EngineEvent.InstanceCompleted("i1", "{}")
+        backend.sink(event) // no scheduler turn between subscription and production
+        runCurrent()
+        assertEquals(listOf<EngineEvent>(event), seen)
+        subscription.close(); engine.close()
+    }
+
+    @Test
+    fun closingOneEventSubscriptionPreservesTheOtherAndTheEngine() = runTest {
+        val backend = FakeBackend()
+        val engine = Orch8Engine(backend, StandardTestDispatcher(testScheduler))
+        var first = 0
+        var second = 0
+        val a = engine.subscribeEvents(object : TestObservationLifecycle(), EngineEventObserver {
+            override fun onEvent(event: EngineEvent) { first++ }
+        })
+        val b = engine.subscribeEvents(object : TestObservationLifecycle(), EngineEventObserver {
+            override fun onEvent(event: EngineEvent) { second++ }
+        })
+        runCurrent(); a.close(); runCurrent()
+        backend.sink(EngineEvent.InstanceCompleted("i1", "{}")); runCurrent()
+        assertEquals(0, first); assertEquals(1, second); assertEquals(false, backend.shutdown)
+        b.close(); engine.close()
     }
 
     @Test

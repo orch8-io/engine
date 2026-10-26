@@ -521,6 +521,25 @@ mod tests {
     }
 
     #[test]
+    fn more_frequent_schedule_can_share_next_fire_before_midnight() {
+        let now = "2026-10-25T23:59:05Z"
+            .parse::<chrono::DateTime<Utc>>()
+            .unwrap();
+        let daily = calculate_next_fire_after(&mk_schedule("0 0 * * *"), now).unwrap();
+        let minute = calculate_next_fire_after(&mk_schedule("* * * * *"), now).unwrap();
+        assert_eq!(
+            daily,
+            "2026-10-26T00:00:00Z"
+                .parse::<chrono::DateTime<Utc>>()
+                .unwrap()
+        );
+        assert_eq!(
+            minute, daily,
+            "a more frequent expression need not move the next fire earlier"
+        );
+    }
+
+    #[test]
     fn valid_expr_with_weekday_and_seconds() {
         assert!(validate_cron_expr("0 30 9 * * MON *").is_ok());
         assert!(validate_cron_expr("0 0 12 * * SUN *").is_ok());

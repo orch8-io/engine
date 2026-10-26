@@ -60,29 +60,38 @@ describe("Cron Advanced Edge Cases", () => {
     await client.deleteCron(created.id);
   });
 
-  it("update cron expression changes next_fire_at", async () => {
+  it("updating cron expression recomputes next_fire_at", async () => {
     const tenantId = `cron-up-${uuid().slice(0, 8)}`;
     const seq = testSequence("cron-up", [step("s1", "noop")], { tenantId });
     await client.createSequence(seq);
 
+    // Keep the old fire about 12 hours away. Daily midnight and every minute
+    // legitimately share their next fire during the minute before midnight.
+    const distantHour = (new Date().getUTCHours() + 12) % 24;
     const created = await client.createCron({
       tenant_id: tenantId,
       namespace: "default",
       sequence_id: seq.id,
-      cron_expr: "0 0 * * *",
+      cron_expr: `0 ${distantHour} * * *`,
+      timezone: "UTC",
+      enabled: false,
     });
 
-    const before = await client.getCron(created.id);
-    const beforeTime = new Date(before.next_fire_at).getTime();
-
-    // Change to every minute — next fire should be much sooner.
-    await client.updateCron(created.id, { cron_expr: "* * * * *" });
-
-    const after = await client.getCron(created.id);
-    const afterTime = new Date(after.next_fire_at).getTime();
-    assert.ok(afterTime < beforeTime, "next_fire_at should move earlier");
-
-    await client.deleteCron(created.id);
+    try {
+      const before = await client.getCron(created.id);
+      const beforeTime = new Date(before.next_fire_at).getTime();
+      const updateStarted = Date.now();
+      await client.updateCron(created.id, { cron_expr: "* * * * *" });
+      const updateFinished = Date.now();
+      const after = await client.getCron(created.id);
+      const afterTime = new Date(after.next_fire_at).getTime();
+      assert.equal(after.cron_expr, "* * * * *");
+      assert.ok(afterTime < beforeTime, "new schedule must replace the distant old fire");
+      assert.ok(afterTime > updateStarted, "new fire must be in the future");
+      assert.ok(afterTime <= updateFinished + 60_000, "every-minute fire must be within one minute of the update");
+    } finally {
+      await client.deleteCron(created.id);
+    }
   });
 
   it("delete cron stops firing", async () => {
