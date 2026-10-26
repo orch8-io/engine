@@ -656,7 +656,7 @@ async fn expired_identity_cancels_a_private_retry_wait_without_redispatch() {
         settled,
         "private retry sleeps must stop at the verified identity's monotonic deadline"
     );
-    assert!(matches!(outcome, Ok(Ok(Err(MobileError::Shutdown)))));
+    assert!(matches!(outcome, Ok(Ok(Err(MobileError::Shutdown { .. })))));
     assert_eq!(
         fixture
             .server
@@ -1401,7 +1401,7 @@ fn public_sdk_hung_token_keeps_its_account_charge_across_close_and_reopen_while_
         catalog.close_view();
         assert!(matches!(
             result.recv_timeout(Duration::from_secs(2)).unwrap(),
-            Err(MobileError::Shutdown)
+            Err(MobileError::Shutdown { .. })
         ));
         caller.join().unwrap();
         alice.retire().unwrap();

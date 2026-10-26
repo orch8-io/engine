@@ -364,7 +364,7 @@ async fn insert_checked(
 ) -> Result<TaskInstance, MobileError> {
     fence_catalog(tx, scope).await?;
     if stop.is_cancelled() {
-        return Err(MobileError::Shutdown);
+        return Err(MobileError::shutdown());
     }
     let run = read_run(tx, scope, checked.id).await?;
     if fingerprint_run(&run)? != checked.identity {
@@ -391,7 +391,7 @@ async fn insert_checked(
     .any(|(used, max)| u64::try_from(*used).unwrap_or(u64::MAX) >= u64::from(*max))
     {
         return Err(MobileError::ResourceLimit {
-            message: "catalog active-instance allowance exhausted".into(),
+            detail: "catalog active-instance allowance exhausted".into(),
         });
     }
     let instance = TaskInstance {
@@ -420,7 +420,7 @@ async fn insert_checked(
         updated_at: run.created_at,
     };
     if stop.is_cancelled() {
-        return Err(MobileError::Shutdown);
+        return Err(MobileError::shutdown());
     }
     SqliteStorage::create_instance_in_transaction(tx, &instance).await?;
     sqlx::query("INSERT INTO mobile_catalog_run_materializations(request_id,request_fingerprint,definition_fingerprint,min_sdk_version,required_handlers,materialized_at) VALUES (?1,?2,?3,?4,?5,?6)")

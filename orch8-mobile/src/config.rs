@@ -128,14 +128,14 @@ impl MobileEngineConfig {
             || u64::from(self.max_concurrent_steps) > tokio::sync::Semaphore::MAX_PERMITS as u64
         {
             return Err(crate::MobileError::InvalidInput {
-                message:
+                detail:
                     "max_concurrent_steps must be positive and fit the platform semaphore limit"
                         .into(),
             });
         }
         if self.max_concurrent_instances == 0 {
             return Err(crate::MobileError::InvalidInput {
-                message: "max_concurrent_instances must be greater than zero".into(),
+                detail: "max_concurrent_instances must be greater than zero".into(),
             });
         }
         Ok(())

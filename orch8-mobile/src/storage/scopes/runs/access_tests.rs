@@ -197,15 +197,21 @@ async fn closing_a_scoped_view_or_runtime_does_not_retire_the_account_or_cancel_
     closed.close();
     assert!(matches!(
         closed.snapshot().await,
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
-    assert!(matches!(closed.cancel().await, Err(MobileError::Shutdown)));
+    assert!(matches!(
+        closed.cancel().await,
+        Err(MobileError::Shutdown { .. })
+    ));
     assert_eq!(
         live.snapshot().await.unwrap().unwrap().state,
         InstanceState::Scheduled
     );
     hub.shutdown();
-    assert!(matches!(live.snapshot().await, Err(MobileError::Shutdown)));
+    assert!(matches!(
+        live.snapshot().await,
+        Err(MobileError::Shutdown { .. })
+    ));
     let next = hub.sibling();
     assert_eq!(
         next.run_access(&scope, id)
@@ -219,7 +225,7 @@ async fn closing_a_scoped_view_or_runtime_does_not_retire_the_account_or_cancel_
     let detached = next.run_access(&scope, id);
     drop(next);
     assert!(
-        matches!(detached.snapshot().await, Err(MobileError::Shutdown)),
+        matches!(detached.snapshot().await, Err(MobileError::Shutdown { .. })),
         "a view must not retain its runtime through the storage pool"
     );
 }
@@ -402,7 +408,7 @@ async fn scoped_pending_read_does_not_publish_into_a_closed_view_or_runtime() {
                 .await
                 .unwrap()
                 .unwrap(),
-            Err(MobileError::Shutdown)
+            Err(MobileError::Shutdown { .. })
         ));
         assert_eq!(
             sqlite.get_instance(id).await.unwrap().unwrap().state,

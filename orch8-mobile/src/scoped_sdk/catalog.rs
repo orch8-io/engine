@@ -101,7 +101,7 @@ impl MobileCatalog {
                 .names(&self.scope)
                 .await
                 .map_err(|_| MobileError::Engine {
-                    message: "catalog handlers unavailable".into(),
+                    detail: "catalog handlers unavailable".into(),
                 })?;
             handlers.extend(
                 engine
@@ -153,13 +153,13 @@ impl MobileCatalog {
                 .await
                 .map_err(|error| match error {
                     orch8_types::error::StepError::Permanent { .. } => MobileError::InvalidInput {
-                        message: "invalid catalog handler binding".into(),
+                        detail: "invalid catalog handler binding".into(),
                     },
                     orch8_types::error::StepError::ClaimLost => MobileError::InvalidInput {
-                        message: "catalog session is unavailable".into(),
+                        detail: "catalog session is unavailable".into(),
                     },
                     orch8_types::error::StepError::Retryable { .. } => MobileError::ResourceLimit {
-                        message: "catalog handler binding unavailable; retry after it settles"
+                        detail: "catalog handler binding unavailable; retry after it settles"
                             .into(),
                     },
                 })
@@ -200,7 +200,7 @@ impl MobileCatalog {
         let id = uuid::Uuid::parse_str(&instance_id)
             .map(orch8_types::ids::InstanceId::from_uuid)
             .map_err(|_| MobileError::InvalidInput {
-                message: "invalid run ID".into(),
+                detail: "invalid run ID".into(),
             })?;
         Ok(self.run_view(id))
     }

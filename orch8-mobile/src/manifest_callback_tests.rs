@@ -72,10 +72,10 @@ fn interrupted_manifest(shutdown: bool) {
     let outcome =
         interrupted.expect("timeout/shutdown must return before the host getter finishes");
     if shutdown {
-        assert!(matches!(outcome, Err(MobileError::Shutdown)));
+        assert!(matches!(outcome, Err(MobileError::Shutdown { .. })));
     } else {
         assert!(
-            matches!(outcome, Err(MobileError::Engine { message }) if message.contains("timed out"))
+            matches!(outcome, Err(MobileError::Engine { detail: message }) if message.contains("timed out"))
         );
     }
 }
@@ -161,7 +161,7 @@ fn timed_out_manifest_getters_retain_shared_admission_without_queueing() {
         wait_for_sync_cleanup(&engine);
         assert!(began);
         assert!(
-            matches!(result, Some(Err(MobileError::Engine { message })) if message.contains("timed out"))
+            matches!(result, Some(Err(MobileError::Engine { detail: message })) if message.contains("timed out"))
         );
     }
     assert_eq!(engine.credential.available_token_slots(), 0);
@@ -242,7 +242,7 @@ fn manifest_admission_survives_foreign_provider_destruction() {
     engine.shutdown();
     assert!(began);
     assert!(
-        matches!(result, Some(Err(MobileError::Engine { message })) if message.contains("timed out"))
+        matches!(result, Some(Err(MobileError::Engine { detail: message })) if message.contains("timed out"))
     );
     assert_eq!(held, 1, "foreign destruction must retain physical capacity");
 }
@@ -283,10 +283,13 @@ fn queued_manifest_getter(shutdown: bool) {
     wait_until(|| engine.credential.available_token_slots() == 2);
     engine.shutdown();
     if shutdown {
-        assert!(matches!(interrupted, Some(Err(MobileError::Shutdown))));
+        assert!(matches!(
+            interrupted,
+            Some(Err(MobileError::Shutdown { .. }))
+        ));
     } else {
         assert!(
-            matches!(interrupted, Some(Err(MobileError::Engine { message })) if message.contains("timed out"))
+            matches!(interrupted, Some(Err(MobileError::Engine { detail: message })) if message.contains("timed out"))
         );
     }
     assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -346,7 +349,7 @@ fn retired_node_refreshes_limit_manifest_callback_admission() {
         caller.join().unwrap();
         assert!(began);
         assert!(
-            matches!(result, Some(Err(MobileError::Engine { message })) if message.contains("timed out"))
+            matches!(result, Some(Err(MobileError::Engine { detail: message })) if message.contains("timed out"))
         );
     }
     let calls = Arc::new(AtomicUsize::new(0));
@@ -420,7 +423,7 @@ fn engine_can_retire_while_manifest_callback_keeps_its_physical_resources() {
     wait_until(|| dropped.load(Ordering::Acquire));
     assert!(began && held && retired_without_waiting && engine_gone);
     assert!(
-        matches!(outcome, Some(Err(MobileError::Engine { message })) if message.contains("timed out"))
+        matches!(outcome, Some(Err(MobileError::Engine { detail: message })) if message.contains("timed out"))
     );
 }
 
@@ -466,5 +469,8 @@ fn manifest_sync_backpressure_precedes_a_second_host_getter() {
         Some(Err(MobileError::ResourceLimit { .. }))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(interrupted, Some(Err(MobileError::Shutdown))));
+    assert!(matches!(
+        interrupted,
+        Some(Err(MobileError::Shutdown { .. }))
+    ));
 }

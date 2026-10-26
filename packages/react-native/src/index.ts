@@ -2,6 +2,10 @@ import { NativeModules, NativeEventEmitter } from "react-native";
 import { Orch8Client, type NativeOrch8 } from "./core";
 
 export * from "./types";
+export { Orch8Account, Orch8Catalog, Orch8CatalogRun, CatalogHistoryCursor } from "./scoped";
+export type { AccountIdentity, CatalogConfiguration, CatalogRunRequest, CatalogCallbackContext,
+  CatalogStepHandler, CatalogTokenSource, CatalogRunSnapshot, CatalogArchiveReceipt,
+  CatalogNativeState, CatalogRunSummary, CatalogRunPage } from "./scoped";
 export {
   Orch8Client,
   PermanentHandlerError,

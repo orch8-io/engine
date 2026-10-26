@@ -815,6 +815,8 @@ internal object IntegrityCheckingUniffiLib {
     }
 
     internal fun ensureInitialized() = Unit
+    external fun uniffi_orch8_mobile_checksum_func_mobile_callback_contract_v2(
+    ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule(
     ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_active_instances(
@@ -1210,6 +1212,8 @@ internal object UniffiLib {
     ): RustBuffer.ByValue
     external fun uniffi_orch8_mobile_fn_method_mobilecatalogrun_start(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
+    external fun uniffi_orch8_mobile_fn_func_mobile_callback_contract_v2(uniffi_out_err: UniffiRustCallStatus,
+    ): Int
     external fun ffi_orch8_mobile_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun ffi_orch8_mobile_rustbuffer_from_bytes(`bytes`: ForeignBytes.ByValue,uniffi_out_err: UniffiRustCallStatus,
@@ -1329,6 +1333,9 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if ((lib.uniffi_orch8_mobile_checksum_func_mobile_callback_contract_v2() and 0xFFFF) != 4123) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule() and 0xFFFF) != 961) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -8626,16 +8633,33 @@ public object FfiConverterTypeDeviceCapability: FfiConverterRustBuffer<DeviceCap
 /**
  * Handler error returned by host-registered step handlers.
  */
-sealed class HandlerException(message: String): kotlin.Exception(message) {
+sealed class HandlerException: kotlin.Exception() {
 
-        class Retryable(message: String) : HandlerException(message)
+    class Retryable(
 
-        class Permanent(message: String) : HandlerException(message)
+        val `detail`: kotlin.String
+        ) : HandlerException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class Permanent(
+
+        val `detail`: kotlin.String
+        ) : HandlerException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+
+
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<HandlerException> {
         override fun lift(error_buf: RustBuffer.ByValue): HandlerException = FfiConverterTypeHandlerError.lift(error_buf)
     }
+
+
 }
 
 /**
@@ -8644,26 +8668,43 @@ sealed class HandlerException(message: String): kotlin.Exception(message) {
 public object FfiConverterTypeHandlerError : FfiConverterRustBuffer<HandlerException> {
     override fun read(buf: ByteBuffer): HandlerException {
 
-            return when(buf.getInt()) {
-            1 -> HandlerException.Retryable(FfiConverterString.read(buf))
-            2 -> HandlerException.Permanent(FfiConverterString.read(buf))
+
+        return when(buf.getInt()) {
+            1 -> HandlerException.Retryable(
+                FfiConverterString.read(buf),
+                )
+            2 -> HandlerException.Permanent(
+                FfiConverterString.read(buf),
+                )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
-
     }
 
     override fun allocationSize(value: HandlerException): ULong {
-        return 4UL
+        return when(value) {
+            is HandlerException.Retryable -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is HandlerException.Permanent -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+        }
     }
 
     override fun write(value: HandlerException, buf: ByteBuffer) {
         when(value) {
             is HandlerException.Retryable -> {
                 buf.putInt(1)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is HandlerException.Permanent -> {
                 buf.putInt(2)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -8864,28 +8905,76 @@ public object FfiConverterTypeMobileCatalogRequestState: FfiConverterRustBuffer<
 
 
 /**
- * Error type exposed to mobile hosts via `UniFFI`.
+ * Error type exposed to mobile hosts via `UniFFI`. The `detail` field avoids
+ * colliding with Kotlin Throwable.message in generated structured exceptions.
  */
-sealed class MobileException(message: String): kotlin.Exception(message) {
+sealed class MobileException: kotlin.Exception() {
 
-        class Engine(message: String) : MobileException(message)
+    class Engine(
 
-        class Storage(message: String) : MobileException(message)
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
 
-        class InvalidInput(message: String) : MobileException(message)
+    class Storage(
 
-        class NotFound(message: String) : MobileException(message)
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
 
-        class ResourceLimit(message: String) : MobileException(message)
+    class InvalidInput(
 
-        class AlreadyExists(message: String) : MobileException(message)
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
 
-        class Shutdown(message: String) : MobileException(message)
+    class NotFound(
+
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class ResourceLimit(
+
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class AlreadyExists(
+
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+    class Shutdown(
+
+        val `detail`: kotlin.String
+        ) : MobileException() {
+        override val message
+            get() = "detail=${ `detail` }"
+    }
+
+
+
 
 
     companion object ErrorHandler : UniffiRustCallStatusErrorHandler<MobileException> {
         override fun lift(error_buf: RustBuffer.ByValue): MobileException = FfiConverterTypeMobileError.lift(error_buf)
     }
+
+
 }
 
 /**
@@ -8894,51 +8983,108 @@ sealed class MobileException(message: String): kotlin.Exception(message) {
 public object FfiConverterTypeMobileError : FfiConverterRustBuffer<MobileException> {
     override fun read(buf: ByteBuffer): MobileException {
 
-            return when(buf.getInt()) {
-            1 -> MobileException.Engine(FfiConverterString.read(buf))
-            2 -> MobileException.Storage(FfiConverterString.read(buf))
-            3 -> MobileException.InvalidInput(FfiConverterString.read(buf))
-            4 -> MobileException.NotFound(FfiConverterString.read(buf))
-            5 -> MobileException.ResourceLimit(FfiConverterString.read(buf))
-            6 -> MobileException.AlreadyExists(FfiConverterString.read(buf))
-            7 -> MobileException.Shutdown(FfiConverterString.read(buf))
+
+        return when(buf.getInt()) {
+            1 -> MobileException.Engine(
+                FfiConverterString.read(buf),
+                )
+            2 -> MobileException.Storage(
+                FfiConverterString.read(buf),
+                )
+            3 -> MobileException.InvalidInput(
+                FfiConverterString.read(buf),
+                )
+            4 -> MobileException.NotFound(
+                FfiConverterString.read(buf),
+                )
+            5 -> MobileException.ResourceLimit(
+                FfiConverterString.read(buf),
+                )
+            6 -> MobileException.AlreadyExists(
+                FfiConverterString.read(buf),
+                )
+            7 -> MobileException.Shutdown(
+                FfiConverterString.read(buf),
+                )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
-
     }
 
     override fun allocationSize(value: MobileException): ULong {
-        return 4UL
+        return when(value) {
+            is MobileException.Engine -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is MobileException.Storage -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is MobileException.InvalidInput -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is MobileException.NotFound -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is MobileException.ResourceLimit -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is MobileException.AlreadyExists -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+            is MobileException.Shutdown -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`detail`)
+            )
+        }
     }
 
     override fun write(value: MobileException, buf: ByteBuffer) {
         when(value) {
             is MobileException.Engine -> {
                 buf.putInt(1)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is MobileException.Storage -> {
                 buf.putInt(2)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is MobileException.InvalidInput -> {
                 buf.putInt(3)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is MobileException.NotFound -> {
                 buf.putInt(4)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is MobileException.ResourceLimit -> {
                 buf.putInt(5)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is MobileException.AlreadyExists -> {
                 buf.putInt(6)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
             is MobileException.Shutdown -> {
                 buf.putInt(7)
+                FfiConverterString.write(value.`detail`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -9522,3 +9668,16 @@ public object FfiConverterSequenceTypeSequenceInfo: FfiConverterRustBuffer<List<
         }
     }
 }
+        /**
+         * Adds an initialization checksum unique to the bidirectional callback error
+         * contract. New bindings must refuse older development libraries whose flat
+         * callback errors cannot be lifted back into Rust.
+         */ fun `mobileCallbackContractV2`(): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_func_mobile_callback_contract_v2(
+
+        _status)
+}
+    )
+    }

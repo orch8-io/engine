@@ -313,11 +313,11 @@ mod tests {
             self.calls.lock().unwrap().push((step_name, input));
             match &self.result {
                 Ok(output) => Ok(output.clone()),
-                Err(HandlerError::Retryable { message }) => Err(HandlerError::Retryable {
-                    message: message.clone(),
+                Err(HandlerError::Retryable { detail: message }) => Err(HandlerError::Retryable {
+                    detail: message.clone(),
                 }),
-                Err(HandlerError::Permanent { message }) => Err(HandlerError::Permanent {
-                    message: message.clone(),
+                Err(HandlerError::Permanent { detail: message }) => Err(HandlerError::Permanent {
+                    detail: message.clone(),
                 }),
             }
         }
@@ -637,7 +637,7 @@ mod tests {
         let result = invoke(
             Arc::new(RecordingHandler {
                 result: Err(HandlerError::Retryable {
-                    message: "try later".into(),
+                    detail: "try later".into(),
                 }),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),
@@ -656,7 +656,7 @@ mod tests {
         let result = invoke(
             Arc::new(RecordingHandler {
                 result: Err(HandlerError::Permanent {
-                    message: "invalid request".into(),
+                    detail: "invalid request".into(),
                 }),
                 calls: Arc::new(Mutex::new(Vec::new())),
             }),

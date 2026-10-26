@@ -32,7 +32,7 @@ impl SyncOrchestrator {
         let permit = Arc::clone(&self.admission)
             .try_acquire_owned()
             .map_err(|_| MobileError::ResourceLimit {
-                message: "manifest sync already in progress; retry after it settles".into(),
+                detail: "manifest sync already in progress; retry after it settles".into(),
             })?;
         let mut operation = self.clone();
         operation.run_cancelled = Some(cancelled.clone());
@@ -47,7 +47,7 @@ impl SyncOrchestrator {
         });
         let mut waiting = SyncWait { cancelled, task };
         (&mut waiting.task).await.map_err(|_| MobileError::Engine {
-            message: "manifest sync task failed".into(),
+            detail: "manifest sync task failed".into(),
         })?
     }
 
@@ -65,7 +65,7 @@ impl SyncOrchestrator {
                 .as_ref()
                 .is_some_and(CancellationToken::is_cancelled)
         {
-            Err(MobileError::Shutdown)
+            Err(MobileError::shutdown())
         } else {
             Ok(())
         }
@@ -83,14 +83,14 @@ impl SyncOrchestrator {
         if let Some(cancelled) = self.run_cancelled.as_ref() {
             tokio::select! {
                 biased;
-                () = cancelled.cancelled() => Err(MobileError::Shutdown),
-                () = &mut deadline => Err(MobileError::Shutdown),
+                () = cancelled.cancelled() => Err(MobileError::shutdown()),
+                () = &mut deadline => Err(MobileError::shutdown()),
                 value = future => Ok(value),
             }
         } else {
             tokio::select! {
                 biased;
-                () = &mut deadline => Err(MobileError::Shutdown),
+                () = &mut deadline => Err(MobileError::shutdown()),
                 value = future => Ok(value),
             }
         }

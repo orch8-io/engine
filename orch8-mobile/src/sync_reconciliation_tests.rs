@@ -366,7 +366,7 @@ async fn already_retired_run_does_not_invoke_authorization_factory() {
             },
         )
         .await;
-    assert!(matches!(result, Err(MobileError::Shutdown)));
+    assert!(matches!(result, Err(MobileError::Shutdown { .. })));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     assert!(!fixture.orch.sync_in_progress());
     assert!(fixture.origin.recorded().is_empty());

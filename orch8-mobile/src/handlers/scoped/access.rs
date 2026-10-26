@@ -41,13 +41,13 @@ impl CatalogRunAccess {
     }
 
     fn runtime(&self) -> Result<Arc<CatalogHandlers>, MobileError> {
-        let runtime = self.runtime.upgrade().ok_or(MobileError::Shutdown)?;
+        let runtime = self.runtime.upgrade().ok_or(MobileError::shutdown())?;
         self.ensure_open(&runtime)?;
         Ok(runtime)
     }
     fn ensure_open(&self, runtime: &CatalogHandlers) -> Result<(), MobileError> {
         if self.closed.is_cancelled() || runtime.stop.is_cancelled() {
-            Err(MobileError::Shutdown)
+            Err(MobileError::shutdown())
         } else {
             Ok(())
         }

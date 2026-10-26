@@ -11,6 +11,72 @@ cd ios && pod install
 
 Requires React Native 0.71+, iOS 16+, Xcode 16+, Android API 24+ and JDK 17.
 
+## Multiple accounts and catalogs (development sources)
+
+The scoped API below requires generated bindings and a native library built from
+the same engine commit. It is not present in the published 0.7.1 pod/AAR. Build
+and pair the native artifacts before using these sources; the wrapper refuses
+unavailable scoped operations rather than falling back to global legacy APIs.
+
+```ts
+const account = await orch8.openAccount({
+  accountKey: "signed-in-account", issuer: "trusted-issuer", subject: "trusted-subject",
+});
+const catalog = await account.openCatalog({
+  catalogKey: "inbox", source: "publisher-source", signingAuthority: "ed25519:<base64>",
+  manifestUrl: "https://catalog.example/manifest", identityUrl: "https://catalog.example/identity",
+});
+await catalog.registerHandler("apply", async (context, stepName, inputJson) => {
+  // Use context.effectId for host-side idempotency. Identity comes from the engine.
+  return JSON.stringify({ applied: true });
+});
+await catalog.sync({ currentToken: () => cachedAccessToken, refreshToken: refreshAccessToken });
+const run = await catalog.prepareRun({ workflow: "approval", operationKey: "stable-request-key" });
+await run.start();
+const snapshot = await run.snapshot();
+if (snapshot?.state === "waiting" && snapshot.pendingSteps.includes("approval")) {
+  await run.answer(snapshot, "approval", "yes");
+}
+// After a terminal run has been acknowledged by the app/backend:
+// await run.archiveAfterAcknowledgement(acknowledgementReference);
+```
+
+Epochs are decimal strings, preserving signed 64-bit precision in JavaScript.
+Handlers and token providers are routed by immutable native-issued ownership and
+per-operation callback keys. Switching the UI's selected account does not change
+an existing handle. A stale snapshot answer is refused by its exact native
+`updatedAt` version. `catalog.history(cursor, limit)` returns metadata and an
+opaque cursor bound to the original catalog/session, with page sizes 1–128.
+
+Call `closeView()` to fence a view and its descendants without deleting durable
+work. Call `dispose()` when a wrapper or history cursor is no longer needed;
+disposing a temporary parent preserves already-issued children. `account.retire()`
+durably fences the entire account session, including sibling views. Reopening the
+same trusted identity creates a new epoch. Closing trees and retiring accounts
+reclaim their native handle-table entries; the table permits at most 4,096 live
+views per engine, 1,024 per stable account and 512 per catalog. Release unused
+cursors and run views during long sessions.
+
+Scoped JS handlers and token refreshes each have a ceiling of 32 per loaded SDK module
+unsettled host calls and 2 per stable account ID. A native timeout or engine
+replacement does not release this JS charge until the host promise settles.
+Scoped native reply slots likewise remain pending through Rust's logical timeout
+and root retirement; they are not force-completed by legacy bridge teardown.
+The actual late host reply releases the physical foreign call. App callbacks
+must settle their promises to restore that account's physical capacity.
+Pending registrations are bounded at 1,024 and sync bridge requests at 32 per
+client across replacements. Native execution, registration, storage and physical
+callback bounds still apply independently. These JS limits do not coordinate
+independent JavaScript runtimes. This does not cancel arbitrary app
+promises or complete the scoped worker/delegation rollout.
+
+Explicit `archiveAfterAcknowledgement(reference)` releases hot request admission
+and stored input while retaining compact deduplication/outcome receipts. The
+reference is trusted host input, not a backend credential verified by the engine.
+There is no automatic archive or receipt eviction. See the
+[scoped native contract](../../docs/SDK_SCOPED_NATIVE.md) for bounds and remaining
+ADR-0002 readiness requirements.
+
 ## Android: Orch8's Maven repository
 
 The AAR lives in Orch8's public, read-only Maven repository

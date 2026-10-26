@@ -221,7 +221,7 @@ impl TelemetryManager {
             .read_telemetry_events(MAX_UPLOAD_BATCH_SIZE)
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         if events.is_empty() {
             return Ok(FlushResult {
@@ -279,7 +279,7 @@ impl TelemetryManager {
             .send()
             .await
             .map_err(|e| MobileError::Engine {
-                message: e.to_string(),
+                detail: e.to_string(),
             })
     }
 
@@ -329,14 +329,14 @@ impl TelemetryManager {
 
 fn mobile_storage_error(error: orch8_types::error::StorageError) -> MobileError {
     MobileError::Storage {
-        message: error.to_string(),
+        detail: error.to_string(),
     }
 }
 
 fn flush_response_error(status: reqwest::StatusCode) -> MobileError {
     tracing::warn!(%status, "telemetry flush failed");
     MobileError::Engine {
-        message: format!("telemetry flush failed: {status}"),
+        detail: format!("telemetry flush failed: {status}"),
     }
 }
 

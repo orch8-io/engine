@@ -296,7 +296,7 @@ async fn materialization_refuses_foreign_cancelled_retired_and_stopped_requests(
             builtins()
         )
         .await,
-        Err(crate::MobileError::Shutdown)
+        Err(crate::MobileError::Shutdown { .. })
     ));
 }
 

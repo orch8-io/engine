@@ -33,13 +33,13 @@ impl CatalogHandlers {
         environment: RuntimeEnvironment,
     ) -> Result<TaskInstance, MobileError> {
         if self.stop.is_cancelled() {
-            return Err(MobileError::Shutdown);
+            return Err(MobileError::shutdown());
         }
         let permit = self
             .capacity
             .reserve(&scope)
             .map_err(|_| MobileError::ResourceLimit {
-                message: "catalog materialization capacity is occupied".into(),
+                detail: "catalog materialization capacity is occupied".into(),
             })?;
         let owner = self.clone();
         let stop = self.stop.child_token();
@@ -51,7 +51,7 @@ impl CatalogHandlers {
         });
         let mut wait = Wait { task, stop };
         (&mut wait.task).await.map_err(|_| MobileError::Engine {
-            message: "catalog materialization task failed".into(),
+            detail: "catalog materialization task failed".into(),
         })?
     }
     async fn materialize_owned(
@@ -64,7 +64,7 @@ impl CatalogHandlers {
         permit: NativePermit,
     ) -> Result<TaskInstance, MobileError> {
         if stop.is_cancelled() {
-            return Err(MobileError::Shutdown);
+            return Err(MobileError::shutdown());
         }
         let snapshot = match self.storage.prepare_materialization(&scope, id).await? {
             Preparation::Existing(instance) => return Ok(*instance),
@@ -72,14 +72,14 @@ impl CatalogHandlers {
         };
         let mut handlers = environment.builtins;
         handlers.extend(self.names(&scope).await.map_err(|_| MobileError::Engine {
-            message: "catalog handler bindings are unavailable".into(),
+            detail: "catalog handler bindings are unavailable".into(),
         })?);
         let validation_stop = stop.clone();
         // The physical permit follows the CPU closure even if its Tokio caller
         // is aborted at runtime teardown. No foreign Binding is captured here.
         let (permit, checked) = tokio::task::spawn_blocking(move || {
             let result = if validation_stop.is_cancelled() {
-                Err(MobileError::Shutdown)
+                Err(MobileError::shutdown())
             } else {
                 snapshot
                     .check(&handlers, &environment.sdk)
@@ -89,7 +89,7 @@ impl CatalogHandlers {
         })
         .await
         .map_err(|_| MobileError::Engine {
-            message: "catalog validation task failed".into(),
+            detail: "catalog validation task failed".into(),
         })?;
         let _permit = permit;
         self.storage

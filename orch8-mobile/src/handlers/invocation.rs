@@ -214,11 +214,11 @@ fn invoke_native(
         }
     }
     let result = handler.execute(name, input).map_err(|error| match error {
-        HandlerError::Retryable { message } => StepError::Retryable {
+        HandlerError::Retryable { detail: message } => StepError::Retryable {
             message,
             details: None,
         },
-        HandlerError::Permanent { message } => StepError::Permanent {
+        HandlerError::Permanent { detail: message } => StepError::Permanent {
             message,
             details: None,
         },

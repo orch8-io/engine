@@ -104,7 +104,16 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
         val kind = orch8Kind(e)
         result.error(
             "ORCH8_" + kind.uppercase(),
-            e.message ?: e.toString(),
+            when (e) {
+                is MobileException.Engine -> e.detail
+                is MobileException.Storage -> e.detail
+                is MobileException.InvalidInput -> e.detail
+                is MobileException.NotFound -> e.detail
+                is MobileException.ResourceLimit -> e.detail
+                is MobileException.AlreadyExists -> e.detail
+                is MobileException.Shutdown -> e.detail
+                else -> e.message ?: e.toString()
+            },
             mapOf("kind" to kind, "legacyCode" to legacyCode),
         )
     }

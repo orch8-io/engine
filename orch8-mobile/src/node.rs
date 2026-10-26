@@ -192,14 +192,14 @@ pub(crate) async fn load_or_create_runtime_id(pool: &SqlitePool) -> Result<Runti
             .await
             .map_err(storage_err)?;
     let uuid = uuid::Uuid::parse_str(&stored).map_err(|e| MobileError::Engine {
-        message: format!("corrupt stored runtime id: {e}"),
+        detail: format!("corrupt stored runtime id: {e}"),
     })?;
     Ok(RuntimeId::from_uuid(uuid))
 }
 
 pub(crate) fn storage_err(e: sqlx::Error) -> MobileError {
     MobileError::Storage {
-        message: e.to_string(),
+        detail: e.to_string(),
     }
 }
 
@@ -403,7 +403,7 @@ impl NodeClient {
         self.lease
             .poll(handler, limit, version, &self.capabilities())
             .await
-            .map_err(|message| MobileError::Engine { message })
+            .map_err(|message| MobileError::Engine { detail: message })
     }
 
     pub async fn heartbeat(&self, task_id: uuid::Uuid, claim_epoch: u64) -> LeaseResponse {
@@ -556,7 +556,7 @@ fn urlencode_path_segment(segment: &str) -> String {
 
 fn network_err(what: &str, e: &LeaseRequestError) -> MobileError {
     MobileError::Engine {
-        message: format!("{what}: {e}"),
+        detail: format!("{what}: {e}"),
     }
 }
 
@@ -571,7 +571,7 @@ async fn expect_success(
     let body = read_capped(resp).await.unwrap_or_default();
     let snippet = String::from_utf8_lossy(&body[..body.len().min(512)]).into_owned();
     Err(MobileError::Engine {
-        message: format!("{what}: HTTP {status}: {snippet}"),
+        detail: format!("{what}: HTTP {status}: {snippet}"),
     })
 }
 
@@ -589,10 +589,10 @@ async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, MobileError> {
         .await
         .map_err(|e| match e {
             orch8_engine::handlers::builtin::BodyReadError::TooLarge(_) => MobileError::Engine {
-                message: format!("response exceeds {MAX_RESPONSE_BYTES} bytes"),
+                detail: format!("response exceeds {MAX_RESPONSE_BYTES} bytes"),
             },
             orch8_engine::handlers::builtin::BodyReadError::Io(message) => {
-                MobileError::Engine { message }
+                MobileError::Engine { detail: message }
             }
         })
 }

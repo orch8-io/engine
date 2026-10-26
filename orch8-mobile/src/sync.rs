@@ -250,12 +250,12 @@ impl SyncAuth {
             Self::Bearer(token) => {
                 if token.trim().is_empty() {
                     return Err(MobileError::InvalidInput {
-                        message: "manifest token provider returned an empty token".into(),
+                        detail: "manifest token provider returned an empty token".into(),
                     });
                 }
                 let manifest_url =
                     reqwest::Url::parse(manifest_url).map_err(|_| MobileError::InvalidInput {
-                        message: "invalid manifest URL".into(),
+                        detail: "invalid manifest URL".into(),
                     })?;
                 Ok(ScopedSyncAuth::Bearer {
                     token,
@@ -340,12 +340,12 @@ impl SyncOrchestrator {
         entry_url: &str,
     ) -> Result<reqwest::Url, MobileError> {
         let base = reqwest::Url::parse(manifest_url).map_err(|e| MobileError::InvalidInput {
-            message: format!("invalid manifest URL: {e}"),
+            detail: format!("invalid manifest URL: {e}"),
         })?;
         let url = base
             .join(entry_url)
             .map_err(|e| MobileError::InvalidInput {
-                message: format!("invalid sequence URL {entry_url:?}: {e}"),
+                detail: format!("invalid sequence URL {entry_url:?}: {e}"),
             })?;
         if !self.allow_insecure_urls {
             crate::validate_https_url(url.as_str())?;
@@ -377,7 +377,7 @@ impl SyncOrchestrator {
         if_none_match: Option<&str>,
     ) -> Result<reqwest::Response, MobileError> {
         let target = reqwest::Url::parse(url).map_err(|_| MobileError::InvalidInput {
-            message: "invalid sync request URL".into(),
+            detail: "invalid sync request URL".into(),
         })?;
         let mut delay = Duration::from_millis(200);
         let max_retries = 3u32;
@@ -495,7 +495,7 @@ impl SyncOrchestrator {
             .get_sync_metadata(ENV_FINGERPRINT_KEY)
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         let env_changed = stored_fingerprint.as_deref() != Some(fingerprint.as_str());
 
@@ -644,7 +644,7 @@ impl SyncOrchestrator {
             .accept_manifest_trust(&keys, manifest.manifest_version, digest)
             .await
             .map_err(|error| MobileError::Storage {
-                message: error.to_string(),
+                detail: error.to_string(),
             })?;
 
         self.check_active()?;
@@ -941,14 +941,14 @@ impl SyncOrchestrator {
             .get_sync_metadata("last_manifest_version")
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         match raw {
             Some(s) => s
                 .parse::<i64>()
                 .map(Some)
                 .map_err(|e| MobileError::Storage {
-                    message: format!("bad last_manifest_version: {e}"),
+                    detail: format!("bad last_manifest_version: {e}"),
                 }),
             None => Ok(None),
         }
@@ -965,7 +965,7 @@ impl SyncOrchestrator {
                 .get_sync_metadata("manifest_etag")
                 .await
                 .map_err(|e| MobileError::Storage {
-                    message: e.to_string(),
+                    detail: e.to_string(),
                 })?
         } else {
             None
@@ -1062,7 +1062,7 @@ impl SyncOrchestrator {
             .list_local_sequence_versions(&tenant, &ns, 1000)
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })
             .map(|versions| versions.into_iter().collect())
     }
@@ -1076,7 +1076,7 @@ impl SyncOrchestrator {
             .get_sequence_by_name(&tenant, &ns, name, None)
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         if seq.is_none() {
             return Ok(());
@@ -1090,7 +1090,7 @@ impl SyncOrchestrator {
             .list_sequence_versions(&tenant, &ns, name)
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         for version in versions {
             self.check_active()?;
@@ -1103,12 +1103,12 @@ impl SyncOrchestrator {
                         .deprecate_sequence(version.id)
                         .await
                         .map_err(|e| MobileError::Storage {
-                            message: e.to_string(),
+                            detail: e.to_string(),
                         })?;
                 }
                 Err(e) => {
                     return Err(MobileError::Storage {
-                        message: e.to_string(),
+                        detail: e.to_string(),
                     });
                 }
             }
@@ -1137,7 +1137,7 @@ impl SyncOrchestrator {
             .await
             .map(|n| n > 0)
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })
     }
 
@@ -1203,7 +1203,7 @@ impl SyncOrchestrator {
                         .create_sequence(&new)
                         .await
                         .map_err(|e| MobileError::Storage {
-                            message: format!("failed to add sequence '{}': {e}", seq.name),
+                            detail: format!("failed to add sequence '{}': {e}", seq.name),
                         })?;
                     new.id
                 } else {
@@ -1215,7 +1215,7 @@ impl SyncOrchestrator {
                         .replace_sequence(existing.id, seq)
                         .await
                         .map_err(|e| MobileError::Storage {
-                            message: format!("failed to replace sequence '{}': {e}", seq.name),
+                            detail: format!("failed to replace sequence '{}': {e}", seq.name),
                         })?;
                     seq.id
                 };
@@ -1227,12 +1227,12 @@ impl SyncOrchestrator {
                     .create_sequence(seq)
                     .await
                     .map_err(|e| MobileError::Storage {
-                        message: e.to_string(),
+                        detail: e.to_string(),
                     })?;
             }
             Err(e) => {
                 return Err(MobileError::Storage {
-                    message: e.to_string(),
+                    detail: e.to_string(),
                 });
             }
         }
@@ -1251,7 +1251,7 @@ impl SyncOrchestrator {
             .list_excess_oldest_local_sequences(&tenant, &ns, self.max_stored_sequences)
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         for (sequence_id, name) in candidates {
             self.check_active()?;
@@ -1270,11 +1270,11 @@ impl SyncOrchestrator {
             .get_sync_metadata("last_sync_ts")
             .await
             .map_err(|e| MobileError::Storage {
-                message: e.to_string(),
+                detail: e.to_string(),
             })?;
         match raw {
             Some(s) => s.parse().map(Some).map_err(|e| MobileError::InvalidInput {
-                message: format!("bad last_sync_ts: {e}"),
+                detail: format!("bad last_sync_ts: {e}"),
             }),
             None => Ok(None),
         }

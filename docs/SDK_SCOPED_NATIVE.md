@@ -4,9 +4,14 @@ The development Rust/UniFFI surface exposes `MobileAccount`, `MobileCatalog` and
 `MobileCatalogRun` objects. Generated Swift and Kotlin bindings expose the same
 typed objects and records. This API is not in the published v0.7.1 native binary.
 Use generated bindings with the native library built from the same source.
+Development callback errors carry a structured `detail` payload; new bindings
+include the callback-contract-v2 initialization guard and refuse older flat-error
+development libraries. This is not the published 0.7.1 callback ABI.
 The [common KMP facade](../packages/kmp/README.md#multiple-accounts-and-catalogs-development-sources)
 wraps these objects through direct JVM/Android adapters and a protocol-6 Swift
-bridge. Release artifacts and pins, RN/Flutter facade integration, native scoped event
+bridge. The [React Native development facade](../packages/react-native/README.md#multiple-accounts-and-catalogs-development-sources)
+also wraps the typed views through bounded native handles and scoped callbacks.
+Release artifacts and pins, Flutter facade integration, native scoped event
 listeners, account-owned worker/delegation and authenticated outcome reporting
 remain rollout requirements. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) S1–S12 are not complete.
 
@@ -75,7 +80,7 @@ Use `forget_cancelled_request` only to release a cancelled never-materialized
 request. Materialized executions keep their durable effect evidence.
 
 After the app/backend acknowledges a completed run, call
-`archive_after_acknowledgement` (`archiveAfterAcknowledgement` in Swift/Kotlin)
+`archive_after_acknowledgement` (`archiveAfterAcknowledgement` in Swift/Kotlin/RN)
 with the acknowledgement reference. This explicit operation releases hot request
 admission and stored input while retaining compact operation-key deduplication and
 outcome receipts. The reference is supplied by the trusted host; the engine does

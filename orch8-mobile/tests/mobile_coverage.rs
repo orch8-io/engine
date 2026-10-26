@@ -29,7 +29,7 @@ struct FailingHandler;
 impl StepHandler for FailingHandler {
     fn execute(&self, _step_name: String, _input: String) -> Result<String, HandlerError> {
         Err(HandlerError::Permanent {
-            message: "intentional failure".to_string(),
+            detail: "intentional failure".to_string(),
         })
     }
 }
@@ -39,7 +39,7 @@ struct RetryableFailHandler;
 impl StepHandler for RetryableFailHandler {
     fn execute(&self, _step_name: String, _input: String) -> Result<String, HandlerError> {
         Err(HandlerError::Retryable {
-            message: "try again".to_string(),
+            detail: "try again".to_string(),
         })
     }
 }
@@ -928,7 +928,7 @@ fn lifecycle_09_shutdown_prevents_tick() {
     let (engine, _dir) = default_engine();
     engine.shutdown();
     let result = engine.tick_once();
-    assert!(matches!(result, Err(MobileError::Shutdown)));
+    assert!(matches!(result, Err(MobileError::Shutdown { .. })));
 }
 
 #[test]

@@ -92,7 +92,7 @@ fn shutdown_is_terminal_for_common_storage_operations() {
     engine.shutdown();
     assert!(matches!(
         engine.node_runtime_id(),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
 }
 
@@ -262,7 +262,7 @@ fn shutdown_never_polls_new_work_and_cancels_an_admitted_operation() {
             entered.send(()).unwrap();
             std::future::pending().await
         });
-        let _ = finished.send(matches!(r, Err(MobileError::Shutdown)));
+        let _ = finished.send(matches!(r, Err(MobileError::Shutdown { .. })));
     });
     started.recv_timeout(Duration::from_secs(5)).unwrap();
     engine.shutdown();
@@ -273,7 +273,7 @@ fn shutdown_never_polls_new_work_and_cancels_an_admitted_operation() {
         polled.store(true, Ordering::SeqCst);
         Ok(())
     });
-    assert!(matches!(r, Err(MobileError::Shutdown)));
+    assert!(matches!(r, Err(MobileError::Shutdown { .. })));
     assert!(!polled.load(Ordering::SeqCst));
 }
 
@@ -289,7 +289,7 @@ impl Drop for ReentrantCallback {
         let _token = engine.credential.current();
         let _listener = engine.notifier.listener();
         let allowed = if engine.cancel.is_cancelled() {
-            matches!(engine.node_runtime_id(), Err(MobileError::Shutdown))
+            matches!(engine.node_runtime_id(), Err(MobileError::Shutdown { .. }))
         } else {
             engine.node_runtime_id().is_ok()
         };
@@ -400,7 +400,7 @@ fn shutdown_refuses_handlers_listeners_and_worker_restart() {
     });
     assert!(matches!(
         engine.register_handler("late".into(), callback.clone()),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     engine.set_listener(callback.clone());
     assert!(engine.notifier.listener().is_none());
@@ -408,11 +408,11 @@ fn shutdown_refuses_handlers_listeners_and_worker_restart() {
     assert!(dropped.load(Ordering::Acquire));
     assert!(matches!(
         engine.enable_builtin("http_request".into()),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     assert!(matches!(
         engine.start_worker(WorkerOptions::default()),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     assert!(matches!(
         engine.start_delegation(DelegationOptions {
@@ -420,11 +420,11 @@ fn shutdown_refuses_handlers_listeners_and_worker_restart() {
             poll_interval_ms: 2000,
             ttl_secs: 600
         }),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     assert!(matches!(
         engine.run_worker_window(1),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     engine.runtime.block_on(async {
         // Closed lifecycle calls must not enter another synchronous runtime
@@ -449,7 +449,7 @@ fn enabling_an_existing_builtin_is_idempotent_with_a_shared_registry() {
     engine.shutdown();
     assert!(matches!(
         engine.enable_builtin(builtins::DEFAULT_BUILTINS[0].to_string()),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
 }
 

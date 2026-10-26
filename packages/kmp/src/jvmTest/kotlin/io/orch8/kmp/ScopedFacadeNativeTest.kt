@@ -39,6 +39,28 @@ class ScopedFacadeNativeTest {
         error("workflow failed to reach $state")
     }
     @Test
+    fun permanentHostErrorCrossesTheRealNativeCallbackBoundaryWithoutPanicking() = runBlocking {
+        withFixture { engine, cases ->
+            val account = engine.openAccount(cases.first().identity())
+            val catalog = account.openCatalog(cases.first().configuration())
+            val entered = AtomicInteger()
+            catalog.registerHandler("echo", Orch8CatalogStepHandler { _, _, _ ->
+                entered.incrementAndGet()
+                throw Orch8HandlerException.Permanent("typed host failure")
+            }, 1000)
+            val run = catalog.prepareRun(CatalogRunRequest("flow", operationKey = "foreign-permanent-error"))
+            run.start()
+            val waiting = advance(engine, run, InstanceState.WAITING, 2)
+            assertTrue(run.answer(waiting, "left", "yes"))
+            val remaining = advance(engine, run, InstanceState.WAITING, 1)
+            assertTrue(run.answer(remaining, "right", "yes"))
+            advance(engine, run, InstanceState.FAILED)
+            repeat(3) { engine.tick() }
+            assertEquals(2, entered.get())
+        }
+    }
+
+    @Test
     fun fourScopedWorkflowsExecuteThroughTheCommonFacadeWithOwnedCallbacksAndVersionedApprovals()=runBlocking {
         withFixture {engine,cases->
             val contexts=ConcurrentLinkedQueue<CatalogCallbackContext>()

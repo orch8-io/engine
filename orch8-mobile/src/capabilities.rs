@@ -132,7 +132,7 @@ impl<H: CapabilityHost> DeviceToolBridge<H> {
         }
         if descriptor.requires_foreground && !request.foreground {
             return Err(HandlerError::Retryable {
-                message: "capability requires an active foreground session".into(),
+                detail: "capability requires an active foreground session".into(),
             });
         }
         let response = self.host.invoke(capability, &request)?;
@@ -147,7 +147,7 @@ impl<H: CapabilityHost> DeviceToolBridge<H> {
 
 fn permanent(message: impl Into<String>) -> HandlerError {
     HandlerError::Permanent {
-        message: message.into(),
+        detail: message.into(),
     }
 }
 
@@ -387,7 +387,7 @@ mod tests {
         );
 
         assert!(
-            matches!(&result, Err(HandlerError::Permanent { message }) if message.contains("256 KiB")),
+            matches!(&result, Err(HandlerError::Permanent { detail: message }) if message.contains("256 KiB")),
             "{result:?}"
         );
         assert_eq!(host.calls(), 0);
@@ -423,7 +423,7 @@ mod tests {
         let result = bridge.execute(DeviceCapability::SecureStorage, &request("get", false));
 
         assert!(
-            matches!(&result, Err(HandlerError::Permanent { message }) if message.contains("5 MiB")),
+            matches!(&result, Err(HandlerError::Permanent { detail: message }) if message.contains("5 MiB")),
             "{result:?}"
         );
     }
@@ -432,12 +432,12 @@ mod tests {
     fn host_errors_propagate_with_their_retry_class_and_message() {
         let retryable = ScriptedHost::new(|| {
             Err(HandlerError::Retryable {
-                message: "keychain locked".into(),
+                detail: "keychain locked".into(),
             })
         });
         let permanent = ScriptedHost::new(|| {
             Err(HandlerError::Permanent {
-                message: "permission denied".into(),
+                detail: "permission denied".into(),
             })
         });
 
@@ -447,11 +447,11 @@ mod tests {
             .execute(DeviceCapability::SecureStorage, &request("get", false));
 
         assert!(
-            matches!(&retry, Err(HandlerError::Retryable { message }) if message == "keychain locked"),
+            matches!(&retry, Err(HandlerError::Retryable { detail: message }) if message == "keychain locked"),
             "{retry:?}"
         );
         assert!(
-            matches!(&fail, Err(HandlerError::Permanent { message }) if message == "permission denied"),
+            matches!(&fail, Err(HandlerError::Permanent { detail: message }) if message == "permission denied"),
             "{fail:?}"
         );
     }

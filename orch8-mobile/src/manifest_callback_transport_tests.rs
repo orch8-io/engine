@@ -148,7 +148,7 @@ fn manifest_callback_panic_is_an_error_and_releases_admission() {
         Some(Arc::new(PanickingToken)),
     );
     assert!(
-        matches!(result, Err(MobileError::Engine { message }) if message == "manifest token callback failed")
+        matches!(result, Err(MobileError::Engine { detail: message }) if message == "manifest token callback failed")
     );
     wait_until(|| engine.credential.available_token_slots() == 2);
     assert_eq!(probe.connections.load(Ordering::SeqCst), 0);

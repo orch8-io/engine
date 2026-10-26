@@ -339,13 +339,13 @@ const MAX_SEQUENCES_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 fn parse_sequence_batch(body: &[u8]) -> Result<Vec<(usize, SequenceDefinition)>, MobileError> {
     let raw_sequences: Vec<&serde_json::value::RawValue> =
         serde_json::from_slice(body).map_err(|error| MobileError::InvalidInput {
-            message: format!("parse sequences JSON: {error}"),
+            detail: format!("parse sequences JSON: {error}"),
         })?;
     let mut sequences = Vec::with_capacity(raw_sequences.len());
     for raw in raw_sequences {
         let sequence =
             serde_json::from_str(raw.get()).map_err(|error| MobileError::InvalidInput {
-                message: format!("parse sequences JSON: {error}"),
+                detail: format!("parse sequences JSON: {error}"),
             })?;
         sequences.push((raw.get().len(), sequence));
     }
@@ -378,17 +378,17 @@ pub(crate) fn validate_https_url(url: &str) -> Result<(), MobileError> {
     use std::net::IpAddr;
 
     let parsed = reqwest::Url::parse(url).map_err(|e| MobileError::InvalidInput {
-        message: format!("invalid URL: {e}"),
+        detail: format!("invalid URL: {e}"),
     })?;
     if parsed.scheme() != "https" {
         return Err(MobileError::InvalidInput {
-            message: "URL must use https".to_string(),
+            detail: "URL must use https".to_string(),
         });
     }
     let host = parsed.host_str().unwrap_or("").to_lowercase();
     if host.is_empty() {
         return Err(MobileError::InvalidInput {
-            message: "URL must have a host".to_string(),
+            detail: "URL must have a host".to_string(),
         });
     }
     // `host_str()` keeps the brackets around IPv6 literals; strip them before
@@ -400,12 +400,12 @@ pub(crate) fn validate_https_url(url: &str) -> Result<(), MobileError> {
     let ip = ip_str.parse::<IpAddr>().ok();
     if ip.is_some_and(orch8_types::net::is_non_public_ip) {
         return Err(MobileError::InvalidInput {
-            message: "URL must not target an internal address".to_string(),
+            detail: "URL must not target an internal address".to_string(),
         });
     }
     if parsed.port().is_some_and(|p| p != 443) {
         return Err(MobileError::InvalidInput {
-            message: "URL must use port 443".to_string(),
+            detail: "URL must use port 443".to_string(),
         });
     }
     Ok(())
@@ -421,7 +421,7 @@ impl MobileEngine {
     pub fn new(db_path: String, config: MobileEngineConfig) -> Result<Arc<Self>, MobileError> {
         config.validate()?;
         let rt = runtime::MobileRuntime::new(config.max_concurrent_steps)
-            .map_err(|e| MobileError::Engine { message: e })?;
+            .map_err(|e| MobileError::Engine { detail: e })?;
 
         let (storage, sqlite) = rt.block_on(async {
             let s = orch8_storage::sqlite::SqliteStorage::file_mobile_owned(&db_path)
@@ -587,7 +587,7 @@ impl MobileEngine {
             .find(|candidate| **candidate == name)
         else {
             return Err(MobileError::InvalidInput {
-                message: format!("builtin '{name}' is not available on mobile"),
+                detail: format!("builtin '{name}' is not available on mobile"),
             });
         };
         if self
@@ -614,7 +614,7 @@ impl MobileEngine {
     /// Execute a single tick.
     pub fn tick_once(&self) -> Result<TickResult, MobileError> {
         if self.cancel.is_cancelled() {
-            return Err(MobileError::Shutdown);
+            return Err(MobileError::shutdown());
         }
         if let Some(rss) = self
             .memory_sampler
@@ -640,7 +640,7 @@ impl MobileEngine {
             let guard = self.tick_controller.tick_mutex().lock().await;
 
             if self.cancel.is_cancelled() {
-                return Err(MobileError::Shutdown);
+                return Err(MobileError::shutdown());
             }
 
             let result = tick_once(
@@ -678,12 +678,12 @@ impl MobileEngine {
     ) -> Result<BackgroundRunResult, MobileError> {
         if max_ticks == 0 {
             return Err(MobileError::InvalidInput {
-                message: "max_ticks must be greater than zero".to_string(),
+                detail: "max_ticks must be greater than zero".to_string(),
             });
         }
         if time_budget_ms == 0 {
             return Err(MobileError::InvalidInput {
-                message: "time_budget_ms must be greater than zero".to_string(),
+                detail: "time_budget_ms must be greater than zero".to_string(),
             });
         }
 
@@ -971,7 +971,7 @@ impl MobileEngine {
         self.run_with_timeout(async {
             if json.len() as u64 > self.config.max_sequence_size_bytes {
                 return Err(MobileError::ResourceLimit {
-                    message: format!(
+                    detail: format!(
                         "sequence size ({} bytes) exceeds limit ({} bytes)",
                         json.len(),
                         self.config.max_sequence_size_bytes
@@ -1003,7 +1003,7 @@ impl MobileEngine {
                     let count = existing.len() as u32;
                     if count >= self.config.max_stored_sequences {
                         return Err(MobileError::ResourceLimit {
-                            message: format!(
+                            detail: format!(
                                 "stored sequence count ({}) would exceed limit ({})",
                                 count, self.config.max_stored_sequences
                             ),
@@ -1034,7 +1034,7 @@ impl MobileEngine {
         };
         if target.is_empty() {
             return Err(MobileError::InvalidInput {
-                message: "no sequences URL configured".to_string(),
+                detail: "no sequences URL configured".to_string(),
             });
         }
         let target = target.clone();
@@ -1046,7 +1046,7 @@ impl MobileEngine {
                 .send()
                 .await
                 .map_err(|e| MobileError::Engine {
-                    message: format!(
+                    detail: format!(
                         "fetch sequences from {shown}: {}",
                         orch8_engine::outbound::redact_error(&e)
                     ),
@@ -1054,7 +1054,7 @@ impl MobileEngine {
 
             if !resp.status().is_success() {
                 return Err(MobileError::Engine {
-                    message: format!("fetch sequences: HTTP {} from {shown}", resp.status()),
+                    detail: format!("fetch sequences: HTTP {} from {shown}", resp.status()),
                 });
             }
 
@@ -1062,7 +1062,7 @@ impl MobileEngine {
             let content_length = resp.content_length().unwrap_or(0);
             if content_length > MAX_SEQUENCES_RESPONSE_BYTES as u64 {
                 return Err(MobileError::InvalidInput {
-                    message: format!(
+                    detail: format!(
                         "sequences response too large: {content_length} bytes exceeds limit"
                     ),
                 });
@@ -1075,14 +1075,14 @@ impl MobileEngine {
             .map_err(|error| match error {
                 orch8_engine::handlers::builtin::BodyReadError::TooLarge(_) => {
                     MobileError::InvalidInput {
-                        message: format!(
+                        detail: format!(
                             "sequences response exceeds {MAX_SEQUENCES_RESPONSE_BYTES} byte limit"
                         ),
                     }
                 }
                 orch8_engine::handlers::builtin::BodyReadError::Io(message) => {
                     MobileError::Engine {
-                        message: format!("read response body: {message}"),
+                        detail: format!("read response body: {message}"),
                     }
                 }
             })?;
@@ -1146,7 +1146,7 @@ impl MobileEngine {
             let orch = {
                 let guard = self.sync_orchestrator.lock().await;
                 Arc::clone(guard.as_ref().ok_or_else(|| MobileError::Engine {
-                    message: "sync not configured — set root_public_key in config".to_string(),
+                    detail: "sync not configured — set root_public_key in config".to_string(),
                 })?)
             };
 
@@ -1294,7 +1294,7 @@ impl MobileEngine {
         self.ensure_open()?;
         self.credential
             .begin_installation(provider)
-            .ok_or(MobileError::Shutdown)
+            .ok_or(MobileError::shutdown())
     }
 
     /// Publish an initial token only for its reserved owner. Returns false for
@@ -1346,11 +1346,11 @@ impl MobileEngine {
                 .filter(|base| !base.is_empty())
                 .or_else(|| node::derive_api_base(&self.config.sync_url))
                 .ok_or_else(|| MobileError::InvalidInput {
-                    message: "set api_base_url, or a sync_url ending in /mobile/sync".into(),
+                    detail: "set api_base_url, or a sync_url ending in /mobile/sync".into(),
                 })?;
             if !self.credential.is_configured() || self.config.device_id.is_empty() {
                 return Err(MobileError::InvalidInput {
-                    message: "register_node requires device_id in the config and a credential \
+                    detail: "register_node requires device_id in the config and a credential \
                               (set_token_provider, or sync_api_key)"
                         .into(),
                 });
@@ -1383,7 +1383,7 @@ impl MobileEngine {
         let client = self
             .node_client()
             .ok_or_else(|| MobileError::InvalidInput {
-                message: "register_node first".into(),
+                detail: "register_node first".into(),
             })?;
         client.update_advertisement(|ad| {
             ad.caps.connectivity = connectivity;
@@ -1419,7 +1419,7 @@ impl MobileEngine {
         let client = self
             .node_client()
             .ok_or_else(|| MobileError::InvalidInput {
-                message: "register_node before start_worker".into(),
+                detail: "register_node before start_worker".into(),
             })?;
         let mut slot = self
             .worker
@@ -1428,7 +1428,7 @@ impl MobileEngine {
         self.ensure_open()?;
         if slot.as_ref().is_some_and(|worker| !worker.is_stopped()) {
             return Err(MobileError::InvalidInput {
-                message: "worker already running".into(),
+                detail: "worker already running".into(),
             });
         }
         let registry = self
@@ -1495,7 +1495,7 @@ impl MobileEngine {
         let worker = self
             .current_worker()
             .ok_or_else(|| MobileError::InvalidInput {
-                message: "start_worker before run_worker_window".into(),
+                detail: "start_worker before run_worker_window".into(),
             })?;
         let budget = Duration::from_millis(time_budget_ms.max(1));
         Ok(self.runtime.block_on(worker.run_window(budget)))
@@ -1521,7 +1521,7 @@ impl MobileEngine {
         let client = self
             .node_client()
             .ok_or_else(|| MobileError::InvalidInput {
-                message: "register_node before start_delegation".into(),
+                detail: "register_node before start_delegation".into(),
             })?;
         let pump = delegation::DelegationPump::new(
             client,
@@ -1565,7 +1565,7 @@ impl MobileEngine {
         let pump = self
             .current_delegation()
             .ok_or_else(|| MobileError::InvalidInput {
-                message: "start_delegation before delegate".into(),
+                detail: "start_delegation before delegate".into(),
             })?;
         for (value, field) in [
             (&request.instance_id, "instance_id"),
@@ -1573,20 +1573,20 @@ impl MobileEngine {
             (&request.sub_sequence_id, "sub_sequence_id"),
         ] {
             uuid::Uuid::parse_str(value).map_err(|e| MobileError::InvalidInput {
-                message: format!("invalid {field}: {e}"),
+                detail: format!("invalid {field}: {e}"),
             })?;
         }
         let input: serde_json::Value = serde_json::from_str(&request.input_json)?;
         if !input.is_object() {
             return Err(MobileError::InvalidInput {
-                message: "delegation input must be a JSON object".into(),
+                detail: "delegation input must be a JSON object".into(),
             });
         }
         let id = self.run_with_timeout(async {
             let local = orch8_types::ids::InstanceId::from_uuid(
                 uuid::Uuid::parse_str(&request.instance_id).map_err(|e| {
                     MobileError::InvalidInput {
-                        message: format!("invalid instance_id: {e}"),
+                        detail: format!("invalid instance_id: {e}"),
                     }
                 })?,
             );
@@ -1594,7 +1594,7 @@ impl MobileEngine {
                 .get_instance(local)
                 .await?
                 .ok_or_else(|| MobileError::NotFound {
-                    message: format!("instance {}", request.instance_id),
+                    detail: format!("instance {}", request.instance_id),
                 })?;
             delegation::DelegationPump::record_explicit(
                 &self.node_pool,
@@ -1617,7 +1617,7 @@ impl MobileEngine {
             delegation::DelegationPump::status(&self.node_pool, &delegation_id)
                 .await?
                 .ok_or_else(|| MobileError::NotFound {
-                    message: format!("delegation {delegation_id}"),
+                    detail: format!("delegation {delegation_id}"),
                 })
         })
     }
@@ -1643,7 +1643,7 @@ impl MobileEngine {
             Ok(())
         } else {
             Err(MobileError::InvalidInput {
-                message: "load_sequences_from_url installs unsigned sequences and is disabled \
+                detail: "load_sequences_from_url installs unsigned sequences and is disabled \
                           while root_public_key is configured; use sync() with a signed manifest"
                     .to_string(),
             })
@@ -1719,11 +1719,11 @@ impl MobileEngine {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if self.cancel.is_cancelled() {
-                return Err(MobileError::Shutdown);
+                return Err(MobileError::shutdown());
             }
             if Arc::get_mut(&mut registry).is_none() {
                 return Err(MobileError::Engine {
-                    message: "cannot register handlers after engine has started".to_string(),
+                    detail: "cannot register handlers after engine has started".to_string(),
                 });
             }
             let mut foreign = self
@@ -1892,7 +1892,7 @@ impl MobileEngine {
 
     fn ensure_open(&self) -> Result<(), MobileError> {
         if self.cancel.is_cancelled() {
-            Err(MobileError::Shutdown)
+            Err(MobileError::shutdown())
         } else {
             Ok(())
         }
@@ -1907,9 +1907,9 @@ impl MobileEngine {
         self.runtime.block_on(async {
             tokio::select! {
                 biased;
-                () = self.cancel.cancelled() => Err(MobileError::Shutdown),
+                () = self.cancel.cancelled() => Err(MobileError::shutdown()),
                 result = tokio::time::timeout(timeout, fut) => result.map_err(|_| MobileError::Engine {
-                    message: format!("operation timed out after {}ms", self.config.operation_timeout_ms),
+                    detail: format!("operation timed out after {}ms", self.config.operation_timeout_ms),
                 })?,
             }
         })
@@ -2007,7 +2007,7 @@ fn spawn_readvertise_loop(
 #[cfg(test)]
 pub(crate) fn parse_instance_id(s: &str) -> Result<InstanceId, MobileError> {
     let uuid = uuid::Uuid::parse_str(s).map_err(|e| MobileError::InvalidInput {
-        message: format!("invalid instance ID '{s}': {e}"),
+        detail: format!("invalid instance ID '{s}': {e}"),
     })?;
     Ok(InstanceId::from_uuid(uuid))
 }

@@ -33,7 +33,7 @@ impl CatalogRunHistory {
 
     fn ensure_open(&self, runtime: &CatalogHandlers) -> Result<(), MobileError> {
         if self.closed.is_cancelled() || runtime.stop.is_cancelled() {
-            Err(MobileError::Shutdown)
+            Err(MobileError::shutdown())
         } else {
             Ok(())
         }
@@ -44,14 +44,14 @@ impl CatalogRunHistory {
         cursor: Option<&CatalogRunCursor>,
         limit: u32,
     ) -> Result<CatalogRunPage, MobileError> {
-        let runtime = self.runtime.upgrade().ok_or(MobileError::Shutdown)?;
+        let runtime = self.runtime.upgrade().ok_or(MobileError::shutdown())?;
         self.ensure_open(&runtime)?;
         // Reads have no independently owned effect to settle. Closing a view
         // cancels even pool acquisition and releases the temporary runtime Arc.
         let result = tokio::select! {
             biased;
-            () = self.closed.cancelled() => return Err(MobileError::Shutdown),
-            () = runtime.stop.cancelled() => return Err(MobileError::Shutdown),
+            () = self.closed.cancelled() => return Err(MobileError::shutdown()),
+            () = runtime.stop.cancelled() => return Err(MobileError::shutdown()),
             result = runtime.storage.catalog_run_history(&self.scope, cursor, limit) => result,
         };
         self.ensure_open(&runtime)?;

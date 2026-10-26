@@ -4,6 +4,12 @@
 // Selectors must match the @objc(...) names in Orch8Module.swift.
 @interface RCT_EXTERN_MODULE(Orch8Module, RCTEventEmitter)
 
+RCT_EXTERN_METHOD(scopedCall:(NSString *)handle
+                  method:(NSString *)method
+                  argsJson:(NSString *)argsJson
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(initialize:(NSDictionary *)config
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject)

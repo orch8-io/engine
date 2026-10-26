@@ -48,7 +48,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
 
     public func openAccount(identityJson: String) -> Orch8ScopedReply {
         do {
-            guard let engine = currentEngine() else { throw MobileError.Shutdown(message: "engine not open") }
+            guard let engine = currentEngine() else { throw MobileError.Shutdown(detail: "engine not open") }
             let identity = try Self.parseObject(identityJson)
             return NativeScopedReply.scope(.account(try engine.openAccount(identity: MobileAccountIdentity(
                 accountKey: identity.string("accountKey"), issuer: identity.string("issuer"), subject: identity.string("subject")
@@ -498,16 +498,16 @@ private final class StepHandlerAdapter: StepHandler, @unchecked Sendable {
 
     func execute(stepName: String, input: String) throws -> String {
         guard let callbacks = bridge?.currentCallbacks() else {
-            throw HandlerError.Retryable(message: "Kotlin callbacks not installed yet")
+            throw HandlerError.Retryable(detail: "Kotlin callbacks not installed yet")
         }
         let envelope = callbacks.executeHandler(handlerName: name, stepName: stepName, inputJson: input)
         switch Orch8KmpBridge.unwrapCallback(envelope) {
         case let .success(output):
             return output
         case let .failure(failure) where failure.kind == "permanent":
-            throw HandlerError.Permanent(message: failure.message)
+            throw HandlerError.Permanent(detail: failure.message)
         case let .failure(failure):
-            throw HandlerError.Retryable(message: failure.message)
+            throw HandlerError.Retryable(detail: failure.message)
         }
     }
 }
@@ -548,7 +548,7 @@ private final class ManifestTokenAdapter: TokenProvider, @unchecked Sendable {
     func refreshToken() throws -> String {
         switch Orch8KmpBridge.unwrapCallback(callbacks.refreshManifestToken(providerId: providerId)) {
         case let .success(token): return token
-        case let .failure(failure): throw MobileError.Engine(message: failure.message)
+        case let .failure(failure): throw MobileError.Engine(detail: failure.message)
         }
     }
 }
@@ -574,7 +574,7 @@ private final class NodeTokenAdapter: TokenProvider, @unchecked Sendable {
     func refreshToken() throws -> String {
         switch Orch8KmpBridge.unwrapCallback(callbacks.refreshNodeToken(providerId: providerId)) {
         case let .success(token): return token
-        case let .failure(failure): throw MobileError.Engine(message: failure.message)
+        case let .failure(failure): throw MobileError.Engine(detail: failure.message)
         }
     }
 }
@@ -668,7 +668,7 @@ private final class NativeScopedPort: NSObject, Orch8ScopedBridge, @unchecked Se
             return NativeScopedReply()
         }
         do {
-            guard let node = snapshotNode() else { throw MobileError.Shutdown(message: "scope view disposed") }
+            guard let node = snapshotNode() else { throw MobileError.Shutdown(detail: "scope view disposed") }
             let args = try Orch8KmpBridge.parseObject(argsJson)
             switch (node, method) {
             case let (.account(account), "openCatalog"):
@@ -737,7 +737,7 @@ private final class NativeScopedPort: NSObject, Orch8ScopedBridge, @unchecked Se
     }
     func registerHandler(name: String, timeoutMs: Int64, handler: Orch8ScopedHandler) -> String {
         do {
-            guard case let .catalog(catalog) = snapshotNode() else { throw MobileError.Shutdown(message: "catalog view disposed") }
+            guard case let .catalog(catalog) = snapshotNode() else { throw MobileError.Shutdown(detail: "catalog view disposed") }
             guard timeoutMs > 0 else { throw BridgeFailure(kind: "InvalidInput", message: "invalid handler timeout") }
             try catalog.registerHandler(name: name, handler: ScopedHandlerAdapter(handler), timeoutMs: UInt64(timeoutMs))
             return NativeScopedReply().payloadJson()
@@ -745,7 +745,7 @@ private final class NativeScopedPort: NSObject, Orch8ScopedBridge, @unchecked Se
     }
     func sync(tokens: Orch8ScopedTokenSource) -> String {
         do {
-            guard case let .catalog(catalog) = snapshotNode() else { throw MobileError.Shutdown(message: "catalog view disposed") }
+            guard case let .catalog(catalog) = snapshotNode() else { throw MobileError.Shutdown(detail: "catalog view disposed") }
             let value = try catalog.sync(tokenProvider: ScopedTokenAdapter(tokens))
             return NativeScopedReply(["added": value.added, "updated": value.updated, "removed": value.removed,
                 "skipped": value.skipped, "signatureFailures": value.signatureFailures]).payloadJson()
@@ -777,8 +777,8 @@ private final class ScopedHandlerAdapter: MobileCatalogStepHandler, @unchecked S
         ])
         switch Orch8KmpBridge.unwrapCallback(handler.execute(contextJson: json, stepName: stepName, inputJson: input)) {
         case let .success(output): return output
-        case let .failure(error) where error.kind == "permanent": throw HandlerError.Permanent(message: error.message)
-        case let .failure(error): throw HandlerError.Retryable(message: error.message)
+        case let .failure(error) where error.kind == "permanent": throw HandlerError.Permanent(detail: error.message)
+        case let .failure(error): throw HandlerError.Retryable(detail: error.message)
         }
     }
 }
@@ -789,7 +789,7 @@ private final class ScopedTokenAdapter: TokenProvider, @unchecked Sendable {
     func refreshToken() throws -> String {
         switch Orch8KmpBridge.unwrapCallback(tokens.refreshEnvelope()) {
         case let .success(token): return token
-        case let .failure(error): throw MobileError.Engine(message: error.message)
+        case let .failure(error): throw MobileError.Engine(detail: error.message)
         }
     }
 }

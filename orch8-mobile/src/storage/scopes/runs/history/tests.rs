@@ -294,13 +294,13 @@ async fn history_view_close_and_runtime_close_do_not_retire_accounts_and_views_d
     closed.close();
     assert!(matches!(
         closed.page(None, 1).await,
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     assert_eq!(live.page(None, 1).await.unwrap().items.len(), 1);
     hub.shutdown();
     assert!(matches!(
         live.page(None, 1).await,
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     let sibling = hub.sibling();
     let detached = sibling.run_history(&scope);
@@ -308,7 +308,7 @@ async fn history_view_close_and_runtime_close_do_not_retire_accounts_and_views_d
     drop(sibling);
     assert!(matches!(
         detached.page(None, 1).await,
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     assert_eq!(owner(&storage, "alice", "one").await.epoch(), scope.epoch());
 }
@@ -348,7 +348,7 @@ async fn pending_history_page_releases_runtime_when_view_or_runtime_closes() {
             .await
             .expect("a closed view must not wait for a pooled connection")
             .unwrap();
-        assert!(matches!(result, Err(MobileError::Shutdown)));
+        assert!(matches!(result, Err(MobileError::Shutdown { .. })));
         assert!(weak.upgrade().is_none());
         drop(held);
         assert_eq!(owner(&storage, "alice", "one").await.epoch(), scope.epoch());

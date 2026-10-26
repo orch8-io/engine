@@ -346,7 +346,7 @@ impl Worker {
         let handlers = deps.client.handlers();
         if handlers.is_empty() {
             return Err(MobileError::InvalidInput {
-                message: "the node advertises no handlers; register handlers before register_node"
+                detail: "the node advertises no handlers; register handlers before register_node"
                     .into(),
             });
         }
@@ -356,7 +356,7 @@ impl Worker {
             .collect();
         if !missing.is_empty() {
             return Err(MobileError::InvalidInput {
-                message: format!("advertised handlers are not registered: {missing:?}"),
+                detail: format!("advertised handlers are not registered: {missing:?}"),
             });
         }
         let admission = Arc::clone(&deps.store.admission);

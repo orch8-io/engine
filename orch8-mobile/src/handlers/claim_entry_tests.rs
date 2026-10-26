@@ -394,7 +394,7 @@ async fn admitted_native_failure_preserves_unknown_evidence_and_blocks_same_atte
         fn execute(&self, _name: String, _input: String) -> Result<String, HandlerError> {
             self.0.fetch_add(1, Ordering::SeqCst);
             Err(HandlerError::Retryable {
-                message: "provider outcome is ambiguous".into(),
+                detail: "provider outcome is ambiguous".into(),
             })
         }
     }
