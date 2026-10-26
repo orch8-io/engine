@@ -8,9 +8,11 @@ import Orch8Mobile
 /// thread. A step handler blocks its engine thread while Dart runs
 /// `executeStep` on the platform thread, so no engine call may run on the
 /// main thread.
-public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
+public class Orch8FlutterPlugin: NSObject, FlutterPlugin, MobileScopedCallbacks {
     private let lock = NSLock()
     private let lifecycle = NativeEngineLifecycle<MobileEngine>(dispose: { $0.shutdown() })
+    private let scoped = MobileScopedBridge()
+    let scopedPending = PendingHandlerCalls()
     private var handlerTimeoutMs: UInt64 = 30_000
     private var eventSink: FlutterEventSink?
     private var eventChannel: FlutterEventChannel?
@@ -42,6 +44,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         eventChannel = nil
         eventSink = nil
         lifecycle.shutdown(permanent: true, retired: {}, complete: {})
+        workQueue.async { self.scoped.prune() }
     }
 
     // MARK: - Dispatch
@@ -54,6 +57,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
         }
         if call.method == "shutdown" {
             lifecycle.shutdown(permanent: false, retired: {}, complete: { [weak self] in
+                self?.scoped.prune()
                 DispatchQueue.main.async {
                     guard let self, !self.lifecycle.isClosed else { return }
                     result(nil)
@@ -84,6 +88,9 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     private func dispatch(_ method: String, _ a: [String: Any], _ engine: MobileEngine) throws -> Any? {
         switch method {
+        case "scopedCall":
+            return try scoped.call(engine: engine, scope: lifecycle.scope(for: engine), module: self,
+                handle: a.string("handle"), method: a.string("method"), argsJson: a.string("argsJson"))
         case "registerHandler":
             lock.lock(); let timeout = handlerTimeoutMs; lock.unlock()
             try engine.registerHandler(
@@ -338,6 +345,31 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin {
                 result(error.map { Orch8Support.flutterError($0, legacyCode: "INIT_ERROR") })
             }
         })
+        workQueue.async { self.scoped.prune() }
+    }
+
+    @discardableResult
+    func emit(scope: NativeEngineScope, _ name: String, _ body: [String: Any]) -> Bool {
+        guard scope.isCurrent, let id = body["requestId"] as? String else { return false }
+        let pending = scopedPending
+        let method = name == "orch8:scopedExecuteStep" ? "scopedExecuteStep" : "scopedRefreshToken"
+        DispatchQueue.main.async { [weak self] in
+            guard scope.isCurrent, let channel = self?.channel else {
+                pending.resolve(id, output: nil, error: "Flutter bridge retired", permanent: false)
+                return
+            }
+            channel.invokeMethod(method, arguments: body) { reply in
+                if let error = reply as? FlutterError {
+                    pending.resolve(id, output: nil, error: error.message ?? "host callback failed",
+                        permanent: error.code == "ORCH8_CATALOG_PERMANENT")
+                } else if let output = reply as? String {
+                    pending.resolve(id, output: output, error: nil, permanent: false)
+                } else {
+                    pending.resolve(id, output: nil, error: "invalid host callback reply", permanent: false)
+                }
+            }
+        }
+        return true
     }
 
     fileprivate func sendEvent(scope: NativeEngineScope, _ event: [String: Any]) {

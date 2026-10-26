@@ -1,7 +1,7 @@
 import Foundation
 import Orch8Mobile
 
-private final class Host: RNScopedCallbacks {
+private final class Host: MobileScopedCallbacks {
     let scopedPending = PendingHandlerCalls()
     private let lock = NSLock()
     private var received: [[String: Any]] = []
@@ -82,7 +82,7 @@ private enum Tests {
         lane.sync {}
         let engine = owner.engine!
         let scope = try owner.scope(for: engine)
-        let bridge = RNScopedBridge()
+        let bridge = MobileScopedBridge()
         let host = Host()
         defer {
             owner.shutdown(permanent: true, retired: {}, complete: {})
@@ -191,6 +191,15 @@ private enum Tests {
         try refuses { _ = try call("", "openAccount", wrongPrincipal) }
         _ = try call(
             catalogs[1], "prepareRun", ["workflow": "flow", "inputJson": "{}", "operationKey": "second-page"])
+        // A legal native input can exceed 2 MiB once JSON-escaped in the
+        // platform envelope. Exercise the actual bridge parser, not a DTO mock.
+        let maximumInput = "{\"text\":\"" + String(repeating: "\\\\", count: 524282) + "\"}"
+        precondition(maximumInput.utf8.count == 1_048_575)
+        let maximumRun = str(obj(try call(catalogs[1], "prepareRun", [
+            "workflow": "flow", "inputJson": maximumInput, "operationKey": "maximum-input"
+        ]))["handle"])
+        _ = try call(maximumRun, "cancel")
+        _ = try call(maximumRun, "forgetCancelledRequest")
         let page = obj(try call(catalogs[1], "history", ["limit": 1]))
         let cursor = str(obj(page["next"])["handle"])
         _ = try call(catalogs[1], "history", ["limit": 1, "cursor": cursor])

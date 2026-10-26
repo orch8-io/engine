@@ -9,7 +9,7 @@ import Orch8Mobile
 /// module's method queue, because a handler blocks its engine thread until JS
 /// answers through `resolveStep`, which arrives on the method queue.
 @objc(Orch8Module)
-class Orch8Module: RCTEventEmitter, RNScopedCallbacks {
+class Orch8Module: RCTEventEmitter, MobileScopedCallbacks {
     private let lock = NSLock()
     private var hasListeners = false
     private let lifecycle = NativeEngineLifecycle<MobileEngine>(dispose: { $0.shutdown() })
@@ -18,7 +18,7 @@ class Orch8Module: RCTEventEmitter, RNScopedCallbacks {
     private let workQueue = DispatchQueue(label: "io.orch8.reactnative.work", qos: .utility, attributes: .concurrent)
     let pending = PendingHandlerCalls()
     let scopedPending = PendingHandlerCalls()
-    private let scoped = RNScopedBridge()
+    private let scoped = MobileScopedBridge()
 
     private var engine: MobileEngine? { lifecycle.engine }
     private var isInvalidated: Bool { lock.lock(); defer { lock.unlock() }; return invalidated }

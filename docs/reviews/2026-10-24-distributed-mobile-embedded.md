@@ -3947,3 +3947,38 @@ requires startup on a fresh pair, and proves the foreign endpoint received no
 requests. The complete three-test crash suite passes with SQLite and an isolated
 PostgreSQL database, including the exact failing two-scheduler case. The temporary
 PostgreSQL cluster was stopped and removed after validation.
+
+### DME157 — Expose explicit Flutter account and catalog views
+
+Flutter now wraps development scoped native objects through typed Dart account,
+catalog, run and history-cursor views. Handler bindings and token sources belong
+to their exact scope/operation; session epochs stay strings. Callback DTOs retain
+native owner/effect identity, answers carry the snapshot's exact update version,
+and archives require acknowledgement. Account retirement fences sibling views and
+late replies; an old retirement completion cannot close a freshly reopened epoch.
+Closing a parent disposes a native child returned after its observer was fenced.
+
+The Dart facade limits pending registrations, handler tables, sync calls and
+physical host callbacks. Root replacement detaches old registration queues but
+retains charges for unsettled host futures. Permanent errors use the final
+CatalogHandlerFailure type; unknown host errors are bounded without invoking
+arbitrary string conversion. Temporary disposal preserves children while
+closeView fences descendants.
+
+Swift/Kotlin native helpers now depend on small platform callback interfaces.
+Flutter and RN carry equivalent helper copies; both actual Swift copies execute
+the Rust-produced four-scope fixture independently in CI. Native pending slots
+remain charged until a real Dart/JS reply, including after Rust timeout or root
+retirement. Argument envelopes allow 4 MiB so a legal near-1 MiB input containing
+escaped backslashes remains admissible after bridge JSON encoding. The actual
+maximum-input case passes through both adapters.
+
+Local validation passes Flutter analysis and all 20 tests, including the 1024
+pending-registration boundary and recovery, late retirement, orphan cleanup,
+callback fairness and exact answer/archive arguments. All 36 RN JS tests and
+TypeScript checks pass. Actual iOS 16 adapter compilation passes; both Android
+adapters compile and 10 lifecycle tests pass against current generated Kotlin
+signatures. The local AAR is compile-only; device JNI execution is not claimed.
+Strict workspace Clippy and docs/packaging/version/actionlint checks pass.
+No artifacts are published. Native scoped observations, account-owned workers,
+delegation/reporting and the remaining ADR-0002 rollout matrix remain required.

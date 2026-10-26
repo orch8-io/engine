@@ -57,6 +57,49 @@ Failures are `PlatformException`s with `code = "ORCH8_<KIND>"` (for example
 classify them as an `Orch8ErrorKind`. The previous code (`ORCH8_ERROR`,
 `INIT_ERROR`) is available as `details['legacyCode']`.
 
+## Account and catalog scopes (unpublished development API)
+
+The scoped API requires bindings and native artifacts built from the same engine
+commit. It is not available in the published `0.7.1` binaries.
+
+```dart
+final account = await orch8.openAccount(const AccountIdentity(
+  accountKey: 'signed-in-account', issuer: 'trusted-issuer', subject: 'user-id',
+));
+final catalog = await account.openCatalog(const CatalogConfiguration(
+  catalogKey: 'invoices', source: 'backend', signingAuthority: 'catalog-key',
+  manifestUrl: 'https://backend.example/manifest',
+  identityUrl: 'https://backend.example/identity',
+));
+await catalog.registerHandler('approve', (context, step, inputJson) async {
+  // context includes account/catalog, run, attempt and stable effectId.
+  return '{"approved":true}';
+});
+final run = await catalog.prepareRun(const CatalogRunRequest(
+  workflow: 'invoice', operationKey: 'backend-invoice-id',
+));
+await run.start();
+final snapshot = await run.snapshot();
+```
+
+Supply identity from the trusted sign-in flow. Catalog token sources belong to
+individual `sync` calls. Session epochs remain strings so 64-bit ownership is
+preserved. A cursor belongs to one catalog session; answers use the snapshot's
+exact update version. Use `CatalogHandlerFailure.permanent` for terminal host
+errors and `CatalogHandlerFailure.retryable` for transient failures.
+
+`dispose()` releases a temporary view and preserves its children. `closeView()`
+fences descendants; account `retire()` fences every sibling view from the old
+session. Native retirement cannot cancel an already-entered Dart future: its
+physical callback charge remains until that future settles. Keep host handlers
+bounded and return their real completion futures.
+
+After the app or backend acknowledges a terminal outcome, call
+`run.archiveAfterAcknowledgement(receipt)`. This frees full local run state while
+retaining compact outcome/deduplication receipts. Archiving is explicit and does
+not authorize deleting those receipts. Scoped native event observers and
+account-owned distributed workers are still separate work.
+
 ## Runtime node (engine release after 0.7.1)
 
 The device can join the distributed-execution mesh as a runtime of kind

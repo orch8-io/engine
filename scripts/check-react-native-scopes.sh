@@ -24,13 +24,19 @@ swiftc "${flags[@]}" -emit-module -emit-library -parse-as-library -module-name O
   -I "$work/ffi" -L "$work/runtime" -lorch8_mobile -Xlinker -rpath -Xlinker "$work/runtime" \
   -emit-module-path "$work/Orch8Mobile.swiftmodule" -o "$work/libOrch8Mobile.dylib" \
   "$root"/packages/swift/Sources/Orch8Mobile/*.swift
+for platform in react-native flutter; do
+  if [[ "$platform" == react-native ]]; then
+    sources="$root/packages/react-native/ios"
+  else
+    sources="$root/packages/flutter/ios/orch8_flutter/Sources/orch8_flutter"
+  fi
 swiftc "${flags[@]}" -parse-as-library -I "$work" -I "$work/ffi" -L "$work" -lOrch8Mobile \
   -Xlinker -rpath -Xlinker "$work" \
-  "$root/packages/react-native/ios/NativeEngineLifecycle.swift" \
-  "$root/packages/react-native/ios/PendingHandlerCalls.swift" \
-  "$root/packages/react-native/ios/ScopedBridge.swift" \
+  "$sources/NativeEngineLifecycle.swift" \
+  "$sources/PendingHandlerCalls.swift" \
+  "$sources/ScopedBridge.swift" \
   "$root/tests/react-native-scopes/main.swift" -o "$work/tests"
-if [[ "$#" == 4 ]]; then
+if [[ "$#" == 4 && "$platform" == react-native ]]; then
   install_runtime "$4"
   if "$work/tests" "$fixture" "$work" > "$work/previous.log" 2>&1; then
     echo 'New bindings unexpectedly accepted the old flat-error native library.' >&2
@@ -53,3 +59,5 @@ if grep -q 'panicked at' "$work/output.log"; then
   echo 'Unexpected native panic during scoped bridge validation.' >&2
   exit 1
 fi
+echo "Scoped native fixture passed: $platform"
+done

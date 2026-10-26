@@ -11,7 +11,9 @@ The [common KMP facade](../packages/kmp/README.md#multiple-accounts-and-catalogs
 wraps these objects through direct JVM/Android adapters and a protocol-6 Swift
 bridge. The [React Native development facade](../packages/react-native/README.md#multiple-accounts-and-catalogs-development-sources)
 also wraps the typed views through bounded native handles and scoped callbacks.
-Release artifacts and pins, Flutter facade integration, native scoped event
+The [Flutter development facade](../packages/flutter/README.md#account-and-catalog-scopes-unpublished-development-api)
+provides the same ownership model through typed Dart views and platform callbacks.
+Release artifacts and pins, native scoped event
 listeners, account-owned worker/delegation and authenticated outcome reporting
 remain rollout requirements. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) S1–S12 are not complete.
 
