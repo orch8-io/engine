@@ -500,7 +500,10 @@ fn owned_host_handler_with_budget(
                     },
                 ));
             };
-            let outputs = ctx.storage.get_all_outputs(ctx.instance_id).await;
+            let outputs = ctx
+                .storage
+                .get_latest_completed_outputs(ctx.instance_id)
+                .await;
             // Loading the request envelope is an asynchronous phase. Its
             // initiating claim must still own execution before host entry,
             // including when the load itself failed after ownership changed.

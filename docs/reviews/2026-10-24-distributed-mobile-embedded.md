@@ -4351,3 +4351,47 @@ all seven retention tests pass again, strict all-target storage Clippy passes,
 and all 30 mobile lifecycle tests pass. Migration immutability/destructive-DDL,
 documentation and formatting checks pass.
 The wider long-running engine and scoped mobile completion matrix remains open.
+
+### DME169 — Current output views materialized the whole execution history
+
+[PRE-EXISTING, HIGH] Template resolution and the shared Node/Python callback
+adapter loaded every append-only block-output row, decoded/decrypted them, then
+kept only the latest substantive result per block. Loops therefore increased
+per-step materialization and map allocation with their lifetime. A native adapter
+regression reproduced another consequence on encrypted SQLite and PostgreSQL:
+one damaged superseded ciphertext prevented an otherwise valid current result
+from reaching the handler.
+
+`OutputStore::get_latest_completed_outputs` now provides a current business view.
+The supported backends seek distinct block keys and their latest substantive
+rows inside one statement snapshot. SQLite keeps the key stream outside the
+payload lookup; PostgreSQL uses a per-key lateral lookup with the instance
+predicate preserved, including the final payload selection. Encryption unwraps
+only selected rows. Custom storage implementations retain a correct full-history
+fallback; the optimized read guarantee belongs to the provided backends.
+
+The initial PostgreSQL candidate still visited 517 rows for two current outputs.
+The revised plan passes a <=20 visited-row bound with 512 business results and
+512 internal trace results; SQLite verifies indexed next-key and payload seeks.
+Migration 125 supplies the partial current-output index, its down migration and
+online pre-creation instructions. The durable schema marker advances to 125;
+released migrations are unchanged.
+
+Business semantics remain deterministic by creation time and UUID. Retry and
+in-progress markers and interceptor/SLA metadata are excluded before selecting a
+winner; genuine failure outcomes, custom output references and business fields
+named `_sentinel` are preserved. Tests cover same-timestamp insertion disorder,
+empty/Unicode keys, SQL-wildcard lookalikes, owner isolation and PostgreSQL output
+UUID collisions across instance partitions. Selected corrupt ciphertext still
+fails closed before host entry. Existing request-load claim/retirement gates now
+pause on the new physical read and retain their original ownership assertions.
+
+Template/preparation tests (27/31), composite/metadata contracts (9), native
+claim/capacity contracts (26), and migration rollback checks (15) pass with
+required isolated PostgreSQL. All nine projection checks pass, including 2,049 distinct blocks on both
+backends. Strict all-target Clippy passes across storage, engine and the Rust
+facade. Freshly rebuilt actual bindings pass all 13 packed Node tests and all
+19 Python extension tests, with zero failures/skips. Documentation, formatting
+and migration safety checks pass. Native diagnostic snapshots still have their separate
+history/diagnostic contract; per-payload byte bounds and the wider review matrix
+remain open. No published version, FFI ABI or release publication changes.

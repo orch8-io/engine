@@ -1,5 +1,6 @@
 mod child_adoption;
 mod child_lookup;
+mod current_outputs;
 mod mobile_access;
 pub use child_adoption::ChildAdoption;
 pub use mobile_access::MobileInstanceAccess;
@@ -73,7 +74,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 124;
+pub const STORAGE_SCHEMA_VERSION: u32 = 125;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -1432,6 +1433,20 @@ pub trait OutputStore: Send + Sync + 'static {
         &self,
         instance_id: InstanceId,
     ) -> Result<Vec<BlockOutput>, StorageError>;
+
+    /// Latest substantive output per block, ordered by `(created_at, id)`.
+    /// Excludes retry/in-progress markers and interceptor/SLA metadata before
+    /// selecting a winner; genuine `__error__` outputs remain visible. `SQLite`
+    /// and `PostgreSQL` seek selected rows without loading historical payloads.
+    /// The default preserves semantics for custom backends using full history.
+    async fn get_latest_completed_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        Ok(current_outputs::from_history(
+            self.get_all_outputs(instance_id).await?,
+        ))
+    }
 
     /// Return block outputs created at or after the given timestamp
     /// (inclusive). Used by SSE streaming to avoid fetching the entire

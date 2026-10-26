@@ -124,6 +124,17 @@ pub(super) async fn get_batch(
     Ok(map)
 }
 
+pub(super) async fn get_latest_completed(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = sqlx::query(crate::current_outputs::SQLITE_QUERY)
+        .bind(instance_id.to_string())
+        .fetch_all(&storage.pool)
+        .await?;
+    rows.iter().map(row_to_output).collect()
+}
+
 pub(super) async fn get_all(
     storage: &SqliteStorage,
     instance_id: InstanceId,

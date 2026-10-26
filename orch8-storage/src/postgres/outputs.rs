@@ -158,6 +158,17 @@ pub(super) async fn get_batch(
     Ok(map)
 }
 
+pub(super) async fn get_latest_completed(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = sqlx::query_as::<_, BlockOutputRow>(crate::current_outputs::POSTGRES_QUERY)
+        .bind(instance_id.into_uuid())
+        .fetch_all(&store.pool)
+        .await?;
+    rows.into_iter().map(BlockOutputRow::into_output).collect()
+}
+
 pub(super) async fn get_all(
     store: &PostgresStorage,
     instance_id: InstanceId,

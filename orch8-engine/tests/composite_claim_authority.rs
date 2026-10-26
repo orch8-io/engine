@@ -53,7 +53,7 @@ async fn stale_router_cannot_replace_the_current_claims_decision_or_complete_its
     let (storage, faults) = FaultStorage::wrap(Arc::clone(&inner));
     // Memoized route was read as absent. Pause while collecting condition
     // inputs, before this in-flight activation persists its selected branch.
-    let pause = faults.on("get_all_outputs").times(1).pause();
+    let pause = faults.on("get_latest_completed_outputs").times(1).pause();
     let registry = HandlerRegistry::new();
     let clock = SharedClock::default();
     let stop = AtomicBool::new(false);
@@ -166,7 +166,10 @@ async fn router_output_read_failure_is_transient_and_does_not_persist_a_default_
     };
     inner.save_block_output(&prior).await.unwrap();
     let (storage, faults) = FaultStorage::wrap(Arc::clone(&inner));
-    faults.on("get_all_outputs").times(1).fail_transient();
+    faults
+        .on("get_latest_completed_outputs")
+        .times(1)
+        .fail_transient();
     let result = evaluate_with_claim_token(
         &storage,
         &HandlerRegistry::new(),
@@ -177,7 +180,7 @@ async fn router_output_read_failure_is_transient_and_does_not_persist_a_default_
         &AtomicBool::new(false),
     )
     .await;
-    assert_eq!(faults.injected("get_all_outputs"), 1);
+    assert_eq!(faults.injected("get_latest_completed_outputs"), 1);
     assert!(
         matches!(&result, Err(error) if error.is_transient_storage()),
         "a failed condition-input read must remain retryable: {result:?}"

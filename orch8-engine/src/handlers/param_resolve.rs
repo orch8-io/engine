@@ -26,12 +26,12 @@ use crate::error::EngineError;
 
 /// Build the `outputs` JSON shape expected by `template::resolve`:
 /// `{ "block_id_1": <output>, "block_id_2": <output>, ... }`.
-/// Fetches all prior block outputs for the instance from storage.
+/// Fetches the latest substantive row per block without loading loop history.
 ///
 /// Internal bookkeeping rows are NOT step outputs and must never surface in
 /// `{{ outputs.* }}` templates, so they are filtered here as defense in
 /// depth (the completed-id queries already exclude them, but a stale row can
-/// still be returned by `get_all_outputs` — e.g. the sentinel left behind by
+/// still be returned by a custom backend — e.g. the sentinel left behind by
 /// a crashed attempt after the re-executed step saves its real output):
 ///   - `__in_progress__`: crash-mid-step sentinel — its `{"_sentinel":
 ///     true, ...}` payload is garbage to downstream templates.
@@ -49,7 +49,7 @@ pub(crate) async fn build_outputs_shape(
     instance_id: InstanceId,
 ) -> Result<serde_json::Value, EngineError> {
     let outputs = storage
-        .get_all_outputs(instance_id)
+        .get_latest_completed_outputs(instance_id)
         .await
         .map_err(EngineError::Storage)?;
     let mut map = serde_json::Map::with_capacity(outputs.len());
@@ -75,7 +75,7 @@ pub(crate) async fn build_outputs_shape(
 /// Phase 3 of the evaluator may dispatch multiple composite nodes in one
 /// iteration — each router among them would otherwise call
 /// `build_outputs_shape` independently, producing N redundant
-/// `get_all_outputs` queries against identical data. Sharing one snapshot
+/// current-output queries against identical data. Sharing one snapshot
 /// per iteration collapses those to a single fetch.
 ///
 /// Coherence: a fresh snapshot is created at the top of each iteration
@@ -389,7 +389,7 @@ mod tests {
         save_output(&s, inst.id, "b1", json!({"v": 1})).await;
         save_output(&s, inst.id, "b1", json!({"v": 2})).await;
         let shape = build_outputs_shape(&s, inst.id).await.unwrap();
-        // `get_all_outputs` orders by `created_at, id` and ids are UUIDv7
+        // Current projections order by `created_at, id` and ids are UUIDv7
         // (time-ordered), so the second save deterministically wins even if
         // both rows land in the same millisecond.
         assert_eq!(shape["b1"], json!({"v": 2}));

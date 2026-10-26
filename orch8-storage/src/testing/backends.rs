@@ -148,6 +148,41 @@ pub enum RawPool {
 }
 
 impl RawPool {
+    /// Replace one JSON field for a storage-corruption fixture. Identifiers
+    /// are test constants, never application input; the value and id are bound.
+    pub async fn set_json(
+        &self,
+        table: &str,
+        column: &str,
+        key: &str,
+        id: &str,
+        value: &serde_json::Value,
+    ) {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Postgres(pool) => {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "UPDATE {table} SET {column} = $1 WHERE {key}::text = $2"
+                )))
+                .bind(value)
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("replace JSON fixture field");
+            }
+            Self::Sqlite(pool) => {
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "UPDATE {table} SET {column} = ?1 WHERE {key} = ?2"
+                )))
+                .bind(value.to_string())
+                .bind(id)
+                .execute(pool)
+                .await
+                .expect("replace JSON fixture field");
+            }
+        }
+    }
+
     /// `UPDATE {table} SET {col} = when WHERE {key} = id` (the key compared
     /// as text), for back-dating rows whose timestamps the database stamps
     /// itself (`NOW()`). `table` / `col` / `key` are test-supplied
