@@ -231,10 +231,6 @@ impl CatalogHandlers {
         self.storage.clone()
     }
     #[cfg(test)]
-    pub(crate) fn registry_unlocked(&self) -> bool {
-        self.bindings.try_lock().is_ok()
-    }
-    #[cfg(test)]
     pub(crate) fn shared_test_gate() -> Arc<tokio::sync::Mutex<()>> {
         static GATE: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
         GATE.get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
