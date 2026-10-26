@@ -41,6 +41,33 @@ class PermanentError(Exception):
     """
 
 
+# Read built-in exception storage directly: subclass accessors, __str__ and
+# metaclass hooks are application code and must not run while reporting failure.
+_exception_args = BaseException.__dict__["args"].__get__
+_exception_dict = BaseException.__dict__["__dict__"].__get__
+_class_mro = type.__dict__["__mro__"].__get__
+_permanent_error_type = PermanentError
+
+
+def _host_error(error: BaseException) -> dict:
+    args = _exception_args(error)
+    message = args[0] if len(args) == 1 and type(args[0]) is str else "handler failed"
+    # Slice before encoding so a large diagnostic cannot allocate another large
+    # copy. Lone surrogates must not reach Rust's strict JSON string decoder.
+    message = (message[:1024] or "handler failed").encode("utf-8", "replace").decode("utf-8")
+    permanent = any(cls is _permanent_error_type for cls in _class_mro(type(error)))
+    if not permanent:
+        # Iterating exact string keys avoids dict lookup invoking a hostile key's
+        # __eq__. Bound inspection independently of the exception's attribute count.
+        for index, (key, value) in enumerate(dict.items(_exception_dict(error))):
+            if index == 64:
+                break
+            if type(key) is str and key == "permanent":
+                permanent = value is True
+                break
+    return {"message": message, "permanent": permanent}
+
+
 def _to_json(value: Any) -> Optional[str]:
     if value is None or isinstance(value, str):
         return value
@@ -56,8 +83,7 @@ def _wrap(fn: Handler) -> Callable[[str], str]:
                 output = asyncio.run(_await(output))
             return json.dumps({"ok": output})
         except BaseException as error:  # noqa: BLE001 - every failure becomes a step error
-            permanent = isinstance(error, PermanentError) or getattr(error, "permanent", False) is True
-            return json.dumps({"error": {"message": str(error) or type(error).__name__, "permanent": permanent}})
+            return json.dumps({"error": _host_error(error)})
 
     return invoke
 
