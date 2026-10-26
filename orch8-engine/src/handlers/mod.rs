@@ -219,6 +219,11 @@ fn state_storage_error(error: &orch8_types::error::StorageError) -> StepError {
     }
 }
 
+/// An owned native invocation that has reserved admission but has not entered
+/// host code. Dropping it before polling releases its reservation.
+pub type PreparedStep = Pin<Box<dyn Future<Output = Result<serde_json::Value, StepError>> + Send>>;
+type StepPreparation = Box<dyn Fn(StepContext) -> Result<PreparedStep, StepError> + Send + Sync>;
+
 /// Registry of named step handlers.
 ///
 /// Supports mock overrides for testing: when a mock is registered for a handler
@@ -226,6 +231,7 @@ fn state_storage_error(error: &orch8_types::error::StorageError) -> StepError {
 pub struct HandlerRegistry {
     handlers: HashMap<Arc<str>, StepHandler>,
     deferred_effect_handlers: HashSet<Arc<str>>,
+    prepared_handlers: HashMap<Arc<str>, StepPreparation>,
     resolver: Option<Arc<dyn HandlerResolver>>,
     /// Mock overrides. When present, `get()` returns the mock instead of the real handler.
     mocks: HashMap<Arc<str>, StepHandler>,
@@ -246,6 +252,7 @@ impl HandlerRegistry {
         Self {
             handlers: HashMap::new(),
             deferred_effect_handlers: HashSet::new(),
+            prepared_handlers: HashMap::new(),
             resolver: None,
             mocks: HashMap::new(),
             circuit_breakers: None,
@@ -287,6 +294,7 @@ impl HandlerRegistry {
         Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
     {
         self.deferred_effect_handlers.remove(name);
+        self.prepared_handlers.remove(name);
         self.handlers
             .insert(Arc::from(name), Box::new(move |ctx| Box::pin(handler(ctx))));
     }
@@ -302,6 +310,42 @@ impl HandlerRegistry {
         self.deferred_effect_handlers.insert(Arc::from(name));
     }
 
+    /// Register native admission that can be reserved before a worker journals
+    /// dispatch. Preparation must not call host code or start effects; those
+    /// belong exclusively in the returned future when it is polled.
+    pub fn register_prepared_with_deferred_effect_admission<F, Fut>(
+        &mut self,
+        name: &str,
+        prepare: F,
+    ) where
+        F: Fn(StepContext) -> Result<Fut, StepError> + Send + Sync + 'static,
+        Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
+    {
+        let prepare = Arc::new(prepare);
+        let invoke = Arc::clone(&prepare);
+        self.register_with_deferred_effect_admission(name, move |ctx| {
+            let prepared = invoke(ctx);
+            async move { prepared?.await }
+        });
+        self.prepared_handlers.insert(
+            Arc::from(name),
+            Box::new(move |ctx| prepare(ctx).map(|future| Box::pin(future) as PreparedStep)),
+        );
+    }
+
+    /// Opt-in native reservation. Ordinary handlers and mocks return None and
+    /// must be invoked at their normal execution boundary, never during preflight.
+    pub fn prepare_native_handler(
+        &self,
+        name: &str,
+        ctx: StepContext,
+    ) -> Option<Result<PreparedStep, StepError>> {
+        if self.mocks.contains_key(name) {
+            return None;
+        }
+        self.prepared_handlers.get(name).map(|prepare| prepare(ctx))
+    }
+
     pub(crate) fn defers_effect_admission(&self, name: &str) -> bool {
         !self.mocks.contains_key(name) && self.deferred_effect_handlers.contains(name)
     }
@@ -313,6 +357,8 @@ impl HandlerRegistry {
         self.handlers.retain(|name, _| keep(name));
         self.deferred_effect_handlers
             .retain(|name| self.handlers.contains_key(name));
+        self.prepared_handlers
+            .retain(|name, _| self.handlers.contains_key(name));
     }
 
     /// Look up a handler by name. Mocks take precedence over real handlers.
@@ -413,6 +459,8 @@ impl Default for HandlerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod preparation;
 
     async fn mk_test_storage() -> Arc<dyn StorageBackend> {
         Arc::new(

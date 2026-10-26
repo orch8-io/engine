@@ -3754,3 +3754,66 @@ and strengthened token subprocess probe also pass after adding explicit child
 completion markers; a subprocess matching zero tests can no longer pass silently.
 Strict all-target mobile Clippy, workspace formatting, binding parity, SDK
 packaging, docs and whitespace checks pass.
+
+
+### DME152 — Reserve legacy native admission before scheduler or worker dispatch
+
+Legacy native callbacks had no process-wide physical gate. A fresh registry or
+engine could create more native frames while retired callbacks remained blocked.
+Real flat and tree scheduler regressions reproduced dispatch despite an exhausted
+shared allowance: both completed work instead of rescheduling before host entry.
+
+Legacy registrations now share a process-wide 32-call semaphore. Scoped callbacks
+retain their existing account-aware admission domain. An explicit invocation
+permit variant keeps these domains distinct while preserving the native kernel's
+ownership through physical return, foreign destruction, panic cleanup and queued
+cancellation. Dry runs reserve no native slot. A stopped or invalid adapter fails
+closed. Straggler contention and capacity refusal preserve AdmissionBusy through
+the deferred effect capability, rather than consuming business retry attempts.
+
+The scheduler tests retain one Prepared effect and attempt zero over forty
+contention cycles, use the fixed admission delay rather than growing storage
+backoff, then commit the same receipt with one host execution when capacity
+returns. Separate tests retain physical admission across retired registries and
+verify the actual default static gate in an isolated subprocess.
+
+Worker review exposed a second ordering problem: execute_confirmed journaled
+started before invoking the wrapper. With physical capacity exhausted, the old
+ordering wrote a start marker even though no host code ran. A SQLite audit trigger
+reproduced this false start. The journal is local; no separate remote mark-start
+request is implied by this finding.
+
+HandlerRegistry now offers opt-in synchronous native preparation. Its constructor
+may reserve admission but must not enter host code or start effects. The owned
+future executes only when polled. Ordinary handlers and mocks keep their existing
+invocation boundary. Replacement, retention and mock precedence cannot leave a
+stale native preparer active. Root native adapters provide a real reservation;
+scoped routing continues through its existing ownership checks.
+
+Workers prepare before journal start, release refused claims as unstarted, and
+retain rejected releases as unstarted recovery evidence. The reserved future
+survives journal/lease I/O and enters native code only after a successful start
+record. Cancellation or journal-start failure drops the unpolled reservation
+without invoking the host. Prepared callback field order retains admission through
+last foreign-reference destruction, including cancellation before first poll.
+
+A process availability hint suppresses foreign-handler polling while every slot
+is occupied. It is not authority: an isolated real-default worker test exhausts
+capacity during a delayed poll response, then verifies unstarted release, no
+start/failure/host entry, and one execution after capacity recovers. This avoids
+both claim/release churn under sustained exhaustion and a check/use race.
+
+Regression coverage uses actual native adapters, SQLite journals and effect
+receipts, plus the existing mock control-plane lease endpoints. It covers normal
+and unpolled foreign destruction, callback/destructor panic cleanup, queued
+cancellation, journal failure, cancellation before journal connection acquisition,
+rejected unstarted release, metadata forwarding, and registry replacement/mocks.
+No serialized admission capability, account fallback, UniFFI API or protocol 6
+change is introduced.
+
+Full local validation passes 2,120 core library tests, 675 mobile library tests
+and 109 mobile integration/coverage/example-workflow tests, with zero failures
+or skips. Strict all-target core/mobile Clippy passes with warnings denied.
+The final worker preparation tests also verify an actual rejected release
+request, rather than only checking its absent start/outcome state. Workspace
+formatting, binding parity, SDK packaging, docs and whitespace checks pass.

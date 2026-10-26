@@ -92,11 +92,22 @@ impl NativeClaim {
     }
 }
 
+// Exactly one physical admission domain owns an invocation. Scoped callbacks
+// keep their account-aware budget; legacy callbacks use the process gate.
+pub(super) enum InvocationPermit {
+    Scoped {
+        _permit: super::scoped::NativePermit,
+    },
+    Legacy {
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    },
+}
+
 pub(super) struct NativeOwnership {
     pub(super) claim: Option<NativeClaim>,
     pub(super) effect_admission: Option<orch8_engine::handlers::EffectAdmission>,
     pub(super) tracking_key: String,
-    pub(super) _permits: Option<super::scoped::NativePermit>,
+    pub(super) _permits: Option<InvocationPermit>,
     pub(super) binding: Option<Arc<super::scoped::Binding>>,
     pub(super) stop: tokio_util::sync::CancellationToken,
 }
@@ -337,6 +348,7 @@ mod tests {
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let stragglers = Arc::new(Stragglers::default());
+        let capacity = Arc::new(tokio::sync::Semaphore::new(1));
         runtime.block_on(async {
             let call = NativeInvocation::spawn(
                 Arc::new(CountingHandler(Arc::clone(&calls))),
@@ -347,7 +359,9 @@ mod tests {
                     claim: None,
                     effect_admission: None,
                     tracking_key: "queued".into(),
-                    _permits: None,
+                    _permits: Some(InvocationPermit::Legacy {
+                        _permit: capacity.clone().try_acquire_owned().unwrap(),
+                    }),
                     binding: None,
                     stop: tokio_util::sync::CancellationToken::new(),
                 },
@@ -361,5 +375,6 @@ mod tests {
         });
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(!stragglers.blocks("queued"));
+        assert_eq!(capacity.available_permits(), 1);
     }
 }

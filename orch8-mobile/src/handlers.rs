@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -13,10 +14,30 @@ use crate::stragglers::{Stragglers, device_timeout_error};
 
 mod invocation;
 mod pool;
-use invocation::{NativeClaim, NativeInvocation, NativeOwnership};
+use invocation::{InvocationPermit, NativeClaim, NativeInvocation, NativeOwnership};
 // Internal scoped dispatcher; public scoped execution is still gated.
 #[allow(dead_code)]
 pub(crate) mod scoped;
+
+const MAX_PROCESS_LEGACY_CALLS: usize = 32;
+
+fn process_legacy_slots() -> Arc<Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_PROCESS_LEGACY_CALLS))))
+}
+
+// A polling hint only. Preparation still reserves authoritatively after the
+// response, because another owner may take the last slot during network I/O.
+pub(crate) fn legacy_capacity_available() -> bool {
+    process_legacy_slots().available_permits() != 0
+}
+
+#[cfg(test)]
+pub(crate) fn occupy_legacy_capacity_for_test() -> tokio::sync::OwnedSemaphorePermit {
+    process_legacy_slots()
+        .try_acquire_many_owned(u32::try_from(MAX_PROCESS_LEGACY_CALLS).unwrap())
+        .unwrap()
+}
 
 struct Callback {
     handler: Arc<dyn StepHandler>,
@@ -25,6 +46,7 @@ struct Callback {
     stragglers: Arc<Stragglers>,
     tracking_key: String,
     permits: Option<scoped::NativePermit>,
+    legacy_capacity: Option<Arc<Semaphore>>,
     binding: Option<Arc<scoped::Binding>>,
     stop: CancellationToken,
 }
@@ -79,9 +101,49 @@ pub(crate) fn register_owned_foreign_handler(
     stragglers: Arc<Stragglers>,
     stop: CancellationToken,
 ) {
+    register_with_capacity(
+        registry,
+        name,
+        handler,
+        timeout,
+        stragglers,
+        stop,
+        process_legacy_slots(),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn register_foreign_handler_with_capacity(
+    registry: &mut HandlerRegistry,
+    name: &str,
+    handler: Arc<dyn StepHandler>,
+    timeout: Duration,
+    stragglers: Arc<Stragglers>,
+    capacity: Arc<Semaphore>,
+) {
+    register_with_capacity(
+        registry,
+        name,
+        handler,
+        timeout,
+        stragglers,
+        CancellationToken::new(),
+        capacity,
+    );
+}
+
+fn register_with_capacity(
+    registry: &mut HandlerRegistry,
+    name: &str,
+    handler: Arc<dyn StepHandler>,
+    timeout: Duration,
+    stragglers: Arc<Stragglers>,
+    stop: CancellationToken,
+    capacity: Arc<Semaphore>,
+) {
     let handler_name = name.to_string();
-    registry.register_with_deferred_effect_admission(name, move |ctx: StepContext| {
-        invoke_foreign_handler(
+    registry.register_prepared_with_deferred_effect_admission(name, move |ctx: StepContext| {
+        prepare_foreign_handler(
             ctx,
             Callback {
                 handler: Arc::clone(&handler),
@@ -90,6 +152,7 @@ pub(crate) fn register_owned_foreign_handler(
                 stragglers: Arc::clone(&stragglers),
                 tracking_key: handler_name.clone(),
                 permits: None,
+                legacy_capacity: Some(capacity.clone()),
                 binding: None,
                 stop: stop.clone(),
             },
@@ -97,38 +160,88 @@ pub(crate) fn register_owned_foreign_handler(
     });
 }
 
+fn callback_busy(ctx: &StepContext, message: String) -> StepError {
+    ctx.effect_admission.as_ref().map_or_else(
+        || StepError::Retryable {
+            message,
+            details: None,
+        },
+        |admission| {
+            admission.reject_preflight(orch8_engine::error::EngineError::AdmissionBusy {
+                instance_id: ctx.instance_id,
+            })
+        },
+    )
+}
+
+// Declaration order retains admission through foreign Arc destruction even
+// when a worker cancels an unpolled prepared invocation.
+struct PreparedCallback {
+    callback: Callback,
+    permits: Option<InvocationPermit>,
+}
+
 async fn invoke_foreign_handler(ctx: StepContext, callback: Callback) -> Result<Value, StepError> {
+    prepare_foreign_handler(ctx, callback)?.await
+}
+
+fn prepare_foreign_handler(
+    ctx: StepContext,
+    mut callback: Callback,
+) -> Result<impl std::future::Future<Output = Result<Value, StepError>> + Send, StepError> {
+    if callback.stop.is_cancelled() {
+        return Err(StepError::ClaimLost);
+    }
+    let permits = if ctx.is_dry_run() {
+        None
+    } else {
+        if callback.stragglers.blocks(&callback.tracking_key) {
+            return Err(callback_busy(
+                &ctx,
+                format!(
+                    "handler '{}' is still running from a previous unfinished attempt",
+                    callback.name
+                ),
+            ));
+        }
+        match (callback.permits.take(), callback.legacy_capacity.take()) {
+            (Some(scoped), None) => Some(InvocationPermit::Scoped { _permit: scoped }),
+            (None, Some(capacity)) => Some(InvocationPermit::Legacy {
+                _permit: capacity.try_acquire_owned().map_err(|_| {
+                    callback_busy(&ctx, "native callback capacity is occupied".into())
+                })?,
+            }),
+            _ => return Err(StepError::ClaimLost),
+        }
+    };
+    Ok(invoke_reserved_handler(
+        ctx,
+        PreparedCallback { callback, permits },
+    ))
+}
+
+async fn invoke_reserved_handler(
+    ctx: StepContext,
+    prepared: PreparedCallback,
+) -> Result<Value, StepError> {
+    let PreparedCallback { callback, permits } = prepared;
     let Callback {
         handler,
         name,
         timeout,
         stragglers,
         tracking_key,
-        permits,
         binding,
         stop,
+        ..
     } = callback;
-
     if stop.is_cancelled() {
         return Err(StepError::ClaimLost);
     }
-
     if ctx.is_dry_run() {
-        return Ok(serde_json::json!({
-            "dry_run": true, "handler": name, "would": "invoke registered handler",
-        }));
-    }
-    // MC-06: a timed-out native call cannot be interrupted. A retry
-    // dispatched by the local scheduler must not run concurrently with
-    // that straggler (double side effects), so refuse to start and let
-    // the engine's retry policy come back after it has returned.
-    if stragglers.blocks(&tracking_key) {
-        return Err(StepError::Retryable {
-            message: format!(
-                "handler '{name}' is still running from a previous unfinished attempt"
-            ),
-            details: None,
-        });
+        return Ok(
+            serde_json::json!({ "dry_run": true, "handler": name, "would": "invoke registered handler" }),
+        );
     }
     let input = serde_json::to_string(&ctx.params).unwrap_or_else(|_| "{}".to_string());
 
@@ -624,3 +737,6 @@ mod tests {
 
 #[cfg(test)]
 mod claim_entry_tests;
+
+#[cfg(test)]
+mod process_capacity_tests;
