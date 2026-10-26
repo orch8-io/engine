@@ -4043,3 +4043,26 @@ the real host/process tests. Previously CI only compiled the standalone binding.
 No native ABI, schema, callback payload or release version changes; no package is
 published. Process-wide physical host capacity and the remaining review matrix
 are still open.
+
+### DME160 — Remove the unused vulnerable Wasmtime disk-cache graph
+
+PR343's current all-feature dependency audit found zstd 0.13.3 and zstd-safe
+7.3.0 through Wasmtime's optional disk-cache feature. Upstream advisories cover
+[abandoned stream context reuse](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/zstd/RUSTSEC-2026-0391.md),
+[out-of-bounds seekable decompression](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/zstd-safe/RUSTSEC-2026-0398.md),
+and [failed legacy streaming decompression](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/zstd-safe/RUSTSEC-2026-0403.md).
+The patched versions are zstd 0.14.3 and zstd-safe 8.2.0, already used by storage
+compression. No advisory exception is added.
+
+The WASM handler constructs Config::new(), whose disk cache is None, and never
+sets it. Its bounded process-local compiled-module cache is independent. The
+workspace now explicitly retains Wasmtime 49's other default runtime/compiler
+features while excluding that unused disk-cache dependency. The lockfile drops
+the old compression pair and their now-unreachable cache dependencies; module
+compilation/execution and the actual in-memory cache remain enabled.
+
+All five locked advisory checks pass: root default and all-feature graphs plus
+standalone Node, Python and fuzz graphs. All 27 actual WASM plugin tests pass,
+including ABI shape, import rejection, fuel, memory and wall-clock limits. The
+iOS x86 CI failure was separately traced to GitHub's artifact-service request
+timeouts after a successful build; it was not an iOS compilation defect.
