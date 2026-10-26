@@ -4011,3 +4011,58 @@ property, and removes the obsolete test-only probe.
 All 678 mobile library tests and strict all-target mobile Clippy pass. This closes
 one independent-process evidence gap; it does not complete account-owned remote
 workers, authenticated reporting, migration/disk-failure cases or ADR-0002 S1–S12.
+
+### DME159 — Node callback error reporting executed untrusted host hooks
+
+Actual Node/native regressions against the baseline wrapper invoked thrown-value
+accessors and proxy traps while formatting a failure. A serialization exception
+also replaced the promised TypeError with a proxy's own exception. The wrapper's
+catch block could therefore reject instead of returning its JSON error envelope,
+and hostile hooks could run again during error reporting. Large diagnostics and
+lone UTF-16 surrogates also lacked a bounded, native-decodable error contract.
+
+The wrapper now normalizes only own data properties, excluding proxies with
+Node's native proxy-brand check before reflection. Unknown objects use a constant
+retryable diagnostic; no accessor, object coercion or instanceof hook is invoked.
+PermanentError instances have a weak private brand, preserving terminal behavior
+without prototype callbacks or trusting a replaced marker. Explicit own
+permanent:true data records remain supported. Messages are limited to 1024
+UTF-16 units without splitting a valid surrogate pair, and lone surrogates become
+replacement characters before Rust JSON decoding. Input serialization uses the
+same safe diagnostic path.
+
+All six targeted baseline cases fail against the old wrapper with the current
+actual addon. The corrected wrapper passes all 12 Node tests using a freshly
+built addon packed into an actual npm tarball, including the existing hard-kill,
+restart, idempotency, run-deadline and error-retry contracts. Packing verifies the
+new helper is present in the package's explicit files list. The temporary package,
+compiled copy and database fixtures are removed afterward.
+
+CI gains a Node native runtime gate: build the same-commit addon, pack it, and run
+the real host/process tests. Previously CI only compiled the standalone binding.
+No native ABI, schema, callback payload or release version changes; no package is
+published. Process-wide physical host capacity and the remaining review matrix
+are still open.
+
+### DME160 — Remove the unused vulnerable Wasmtime disk-cache graph
+
+PR343's current all-feature dependency audit found zstd 0.13.3 and zstd-safe
+7.3.0 through Wasmtime's optional disk-cache feature. Upstream advisories cover
+[abandoned stream context reuse](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/zstd/RUSTSEC-2026-0391.md),
+[out-of-bounds seekable decompression](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/zstd-safe/RUSTSEC-2026-0398.md),
+and [failed legacy streaming decompression](https://raw.githubusercontent.com/RustSec/advisory-db/main/crates/zstd-safe/RUSTSEC-2026-0403.md).
+The patched versions are zstd 0.14.3 and zstd-safe 8.2.0, already used by storage
+compression. No advisory exception is added.
+
+The WASM handler constructs Config::new(), whose disk cache is None, and never
+sets it. Its bounded process-local compiled-module cache is independent. The
+workspace now explicitly retains Wasmtime 49's other default runtime/compiler
+features while excluding that unused disk-cache dependency. The lockfile drops
+the old compression pair and their now-unreachable cache dependencies; module
+compilation/execution and the actual in-memory cache remain enabled.
+
+All five locked advisory checks pass: root default and all-feature graphs plus
+standalone Node, Python and fuzz graphs. All 27 actual WASM plugin tests pass,
+including ABI shape, import rejection, fuel, memory and wall-clock limits. The
+iOS x86 CI failure was separately traced to GitHub's artifact-service request
+timeouts after a successful build; it was not an iOS compilation defect.

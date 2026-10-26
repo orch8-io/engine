@@ -137,7 +137,16 @@ redis = { version = "1", default-features = false, features = ["tokio-comp", "st
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 notify = { version = "8", features = ["serde"] }
 # 49.0.4 fixes the aarch64 br_table sandbox escape and component-stream panic.
-wasmtime = "49.0.4"
+# Preserve Wasmtime's runtime/compiler defaults except its unused disk cache.
+# wasm_plugin builds Config::new() with cache=None and keeps its own bounded
+# module cache. Wasmtime's optional disk-cache feature pulls vulnerable zstd 0.13.
+wasmtime = { version = "49.0.4", default-features = false, features = [
+    "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null",
+    "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator",
+    "demangle", "addr2line", "coredump", "debug-builtins", "runtime",
+    "component-model", "component-model-async", "threads", "stack-switching",
+    "std", "debug", "compile-time-builtins", "wit-parser",
+] }
 dashmap = "6"
 tempfile = "3"
 serial_test = "4"

@@ -1,6 +1,7 @@
 'use strict'
 
 const native = require('./binding.js')
+const { hostError, markPermanentError } = require('./host-errors.js')
 
 /**
  * Throw (or reject with) a `PermanentError` from a handler to fail the step
@@ -11,6 +12,7 @@ class PermanentError extends Error {
     super(message, options)
     this.name = 'PermanentError'
     this.permanent = true
+    markPermanentError(this)
   }
 }
 
@@ -20,7 +22,7 @@ function toJson(value, what) {
   try {
     return JSON.stringify(value)
   } catch (error) {
-    throw new TypeError(`${what} must be JSON-serializable: ${error.message}`)
+    throw new TypeError(`${what} must be JSON-serializable: ${hostError(error).message}`)
   }
 }
 
@@ -41,9 +43,7 @@ function wrapHandler(name, fn) {
       })
       return JSON.stringify({ ok: output === undefined ? null : output })
     } catch (error) {
-      const permanent = Boolean(error && (error instanceof PermanentError || error.permanent === true))
-      const message = error instanceof Error ? error.message : String(error)
-      return JSON.stringify({ error: { message, permanent } })
+      return JSON.stringify({ error: hostError(error) })
     }
   }
 }

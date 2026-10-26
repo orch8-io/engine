@@ -115,3 +115,13 @@ cd ../..
 This package has its own Cargo workspace and lockfile. The JavaScript wrapper
 loads the addon from this package's directory; building the root Rust workspace
 alone does not produce the Node addon.
+
+### Callback failure diagnostics
+
+`PermanentError` fails without retry. An own data property `permanent: true`
+remains supported for explicit error records. Unknown thrown values are retryable.
+Failure reporting reads only own string message properties; it does not execute
+accessors, proxy traps, `instanceof` hooks or object coercion. Other objects use
+`handler failed`. Diagnostics are bounded to 1024 UTF-16 units, preserve complete
+surrogate pairs at the boundary, and replace lone surrogates before native JSON
+decoding. These rules also apply when input serialization throws an unusual value.
