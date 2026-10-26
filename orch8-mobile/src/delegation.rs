@@ -80,6 +80,8 @@ use orch8_types::worker::{WorkerClaim, WorkerTask};
 use crate::error::MobileError;
 use crate::node::NodeClient;
 
+#[path = "delegation_owner.rs"]
+mod owner;
 #[path = "delegation_scan.rs"]
 mod scan;
 
@@ -166,10 +168,11 @@ pub(crate) async fn purge_finished(
     pool: &SqlitePool,
     cutoff: chrono::DateTime<chrono::Utc>,
 ) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM mobile_delegations \
-         WHERE state IN ('resolved', 'abandoned') AND updated_at < ?",
-    )
+    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
+        "DELETE FROM mobile_delegations AS d
+         WHERE state IN ('resolved', 'abandoned') AND updated_at < ? AND {}",
+        owner::record()
+    )))
     .bind(cutoff.to_rfc3339())
     .execute(pool)
     .await?;
@@ -272,6 +275,7 @@ pub(crate) async fn init_tables(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    owner::init(pool).await?;
     scan::init(pool).await?;
     Ok(())
 }
@@ -673,11 +677,12 @@ impl DelegationPump {
             .begin()
             .await
             .map_err(|error| storage_err(&error))?;
-        let claimed = sqlx::query(
-            "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claimed_at = ?2, \
-             heartbeat_at = ?2, claim_epoch = claim_epoch + 1 \
-             WHERE id = ?3 AND state = 'pending' AND awaiting_dispatch = 0",
-        )
+        let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claimed_at = ?2,
+             heartbeat_at = ?2, claim_epoch = claim_epoch + 1
+             WHERE id = ?3 AND state = 'pending' AND awaiting_dispatch = 0 AND {}",
+            owner::native("worker_tasks.instance_id")
+        )))
         .bind(PUMP_WORKER_ID)
         .bind(now.to_rfc3339())
         .bind(task.id.to_string())
@@ -697,8 +702,8 @@ impl DelegationPump {
         sqlx::query(
             "INSERT INTO mobile_delegations (delegation_id, local_task_id, local_instance_id, \
              block_id, claim_epoch, kind, destination_runtime_id, runtime_kinds, \
-             sub_sequence_id, handler, input, state, deadline_at, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'prepared', ?12, ?13, ?13)",
+             sub_sequence_id, handler, input, state, deadline_at, created_at, updated_at, legacy_verified) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'prepared', ?12, ?13, ?13, 1)",
         )
         .bind(&delegation_id)
         .bind(task.id.to_string())
@@ -730,10 +735,10 @@ impl DelegationPump {
     /// A placed step that can never be delegated: claim it and fail it
     /// permanently (the step definition itself is wrong).
     async fn reject_unclaimed(&self, task: &WorkerTask, message: &str) -> Result<(), MobileError> {
-        let claimed = sqlx::query(
-            "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claim_epoch = claim_epoch + 1 \
-             WHERE id = ?2 AND state = 'pending'",
-        )
+        let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claim_epoch = claim_epoch + 1
+             WHERE id = ?2 AND state = 'pending' AND {}", owner::native("worker_tasks.instance_id")
+        )))
         .bind(PUMP_WORKER_ID)
         .bind(task.id.to_string())
         .execute(&self.pool)
@@ -772,11 +777,14 @@ impl DelegationPump {
     ) -> Result<String, MobileError> {
         let now = chrono::Utc::now();
         let delegation_id = uuid::Uuid::now_v7().to_string();
-        sqlx::query(
-            "INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind, \
-             destination_runtime_id, sub_sequence_id, input, state, deadline_at, created_at, \
-             updated_at) VALUES (?1, ?2, 'explicit', ?3, ?4, ?5, 'prepared', ?6, ?7, ?7)",
-        )
+        let inserted = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind,
+             destination_runtime_id, sub_sequence_id, input, state, deadline_at, created_at,
+             updated_at, legacy_verified)
+             SELECT ?1, i.id, 'explicit', ?3, ?4, ?5, 'prepared', ?6, ?7, ?7, 1
+             FROM task_instances i WHERE i.id=?2 AND ({})",
+            orch8_storage::sqlite::LEGACY_MOBILE_OWNER_SQL
+        )))
         .bind(&delegation_id)
         .bind(&request.instance_id)
         .bind(&request.destination_runtime_id)
@@ -787,6 +795,11 @@ impl DelegationPump {
         .execute(pool)
         .await
         .map_err(|error| storage_err(&error))?;
+        if inserted.rows_affected() != 1 {
+            return Err(MobileError::NotFound {
+                detail: format!("instance {}", request.instance_id),
+            });
+        }
         Ok(delegation_id)
     }
 
@@ -794,21 +807,27 @@ impl DelegationPump {
         pool: &SqlitePool,
         delegation_id: &str,
     ) -> Result<Option<DelegationStatus>, MobileError> {
-        let row = sqlx::query("SELECT * FROM mobile_delegations WHERE delegation_id = ?")
-            .bind(delegation_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|error| storage_err(&error))?;
+        let row = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT d.* FROM mobile_delegations d WHERE delegation_id = ? AND {}",
+            owner::record()
+        )))
+        .bind(delegation_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| storage_err(&error))?;
         row.map(|row| Record::from_row(&row).map(|record| record.status()))
             .transpose()
             .map_err(|error| storage_err(&error))
     }
 
     pub(crate) async fn list(pool: &SqlitePool) -> Result<Vec<DelegationStatus>, MobileError> {
-        let rows = sqlx::query("SELECT * FROM mobile_delegations ORDER BY created_at")
-            .fetch_all(pool)
-            .await
-            .map_err(|error| storage_err(&error))?;
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "SELECT d.* FROM mobile_delegations d WHERE {} ORDER BY created_at",
+            owner::record()
+        )))
+        .fetch_all(pool)
+        .await
+        .map_err(|error| storage_err(&error))?;
         rows.iter()
             .map(|row| Record::from_row(row).map(|record| record.status()))
             .collect::<Result<_, _>>()
@@ -1452,8 +1471,11 @@ mod tests {
 
     #[tokio::test]
     async fn mc09_finished_delegations_are_purged_after_retention_only() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
-        init_tables(&pool).await.unwrap();
+        let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+            .await
+            .unwrap();
+        let pool = storage.pool();
+        init_tables(pool).await.unwrap();
         let now = chrono::Utc::now();
         let old = (now - chrono::Duration::days(31)).to_rfc3339();
         let recent = (now - chrono::Duration::days(2)).to_rfc3339();
@@ -1465,24 +1487,24 @@ mod tests {
         ] {
             sqlx::query(
                 "INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind, input, \
-                 state, deadline_at, created_at, updated_at) VALUES (?1, 'i', 'explicit', '{}', ?2, ?3, ?3, ?3)",
+                 state, deadline_at, created_at, updated_at, legacy_verified) VALUES (?1, 'i', 'explicit', '{}', ?2, ?3, ?3, ?3, 1)",
             )
             .bind(id)
             .bind(state)
             .bind(updated)
-            .execute(&pool)
+            .execute(pool)
             .await
             .unwrap();
         }
 
-        let removed = purge_finished(&pool, now - FINISHED_RETENTION)
+        let removed = purge_finished(pool, now - FINISHED_RETENTION)
             .await
             .unwrap();
         assert_eq!(removed, 2);
         let left: Vec<String> = sqlx::query_scalar(
             "SELECT delegation_id FROM mobile_delegations ORDER BY delegation_id",
         )
-        .fetch_all(&pool)
+        .fetch_all(pool)
         .await
         .unwrap();
         assert_eq!(left, vec!["old-open", "recent-resolved"]);

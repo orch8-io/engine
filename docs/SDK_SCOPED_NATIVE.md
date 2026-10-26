@@ -60,6 +60,13 @@ it and its foreign references are actually destroyed.
 5. Read `snapshot` or bounded catalog `history`. Global legacy read, listener and
    reporting APIs do not expose scoped private data.
 
+Legacy device delegation also requires a legacy-owned parent. Its admission,
+parked-task discovery, replay, status/list reads and retention cleanup exclude
+catalog-owned runs. Retained verified legacy records can outlive native GC;
+pre-upgrade orphan records without surviving ownership proof remain stored but
+are not replayed or exposed. This does not provide account-authenticated
+delegation; that requires a scoped protocol and credential owner.
+
 A snapshot returns only owned instance data. `pending_steps` comes from actual
 waiting step nodes, with the current-step fallback only when no tree exists.
 The snapshot's `session_epoch` describes the viewing session; history and callback

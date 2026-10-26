@@ -27,12 +27,12 @@ and analytics/warehouse reviews are outside this runtime-focused goal.
 | Hybrid executors | Draining, reconnect, expired credentials, local secrets, TLS/SSRF boundaries, oversized results, ambiguous effects | Reviewing; redirect boundary fixed; lease supervision still under investigation |
 | Mobile remote workers | Stop/restart, cold recovery, app suspension, bounded background windows, stragglers, power transitions, credential refresh | Reviewing; journal ownership and native cancellation covered; lease supervisor validation below |
 | Mobile control and sync | Device registration, account/control-plane changes, commands, approval deduplication, revocation, protected fields, hostile manifests | Reviewing; provider and per-sync callback identity verified below; manifest callback execution bounded below; scoped cache and signed audience ingestion verified internally; internal authenticated private sync verified; public runtime/SDK integration remains open |
-| Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; scoped transfer and acceptance audit remain open |
+| Device delegation and handoff | Interrupted ownership transfer, epoch fencing, idempotent acceptance, private data, return/resume, cleanup | Reviewing; legacy queue fairness and response correlation verified; legacy delegation admission/replay ownership is now under regression validation (DME163); account-authenticated transfer and acceptance remain open |
 | Embedded Rust | Tick/run lifecycle, shutdown, independent engines, tenant/backend identity, cancellation and callback ownership | Reviewing; runtime retirement/terminal shutdown and backend-owned volatile wake/retry state verified; backend-qualified cache identity verified; sub-sequence restart recovery and indexed current/historical child selection pass SQLite/Postgres behavioral and query-plan tests; callbacks remain under review |
-| Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Reviewing; shared adapter post-storage claim entry and replacement/close finalization covered below; queued physical host admission, resource bounds and platform parity remain open |
-| Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal covered; RN/Flutter ports, artifact parity, and platform runtime E2E remain open |
+| Node/Python bindings | Initialization failures, repeated close, host callbacks, concurrent calls, crash/restart, handler retention and errors | Reviewing; post-storage claim entry, physical callback count ownership through timeout/retirement (DME161), and safe Node/Python failure diagnostics (DME159/162) covered; byte bounds and platform parity remain open |
+| Swift/Kotlin/RN/Flutter wrappers | Initialization/disposal, listener retention, background wake, FFI errors and cross-platform protocol compatibility | Reviewing; Swift/KMP ownership and disposal plus typed RN/Flutter scoped development facades covered; release artifact parity and full platform runtime E2E remain open |
 | Web embed | Customer-scoped token isolation, sandbox effects, quotas/races, output disclosure, component lifecycle and browser auth | Reviewing; HTTP refresh and component account ownership fixed; sandbox/quota review pending |
-| Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Pending |
+| Operations and security | Payload bounds, resource retention, diagnostics without secrets, dependency advisories, migration/rollback and supported platforms | Reviewing; five dependency advisory graphs pass after removing unused vulnerable Wasmtime cache dependencies (DME160); complete retention/at-rest/migration/platform matrix remains open |
 
 For each area, completion requires source and caller review, relevant existing
 coverage inspection, reproduced confirmed defects, fixes with regression checks,
@@ -4129,3 +4129,45 @@ behavior. All 19 Python tests pass against the real native extension, including
 existing hard-exit/restart and physical-capacity/runtime-retirement tests. This
 changes only Python error normalization; no Rust, protocol/schema or release
 version change and no publication.
+
+
+### DME163 — Legacy delegation adopted catalog-owned parents and journal rows
+
+Two real SQLite regressions fail on the baseline: explicit delegation accepts a
+catalog-owned parent, and the legacy replay queue selects a persisted catalog
+record. The other 11 scan tests pass. Public delegate only checked instance
+existence; direct parked-task claims and journal status/list/retention paths also
+lacked the account/catalog exclusion applied to legacy reads and sync reporting.
+The legacy node credential could therefore adopt a scoped parent's continuity
+identity and disclose or mutate its delegation journal.
+
+Explicit admission now uses INSERT/SELECT with the shared positive legacy-owner
+predicate in the write. Public preflight uses the authorized instance reader.
+Discovery filters ownership before its ordered batch limit, and both parked-task
+claim/rejection writes repeat that predicate. Replay, status/list and retention
+use a shared delegation-owner predicate. Scoped request/materialization receipts
+remain unconditional exclusions after tenant relabelling or native-history GC.
+Unverified missing-parent records remain stored without being replayed, exposed
+or purged by the legacy interface.
+
+New accepted journal rows retain a legacy_verified bit atomically with their
+original admission. An additive local-table upgrade reserves the SQLite writer,
+adds the constrained column, and marks old rows only when a surviving native
+instance proves legacy ownership. Schema change and backfill roll back together
+on failure. Verified legacy delegations remain readable/replayable after native
+GC; pre-upgrade orphan records are never assigned to a newly selected account.
+Released migrations and the wire/UniFFI contract are unchanged.
+
+Eight added regressions cover four account/catalog parents, actual pump replay
+with zero HTTP requests, catalog receipts overriding stale markers after GC,
+direct claim/rejection exclusion, retained legacy history, unknown-orphan
+preservation, injected upgrade failure/retry, filtering before the scan limit,
+and retention ownership. The indexed-query-plan checks still pass without a
+temporary sort. The final source passes all 686 mobile unit and 109 integration
+checks, with zero failures or skips. Documentation, SDK packaging/version,
+released-migration immutability and whitespace checks pass. Strict all-target
+mobile Clippy also passes with warnings denied.
+
+This confines the original device protocol; it does not implement account-owned
+workers, remote provenance, delegation grants or authenticated scoped outcome
+reporting. Those ADR S8/S12 requirements and the remaining matrix stay open.

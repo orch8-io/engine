@@ -1591,7 +1591,7 @@ impl MobileEngine {
                 })?,
             );
             self.storage
-                .get_instance(local)
+                .get_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, local)
                 .await?
                 .ok_or_else(|| MobileError::NotFound {
                     detail: format!("instance {}", request.instance_id),
