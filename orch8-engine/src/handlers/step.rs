@@ -1126,7 +1126,15 @@ mod tests {
             // A subscriber-cache retry is a separate probe execution. The
             // previous probe's effect is already committed even if tracing
             // missed its span, so it must keep its own instance identity.
-            let instance_id = InstanceId::new();
+            let instance = orch8_storage::testing::fixtures::InstanceBuilder::new(
+                "tenant-a",
+                "default",
+                orch8_types::ids::SequenceId::new(),
+            )
+            .state(orch8_types::instance::InstanceState::Running)
+            .build();
+            storage.create_instance(&instance).await.unwrap();
+            let instance_id = instance.id;
             let run = execute_step_dry(&storage, &handlers, exec(instance_id))
                 .with_subscriber(dispatch.clone())
                 .await
