@@ -22,14 +22,14 @@ impl StepHandler for Recording {
         std::thread::sleep(self.delay);
         match &self.result {
             Ok(v) => Ok(v.clone()),
-            Err(crate::HandlerError::Retryable { message }) => {
+            Err(crate::HandlerError::Retryable { detail: message }) => {
                 Err(crate::HandlerError::Retryable {
-                    message: message.clone(),
+                    detail: message.clone(),
                 })
             }
-            Err(crate::HandlerError::Permanent { message }) => {
+            Err(crate::HandlerError::Permanent { detail: message }) => {
                 Err(crate::HandlerError::Permanent {
-                    message: message.clone(),
+                    detail: message.clone(),
                 })
             }
         }
@@ -225,7 +225,7 @@ async fn retryable_handler_error_is_reported_as_retryable_fail() {
             inputs: Arc::new(Mutex::new(Vec::new())),
             delay: Duration::ZERO,
             result: Err(crate::HandlerError::Retryable {
-                message: "camera busy".into(),
+                detail: "camera busy".into(),
             }),
         },
     )

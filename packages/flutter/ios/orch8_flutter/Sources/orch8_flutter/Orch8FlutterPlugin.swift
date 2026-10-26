@@ -409,7 +409,7 @@ final class FlutterStepHandler: StepHandler, @unchecked Sendable {
 
     func execute(stepName: String, input: String) throws -> String {
         guard scope.isCurrent, let plugin else {
-            throw HandlerError.Retryable(message: "Flutter channel not attached")
+            throw HandlerError.Retryable(detail: "Flutter channel not attached")
         }
         let done = DispatchSemaphore(value: 0)
         let box = ResultBox()
@@ -426,18 +426,18 @@ final class FlutterStepHandler: StepHandler, @unchecked Sendable {
         }
         let millis = Int(min(timeoutMs, UInt64(Int32.max)))
         guard done.wait(timeout: .now() + .milliseconds(millis)) == .success else {
-            throw HandlerError.Retryable(message: "Dart handler '\(stepName)' timed out after \(timeoutMs) ms")
+            throw HandlerError.Retryable(detail: "Dart handler '\(stepName)' timed out after \(timeoutMs) ms")
         }
-        guard scope.isCurrent else { throw HandlerError.Retryable(message: "engine retired") }
+        guard scope.isCurrent else { throw HandlerError.Retryable(detail: "engine retired") }
         switch box.get() {
         case let output as String:
             return output
         case let error as FlutterError:
             let message = error.message ?? error.code
-            if error.code == "PERMANENT" { throw HandlerError.Permanent(message: message) }
-            throw HandlerError.Retryable(message: message)
+            if error.code == "PERMANENT" { throw HandlerError.Permanent(detail: message) }
+            throw HandlerError.Retryable(detail: message)
         case let value where (value as AnyObject) === FlutterMethodNotImplemented:
-            throw HandlerError.Retryable(message: "Dart side has no executeStep handler")
+            throw HandlerError.Retryable(detail: "Dart side has no executeStep handler")
         default:
             return "{}"
         }
@@ -477,7 +477,7 @@ final class FlutterTokenProvider: TokenProvider, @unchecked Sendable {
 
     func refreshToken() throws -> String {
         guard scope.isCurrent, let plugin else {
-            throw MobileError.Engine(message: "Flutter channel not attached")
+            throw MobileError.Engine(detail: "Flutter channel not attached")
         }
         let done = DispatchSemaphore(value: 0)
         let box = ResultBox()
@@ -494,17 +494,17 @@ final class FlutterTokenProvider: TokenProvider, @unchecked Sendable {
         }
         let millis = Int(min(timeoutMs, UInt64(Int32.max)))
         guard done.wait(timeout: .now() + .milliseconds(millis)) == .success else {
-            throw MobileError.Engine(message: "token provider timed out after \(timeoutMs) ms")
+            throw MobileError.Engine(detail: "token provider timed out after \(timeoutMs) ms")
         }
-        guard scope.isCurrent else { throw MobileError.Shutdown(message: "engine retired") }
+        guard scope.isCurrent else { throw MobileError.Shutdown(detail: "engine retired") }
         switch box.get() {
         case let fresh as String where !fresh.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
             lock.lock(); token = fresh; lock.unlock()
             return fresh
         case let error as FlutterError:
-            throw MobileError.Engine(message: "token provider failed: \(error.message ?? error.code)")
+            throw MobileError.Engine(detail: "token provider failed: \(error.message ?? error.code)")
         default:
-            throw MobileError.Engine(message: "token provider returned no token")
+            throw MobileError.Engine(detail: "token provider returned no token")
         }
     }
 }

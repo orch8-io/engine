@@ -67,7 +67,7 @@ public final class Orch8RuntimeNode: @unchecked Sendable {
                 let token = try await provider.fetchInitialToken()
                 try Task.checkCancellation()
                 guard try engine.completeTokenProviderInstallation(installationId: installation, token: token) else {
-                    throw MobileError.Engine(message: "token provider installation superseded")
+                    throw MobileError.Engine(detail: "token provider installation superseded")
                 }
                 try Task.checkCancellation()
             }, onCancel: {

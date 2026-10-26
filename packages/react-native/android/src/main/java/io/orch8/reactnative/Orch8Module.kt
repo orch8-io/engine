@@ -54,6 +54,8 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         Thread(r, "orch8-rn-work").apply { isDaemon = true }
     }
     internal val pending = PendingHandlerCalls()
+    internal val scopedPending = PendingHandlerCalls()
+    private val scoped = RNScopedBridge()
 
     override fun getName(): String = "Orch8Module"
 
@@ -171,6 +173,14 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     // -- Lifecycle ------------------------------------------------------------
 
     @ReactMethod
+    fun scopedCall(handle: String, method: String, argsJson: String, promise: Promise) = background(promise) { eng ->
+        val scope = lifecycle.scopeOf(eng)
+        val reply = scoped.call(eng, scope, this, handle, method, argsJson)
+        if (!scope.isCurrent()) throw MobileException.Shutdown("engine retired")
+        promise.resolve(reply)
+    }
+
+    @ReactMethod
     fun initialize(config: ReadableMap, promise: Promise) {
         val dbPath = config.str("dbPath") ?: defaultDbPath()
         val cfg = MobileEngineConfig(
@@ -202,6 +212,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
                 handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
             },
             complete = { error ->
+                scoped.prune()
                 if (!invalidated) {
                     if (error == null) promise.resolve(null) else Orch8Errors.reject(promise, error, "INIT_ERROR")
                 }
@@ -211,6 +222,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun shutdown(promise: Promise) {
         lifecycle.shutdown(false, { pending.failAll("engine shut down") }) { error ->
+            scoped.prune()
             if (!invalidated) {
                 if (error == null) promise.resolve(null) else Orch8Errors.reject(promise, error)
             }
@@ -283,12 +295,14 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     @ReactMethod
     fun resolveToken(requestId: String, token: String?, error: String?) {
         pending.resolve(requestId, token, error, false)
+        scopedPending.resolve(requestId, token, error, false)
     }
 
     /** JS answer for an `orch8:executeStep` event. */
     @ReactMethod
     fun resolveStep(requestId: String, output: String?, error: String?, permanent: Boolean) {
         pending.resolve(requestId, output, error, permanent)
+        scopedPending.resolve(requestId, output, error, permanent)
     }
 
     // -- Instances ------------------------------------------------------------
@@ -546,7 +560,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     override fun invalidate() {
         invalidated = true
         pending.failAll("React Native context invalidated")
-        lifecycle.shutdown(true, {}) { /* The JS context has already gone. */ }
+        lifecycle.shutdown(true, {}) { scoped.prune() }
         work.shutdown()
         super.invalidate()
     }
@@ -573,6 +587,20 @@ internal class PendingHandlerCalls {
         val done = slot.latch.await(timeoutMs, TimeUnit.MILLISECONDS)
         slots.remove(id)
         return if (done) slot.outcome else null
+    }
+
+    // Rust times out the logical operation, while its foreign call remains
+    // physically charged until the JS promise settles.
+    fun awaitSettlement(id: String): Outcome? {
+        val slot = slots[id] ?: return null
+        var interrupted = false
+        while (true) {
+            try { slot.latch.await(); break }
+            catch (_: InterruptedException) { interrupted = true }
+        }
+        slots.remove(id)
+        if (interrupted) Thread.currentThread().interrupt()
+        return slot.outcome
     }
 
     fun cancel(id: String) {

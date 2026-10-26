@@ -43,7 +43,7 @@ pub struct ContinuityExportResult {
 
 fn invalid(message: impl Into<String>) -> MobileError {
     MobileError::InvalidInput {
-        message: message.into(),
+        detail: message.into(),
     }
 }
 
@@ -170,7 +170,7 @@ pub async fn import_capsule(
         .map_err(|_| invalid("capsule payload size is unsupported"))?;
     if !transport_size_is_valid(declared_bytes, payload_base64.len()) {
         return Err(MobileError::ResourceLimit {
-            message: "transported capsule payload exceeds protocol bounds".into(),
+            detail: "transported capsule payload exceeds protocol bounds".into(),
         });
     }
     let sealed = BASE64
@@ -247,7 +247,7 @@ pub async fn import_capsule(
                 && existing.state == pending.state
         }) {
             return Err(MobileError::Storage {
-                message: format!("cannot claim imported continuity identity: {error}"),
+                detail: format!("cannot claim imported continuity identity: {error}"),
             });
         }
     }

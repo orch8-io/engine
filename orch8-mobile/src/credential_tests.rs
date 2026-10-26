@@ -18,7 +18,7 @@ impl TokenProvider for Rotating {
             .unwrap()
             .pop()
             .ok_or(crate::MobileError::Engine {
-                message: "no more tokens".into(),
+                detail: "no more tokens".into(),
             })
     }
 }
@@ -1069,7 +1069,7 @@ async fn initial_publication_survives_failed_refresh_and_yields_to_successful_re
             self.refresh_gate.lock().unwrap().recv().unwrap();
             if self.fail {
                 Err(crate::MobileError::Engine {
-                    message: "refresh failed".into(),
+                    detail: "refresh failed".into(),
                 })
             } else {
                 Ok("dst_refreshed".into())

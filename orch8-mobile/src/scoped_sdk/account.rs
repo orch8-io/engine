@@ -62,7 +62,7 @@ impl MobileAccount {
             .signing_authority
             .strip_prefix("ed25519:")
             .ok_or_else(|| MobileError::InvalidInput {
-                message: "catalog requires an ed25519 signing authority".into(),
+                detail: "catalog requires an ed25519 signing authority".into(),
             })?;
         RootKey::from_base64(key)?;
         let scope = self.view.run(&engine, async {
@@ -108,7 +108,7 @@ impl MobileAccount {
             })
             .await
             .map_err(|_| MobileError::Engine {
-                message: "account retirement task failed".into(),
+                detail: "account retirement task failed".into(),
             })?
         });
         if result.is_ok() {

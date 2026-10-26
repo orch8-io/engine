@@ -128,6 +128,15 @@ impl ControlPlane {
     /// name) and wait until it is ready. `env` overrides the defaults.
     #[must_use]
     pub fn spawn(&self, name: &str, env: &[(&str, String)]) -> ServerProcess {
+        self.spawn_at(name, env, free_addrs())
+    }
+
+    fn spawn_at(
+        &self,
+        name: &str,
+        env: &[(&str, String)],
+        addrs: (SocketAddr, SocketAddr),
+    ) -> ServerProcess {
         let mut all: Vec<(String, String)> = vec![
             ("ORCH8_API_KEY".into(), ROOT_KEY.into()),
             ("ORCH8_ENCRYPTION_KEY".into(), NODE_ENCRYPTION_KEY.into()),
@@ -140,8 +149,8 @@ impl ControlPlane {
         ];
         all.extend(self.db_env().into_iter().map(|(k, v)| (k.to_owned(), v)));
         all.extend(env.iter().map(|(k, v)| ((*k).to_owned(), v.clone())));
-        let process = ServerProcess::spawn(name, all, self.logs.path().to_path_buf());
-        process.wait_ready(&self.rt, &self.http);
+        let mut process = ServerProcess::spawn(name, all, self.logs.path().to_path_buf(), addrs);
+        process.wait_initial_ready(&self.rt, &self.http);
         process
     }
 
@@ -323,18 +332,29 @@ pub struct ServerProcess {
     generation: u32,
 }
 
-fn free_addr() -> SocketAddr {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("free port")
+// Hold both reservations together so HTTP and gRPC cannot select the same port.
+// Another process can still win after these listeners drop; initial startup retries
+// only that explicit bind failure, before callers have seen either address.
+fn free_addrs() -> (SocketAddr, SocketAddr) {
+    let http = std::net::TcpListener::bind("127.0.0.1:0").expect("HTTP reservation");
+    let grpc = std::net::TcpListener::bind("127.0.0.1:0").expect("gRPC reservation");
+    (
+        http.local_addr().expect("HTTP address"),
+        grpc.local_addr().expect("gRPC address"),
+    )
 }
 
 impl ServerProcess {
-    fn spawn(name: &str, env: Vec<(String, String)>, log_dir: PathBuf) -> Self {
+    fn spawn(
+        name: &str,
+        env: Vec<(String, String)>,
+        log_dir: PathBuf,
+        addrs: (SocketAddr, SocketAddr),
+    ) -> Self {
         let mut process = Self {
             name: name.to_owned(),
-            http_addr: free_addr(),
-            grpc_addr: free_addr(),
+            http_addr: addrs.0,
+            grpc_addr: addrs.1,
             env,
             log_dir,
             child: None,
@@ -342,6 +362,24 @@ impl ServerProcess {
         };
         process.start();
         process
+    }
+
+    fn wait_initial_ready(&mut self, rt: &tokio::runtime::Runtime, http: &reqwest::Client) {
+        for attempt in 0..4 {
+            match self.wait_ready(rt, http) {
+                Ok(()) => return,
+                Err(error) => {
+                    let log = std::fs::read_to_string(self.log_path()).unwrap_or_default();
+                    let collision = log.contains("Address already in use")
+                        && (log.contains("Failed to bind HTTP listener")
+                            || log.contains("Failed to bind gRPC listener"));
+                    assert!(attempt < 3 && collision, "{error}");
+                    self.kill();
+                    (self.http_addr, self.grpc_addr) = free_addrs();
+                    self.start();
+                }
+            }
+        }
     }
 
     fn start(&mut self) {
@@ -388,25 +426,58 @@ impl ServerProcess {
         self.child.as_ref().map(std::process::Child::id)
     }
 
-    fn wait_ready(&self, rt: &tokio::runtime::Runtime, http: &reqwest::Client) {
+    fn wait_ready(
+        &mut self,
+        rt: &tokio::runtime::Runtime,
+        http: &reqwest::Client,
+    ) -> Result<(), String> {
         let url = format!("http://{}/health/ready", self.http_addr);
+        let bound_marker = format!("Health endpoints: http://{}/health/live", self.http_addr);
         let deadline = Instant::now() + READY_TIMEOUT;
         loop {
-            let ready = rt.block_on(async {
-                http.get(&url)
-                    .send()
-                    .await
-                    .is_ok_and(|r| r.status().is_success())
-            });
-            if ready {
-                return;
+            if let Some(status) = self
+                .child
+                .as_mut()
+                .expect("running child")
+                .try_wait()
+                .expect("child status")
+            {
+                return Err(format!(
+                    "node {} exited {status} before readiness; log tail:\n{}",
+                    self.name,
+                    self.log_tail(60)
+                ));
             }
-            assert!(
-                Instant::now() < deadline,
-                "node {} not ready after {READY_TIMEOUT:?}; log tail:\n{}",
-                self.name,
-                self.log_tail(60)
-            );
+            // A foreign server can answer 200 on a stolen port. Only probe after
+            // this generation has logged its own successful HTTP bind.
+            let bound = std::fs::read_to_string(self.log_path())
+                .unwrap_or_default()
+                .contains(&bound_marker);
+            let ready = bound
+                && rt.block_on(async {
+                    http.get(&url)
+                        .send()
+                        .await
+                        .is_ok_and(|r| r.status().is_success())
+                });
+            if ready
+                && self
+                    .child
+                    .as_mut()
+                    .expect("running child")
+                    .try_wait()
+                    .expect("child status")
+                    .is_none()
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "node {} not ready after {READY_TIMEOUT:?}; log tail:\n{}",
+                    self.name,
+                    self.log_tail(60)
+                ));
+            }
             std::thread::sleep(Duration::from_millis(100));
         }
     }
@@ -431,7 +502,8 @@ impl ServerProcess {
             .build()
             .expect("runtime");
         let http = reqwest::Client::new();
-        self.wait_ready(&rt, &http);
+        self.wait_ready(&rt, &http)
+            .unwrap_or_else(|error| panic!("{error}"));
     }
 
     /// Last `lines` lines of the current run's log.
@@ -461,6 +533,40 @@ impl Drop for ServerProcess {
         if std::thread::panicking() {
             eprintln!("---- node {} log (tail) ----", self.name);
             eprintln!("{}", self.log_tail(80));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orch8_engine::testing::http::MockHttp;
+
+    #[test]
+    fn initial_bind_collision_never_accepts_foreign_health() {
+        for listener in ["HTTP", "gRPC"] {
+            let plane = ControlPlane::new(&Backend::Sqlite);
+            let foreign = plane.block_on(MockHttp::start(Vec::new()));
+            let mut addrs = free_addrs();
+            if listener == "HTTP" {
+                addrs.0 = foreign.addr();
+            } else {
+                addrs.1 = foreign.addr();
+            }
+            let node = plane.spawn_at("occupied-port", &[], addrs);
+            assert_ne!(node.http_addr, foreign.addr());
+            assert_ne!(node.grpc_addr, foreign.addr());
+            assert!((2..=4).contains(&node.generation));
+            assert_eq!(
+                foreign.request_count(),
+                0,
+                "foreign health must never be probed"
+            );
+            assert!(
+                node.all_logs()
+                    .contains(&format!("Failed to bind {listener} listener"))
+            );
+            assert_eq!(plane.call(&node, "GET", "/sequences", None).0, 200);
         }
     }
 }

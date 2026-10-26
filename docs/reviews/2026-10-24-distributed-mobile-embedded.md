@@ -3856,3 +3856,94 @@ package. Swift warnings remain fatal, with only upstream Clang nullability and
 incomplete-umbrella diagnostics suppressed. This validates native compilation
 and host-runtime retirement, not device UI attach/detach integration or complete
 ADR-0002 readiness. No Rust/UniFFI protocol or release artifact is changed.
+
+### DME154 — Explicit React Native views and physical JS settlement
+
+The development RN facade now exposes account, catalog, run and history-cursor
+objects, scoped handler registration and credential sync, versioned answers,
+cancellation and explicit acknowledged archive receipts. Native descriptors and
+callback epochs use decimal strings to preserve signed 64-bit precision in JS.
+Opaque native handles carry immutable ownership; no operation consults the UI's
+current account. Cursors are checked against their issuing catalog/session.
+
+Both native adapters bound their view tables at 4,096 globally, 1,024 per stable
+account and 512 per catalog. Closing a view reclaims its descendant entries;
+retirement reclaims the matching account epoch, including sibling views.
+Disposal preserves issued children. ARC/JNI cleanup stays outside table locks.
+A child returned after a concurrent parent close is explicitly disposed by JS.
+Old retirement replies cannot close a replacement epoch, and JSON serialization
+reentry is rechecked before native dispatch.
+
+Handlers use unique registration keys and immutable callback ownership, with
+serialized replacement per binding. Token sources use per-operation keys.
+JS host promises keep physical admission through actual settlement: each loaded
+SDK module permits 32 unsettled calls per handler/token role and 2 per stable
+account. These bounds do not coordinate independent JS runtimes. Registration
+queues are bounded at 1,024 and sync bridge requests at 32 across replacement.
+Error handling reads own data fields instead of invoking hostile error getters.
+
+Scoped reply slots are separate from legacy pending replies. Rust enforces the
+logical operation deadline, while Swift/JVM foreign callbacks wait for actual JS
+settlement. Root teardown cannot synthesize completion of an already-entered
+host promise and free its native permit early. The real Swift/Rust test holds a
+callback through its native deadline and root retirement, then verifies that its
+late reply releases the physical pending slot.
+
+Local evidence includes 36 JS tests, TypeScript checks, actual iOS adapter and
+Objective-C extern compilation, both Android adapter compilations and 10 Android
+lifecycle unit tests against regenerated Kotlin signatures. The local Android
+AAR is explicitly compile-only; device JNI execution is not claimed. CI builds
+and tests against its real same-commit AAR. The actual RN Swift adapter executes
+four workflows across two accounts/two catalogs each against the Rust-produced
+database fixture, checking eight callbacks, owned approvals, stale replies,
+archive acknowledgement, cursor/principal isolation, default per-owner/global
+view ceilings and reclamation. No scoped native event observer, account-owned
+worker/delegation or Flutter scoped facade is claimed by this change.
+
+### DME155 — Decode foreign callback errors instead of panicking
+
+The late RN callback test exposed a native panic despite exit status zero:
+`Can't lift flat errors`. MobileError and HandlerError used UniFFI flat errors,
+whose Rust lifting implementation panics. Host retryable/permanent failures and
+token refresh errors therefore lacked a valid bidirectional wire contract.
+
+Both errors now use structured variants. The payload is named `detail`, avoiding
+the Kotlin generator's collision with Throwable.message. Shutdown retains a
+payload too; its native default display remains `shutdown in progress`. Rust
+constructors/patterns and all Swift adapters are updated, and all five committed
+binding copies match current-library generation. The KMP and Android bridges
+extract native detail while preserving existing public error kinds. SyncError
+remains an outbound-only flat error.
+
+A new callback-contract-v2 export adds an initialization checksum. The actual
+new Swift SDK is tested against PR339's native artifact and refuses its missing
+contract symbol before host execution, then passes against the matching current
+library without a panic. Direct Rust lower/lift regressions preserve both handler
+classifications and token/shutdown detail. A real Kotlin/Rust workflow also
+verifies permanent host failures through the foreign callback boundary.
+
+Validation passes 677 mobile library tests, 109 integration/coverage/workflow
+tests, 112 JVM tests with no skips, and strict all-target workspace Clippy.
+The native RN test now treats panic output as failure even when the process exits
+successfully. This is an unpublished development ABI change requiring paired
+bindings/native artifacts; it does not publish or replace the 0.7.1 release.
+
+### DME156 — Reject foreign health responses during process startup
+
+PR340's two-scheduler CI failure reported a missing sequence, while its child
+server log showed `Address already in use`. The harness selected ports by binding
+and immediately dropping listeners, then accepted any successful health response
+on the chosen HTTP port. A different test server could therefore satisfy
+readiness while the intended child failed to bind, sending API calls to an
+unrelated database.
+
+HTTP and gRPC candidates are now reserved simultaneously to keep them distinct.
+Readiness checks child exit status and requires this generation's own successful
+HTTP-bind log before probing health, then checks child liveness again. Initial
+startup retries at most four fresh pairs, only for an explicit listener bind
+collision. Restarts preserve the already advertised addresses and fail clearly.
+A real-process regression occupies each listener port with a foreign HTTP mock,
+requires startup on a fresh pair, and proves the foreign endpoint received no
+requests. The complete three-test crash suite passes with SQLite and an isolated
+PostgreSQL database, including the exact failing two-scheduler case. The temporary
+PostgreSQL cluster was stopped and removed after validation.

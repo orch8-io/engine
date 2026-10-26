@@ -27,12 +27,23 @@ internal object Orch8Errors {
 
     fun code(kind: String): String = "ORCH8_" + kind.uppercase()
 
+    private fun detail(e: Throwable): String = when (e) {
+        is MobileException.Engine -> e.detail
+        is MobileException.Storage -> e.detail
+        is MobileException.InvalidInput -> e.detail
+        is MobileException.NotFound -> e.detail
+        is MobileException.ResourceLimit -> e.detail
+        is MobileException.AlreadyExists -> e.detail
+        is MobileException.Shutdown -> e.detail
+        else -> e.message ?: e.toString()
+    }
+
     fun reject(promise: Promise, e: Throwable, legacyCode: String = "ORCH8_ERROR") {
         val kind = kind(e)
         val info = Arguments.createMap().apply {
             putString("kind", kind)
             putString("legacyCode", legacyCode)
         }
-        promise.reject(code(kind), e.message ?: e.toString(), e, info)
+        promise.reject(code(kind), detail(e), e, info)
     }
 }

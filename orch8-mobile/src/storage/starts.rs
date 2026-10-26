@@ -71,7 +71,7 @@ impl MobileStorage {
                     }
                     if !matches!(state.as_str(), "completed" | "failed" | "cancelled") {
                         return Err(MobileError::Storage {
-                            message: "invalid previous mobile instance state".into(),
+                            detail: "invalid previous mobile instance state".into(),
                         });
                     }
                     instance.idempotency_key =
@@ -86,7 +86,7 @@ impl MobileStorage {
         ).fetch_one(&mut *tx).await.map_err(orch8_types::error::StorageError::from)?;
         if u64::try_from(active).unwrap_or(u64::MAX) >= u64::from(max_active) {
             return Err(MobileError::ResourceLimit {
-                message: format!("max concurrent instances ({max_active}) reached"),
+                detail: format!("max concurrent instances ({max_active}) reached"),
             });
         }
         SqliteStorage::create_instance_in_transaction(&mut tx, &instance).await?;

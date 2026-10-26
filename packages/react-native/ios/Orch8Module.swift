@@ -9,7 +9,7 @@ import Orch8Mobile
 /// module's method queue, because a handler blocks its engine thread until JS
 /// answers through `resolveStep`, which arrives on the method queue.
 @objc(Orch8Module)
-class Orch8Module: RCTEventEmitter {
+class Orch8Module: RCTEventEmitter, RNScopedCallbacks {
     private let lock = NSLock()
     private var hasListeners = false
     private let lifecycle = NativeEngineLifecycle<MobileEngine>(dispose: { $0.shutdown() })
@@ -17,6 +17,8 @@ class Orch8Module: RCTEventEmitter {
     private var handlerTimeoutMs: UInt64 = 30_000
     private let workQueue = DispatchQueue(label: "io.orch8.reactnative.work", qos: .utility, attributes: .concurrent)
     let pending = PendingHandlerCalls()
+    let scopedPending = PendingHandlerCalls()
+    private let scoped = RNScopedBridge()
 
     private var engine: MobileEngine? { lifecycle.engine }
     private var isInvalidated: Bool { lock.lock(); defer { lock.unlock() }; return invalidated }
@@ -28,6 +30,8 @@ class Orch8Module: RCTEventEmitter {
             "orch8:stepPending",
             "orch8:executeStep",
             "orch8:refreshToken",
+            "orch8:scopedExecuteStep",
+            "orch8:scopedRefreshToken",
         ]
     }
 
@@ -49,6 +53,7 @@ class Orch8Module: RCTEventEmitter {
             self.pending.failAll("React Native bridge invalidated")
         }, complete: {})
         super.invalidate()
+        workQueue.async { self.scoped.prune() }
     }
 
     /// Emits a JS event; returns false when no JS listener is attached so
@@ -131,6 +136,18 @@ class Orch8Module: RCTEventEmitter {
 
     // MARK: - Lifecycle
 
+    @objc(scopedCall:method:argsJson:resolver:rejecter:)
+    func scopedCall(_ handle: String, method: String, argsJson: String,
+                    resolver resolve: @escaping RCTPromiseResolveBlock,
+                    rejecter reject: @escaping RCTPromiseRejectBlock) {
+        background(reject) { engine in
+            let scope = try self.lifecycle.scope(for: engine)
+            let reply = try self.scoped.call(engine: engine, scope: scope, module: self, handle: handle, method: method, argsJson: argsJson)
+            guard scope.isCurrent else { throw NativeEngineLifecycleError.retired }
+            resolve(reply)
+        }
+    }
+
     @objc(initialize:resolver:rejecter:)
     func initialize(
         _ config: NSDictionary,
@@ -175,6 +192,7 @@ class Orch8Module: RCTEventEmitter {
             if let error { Orch8Errors.reject(reject, error, legacyCode: "INIT_ERROR") }
             else { resolve(nil) }
         })
+        workQueue.async { self.scoped.prune() }
     }
 
     @objc(shutdown:rejecter:)
@@ -188,6 +206,7 @@ class Orch8Module: RCTEventEmitter {
             guard let self, !self.isInvalidated else { return }
             resolve(nil)
         })
+        workQueue.async { self.scoped.prune() }
     }
 
     @objc(resume:rejecter:)
@@ -287,12 +306,14 @@ class Orch8Module: RCTEventEmitter {
     @objc(resolveToken:token:error:)
     func resolveToken(_ requestId: String, token: String?, error: String?) {
         pending.resolve(requestId, output: token, error: error, permanent: false)
+        scopedPending.resolve(requestId, output: token, error: error, permanent: false)
     }
 
     /// JS answer for an `orch8:executeStep` event.
     @objc(resolveStep:output:error:permanent:)
     func resolveStep(_ requestId: String, output: String?, error: String?, permanent: Bool) {
         pending.resolve(requestId, output: output, error: error, permanent: permanent)
+        scopedPending.resolve(requestId, output: output, error: error, permanent: permanent)
     }
 
     // MARK: - Instances
@@ -658,58 +679,6 @@ class Orch8Module: RCTEventEmitter {
 
 // MARK: - Handler bridge
 
-/// Outstanding native-to-JS handler calls, keyed by request id.
-final class PendingHandlerCalls: @unchecked Sendable {
-    struct Outcome {
-        let output: String?
-        let error: String?
-        let permanent: Bool
-    }
-
-    private final class Slot {
-        let semaphore = DispatchSemaphore(value: 0)
-        var outcome: Outcome?
-    }
-
-    private let lock = NSLock()
-    private var slots: [String: Slot] = [:]
-
-    func open(_ id: String) {
-        lock.lock(); slots[id] = Slot(); lock.unlock()
-    }
-
-    func cancel(_ id: String) {
-        lock.lock(); slots.removeValue(forKey: id); lock.unlock()
-    }
-
-    func wait(_ id: String, timeoutMs: UInt64) -> Outcome? {
-        lock.lock(); let slot = slots[id]; lock.unlock()
-        guard let slot else { return nil }
-        let result = slot.semaphore.wait(timeout: .now() + .milliseconds(Int(min(timeoutMs, UInt64(Int32.max)))))
-        lock.lock()
-        slots.removeValue(forKey: id)
-        let outcome = slot.outcome
-        lock.unlock()
-        return result == .success ? outcome : nil
-    }
-
-    func resolve(_ id: String, output: String?, error: String?, permanent: Bool) {
-        lock.lock()
-        guard let slot = slots[id], slot.outcome == nil else { lock.unlock(); return } // timed out, unknown, or answered
-        slot.outcome = Outcome(output: output, error: error, permanent: permanent)
-        lock.unlock()
-        slot.semaphore.signal()
-    }
-
-    func failAll(_ message: String) {
-        lock.lock()
-        let open = slots.values.filter { $0.outcome == nil }
-        for slot in open { slot.outcome = Outcome(output: nil, error: message, permanent: false) }
-        lock.unlock()
-        for slot in open { slot.semaphore.signal() }
-    }
-}
-
 /// Emits `orch8:executeStep` and blocks the engine thread until JS answers
 /// with `resolveStep` or `handlerTimeoutMs` elapses (retryable failure).
 final class RNStepHandler: StepHandler, @unchecked Sendable {
@@ -724,7 +693,7 @@ final class RNStepHandler: StepHandler, @unchecked Sendable {
     }
 
     func execute(stepName: String, input: String) throws -> String {
-        guard scope.isCurrent, let module else { throw HandlerError.Retryable(message: "React Native module released") }
+        guard scope.isCurrent, let module else { throw HandlerError.Retryable(detail: "React Native module released") }
         let requestId = UUID().uuidString
         module.pending.open(requestId)
         guard module.emit(scope: scope, "orch8:executeStep", [
@@ -733,16 +702,16 @@ final class RNStepHandler: StepHandler, @unchecked Sendable {
             "input": input,
         ]) else {
             module.pending.cancel(requestId)
-            throw HandlerError.Retryable(message: "No JS runtime available for handler '\(stepName)'")
+            throw HandlerError.Retryable(detail: "No JS runtime available for handler '\(stepName)'")
         }
         guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
-            throw HandlerError.Retryable(message: "JS handler '\(stepName)' timed out after \(timeoutMs) ms")
+            throw HandlerError.Retryable(detail: "JS handler '\(stepName)' timed out after \(timeoutMs) ms")
         }
-        guard scope.isCurrent else { throw HandlerError.Retryable(message: "engine retired") }
+        guard scope.isCurrent else { throw HandlerError.Retryable(detail: "engine retired") }
         if let error = outcome.error {
             throw outcome.permanent
-                ? HandlerError.Permanent(message: error)
-                : HandlerError.Retryable(message: error)
+                ? HandlerError.Permanent(detail: error)
+                : HandlerError.Retryable(detail: error)
         }
         return outcome.output ?? "{}"
     }
@@ -772,20 +741,20 @@ final class RNTokenProvider: TokenProvider, @unchecked Sendable {
     }
 
     func refreshToken() throws -> String {
-        guard scope.isCurrent, let module else { throw MobileError.Engine(message: "React Native module released") }
+        guard scope.isCurrent, let module else { throw MobileError.Engine(detail: "React Native module released") }
         let requestId = UUID().uuidString
         module.pending.open(requestId)
         guard module.emit(scope: scope, "orch8:refreshToken", ["requestId": requestId]) else {
             module.pending.cancel(requestId)
-            throw MobileError.Engine(message: "No JS runtime available for token refresh")
+            throw MobileError.Engine(detail: "No JS runtime available for token refresh")
         }
         guard let outcome = module.pending.wait(requestId, timeoutMs: timeoutMs) else {
-            throw MobileError.Engine(message: "JS token provider timed out after \(timeoutMs) ms")
+            throw MobileError.Engine(detail: "JS token provider timed out after \(timeoutMs) ms")
         }
-        guard scope.isCurrent else { throw MobileError.Shutdown(message: "engine retired") }
-        if let error = outcome.error { throw MobileError.Engine(message: error) }
+        guard scope.isCurrent else { throw MobileError.Shutdown(detail: "engine retired") }
+        if let error = outcome.error { throw MobileError.Engine(detail: error) }
         guard let fresh = outcome.output, !fresh.isEmpty else {
-            throw MobileError.Engine(message: "JS token provider returned an empty token")
+            throw MobileError.Engine(detail: "JS token provider returned an empty token")
         }
         lock.lock(); token = fresh; lock.unlock()
         return fresh

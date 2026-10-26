@@ -427,7 +427,7 @@ fn now_text() -> String {
 
 fn storage_err(error: &sqlx::Error) -> MobileError {
     MobileError::Storage {
-        message: error.to_string(),
+        detail: error.to_string(),
     }
 }
 
@@ -463,12 +463,12 @@ impl DelegationPump {
     ) -> Result<Arc<Self>, MobileError> {
         if options.tenant_id.trim().is_empty() {
             return Err(MobileError::InvalidInput {
-                message: "delegation requires the credential's tenant_id".into(),
+                detail: "delegation requires the credential's tenant_id".into(),
             });
         }
         if !(1..=86_400).contains(&options.ttl_secs) {
             return Err(MobileError::InvalidInput {
-                message: "delegation ttl_secs must be between 1 and 86400".into(),
+                detail: "delegation ttl_secs must be between 1 and 86400".into(),
             });
         }
         Ok(Arc::new(Self {
@@ -1183,7 +1183,7 @@ impl DelegationPump {
             }
         }
         Err(MobileError::Engine {
-            message: format!("publish delegated step sequence: HTTP {status}: {body}"),
+            detail: format!("publish delegated step sequence: HTTP {status}: {body}"),
         })
     }
 
@@ -1232,7 +1232,7 @@ impl DelegationPump {
             || body["delegation"]["parent_continuity_id"].as_str() != Some(continuity)
         {
             return Err(MobileError::Engine {
-                message: "control plane returned an unrelated delegation record".into(),
+                detail: "control plane returned an unrelated delegation record".into(),
             });
         }
         let delivered = match body["status"].as_str() {
@@ -1283,7 +1283,7 @@ impl DelegationPump {
                 return Ok(());
             };
             let task_id = uuid::Uuid::parse_str(task).map_err(|error| MobileError::Storage {
-                message: format!("corrupt delegation task id: {error}"),
+                detail: format!("corrupt delegation task id: {error}"),
             })?;
             let claim = WorkerClaim::new(PUMP_WORKER_ID.to_owned(), epoch);
             let resumed = orch8_engine::delegation::resume_local_parent(

@@ -6343,10 +6343,10 @@ enum HandlerError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
-    case Retryable(message: String)
-
-    case Permanent(message: String)
-
+    case Retryable(detail: String
+    )
+    case Permanent(detail: String
+    )
 
 
 
@@ -6377,15 +6377,13 @@ public struct FfiConverterTypeHandlerError: FfiConverterRustBuffer {
 
 
         case 1: return .Retryable(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 2: return .Permanent(
-            message: try FfiConverterString.read(from: &buf)
-        )
+            detail: try FfiConverterString.read(from: &buf)
+            )
 
-
-        default: throw UniffiInternalError.unexpectedEnumCase
+         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
@@ -6395,11 +6393,15 @@ public struct FfiConverterTypeHandlerError: FfiConverterRustBuffer {
 
 
 
-        case .Retryable(_ /* message is ignored*/):
-            writeInt(&buf, Int32(1))
-        case .Permanent(_ /* message is ignored*/):
-            writeInt(&buf, Int32(2))
 
+        case let .Retryable(detail):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .Permanent(detail):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(detail, into: &buf)
 
         }
     }
@@ -6685,27 +6687,28 @@ public func FfiConverterTypeMobileCatalogRequestState_lower(_ value: MobileCatal
 
 
 /**
- * Error type exposed to mobile hosts via `UniFFI`.
+ * Error type exposed to mobile hosts via `UniFFI`. The `detail` field avoids
+ * colliding with Kotlin Throwable.message in generated structured exceptions.
  */
 public
 enum MobileError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
 
 
-    case Engine(message: String)
-
-    case Storage(message: String)
-
-    case InvalidInput(message: String)
-
-    case NotFound(message: String)
-
-    case ResourceLimit(message: String)
-
-    case AlreadyExists(message: String)
-
-    case Shutdown(message: String)
-
+    case Engine(detail: String
+    )
+    case Storage(detail: String
+    )
+    case InvalidInput(detail: String
+    )
+    case NotFound(detail: String
+    )
+    case ResourceLimit(detail: String
+    )
+    case AlreadyExists(detail: String
+    )
+    case Shutdown(detail: String
+    )
 
 
 
@@ -6736,35 +6739,28 @@ public struct FfiConverterTypeMobileError: FfiConverterRustBuffer {
 
 
         case 1: return .Engine(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 2: return .Storage(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 3: return .InvalidInput(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 4: return .NotFound(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 5: return .ResourceLimit(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 6: return .AlreadyExists(
-            message: try FfiConverterString.read(from: &buf)
-        )
-
+            detail: try FfiConverterString.read(from: &buf)
+            )
         case 7: return .Shutdown(
-            message: try FfiConverterString.read(from: &buf)
-        )
+            detail: try FfiConverterString.read(from: &buf)
+            )
 
-
-        default: throw UniffiInternalError.unexpectedEnumCase
+         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
@@ -6774,21 +6770,40 @@ public struct FfiConverterTypeMobileError: FfiConverterRustBuffer {
 
 
 
-        case .Engine(_ /* message is ignored*/):
-            writeInt(&buf, Int32(1))
-        case .Storage(_ /* message is ignored*/):
-            writeInt(&buf, Int32(2))
-        case .InvalidInput(_ /* message is ignored*/):
-            writeInt(&buf, Int32(3))
-        case .NotFound(_ /* message is ignored*/):
-            writeInt(&buf, Int32(4))
-        case .ResourceLimit(_ /* message is ignored*/):
-            writeInt(&buf, Int32(5))
-        case .AlreadyExists(_ /* message is ignored*/):
-            writeInt(&buf, Int32(6))
-        case .Shutdown(_ /* message is ignored*/):
-            writeInt(&buf, Int32(7))
 
+        case let .Engine(detail):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .Storage(detail):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .InvalidInput(detail):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .NotFound(detail):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .ResourceLimit(detail):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .AlreadyExists(detail):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(detail, into: &buf)
+
+
+        case let .Shutdown(detail):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(detail, into: &buf)
 
         }
     }
@@ -7421,6 +7436,18 @@ fileprivate struct FfiConverterSequenceTypeSequenceInfo: FfiConverterRustBuffer 
         return seq
     }
 }
+/**
+ * Adds an initialization checksum unique to the bidirectional callback error
+ * contract. New bindings must refuse older development libraries whose flat
+ * callback errors cannot be lifted back into Rust.
+ */
+public func mobileCallbackContractV2() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_func_mobile_callback_contract_v2(uniffiCallStatus
+    )
+})
+}
 
 private enum InitializationResult {
     case ok
@@ -7436,6 +7463,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_orch8_mobile_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_func_mobile_callback_contract_v2() != 4123) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_activate_continuity_capsule() != 961) {
         return InitializationResult.apiChecksumMismatch

@@ -888,6 +888,12 @@ RustBuffer uniffi_orch8_mobile_fn_method_mobilecatalogrun_snapshot(uint64_t ptr,
 void uniffi_orch8_mobile_fn_method_mobilecatalogrun_start(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FUNC_MOBILE_CALLBACK_CONTRACT_V2
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_FN_FUNC_MOBILE_CALLBACK_CONTRACT_V2
+uint32_t uniffi_orch8_mobile_fn_func_mobile_callback_contract_v2(RustCallStatus *_Nonnull out_status
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_RUSTBUFFER_ALLOC
 RustBuffer ffi_orch8_mobile_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -1146,6 +1152,12 @@ void ffi_orch8_mobile_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_ORCH8_MOBILE_RUST_FUTURE_COMPLETE_VOID
 void ffi_orch8_mobile_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_FUNC_MOBILE_CALLBACK_CONTRACT_V2
+#define UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_FUNC_MOBILE_CALLBACK_CONTRACT_V2
+uint16_t uniffi_orch8_mobile_checksum_func_mobile_callback_contract_v2(void
+
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ORCH8_MOBILE_CHECKSUM_METHOD_MOBILEENGINE_ACTIVATE_CONTINUITY_CAPSULE

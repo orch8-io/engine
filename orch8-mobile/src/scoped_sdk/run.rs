@@ -97,7 +97,7 @@ impl MobileCatalogRun {
                 }));
             }
             Err(MobileError::ResourceLimit {
-                message: "run changed during snapshot; retry".into(),
+                detail: "run changed during snapshot; retry".into(),
             })
         })
     }
@@ -135,7 +135,7 @@ impl MobileCatalogRun {
         let engine = self.view.engine()?;
         let version = chrono::DateTime::parse_from_rfc3339(&expected_updated_at)
             .map_err(|_| MobileError::InvalidInput {
-                message: "invalid run snapshot version".into(),
+                detail: "invalid run snapshot version".into(),
             })?
             .with_timezone(&chrono::Utc);
         let access = engine.catalog_handlers.run_access(&self.scope, self.id);

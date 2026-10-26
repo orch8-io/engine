@@ -250,8 +250,8 @@ fn public_close_propagates_locally_and_retirement_reopens_without_rebinding_prin
     let cursor = catalog.history(None, 1).unwrap().next.unwrap();
     let sibling_catalog = sibling.open_catalog(configuration("one")).unwrap();
     account.close_view();
-    assert!(matches!(run.snapshot(), Err(MobileError::Shutdown)));
-    assert!(matches!(extra.start(), Err(MobileError::Shutdown)));
+    assert!(matches!(run.snapshot(), Err(MobileError::Shutdown { .. })));
+    assert!(matches!(extra.start(), Err(MobileError::Shutdown { .. })));
     assert_eq!(sibling_catalog.history(None, 8).unwrap().items.len(), 2);
     let epoch = sibling.session_epoch();
     sibling.retire().unwrap();
@@ -277,7 +277,7 @@ fn public_close_propagates_locally_and_retirement_reopens_without_rebinding_prin
     assert!(weak.upgrade().is_none());
     assert!(matches!(
         current.history(None, 1),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
 }
 
@@ -321,7 +321,7 @@ fn public_parent_close_cancels_pool_blocked_history_without_retiring_the_account
     account.close_view();
     assert!(matches!(
         result.recv_timeout(Duration::from_secs(2)).unwrap(),
-        Err(MobileError::Shutdown)
+        Err(MobileError::Shutdown { .. })
     ));
     reader.join().unwrap();
     drop(held);
@@ -412,7 +412,7 @@ fn public_issued_run_view_outlives_temporary_parent_views_without_pinning_the_en
     let weak = Arc::downgrade(&engine);
     drop(engine);
     assert!(weak.upgrade().is_none());
-    assert!(matches!(run.snapshot(), Err(MobileError::Shutdown)));
+    assert!(matches!(run.snapshot(), Err(MobileError::Shutdown { .. })));
 }
 
 /// Portable, trusted test data for real foreign SDK execution tests. There is

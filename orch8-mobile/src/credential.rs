@@ -311,9 +311,9 @@ impl Credential {
 
     fn reserve_token_call(&self) -> Result<TokenCallPermit, MobileError> {
         let exhausted = |error| match error {
-            tokio::sync::TryAcquireError::Closed => MobileError::Shutdown,
+            tokio::sync::TryAcquireError::Closed => MobileError::shutdown(),
             tokio::sync::TryAcquireError::NoPermits => MobileError::ResourceLimit {
-                message: "token callback capacity exhausted".into(),
+                detail: "token callback capacity exhausted".into(),
             },
         };
         let local = Arc::clone(&self.physical_token_slots)
@@ -345,15 +345,15 @@ impl Credential {
         let task = tokio::task::spawn_blocking(move || {
             let call = physical;
             if callback_cancelled.is_cancelled() {
-                return Err(MobileError::Shutdown);
+                return Err(MobileError::shutdown());
             }
             let token = call.provider.current_token();
             if callback_cancelled.is_cancelled() {
-                return Err(MobileError::Shutdown);
+                return Err(MobileError::shutdown());
             }
             if token.trim().is_empty() {
                 return Err(MobileError::InvalidInput {
-                    message: "manifest token provider returned an empty token".into(),
+                    detail: "manifest token provider returned an empty token".into(),
                 });
             }
             Ok(token)
@@ -363,7 +363,7 @@ impl Credential {
             task,
         };
         (&mut waiting.task).await.map_err(|_| MobileError::Engine {
-            message: "manifest token callback failed".into(),
+            detail: "manifest token callback failed".into(),
         })?
     }
 

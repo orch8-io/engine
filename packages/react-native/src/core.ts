@@ -1,3 +1,4 @@
+import { ScopedClient, type AccountIdentity, type Orch8Account } from "./scoped";
 import type {
   BackgroundRunResult,
   DelegateRequest,
@@ -88,6 +89,8 @@ export class PermanentHandlerError extends Error {
  * Every method returns a promise; blocking engine calls run off the JS thread.
  */
 export interface NativeOrch8 {
+  /** Development API; requires matching generated bindings and native library. */
+  scopedCall?(handle: string, method: string, argsJson: string): Promise<string>;
   initialize(config: Orch8Config): Promise<void>;
   registerHandler(name: string): Promise<void>;
   resolveStep(
@@ -260,6 +263,7 @@ function positiveInt(name: string, value: number): number {
 }
 
 export class Orch8Client {
+  private readonly scopes: ScopedClient;
   private readonly handlers = new Map<string, StepHandler>();
   private stepSubscription: Subscription | null = null;
   private tokenSubscription: Subscription | null = null;
@@ -268,9 +272,22 @@ export class Orch8Client {
   constructor(
     private readonly native: NativeOrch8,
     private readonly events: EventSource
-  ) {}
+  ) {
+    this.scopes = new ScopedClient((handle, method, argsJson) => {
+      if (!this.native.scopedCall) throw new Error("Scoped API requires a matching development native build");
+      return this.native.scopedCall(handle, method, argsJson);
+    }, events,
+      (id, output, error, permanent) => this.native.resolveStep(id, output, error, permanent),
+      (id, token, error) => this.native.resolveToken(id, token, error));
+  }
+
+  openAccount(identity: AccountIdentity): Promise<Orch8Account> {
+    if (!this.native.scopedCall) return Promise.reject(new Error("Scoped API requires a matching development native build"));
+    return this.scopes.openAccount(identity);
+  }
 
   async initialize(config: Orch8Config = {}): Promise<void> {
+    this.scopes.reset();
     await this.native.initialize(config);
     this.setupStepDispatch();
   }
@@ -363,6 +380,7 @@ export class Orch8Client {
   }
 
   async shutdown(): Promise<void> {
+    this.scopes.reset();
     this.stepSubscription?.remove();
     this.stepSubscription = null;
     this.tokenSubscription?.remove();

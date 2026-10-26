@@ -165,9 +165,9 @@ impl View {
     }
     fn engine(&self) -> Result<Arc<MobileEngine>, MobileError> {
         if self.closed.is_cancelled() {
-            return Err(MobileError::Shutdown);
+            return Err(MobileError::shutdown());
         }
-        let engine = self.engine.upgrade().ok_or(MobileError::Shutdown)?;
+        let engine = self.engine.upgrade().ok_or(MobileError::shutdown())?;
         engine.ensure_open()?;
         Ok(engine)
     }
@@ -179,12 +179,12 @@ impl View {
         let result = engine.run_with_timeout(async {
             tokio::select! {
                 biased;
-                () = self.closed.cancelled() => Err(MobileError::Shutdown),
+                () = self.closed.cancelled() => Err(MobileError::shutdown()),
                 result = future => result,
             }
         });
         if self.closed.is_cancelled() {
-            Err(MobileError::Shutdown)
+            Err(MobileError::shutdown())
         } else {
             result
         }

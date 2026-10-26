@@ -412,7 +412,7 @@ internal inline fun <T> mapErrors(block: () -> T): T =
     try {
         block()
     } catch (e: UMobileException) {
-        throw Orch8Exception(e.toKind(), e.message ?: e::class.simpleName.orEmpty(), e)
+        throw Orch8Exception(e.toKind(), e.nativeDetail(), e)
     } catch (e: USyncException) {
         throw Orch8Exception(e.toKind(), e.message ?: e::class.simpleName.orEmpty(), e)
     }
@@ -425,6 +425,16 @@ internal fun UMobileException.toKind(): Orch8ErrorKind = when (this) {
     is UMobileException.ResourceLimit -> Orch8ErrorKind.RESOURCE_LIMIT
     is UMobileException.AlreadyExists -> Orch8ErrorKind.ALREADY_EXISTS
     is UMobileException.Shutdown -> Orch8ErrorKind.SHUTDOWN
+}
+
+internal fun UMobileException.nativeDetail(): String = when (this) {
+    is UMobileException.Engine -> detail
+    is UMobileException.Storage -> detail
+    is UMobileException.InvalidInput -> detail
+    is UMobileException.NotFound -> detail
+    is UMobileException.ResourceLimit -> detail
+    is UMobileException.AlreadyExists -> detail
+    is UMobileException.Shutdown -> detail
 }
 
 internal fun USyncException.toKind(): Orch8ErrorKind = when (this) {

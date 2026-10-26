@@ -131,12 +131,12 @@ impl InstanceLifecycleManager {
             .get_sequence_by_name(&tenant, &ns, sequence_name, None)
             .await?
             .ok_or_else(|| MobileError::NotFound {
-                message: format!("sequence '{sequence_name}' not found"),
+                detail: format!("sequence '{sequence_name}' not found"),
             })?;
 
         let input_data: serde_json::Value =
             serde_json::from_str(input).map_err(|e| MobileError::InvalidInput {
-                message: format!("invalid input JSON: {e}"),
+                detail: format!("invalid input JSON: {e}"),
             })?;
 
         let instance_id = InstanceId::new();
@@ -188,7 +188,7 @@ impl InstanceLifecycleManager {
             .cancel_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
             .await?
             .ok_or_else(|| MobileError::NotFound {
-                message: format!("instance '{instance_id}' not found"),
+                detail: format!("instance '{instance_id}' not found"),
             })?;
         if final_state != InstanceState::Cancelled {
             debug!(instance_id, state = %final_state, "cancel ignored: instance already terminal");
@@ -222,7 +222,7 @@ impl InstanceLifecycleManager {
             .get_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
             .await?
             .ok_or_else(|| MobileError::NotFound {
-                message: format!("instance '{instance_id}' not found"),
+                detail: format!("instance '{instance_id}' not found"),
             })?;
 
         let observed = inst.updated_at;
@@ -238,7 +238,7 @@ impl InstanceLifecycleManager {
             .await?
         {
             return Err(MobileError::InvalidInput {
-                message: format!("instance '{instance_id}' changed concurrently; retry"),
+                detail: format!("instance '{instance_id}' changed concurrently; retry"),
             });
         }
 
@@ -257,7 +257,7 @@ impl InstanceLifecycleManager {
             .get_mobile_instance(&orch8_storage::MobileInstanceAccess::Legacy, id)
             .await?
             .ok_or_else(|| MobileError::NotFound {
-                message: format!("instance '{instance_id}' not found"),
+                detail: format!("instance '{instance_id}' not found"),
             })?;
 
         let seq = self
@@ -366,7 +366,7 @@ impl InstanceLifecycleManager {
 
 fn parse_instance_id(s: &str) -> Result<InstanceId, MobileError> {
     let uuid = uuid::Uuid::parse_str(s).map_err(|e| MobileError::InvalidInput {
-        message: format!("invalid instance ID '{s}': {e}"),
+        detail: format!("invalid instance ID '{s}': {e}"),
     })?;
     Ok(InstanceId::from_uuid(uuid))
 }
@@ -385,7 +385,7 @@ pub(crate) fn prepare_step_answer(
 > {
     if inst.state != InstanceState::Waiting {
         return Err(MobileError::InvalidInput {
-            message: format!("instance is in {:?} state, expected Waiting", inst.state),
+            detail: format!("instance is in {:?} state, expected Waiting", inst.state),
         });
     }
 
@@ -395,7 +395,7 @@ pub(crate) fn prepare_step_answer(
         .data
         .as_object_mut()
         .ok_or_else(|| MobileError::InvalidInput {
-            message: "waiting instance context data must be an object".into(),
+            detail: "waiting instance context data must be an object".into(),
         })?;
     if let serde_json::Value::Object(map) = &payload {
         data.extend(map.iter().map(|(key, value)| (key.clone(), value.clone())));

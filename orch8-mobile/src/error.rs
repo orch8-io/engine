@@ -1,27 +1,43 @@
-/// Error type exposed to mobile hosts via `UniFFI`.
+/// Adds an initialization checksum unique to the bidirectional callback error
+/// contract. New bindings must refuse older development libraries whose flat
+/// callback errors cannot be lifted back into Rust.
+#[uniffi::export]
+pub fn mobile_callback_contract_v2() -> u32 {
+    2
+}
+
+/// Error type exposed to mobile hosts via `UniFFI`. The `detail` field avoids
+/// colliding with Kotlin Throwable.message in generated structured exceptions.
 #[derive(Debug, uniffi::Error, thiserror::Error)]
-#[uniffi(flat_error)]
 pub enum MobileError {
-    #[error("engine error: {message}")]
-    Engine { message: String },
-    #[error("storage error: {message}")]
-    Storage { message: String },
-    #[error("invalid input: {message}")]
-    InvalidInput { message: String },
-    #[error("not found: {message}")]
-    NotFound { message: String },
-    #[error("resource limit exceeded: {message}")]
-    ResourceLimit { message: String },
-    #[error("already exists: {message}")]
-    AlreadyExists { message: String },
-    #[error("shutdown in progress")]
-    Shutdown,
+    #[error("engine error: {detail}")]
+    Engine { detail: String },
+    #[error("storage error: {detail}")]
+    Storage { detail: String },
+    #[error("invalid input: {detail}")]
+    InvalidInput { detail: String },
+    #[error("not found: {detail}")]
+    NotFound { detail: String },
+    #[error("resource limit exceeded: {detail}")]
+    ResourceLimit { detail: String },
+    #[error("already exists: {detail}")]
+    AlreadyExists { detail: String },
+    #[error("{detail}")]
+    Shutdown { detail: String },
+}
+
+impl MobileError {
+    pub(crate) fn shutdown() -> Self {
+        Self::Shutdown {
+            detail: "shutdown in progress".into(),
+        }
+    }
 }
 
 impl From<orch8_types::error::StorageError> for MobileError {
     fn from(e: orch8_types::error::StorageError) -> Self {
         Self::Storage {
-            message: e.to_string(),
+            detail: e.to_string(),
         }
     }
 }
@@ -29,7 +45,7 @@ impl From<orch8_types::error::StorageError> for MobileError {
 impl From<orch8_engine::error::EngineError> for MobileError {
     fn from(e: orch8_engine::error::EngineError) -> Self {
         Self::Engine {
-            message: e.to_string(),
+            detail: e.to_string(),
         }
     }
 }
@@ -37,7 +53,7 @@ impl From<orch8_engine::error::EngineError> for MobileError {
 impl From<serde_json::Error> for MobileError {
     fn from(e: serde_json::Error) -> Self {
         Self::InvalidInput {
-            message: e.to_string(),
+            detail: e.to_string(),
         }
     }
 }
@@ -45,7 +61,7 @@ impl From<serde_json::Error> for MobileError {
 impl From<SyncError> for MobileError {
     fn from(e: SyncError) -> Self {
         Self::Engine {
-            message: e.to_string(),
+            detail: e.to_string(),
         }
     }
 }
@@ -64,12 +80,64 @@ pub enum SyncError {
 
 /// Handler error returned by host-registered step handlers.
 #[derive(Debug, uniffi::Error, thiserror::Error)]
-#[uniffi(flat_error)]
 pub enum HandlerError {
-    #[error("handler failed (retryable): {message}")]
-    Retryable { message: String },
-    #[error("handler failed (permanent): {message}")]
-    Permanent { message: String },
+    #[error("handler failed (retryable): {detail}")]
+    Retryable { detail: String },
+    #[error("handler failed (permanent): {detail}")]
+    Permanent { detail: String },
+}
+
+#[cfg(test)]
+mod callback_error_tests {
+    use super::{HandlerError, MobileError};
+
+    #[test]
+    fn foreign_handler_errors_lift_with_classification_and_message() {
+        // This is the same Lift boundary used for a foreign callback's error.
+        // Flat errors panic here even though Rust->host lowering succeeds.
+        for permanent in [false, true] {
+            let error = if permanent {
+                HandlerError::Permanent {
+                    detail: "host permanent".into(),
+                }
+            } else {
+                HandlerError::Retryable {
+                    detail: "host retry".into(),
+                }
+            };
+            let buffer = <HandlerError as uniffi::Lower<crate::UniFfiTag>>::lower(error);
+            let lifted =
+                <HandlerError as uniffi::Lift<crate::UniFfiTag>>::try_lift(buffer).unwrap();
+            match lifted {
+                HandlerError::Permanent { detail: message } => {
+                    assert!(permanent);
+                    assert_eq!(message, "host permanent");
+                }
+                HandlerError::Retryable { detail: message } => {
+                    assert!(!permanent);
+                    assert_eq!(message, "host retry");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn foreign_token_errors_lift_including_shutdown_detail() {
+        for error in [
+            MobileError::Engine {
+                detail: "refresh refused".into(),
+            },
+            MobileError::Shutdown {
+                detail: "engine retired".into(),
+            },
+        ] {
+            let expected = error.to_string();
+            let buffer = <MobileError as uniffi::Lower<crate::UniFfiTag>>::lower(error);
+            let lifted = <MobileError as uniffi::Lift<crate::UniFfiTag>>::try_lift(buffer).unwrap();
+            assert_eq!(lifted.to_string(), expected);
+        }
+        assert_eq!(MobileError::shutdown().to_string(), "shutdown in progress");
+    }
 }
 
 /// Callback interface for refreshable authentication tokens.

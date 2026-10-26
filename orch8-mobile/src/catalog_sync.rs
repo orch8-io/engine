@@ -26,7 +26,7 @@ fn refused() -> MobileError {
 }
 fn busy() -> MobileError {
     MobileError::ResourceLimit {
-        message: "catalog sync capacity is occupied; retry after it settles".into(),
+        detail: "catalog sync capacity is occupied; retry after it settles".into(),
     }
 }
 
@@ -36,7 +36,7 @@ enum EntryError {
     Integrity,
 }
 fn fetch_error(error: MobileError) -> EntryError {
-    if matches!(&error, MobileError::Shutdown) {
+    if matches!(&error, MobileError::Shutdown { .. }) {
         EntryError::Abort(error)
     } else {
         EntryError::Fetch
@@ -154,7 +154,7 @@ impl CatalogSyncCoordinator {
         });
         let mut wait = Wait { cancelled, task };
         (&mut wait.task).await.map_err(|_| MobileError::Engine {
-            message: "catalog sync task failed".into(),
+            detail: "catalog sync task failed".into(),
         })?
     }
 }
@@ -385,7 +385,10 @@ impl CatalogSynchronizer {
                 .install_workflow(&entry.name, &body, &signature.to_bytes())
                 .await
             {
-                if matches!(&error, MobileError::Storage { .. } | MobileError::Shutdown) {
+                if matches!(
+                    &error,
+                    MobileError::Storage { .. } | MobileError::Shutdown { .. }
+                ) {
                     return Err(error);
                 }
                 result.signature_failures += 1;

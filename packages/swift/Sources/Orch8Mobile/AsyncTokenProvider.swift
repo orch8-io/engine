@@ -72,7 +72,7 @@ final class AsyncTokenProvider: TokenProvider, @unchecked Sendable {
     }
 
     private func timeoutError() -> MobileError {
-        MobileError.Engine(message: "token provider timed out")
+        MobileError.Engine(detail: "token provider timed out")
     }
 
     func refreshToken() throws -> String {
@@ -88,7 +88,7 @@ final class AsyncTokenProvider: TokenProvider, @unchecked Sendable {
         guard timeout.isFinite, timeout > 0,
               max(timeout, 0.001) < Double(Int64.max) / 1_000_000_000,
               max(timeout, 0.001) < Double(UInt64.max - now.uptimeNanoseconds) / 1_000_000_000 else {
-            throw MobileError.Engine(message: "token provider timeout must be finite, positive and representable")
+            throw MobileError.Engine(detail: "token provider timeout must be finite, positive and representable")
         }
         lock.lock()
         let flight: Flight
@@ -103,7 +103,7 @@ final class AsyncTokenProvider: TokenProvider, @unchecked Sendable {
         } else {
             guard let permit = budget.tryAcquire() else {
                 lock.unlock()
-                throw MobileError.Engine(message: "token fetch capacity exhausted")
+                throw MobileError.Engine(detail: "token fetch capacity exhausted")
             }
             flight = Flight(deadline: now + max(timeout, 0.001))
             let fetch = self.fetch
@@ -115,7 +115,7 @@ final class AsyncTokenProvider: TokenProvider, @unchecked Sendable {
                 do {
                     try Task.checkCancellation()
                     guard DispatchTime.now() < flight.deadline else {
-                        throw MobileError.Engine(message: "token provider timed out")
+                        throw MobileError.Engine(detail: "token provider timed out")
                     }
                     let fresh = try await fetch()
                     try Task.checkCancellation()
@@ -249,9 +249,9 @@ final class AsyncTokenProvider: TokenProvider, @unchecked Sendable {
                 token = fresh
                 flight.result = .success(fresh)
             case .success:
-                flight.result = .failure(MobileError.Engine(message: "token provider returned an empty token"))
+                flight.result = .failure(MobileError.Engine(detail: "token provider returned an empty token"))
             case .failure:
-                flight.result = .failure(MobileError.Engine(message: "token provider failed"))
+                flight.result = .failure(MobileError.Engine(detail: "token provider failed"))
             }
         }
         if active?.flight === flight { active = nil }

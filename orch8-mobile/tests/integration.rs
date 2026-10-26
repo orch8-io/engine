@@ -276,7 +276,7 @@ fn shutdown_prevents_ticks() {
     engine.shutdown();
 
     let result = engine.tick_once();
-    assert!(matches!(result, Err(MobileError::Shutdown)));
+    assert!(matches!(result, Err(MobileError::Shutdown { .. })));
 }
 
 struct SlowHandler;
