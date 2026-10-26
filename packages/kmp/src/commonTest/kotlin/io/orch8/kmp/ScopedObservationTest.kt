@@ -1,6 +1,11 @@
 package io.orch8.kmp
 
+import io.orch8.kmp.internal.AccountBackend
+import io.orch8.kmp.internal.BlockingCatalogStepHandler
+import io.orch8.kmp.internal.CatalogBackend
+import io.orch8.kmp.internal.CatalogCursorBackend
 import io.orch8.kmp.internal.CatalogRunBackend
+import io.orch8.kmp.internal.EngineBackend
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
@@ -20,7 +25,7 @@ import kotlin.test.assertFailsWith
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
-private class ObservedRunBackend : CatalogRunBackend {
+internal class ObservedRunBackend : CatalogRunBackend {
     override val instanceId = "run-a"
     override val accountId = "account-a"
     override val catalogId = "catalog-a"
@@ -42,6 +47,32 @@ private class ObservedRunBackend : CatalogRunBackend {
     override fun forgetCancelledRequest(): Boolean = error("unexpected cleanup")
     override fun closeView() { closed = true }
     override fun dispose() { closed = true }
+}
+
+internal fun scopedEngine(backend: ObservedRunBackend, dispatcher: kotlinx.coroutines.CoroutineDispatcher): Orch8Engine {
+    val catalog = object : CatalogBackend {
+        override val accountId = backend.accountId
+        override val catalogId = backend.catalogId
+        override val sessionEpoch = backend.sessionEpoch
+        override fun prepareRun(request: CatalogRunRequest): CatalogRunBackend = backend
+        override fun run(instanceId: String): CatalogRunBackend = backend
+        override fun registerHandler(name: String, handler: BlockingCatalogStepHandler, timeoutMs: Long) = error("unused")
+        override fun sync(tokens: Orch8TokenSource): SyncResult = error("unused")
+        override fun history(cursor: CatalogCursorBackend?, limit: Int): CatalogRunPage = error("unused")
+        override fun closeView() = Unit
+        override fun dispose() = Unit
+    }
+    val account = object : AccountBackend {
+        override val accountId = backend.accountId
+        override val sessionEpoch = backend.sessionEpoch
+        override fun openCatalog(configuration: CatalogConfiguration): CatalogBackend = catalog
+        override fun retire() = error("unused")
+        override fun closeView() = Unit
+        override fun dispose() = Unit
+    }
+    return Orch8Engine(object : EngineBackend by FakeBackend() {
+        override fun openAccount(identity: AccountIdentity): AccountBackend = account
+    }, dispatcher)
 }
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
@@ -203,4 +234,76 @@ class ScopedObservationTest {
         runCurrent()
         assertEquals(0, backend.reads)
     }
+    @Test
+    fun engineCloseStopsPreparedAndReopenedRunSubscriptionsDuringLongPollingDelay() = runTest {
+        val backend = ObservedRunBackend()
+        val engine = scopedEngine(backend, StandardTestDispatcher(testScheduler))
+        val account = engine.openAccount(AccountIdentity("a", "issuer", "a"))
+        val catalog = account.openCatalog(CatalogConfiguration("cat", "source", "authority", "https://example.com/manifest", "https://example.com/identity"))
+        val prepared = catalog.prepareRun(CatalogRunRequest("flow", operationKey="key"))
+        val reopened = catalog.run(prepared.instanceId)
+        account.close(); catalog.close()
+        var snapshots = 0
+        val observer = object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) { snapshots++ }
+            override fun onError(error: Orch8Exception) = error("shutdown must cancel silently")
+            override fun onComplete() = error("shutdown must not invent terminal completion")
+        }
+        val first = prepared.subscribeSnapshots(observer, 60_000)
+        val second = reopened.subscribeSnapshots(observer, 60_000)
+        try {
+            runCurrent()
+            assertEquals(2, backend.reads)
+            engine.close(); runCurrent()
+            advanceTimeBy(60_001); runCurrent()
+            assertEquals(2, backend.reads, "engine close must stop scoped polling before its next delay")
+            assertEquals(2, snapshots)
+            assertEquals(false, backend.closed, "observation cancellation must not dispose the run")
+            val refused = assertFailsWith<Orch8Exception> { reopened.subscribeSnapshots(observer, 60_000) }
+            assertEquals(Orch8ErrorKind.SHUTDOWN, refused.kind)
+        } finally { first.close(); second.close(); engine.close() }
+    }
+
+    @Test
+    fun engineCloseBeforeFirstScheduledScopedPollDoesNotReadOrDeliver() = runTest {
+        val backend = ObservedRunBackend()
+        val engine = scopedEngine(backend, StandardTestDispatcher(testScheduler))
+        val account = engine.openAccount(AccountIdentity("a", "issuer", "a"))
+        val catalog = account.openCatalog(CatalogConfiguration("cat", "source", "authority", "https://example.com/manifest", "https://example.com/identity"))
+        val run = catalog.run(backend.instanceId)
+        val subscription = run.subscribeSnapshots(object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) = error("cancelled before scheduling")
+            override fun onError(error: Orch8Exception) = error("cancelled before scheduling")
+            override fun onComplete() = error("cancelled before scheduling")
+        }, 60_000)
+        try {
+            engine.close(); runCurrent()
+            advanceTimeBy(60_001); runCurrent()
+            assertEquals(0, backend.reads)
+        } finally { subscription.close(); account.close(); catalog.close(); engine.close() }
+    }
+
+    @Test
+    fun closingOneScopedSubscriptionLeavesItsSiblingAndRunUsable() = runTest {
+        val backend = ObservedRunBackend()
+        val engine = scopedEngine(backend, StandardTestDispatcher(testScheduler))
+        val account = engine.openAccount(AccountIdentity("a", "issuer", "a"))
+        val catalog = account.openCatalog(CatalogConfiguration("cat", "source", "authority", "https://example.com/manifest", "https://example.com/identity"))
+        val run = catalog.run(backend.instanceId)
+        val observer = object : CatalogSnapshotObserver {
+            override fun onSnapshot(snapshot: CatalogRunSnapshot?) = Unit
+            override fun onError(error: Orch8Exception) = error("unexpected error")
+            override fun onComplete() = error("unexpected completion")
+        }
+        val first = run.subscribeSnapshots(observer, 100)
+        val second = run.subscribeSnapshots(observer, 100)
+        try {
+            runCurrent(); assertEquals(2, backend.reads)
+            first.close(); advanceTimeBy(101); runCurrent()
+            assertEquals(3, backend.reads)
+            assertEquals(backend.instanceId, run.snapshot()?.instanceId)
+            assertEquals(false, backend.closed)
+        } finally { first.close(); second.close(); account.close(); catalog.close(); engine.close() }
+    }
+
 }

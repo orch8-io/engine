@@ -9,6 +9,7 @@ import io.orch8.kmp.internal.runHandlerBlocking
 import kotlin.native.HiddenFromObjC
 import kotlin.experimental.ExperimentalObjCRefinement
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
@@ -74,12 +75,15 @@ data class CatalogRunPage(val items: List<CatalogRunSummary>, val next: CatalogH
  * Local account view. [closeView] fences issued child views; [close] disposes only
  * this object. Durable retirement is explicit. Issued children outlive parent disposal.
  */
-class Orch8Account internal constructor(private val backend: AccountBackend, private val io: CoroutineDispatcher) : AutoCloseable {
+class Orch8Account internal constructor(
+    private val backend: AccountBackend, private val io: CoroutineDispatcher,
+    private val observationOwner: Job? = null,
+) : AutoCloseable {
     val accountId: String = backend.accountId
     val sessionEpoch: Long = backend.sessionEpoch
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun openCatalog(configuration: CatalogConfiguration): Orch8Catalog = withContext(io) {
-        Orch8Catalog(backend.openCatalog(configuration), io)
+        Orch8Catalog(backend.openCatalog(configuration), io, observationOwner)
     }
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun retire() = withContext(io) { backend.retire() }
@@ -88,7 +92,10 @@ class Orch8Account internal constructor(private val backend: AccountBackend, pri
     override fun close() = backend.dispose()
 }
 
-class Orch8Catalog internal constructor(private val backend: CatalogBackend, private val io: CoroutineDispatcher) : AutoCloseable {
+class Orch8Catalog internal constructor(
+    private val backend: CatalogBackend, private val io: CoroutineDispatcher,
+    private val observationOwner: Job? = null,
+) : AutoCloseable {
     val accountId: String = backend.accountId
     val catalogId: String = backend.catalogId
     val sessionEpoch: Long = backend.sessionEpoch
@@ -109,11 +116,11 @@ class Orch8Catalog internal constructor(private val backend: CatalogBackend, pri
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun prepareRun(request: CatalogRunRequest): Orch8CatalogRun {
         require(request.workflow.isNotBlank() && request.operationKey.isNotBlank())
-        return withContext(io) { Orch8CatalogRun(backend.prepareRun(request), io) }
+        return withContext(io) { Orch8CatalogRun(backend.prepareRun(request), io, observationOwner) }
     }
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun run(instanceId: String): Orch8CatalogRun = withContext(io) {
-        Orch8CatalogRun(backend.run(instanceId), io)
+        Orch8CatalogRun(backend.run(instanceId), io, observationOwner)
     }
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun history(cursor: CatalogHistoryCursor? = null, limit: Int = 64): CatalogRunPage {
@@ -125,7 +132,10 @@ class Orch8Catalog internal constructor(private val backend: CatalogBackend, pri
     override fun close() = backend.dispose()
 }
 
-class Orch8CatalogRun internal constructor(private val backend: CatalogRunBackend, private val io: CoroutineDispatcher) : AutoCloseable {
+class Orch8CatalogRun internal constructor(
+    private val backend: CatalogRunBackend, private val io: CoroutineDispatcher,
+    private val observationOwner: Job? = null,
+) : AutoCloseable {
     val instanceId: String = backend.instanceId
     val accountId: String = backend.accountId
     val catalogId: String = backend.catalogId
@@ -157,7 +167,9 @@ class Orch8CatalogRun internal constructor(private val backend: CatalogRunBacken
     @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun subscribeSnapshots(observer: CatalogSnapshotObserver, pollIntervalMs: Long = 500): CatalogSnapshotSubscription {
         val interval = pollingInterval(pollIntervalMs)
-        return subscribeCatalogSnapshots(this, observer, interval, io)
+        if (observationOwner?.isActive == false)
+            throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine observation is closed")
+        return subscribeCatalogSnapshots(this, observer, interval, io, observationOwner)
     }
 
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)

@@ -66,6 +66,17 @@ private func checkObservation(_ run: Orch8CatalogRun, expectShutdown: Bool = fal
     try check(accepted, "Swift subscription did not report the expected completion/error")
 }
 
+private final class ScopedShutdownProbe: NSObject, CatalogSnapshotObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private var snapshots = 0
+    private var errors = 0
+    private var completions = 0
+    func onSnapshot(snapshot: CatalogRunSnapshot?) { lock.lock(); snapshots += 1; lock.unlock() }
+    func onError(error: Orch8Exception) { lock.lock(); errors += 1; lock.unlock() }
+    func onComplete() { lock.lock(); completions += 1; lock.unlock() }
+    func counts() -> (Int, Int, Int) { lock.lock(); defer { lock.unlock() }; return (snapshots, errors, completions) }
+}
+
 private final class RootSnapshotProbe: NSObject, InstanceSnapshotObserver, @unchecked Sendable {
     private let expectedId: String
     private let expectedError: Orch8ErrorKind?
@@ -256,8 +267,21 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         let publicEvents = legacyEvents.state()
         try check(!publicEvents.0.isEmpty && publicEvents.0.allSatisfy { $0 == legacyId } && !publicEvents.1 && !publicEvents.2,
             "legacy observation failed owner isolation or event delivery")
+        let queued: Orch8CatalogRun = try object { retained.last!.0.prepareRun(request:
+            CatalogRunRequest(workflow: "flow", inputJson: "{}", operationKey: "shutdown-observer", version: nil), completionHandler: $0) }
+        let scopedShutdown = ScopedShutdownProbe()
+        let scopedSubscription = try queued.subscribeSnapshots(observer: scopedShutdown, pollIntervalMs: 86_400_000)
+        defer { scopedSubscription.close(); queued.close() }
+        let shutdownDeadline = Date().addingTimeInterval(10)
+        while scopedShutdown.counts().0 == 0 && Date() < shutdownDeadline {
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+        try check(scopedShutdown.counts() == (1, 0, 0), "scoped observer did not attach before shutdown")
         engine.close()
+        try refused { _ = try queued.subscribeSnapshots(observer: scopedShutdown, pollIntervalMs: 86_400_000) }
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        try check(scopedShutdown.counts() == (1, 0, 0), "shutdown delivered a scoped callback")
         try refused { _ = try engine.subscribeEvents(observer: legacyEvents) }
-        print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, acknowledged archives, deduplication, history and close fences passed")
+        print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, acknowledged archives, deduplication, history, scoped shutdown and close fences passed")
     }
 }

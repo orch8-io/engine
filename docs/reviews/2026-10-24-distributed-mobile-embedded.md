@@ -3508,3 +3508,34 @@ The ten archive regressions include a populated v55 upgrade/reopen, input/quota
 recovery, all cold quota dimensions, write failure after receipt insertion,
 corrupted evidence, unknown outcomes, concurrent calls, foreign/retired owners
 and the reproduced subtenant collision. No release is published.
+
+
+### DME146 — Scope subscription retirement follows engine shutdown immediately
+
+Root KMP subscriptions already belonged to the engine's observation job, but
+scoped snapshot subscriptions created independent polling jobs. A new common
+regression reproduced prepared and reopened run subscriptions continuing reads
+after engine close. A JVM WeakReference regression also reproduced the observer
+remaining retained through its one-day polling delay, even while the run and
+subscription objects were intentionally kept alive. Both fail before the fix.
+
+Account, catalog and run views now propagate only the existing observation Job
+token. A scoped SDK subscription attaches its own supervised lifetime directly
+to that shared owner; engine close cancels it during long delays or before its
+first dispatch. New scoped subscriptions after close return typed Shutdown.
+No per-view child job groups are created, and no root engine reference is passed
+through the views. Closing one subscription preserves its sibling and the run;
+parent view disposal continues to preserve issued child views and durable work.
+
+Tests cover prepared/reopened view propagation, silent cancellation, shutdown
+before the first scheduled poll, sibling independence, observer release with
+retained handles, and a retained scope token not pinning the root wrapper.
+The GC tests concern JVM wrapper/callback ownership, not native resource or ARC
+cycle destruction on every platform. Caller-created Kotlin Flow collectors keep
+their own coroutine lifetime. The real Swift/Kotlin/Rust fixture also subscribes
+a queued run with a one-day interval, closes the engine, checks no shutdown
+completion/error delivery and verifies new scoped subscription refusal.
+Final local evidence: 97 JVM tests and 85 Kotlin/Native tests pass with zero
+failures/skips. The actual Swift/Kotlin/Rust host fixture and iOS framework/Swift
+bridge checks pass, along with binding parity, SDK packaging, docs and whitespace.
+No Rust, UniFFI or bridge protocol change is needed.
