@@ -122,3 +122,13 @@ physical token callback through foreign-reference destruction. Closing a view or
 retiring/reopening its account cannot free the old account charge while a getter
 or destructor is blocked; another account can use the remaining slot. This
 proves one-engine fairness, not an independent-engine/process admission guarantee.
+
+
+KMP callback subscriptions share count limits across the loaded SDK runtime:
+32 globally, eight per engine and four per stable account for scoped snapshots.
+These include idle accepted subscriptions. Refusal returns `RESOURCE_LIMIT`
+before a native read is queued. Closing a subscription or engine cannot return
+the allowance of an already-entered callback; it returns when that coroutine
+finishes. Stable account identity, rather than session epoch, retains the charge
+across replacement. Application-owned Flow collectors remain backpressured by
+their own collectors. This does not establish a retained-byte or foreign-GC bound.

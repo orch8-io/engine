@@ -7,11 +7,23 @@ const { tmpdir } = require('node:os')
 const { join } = require('node:path')
 const { Engine } = require('..')
 const { setTimeout: delay } = require('node:timers/promises')
+const { performance } = require('node:perf_hooks')
+
+async function settledSnapshot(engine, id, expected) {
+  let result = await engine.get(id)
+  const deadline = performance.now() + 5000
+  while (['running', 'scheduled'].includes(result.state) && performance.now() < deadline) {
+    await delay(10)
+    result = await engine.get(id)
+  }
+  assert.ok(expected.includes(result.state), `expected ${expected}, got ${result.state}`)
+  return result
+}
 
 async function deferredSnapshot(engine, id) {
   let result = await engine.run(id, { timeoutMs: 150 })
-  const deadline = Date.now() + 5000
-  while (result.state === 'running' && Date.now() < deadline) {
+  const deadline = performance.now() + 5000
+  while (result.state === 'running' && performance.now() < deadline) {
     await delay(10)
     result = await engine.get(id)
   }
@@ -23,11 +35,15 @@ test('physical promise capacity survives step timeouts and engine replacement', 
   const directory = mkdtempSync(join(tmpdir(), 'orch8-physical-'))
   const path = join(directory, 'app.db')
   const release = []
+  const heldIds = new Set()
   let active = 0, peak = 0, entered = 0, successor
-  const host = async ({ params }) => {
+  const host = async ({ params, instanceId }) => {
     active++; entered++; peak = Math.max(peak, active)
     try {
-      if (params.hold) await new Promise(resolve => release.push(resolve))
+      if (params.hold) {
+        heldIds.add(instanceId)
+        await new Promise(resolve => release.push(resolve))
+      }
       return true
     } finally { active-- }
   }
@@ -35,11 +51,28 @@ test('physical promise capacity survives step timeouts and engine replacement', 
   first.handler('host', host)
   try {
     await first.deploy({ name: 'held', blocks: [{ type: 'step', id: 'work', handler: 'host', params: { hold: true }, timeout: 50 }] })
-    for (let i = 0; i < 128; i++) {
-      const result = await first.run(await first.start('held'), { timeoutMs: 3000 })
-      assert.equal(result.state, 'failed')
+    const created = []
+    const fillDeadline = performance.now() + 30000
+    for (let attempts = 0; active < 128 && attempts < 256 && performance.now() < fillDeadline; attempts++) {
+      const id = await first.start('held')
+      created.push(id)
+      const result = await first.run(id, { timeoutMs: 3000 })
+      assert.ok(['failed', 'running', 'scheduled'].includes(result.state))
+      // A timeout can precede host entry. Count observed physical calls,
+      // allowing queued JS callbacks a turn before admitting another run.
+      await delay(0)
     }
     assert.equal(active, 128)
+    assert.equal(heldIds.size, 128, 'each physical callback must have a distinct instance')
+    for (const id of heldIds) await settledSnapshot(first, id, ['failed'])
+    for (const id of created) {
+      if (heldIds.has(id) || (await first.get(id)).state === 'failed') continue
+      // A spare run may have found full capacity while the final callback
+      // was still queued. Retire it before testing the successor's free slot.
+      await first.signal(id, 'cancel')
+      await first.run(id, { timeoutMs: 3000 })
+      await settledSnapshot(first, id, ['failed', 'cancelled'])
+    }
     const deferredId = await first.start('held')
     const deferred = await deferredSnapshot(first, deferredId)
     assert.deepEqual(deferred.outputs, {})

@@ -262,6 +262,19 @@ callback may finish. The scoped raw `Flow` method is available in shared Kotlin
 and hidden from Objective-C/Swift: Kotlin's raw `Flow.collect` export only
 converts cancellation errors and can abort the process on ordinary exceptions.
 
+Callback-based `subscribe*` observations share admission across a loaded KMP
+runtime: 32 accepted subscriptions globally, eight per engine, and four per
+stable account for scoped run observers. Idle polling subscriptions count too.
+Exhaustion throws `Orch8Exception(RESOURCE_LIMIT)` before retaining another
+observer or scheduling a read. Close unused subscriptions when their UI leaves.
+An already-entered blocking callback keeps its allowance until its coroutine
+actually finishes, including after subscription/engine close. Reopening the
+engine or account session cannot reset that account's charge; another account
+can use the remaining allowance. Completed and failed subscriptions return it.
+Application-owned `Flow` collectors keep their existing backpressure semantics.
+These are subscription-count bounds, independent of application-owned work,
+retained snapshot bytes and foreign-runtime garbage collection.
+
 `close()` disposes one object, so a run survives disposal of its parent views.
 `closeView()` explicitly fences that view and its descendants. `account.retire()`
 durably retires its epoch across catalogs. None of these operations deletes

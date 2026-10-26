@@ -47,39 +47,51 @@ internal fun <T> subscribeFlow(
     io: CoroutineDispatcher,
     owner: Job? = null,
     startImmediately: Boolean = false,
+    accountId: String? = null,
+    budget: ObservationBudget = ObservationBudget.shared,
 ): () -> Unit {
+    // Reserve before retaining a callback or scheduling a native snapshot read.
+    val reservation = budget.reserve(owner, accountId)
     val slot = MutableStateFlow<ObserverDispatch<T>?>(ObserverDispatch(observer, emit))
     val lifetime = SupervisorJob(owner)
-    val task = CoroutineScope(io + lifetime).launch(start = if (startImmediately) CoroutineStart.UNDISPATCHED else CoroutineStart.DEFAULT) {
-        try {
-            source.collect {
-                // Hot collectors attach before subscribe returns. Yield before
-                // delivery so initial StateFlow values still reach callbacks
-                // through the configured dispatcher, not the caller's thread.
-                if (startImmediately) yield()
+    val coroutineStart = if (startImmediately) CoroutineStart.UNDISPATCHED else CoroutineStart.DEFAULT
+    val task = try {
+        CoroutineScope(io + lifetime).launch(start = coroutineStart) {
+            try {
+                source.collect {
+                    // Hot collectors attach before subscribe returns. Yield before
+                    // delivery so initial StateFlow values still reach callbacks
+                    // through the configured dispatcher, not the caller's thread.
+                    if (startImmediately) yield()
+                    currentCoroutineContext().ensureActive()
+                    slot.value?.emit?.invoke(it)
+                }
                 currentCoroutineContext().ensureActive()
-                slot.value?.emit?.invoke(it)
+                slot.value?.lifecycle?.onComplete()
+            } catch (_: CancellationException) {
+                // Explicit cancellation has no terminal delivery.
+            } catch (error: Exception) {
+                if (currentCoroutineContext().isActive) {
+                    // An arbitrary callback exception may override message with
+                    // another host getter. Keep its cause without invoking it.
+                    val reported = error as? Orch8Exception
+                        ?: Orch8Exception(Orch8ErrorKind.ENGINE, "observation failed", error)
+                    try { slot.value?.lifecycle?.onError(reported) } catch (_: Exception) { }
+                }
+            } finally {
+                slot.value = null
             }
-            currentCoroutineContext().ensureActive()
-            slot.value?.lifecycle?.onComplete()
-        } catch (_: CancellationException) {
-            // Explicit cancellation has no terminal delivery.
-        } catch (error: Exception) {
-            if (currentCoroutineContext().isActive) {
-                // An arbitrary callback exception may override message with
-                // another host getter. Keep its cause without invoking it.
-                val reported = error as? Orch8Exception
-                    ?: Orch8Exception(Orch8ErrorKind.ENGINE, "observation failed", error)
-                try { slot.value?.lifecycle?.onError(reported) } catch (_: Exception) { }
-            }
-        } finally {
-            slot.value = null
         }
+    } catch (error: Throwable) {
+        try { slot.value = null; lifetime.cancel() }
+        finally { reservation.close() }
+        throw error
     }
-    // Also runs when cancelled before the coroutine body was ever scheduled.
+    // Completion follows actual synchronous callback return, even when its
+    // engine/observer was cancelled while the host was blocked.
     task.invokeOnCompletion {
-        slot.value = null
-        lifetime.cancel()
+        try { slot.value = null; lifetime.cancel() }
+        finally { reservation.close() }
     }
     return {
         slot.value = null
