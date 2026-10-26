@@ -4498,3 +4498,70 @@ The facade's two capsule scenarios and the mobile activation/redelivery scenario
 also pass. Raw output rows are checked for ciphertext on both encrypted backend
 variants, in addition to verifying decrypted API results. Format, documentation
 and strict all-target lint checks cover storage, engine, facade and mobile.
+
+
+### DME173 — Composite capsules lost execution trees and frozen payloads
+
+DME172 restored outputs, but composite execution also depends on tree state and
+externalized payloads. A paused `for_each` carries its frozen collection and
+shadowed item binding outside the checkpoint. The previous importer recreated
+neither: the regression first found zero imported nodes instead of two, and the
+handler's missing-snapshot path can finish a loop without processing its items.
+
+Capsule schema 1.1 now requires an execution-state envelope. New exports include
+the execution tree and complete paginated payload catalog. The 1.0 reader gate
+rejects 1.1; new readers accept legacy flat capsules and reject missing required
+composite recovery or a payload relabeled with the legacy schema. Counts are
+bounded at 10,000 nodes and 10,000 payloads, within the existing 64 MiB encoded
+capsule ceiling. Catalog ownership and repeated references are checked before advancing pages.
+
+An additive atomic snapshot-import operation validates graph ownership, duplicate
+identities, missing parents and cycles before writing. It publishes the paused
+instance, checkpoint, immutable binding, nodes, payloads and outputs together.
+SQLite/PostgreSQL order parents before children; payload-owner conflicts roll
+back every newly written row and preserve the existing owner's bytes. Encrypted
+storage uses the same snapshot sealing helper as archive restore, with destination
+instance/key binding. Raw ciphertext, logical payloads, timestamps, expiry and
+idempotent replay preservation are tested on both databases and wrappers.
+
+Destination node identities are fresh while parent relationships and ordering
+remain stable. Instance-derived payload keys are remapped; arbitrary keys receive
+a destination namespace. Exact externalization markers, nested payload references
+and engine-owned loop snapshot references follow those keys. Ordinary objects
+that merely contain `_ref` retain their data. Missing or expired required references fail before
+publication. Active loops also require their computed snapshot key even when an
+older marker omitted its descriptive `_snapshot_ref` field. The runtime's instance identity is updated to the destination.
+
+The real scheduler regression transfers an encrypted paused loop after its first
+item, while the live collection has changed. It processes only the two frozen
+remaining items and restores the original item variable. Its catalog exceeds one
+1,000-row backend page; nested externalized references survive destination-local
+remapping. Both databases and encrypted destination variants are exercised.
+
+This extends composite recovery; it does not yet establish complete portability
+of effect receipts, queued signals, waits or related instance families. Bounded
+source materialization and clock skew remain open. Full scoped/platform evidence
+and the broader distributed/mobile/embedded completion audit remain required.
+
+
+### DME174 — Capsule import omitted destination sequence ownership
+
+The exporter checked sequence ownership, but the importer checked only the
+sequence ID and signed content hash. A trusted issuer could provide a valid
+manifest and matching hash for a sequence stored under another tenant; SQLite
+accepted a new requesting-tenant instance bound to that foreign sequence. The
+regression reproduced this successful cross-tenant import before the fix.
+
+Import now requires the stored sequence's tenant to equal the authenticated
+capsule/request tenant before constructing or publishing any destination state.
+The regression uses a correctly signed manifest whose sequence hash matches the
+foreign sequence, so refusal depends on ownership rather than signature or hash
+failure. It requires `OwnershipMismatch` and no destination instance.
+
+Final targeted validation for DME173–174: 61 passing results — 12 protocol,
+36 storage (capsule, catalog and atomic archive restore), three state-boundary
+unit tests, seven capsule/scheduler cases, two facade cases and one mobile
+activation/redelivery case. Strict all-target Clippy passes for types, storage,
+engine, facade and mobile; format, diff and documentation checks pass. Hosted
+checks on the exact PR head remain the merge gate; this is not a full platform
+artifact or release certification.

@@ -1,5 +1,7 @@
 //! Safe-boundary execution capsule export and paused import.
 
+mod state;
+
 use std::fmt::Write as _;
 
 use bytes::Bytes;
@@ -51,6 +53,9 @@ pub struct CapsuleImportRequest<'a> {
 
 #[derive(Debug, Error)]
 pub enum CapsuleServiceError {
+    #[error("capsule is missing required portable execution state")]
+    MissingExecutionState,
+
     #[error("continuity execution is not owned by the source instance")]
     OwnershipMismatch,
     #[error("instance must be paused before capsule export")]
@@ -211,6 +216,7 @@ pub async fn export_paused_capsule_manifest(
             parent_instance_id: instance.parent_instance_id,
         },
         checkpoint: checkpoint.clone(),
+        execution_state: Some(state::export(storage, instance.id).await?),
         outputs,
         pending_waits: Vec::new(),
         pending_signals: Vec::new(),
@@ -261,7 +267,7 @@ pub async fn export_paused_capsule_manifest(
         .clone()
         .unwrap_or_else(|| BlockId::new("checkpoint"));
     let manifest = CapsuleManifest {
-        schema: CapsuleSchemaVersion::V1,
+        schema: CapsuleSchemaVersion::CURRENT,
         capsule_id: CapsuleId::new(),
         continuity_id: request.continuity.continuity_id,
         source_instance_id: instance.id,
@@ -327,7 +333,7 @@ pub async fn verify_and_import_paused_capsule_bytes(
         request.now,
         request.tenant_id,
         request.destination_runtime_id,
-        CapsuleSchemaVersion::V1,
+        CapsuleSchemaVersion::CURRENT,
     )?;
     if signed.manifest.epoch != request.expected_epoch {
         return Err(CapsuleServiceError::StaleEpoch);
@@ -358,57 +364,53 @@ pub async fn verify_and_import_paused_capsule_bytes(
     let payload: CapsulePayload = serde_json::from_slice(&plaintext)
         .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
     payload.validate_bounds()?;
+    state::validate_version(&payload, signed.manifest.schema)?;
     let destination_id = request.destination_instance_id.unwrap_or_default();
     let outputs = remap_capsule_outputs(&payload, &signed.manifest, destination_id)?;
     let sequence = storage
         .get_sequence(payload.instance.sequence_id)
         .await?
         .ok_or(CapsuleServiceError::MissingSequence)?;
+    if &sequence.tenant_id != request.tenant_id {
+        return Err(CapsuleServiceError::OwnershipMismatch);
+    }
     let sequence_json = canonical_json(&sequence)
         .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
     if sha256_hex(sequence_json.as_bytes()) != signed.manifest.sequence.content_sha256 {
         return Err(CapsuleServiceError::PayloadIdentityMismatch);
     }
+    if payload.execution_state.is_none()
+        && sequence
+            .blocks
+            .iter()
+            .any(|block| !matches!(block, orch8_types::sequence::BlockDefinition::Step(_)))
+    {
+        return Err(CapsuleServiceError::MissingExecutionState);
+    }
     let now = request.now;
-    let candidate = TaskInstance {
-        claimed_at: None,
-        sub_tenant: None,
-        id: destination_id,
-        sequence_id: payload.instance.sequence_id,
-        tenant_id: request.tenant_id.clone(),
-        namespace: payload.instance.namespace.clone(),
-        state: InstanceState::Paused,
-        next_fire_at: None,
-        priority: payload.instance.priority,
-        timezone: payload.instance.timezone.clone(),
-        metadata: payload.instance.metadata.clone(),
-        context: payload.instance.context.clone(),
-        concurrency_key: None,
-        max_concurrency: None,
-        idempotency_key: None,
-        session_id: None,
-        parent_instance_id: payload.instance.parent_instance_id,
-        budget: payload.instance.budget.clone(),
-        created_at: now,
-        updated_at: now,
-    };
+    let candidate = state::paused_instance(&payload, request.tenant_id, destination_id, now);
     let checkpoint = orch8_types::checkpoint::Checkpoint {
         id: uuid::Uuid::now_v7(),
         instance_id: candidate.id,
         checkpoint_data: payload.checkpoint.checkpoint_data.clone(),
         created_at: now,
     };
+    let snapshot = state::restore(
+        &payload,
+        signed.manifest.source_instance_id,
+        candidate,
+        outputs,
+    )?;
     let imported_id = storage
-        .import_capsule_instance_with_outputs(
+        .import_capsule_snapshot(
             signed.manifest.capsule_id,
             request.destination_runtime_id,
-            &candidate,
+            &snapshot,
             &checkpoint,
-            &outputs,
         )
         .await?;
-    let imported = if imported_id == candidate.id {
-        candidate
+    let imported = if imported_id == snapshot.instance.id {
+        snapshot.instance
     } else {
         storage
             .get_instance(imported_id)

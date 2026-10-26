@@ -474,6 +474,7 @@ fault_impl! {
         async fn get_capsule_manifest(&self, tenant_id: &TenantId, id: CapsuleId) -> Result<Option<CapsuleManifest>, StorageError>;
         async fn import_capsule_instance(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance: &TaskInstance, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn import_capsule_instance_with_outputs(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance: &TaskInstance, checkpoint: &orch8_types::checkpoint::Checkpoint, outputs: &[orch8_types::output::BlockOutput]) -> Result<InstanceId, StorageError>;
+        async fn import_capsule_snapshot(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId, imported_at: DateTime<Utc>) -> Result<InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &TenantId, capabilities: &RuntimeCapabilities) -> Result<(), StorageError>;

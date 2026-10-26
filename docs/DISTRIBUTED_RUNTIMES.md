@@ -131,6 +131,13 @@ node is upgraded no row is ever left awaiting dispatch.
   execution is being exported, gets `409`.
 - Capsule export (and the handoff export API) is refused while the source
   instance has pending or claimed worker tasks.
+- New exports use capsule schema 1.1. Its encrypted execution-state envelope
+  carries the execution tree and logical externalized payload catalog alongside
+  outputs. Import remaps local identities and references, preserves tree state
+  and payload expiry, and atomically publishes all rows into paused quarantine.
+  A 1.0 reader rejects 1.1 before decrypting. New readers accept legacy flat
+  capsules without externalized references, but refuse legacy composite state
+  that cannot be reconstructed safely; export a fresh 1.1 capsule instead.
 - The scheduler never advances an instance whose execution is `transferring`
   (it re-checks every 30 s) or has been handed to another instance/runtime
   (the source parks in `waiting`).
