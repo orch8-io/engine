@@ -3712,3 +3712,45 @@ coverage and example-workflow tests, with zero failures or skips. The real
 default process-capacity subprocess passes as part of the full library suite.
 Committed binding parity, SDK packaging and documentation checks also pass.
 Strict mobile all-target Clippy with warnings denied and workspace formatting checks pass.
+
+
+### DME151 — Retired listeners retain process admission without consuming unseen events
+
+MobileNotifier bounded running and queued callbacks per engine, but every new
+notifier allocated fresh capacity. Real terminal/waiting event scans reproduced
+successor callback admission while retired owners still held blocked host calls.
+The baseline marked nine successor events seen while the intended shared
+physical allowance remained occupied.
+
+Listener callback admission now reserves both the existing two-call local gate
+and a process-wide 32-call gate. Closing a notifier only closes its local gate;
+the shared allowance follows accepted physical callbacks through host return and
+foreign listener destruction. Reservations use immediate try-acquire, with no
+process waiting queue. Failed process admission returns the local reservation.
+
+Both terminal and waiting paths reserve before deduplication, so capacity refusal
+does not consume undelivered events. Terminal cleanup tracking remains independent
+of callback capacity. The mixed-event regression retains callbacks from distinct
+closed notifier owners, verifies zero successor dedup entries and continued
+cleanup, then releases physical work and drains all twelve terminal/waiting
+notifications exactly once.
+
+Additional coverage runs the real default 32-call static gate in an isolated
+subprocess, retains admission while a retired listener destructor blocks, and
+verifies capacity return after a callback panic or destructor panic. A queued
+callback cancelled by close returns both permits without entering host code.
+These panic probes use Rust callback implementations; they do not claim recovery
+from arbitrary foreign ABI exceptions. The new capacity tests live in a dedicated
+child module and reuse the existing real SQLite-backed notifier fixtures.
+
+The process listener allowance is independent of token and scoped-handler
+allowances, so one callback role cannot consume another role's process permits.
+Legacy root handler admission remains a separate review item. The UniFFI API and
+protocol 6 are unchanged; no release publication is involved.
+
+Local validation passes 662 mobile library tests and 109 integration/coverage/
+example-workflow tests with zero failures or skips. The final notifier suite
+and strengthened token subprocess probe also pass after adding explicit child
+completion markers; a subprocess matching zero tests can no longer pass silently.
+Strict all-target mobile Clippy, workspace formatting, binding parity, SDK
+packaging, docs and whitespace checks pass.
