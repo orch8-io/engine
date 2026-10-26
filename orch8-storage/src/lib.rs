@@ -1,6 +1,8 @@
 mod child_adoption;
 mod child_lookup;
 mod current_outputs;
+mod effect_dispatch;
+pub use effect_dispatch::EffectDispatchFence;
 mod mobile_access;
 pub use child_adoption::ChildAdoption;
 pub use mobile_access::MobileInstanceAccess;
@@ -4317,6 +4319,9 @@ pub trait ContinuityStore: Send + Sync + 'static {
         id: EffectId,
     ) -> Result<Option<EffectReceipt>, StorageError>;
 
+    /// Compare-and-set preparation or settlement evidence. This low-level
+    /// mutation is not a runtime admission fence; dispatching runtimes must use
+    /// `dispatch_effect_receipt_owned` before invoking external code.
     async fn cas_effect_receipt(
         &self,
         tenant_id: &TenantId,
@@ -4328,6 +4333,24 @@ pub trait ContinuityStore: Send + Sync + 'static {
     /// Atomically transition a prepared receipt to dispatched only when it is
     /// the first active effect with the same kind, destination, and request
     /// fingerprint in this continuity execution.
+    /// Dispatch only while the captured instance claim, continuity owner and
+    /// epoch remain live. The authority read and receipt transition are one
+    /// transaction; guarded requests also serialize their duplicate check.
+    async fn dispatch_effect_receipt_owned(
+        &self,
+        tenant_id: &TenantId,
+        next: &EffectReceipt,
+        fence: &EffectDispatchFence,
+        at_most_once: bool,
+    ) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError> {
+        let _ = (tenant_id, next, fence, at_most_once);
+        Err(StorageError::Unsupported(
+            "atomic owned effect dispatch".into(),
+        ))
+    }
+
+    /// Legacy duplicate-check primitive without instance/ownership admission.
+    /// Runtime dispatch uses `dispatch_effect_receipt_owned` instead.
     async fn dispatch_effect_receipt_at_most_once(
         &self,
         tenant_id: &TenantId,

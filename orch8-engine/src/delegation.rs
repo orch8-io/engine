@@ -179,6 +179,8 @@ pub async fn enqueue_delegation_task(
         "expires_at": delegation.expires_at,
         "input": input,
     });
+    // Grant-authorized mailbox enqueue is an explicit unclaimed action. A
+    // waiting parent/proxy may retain a historical scheduler timestamp.
     let guard = crate::effect_guard::EffectGuard::begin(
         storage,
         &parent.tenant_id,

@@ -262,20 +262,15 @@ pub(crate) async fn enqueue_worker_task(
     )
     .await;
 
-    let effect_guard = if step_context.runtime.dry_run {
-        None
-    } else {
-        crate::effect_guard::EffectGuard::begin(
-            storage,
-            &instance.tenant_id,
-            instance.id,
-            &step_def.id,
-            &step_def.handler,
-            &resolved_params,
-            attempt,
-        )
-        .await?
-    };
+    let effect_guard = crate::effect_guard::EffectGuard::begin_step(
+        storage,
+        instance,
+        step_def,
+        &resolved_params,
+        attempt,
+        step_context.runtime.dry_run,
+    )
+    .await?;
     let effect_id = effect_guard
         .as_ref()
         .map(crate::effect_guard::EffectGuard::effect_id);

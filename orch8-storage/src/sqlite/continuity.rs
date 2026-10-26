@@ -22,15 +22,15 @@ use orch8_types::instance::TaskInstance;
 use super::SqliteStorage;
 use crate::LiveMigrationTransition;
 
-fn encode<T: Serialize>(value: &T) -> Result<String, StorageError> {
+pub(super) fn encode<T: Serialize>(value: &T) -> Result<String, StorageError> {
     serde_json::to_string(value).map_err(StorageError::Serialization)
 }
 
-fn decode<T: DeserializeOwned>(value: &str) -> Result<T, StorageError> {
+pub(super) fn decode<T: DeserializeOwned>(value: &str) -> Result<T, StorageError> {
     serde_json::from_str(value).map_err(StorageError::Serialization)
 }
 
-fn state_name<T: Serialize>(value: T) -> Result<String, StorageError> {
+pub(super) fn state_name<T: Serialize>(value: T) -> Result<String, StorageError> {
     serde_json::to_value(value)
         .map_err(StorageError::Serialization)?
         .as_str()
@@ -1069,6 +1069,16 @@ impl crate::ContinuityStore for SqliteStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn dispatch_effect_receipt_owned(
+        &self,
+        tenant_id: &TenantId,
+        next: &EffectReceipt,
+        fence: &crate::EffectDispatchFence,
+        at_most_once: bool,
+    ) -> Result<EffectDispatchOutcome, StorageError> {
+        super::effect_dispatch::owned(self, tenant_id, next, fence, at_most_once).await
     }
 
     async fn dispatch_effect_receipt_at_most_once(

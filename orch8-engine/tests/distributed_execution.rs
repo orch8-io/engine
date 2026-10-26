@@ -1355,7 +1355,7 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             .await
             .unwrap();
         assert_eq!(again.id, proxy.id, "{backend}: a retried claim reuses it");
-        let task = enqueue_delegation_task(storage.as_ref(), &proxy, &delegation, &seq, json!({}))
+        let task = enqueue_delegation_task(storage.as_ref(), &again, &delegation, &seq, json!({}))
             .await
             .unwrap();
         let claimed = storage

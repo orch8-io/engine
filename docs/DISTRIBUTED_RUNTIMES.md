@@ -125,6 +125,11 @@ node is upgraded no row is ever left awaiting dispatch.
 
 ## Handoff fencing
 
+- Local effect admission atomically checks the captured owner runtime/epoch,
+  live instance, original scheduler claim and (on SQLite) durable mobile scope
+  before changing a prepared receipt to dispatched. A paused, transferred or
+  reclaimed invocation cannot admit its retained native callback. Explicit
+  unclaimed step/mailbox operations still require live instance ownership.
 - complete / fail / heartbeat / release / artifact upload are fenced on the
   claim epoch **and** the continuity owner epoch recorded at dispatch
   (`continuity_epoch`). A task issued under an older owner, or while the

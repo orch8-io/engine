@@ -34,6 +34,7 @@ pub struct EffectAdmission {
 struct Admission {
     storage: Arc<dyn StorageBackend>,
     receipt: EffectReceipt,
+    fence: orch8_storage::EffectDispatchFence,
     started: AtomicBool,
     admitted: AtomicBool,
     failure: Mutex<Option<EngineError>>,
@@ -66,6 +67,7 @@ impl EffectAdmission {
         let mut guard = EffectGuard {
             storage: self.inner.storage.as_ref(),
             receipt: self.inner.receipt.clone(),
+            fence: self.inner.fence,
         };
         if let Err(error) = guard.dispatch().await {
             *self
@@ -114,6 +116,7 @@ impl EffectAdmission {
 pub(crate) struct EffectGuard<'a> {
     storage: &'a dyn StorageBackend,
     receipt: EffectReceipt,
+    fence: orch8_storage::EffectDispatchFence,
 }
 
 impl<'a> EffectGuard<'a> {
@@ -126,10 +129,7 @@ impl<'a> EffectGuard<'a> {
         params: &Value,
         attempt: u32,
     ) -> Result<Option<Self>, EngineError> {
-        if !crate::release_diff::handler_has_side_effects(handler) {
-            return Ok(None);
-        }
-        let Some(mut guard) = Self::prepare(
+        Self::begin_with_claim(
             storage,
             tenant_id,
             instance_id,
@@ -137,6 +137,34 @@ impl<'a> EffectGuard<'a> {
             handler,
             params,
             attempt,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // original claim is part of durable effect admission
+    pub(crate) async fn begin_with_claim(
+        storage: &'a dyn StorageBackend,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        handler: &str,
+        params: &Value,
+        attempt: u32,
+        claim_token: Option<chrono::DateTime<Utc>>,
+    ) -> Result<Option<Self>, EngineError> {
+        if !crate::release_diff::handler_has_side_effects(handler) {
+            return Ok(None);
+        }
+        let Some(mut guard) = Self::prepare_with_claim(
+            storage,
+            tenant_id,
+            instance_id,
+            block_id,
+            handler,
+            params,
+            attempt,
+            claim_token,
         )
         .await?
         else {
@@ -146,6 +174,31 @@ impl<'a> EffectGuard<'a> {
         Ok(Some(guard))
     }
 
+    pub(crate) async fn begin_step(
+        storage: &'a dyn StorageBackend,
+        instance: &orch8_types::instance::TaskInstance,
+        step: &orch8_types::sequence::StepDef,
+        params: &Value,
+        attempt: u32,
+        dry_run: bool,
+    ) -> Result<Option<Self>, EngineError> {
+        if dry_run {
+            return Ok(None);
+        }
+        Self::begin_with_claim(
+            storage,
+            &instance.tenant_id,
+            instance.id,
+            &step.id,
+            &step.handler,
+            params,
+            attempt,
+            instance.claimed_at,
+        )
+        .await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn prepare(
         storage: &'a dyn StorageBackend,
         tenant_id: &TenantId,
@@ -155,7 +208,35 @@ impl<'a> EffectGuard<'a> {
         params: &Value,
         attempt: u32,
     ) -> Result<Option<Self>, EngineError> {
+        Self::prepare_with_claim(
+            storage,
+            tenant_id,
+            instance_id,
+            block_id,
+            handler,
+            params,
+            attempt,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // original claim is part of durable effect admission
+    pub(crate) async fn prepare_with_claim(
+        storage: &'a dyn StorageBackend,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        handler: &str,
+        params: &Value,
+        attempt: u32,
+        claim_token: Option<chrono::DateTime<Utc>>,
+    ) -> Result<Option<Self>, EngineError> {
         let execution = ensure_effect_scope(storage, tenant_id, instance_id).await?;
+        if execution.state != OwnershipState::Owned || execution.current_instance_id != instance_id
+        {
+            return Err(EngineError::ClaimLost { instance_id });
+        }
 
         if let Some(mut unresolved) = storage
             .find_unresolved_effect_receipt(
@@ -214,7 +295,16 @@ impl<'a> EffectGuard<'a> {
                 "deterministic effect id collided with different effect evidence".into(),
             ));
         }
-        let mut guard = Self { storage, receipt };
+        let mut guard = Self {
+            storage,
+            receipt,
+            fence: orch8_storage::EffectDispatchFence {
+                instance_id,
+                epoch: execution.epoch,
+                owner_runtime_id: execution.owner_runtime_id,
+                claim_token,
+            },
+        };
         match guard.receipt.state {
             EffectState::Planned => guard.advance(EffectState::Prepared).await?,
             EffectState::Prepared => {}
@@ -228,6 +318,7 @@ impl<'a> EffectGuard<'a> {
             inner: Arc::new(Admission {
                 storage,
                 receipt: self.receipt.clone(),
+                fence: self.fence,
                 started: AtomicBool::new(false),
                 admitted: AtomicBool::new(false),
                 failure: Mutex::new(None),
@@ -273,27 +364,37 @@ impl<'a> EffectGuard<'a> {
 
     pub(crate) async fn dispatch(&mut self) -> Result<(), EngineError> {
         let guards = load_effect_commit_guards(self.storage, &self.receipt).await?;
-        if guards.is_empty() {
-            return self.advance(EffectState::Dispatched).await;
-        }
         let mut updated = self.receipt.clone();
         updated
             .transition(EffectState::Dispatched, Utc::now())
             .map_err(|error| EngineError::EffectTransition(error.to_string()))?;
         match self
             .storage
-            .dispatch_effect_receipt_at_most_once(&updated.tenant_id, &updated)
+            .dispatch_effect_receipt_owned(
+                &updated.tenant_id,
+                &updated,
+                &self.fence,
+                !guards.is_empty(),
+            )
             .await?
         {
             EffectDispatchOutcome::Dispatched => {
                 self.receipt = updated;
-                record_effect_guard_results(self.storage, &guards, &self.receipt, false).await?;
+                if !guards.is_empty() {
+                    record_effect_guard_results(self.storage, &guards, &self.receipt, false)
+                        .await?;
+                }
                 Ok(())
             }
             EffectDispatchOutcome::Duplicate => {
+                let Some(invariant) = guards.first() else {
+                    return Err(EngineError::InvalidConfig(
+                        "unguarded effect dispatch returned a duplicate verdict".into(),
+                    ));
+                };
                 record_effect_guard_results(self.storage, &guards, &updated, true).await?;
                 Err(EngineError::InvariantViolation {
-                    invariant_id: guards[0].id,
+                    invariant_id: invariant.id,
                     block_id: updated.block_id,
                 })
             }
@@ -303,7 +404,13 @@ impl<'a> EffectGuard<'a> {
                     .get_effect_receipt(&updated.tenant_id, updated.id)
                     .await?
                     .unwrap_or(self.receipt.clone());
-                Err(blocked(&current))
+                if matches!(current.state, EffectState::Planned | EffectState::Prepared) {
+                    Err(EngineError::ClaimLost {
+                        instance_id: self.fence.instance_id,
+                    })
+                } else {
+                    Err(blocked(&current))
+                }
             }
         }
     }
@@ -1570,5 +1677,156 @@ mod tests {
         assert!(admission.is_admitted());
         guard.refresh().await.unwrap();
         assert_eq!(guard.receipt.state, EffectState::Dispatched);
+    }
+    #[tokio::test]
+    async fn prepared_native_admission_cannot_dispatch_after_pause() {
+        let (storage, instance, _) = continuity_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let guard = EffectGuard::prepare(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("native"),
+            "native",
+            &serde_json::json!({}),
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let id = guard.effect_id();
+        let admission = guard.admission(storage.clone());
+        storage
+            .update_instance_state(instance.id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+        assert!(
+            admission.admit().await.is_err(),
+            "prepared callback dispatched after pause"
+        );
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Prepared
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_native_admission_cannot_dispatch_after_export_fence() {
+        let (storage, instance, execution) = continuity_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let guard = EffectGuard::prepare(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("native"),
+            "native",
+            &serde_json::json!({}),
+            0,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let id = guard.effect_id();
+        let admission = guard.admission(storage.clone());
+        let mut transferring = execution.clone();
+        transferring.state = OwnershipState::Transferring;
+        assert!(
+            storage
+                .cas_continuity_owner(
+                    &instance.tenant_id,
+                    execution.continuity_id,
+                    execution.epoch,
+                    execution.owner_runtime_id,
+                    &transferring
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            admission.admit().await.is_err(),
+            "prepared callback dispatched after continuity export"
+        );
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Prepared
+        );
+    }
+    #[tokio::test]
+    async fn prepared_native_admission_keeps_original_claim_after_replacement() {
+        let (storage, mut instance, _) = continuity_storage().await;
+        let storage: Arc<dyn StorageBackend> = Arc::new(storage);
+        let now = Utc::now();
+        storage
+            .update_instance_state(instance.id, InstanceState::Scheduled, Some(now))
+            .await
+            .unwrap();
+        instance = storage
+            .claim_due_instances(now, 1, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        let old = instance.claimed_at.unwrap();
+        let guard = EffectGuard::prepare_with_claim(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("native"),
+            "native",
+            &serde_json::json!({}),
+            0,
+            Some(old),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let id = guard.effect_id();
+        let admission = guard.admission(storage.clone());
+        storage
+            .update_instance_state(instance.id, InstanceState::Scheduled, Some(now))
+            .await
+            .unwrap();
+        let replacement = storage
+            .claim_due_instances(now + chrono::Duration::seconds(1), 1, 0)
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_ne!(replacement.claimed_at, Some(old));
+        assert!(admission.admit().await.is_err());
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Prepared
+        );
+        // Fresh work can reuse the safely prepared receipt under its own claim.
+        let mut recovered = EffectGuard::prepare_with_claim(
+            storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("native"),
+            "native",
+            &serde_json::json!({}),
+            0,
+            replacement.claimed_at,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        recovered.dispatch().await.unwrap();
     }
 }

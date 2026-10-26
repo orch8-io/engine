@@ -1223,20 +1223,15 @@ async fn begin_effect_guard<'a>(
     attempt: u32,
     context: &ExecutionContext,
 ) -> Result<Option<crate::effect_guard::EffectGuard<'a>>, EngineError> {
-    if context.runtime.dry_run {
-        Ok(None)
-    } else {
-        crate::effect_guard::EffectGuard::begin(
-            storage,
-            &instance.tenant_id,
-            instance.id,
-            &step_def.id,
-            &step_def.handler,
-            params,
-            attempt,
-        )
-        .await
-    }
+    crate::effect_guard::EffectGuard::begin_step(
+        storage,
+        instance,
+        step_def,
+        params,
+        attempt,
+        context.runtime.dry_run,
+    )
+    .await
 }
 
 #[cfg(test)]

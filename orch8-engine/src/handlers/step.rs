@@ -346,7 +346,7 @@ async fn run_step_core(
     {
         None
     } else {
-        let mut guard = crate::effect_guard::EffectGuard::prepare(
+        let mut guard = crate::effect_guard::EffectGuard::prepare_with_claim(
             storage.as_ref(),
             &exec.tenant_id,
             exec.instance_id,
@@ -354,6 +354,7 @@ async fn run_step_core(
             &exec.handler_name,
             &exec.params,
             exec.attempt,
+            exec.claim_token,
         )
         .await?;
         if !deferred_effect && let Some(guard) = &mut guard {
@@ -1125,7 +1126,15 @@ mod tests {
             // A subscriber-cache retry is a separate probe execution. The
             // previous probe's effect is already committed even if tracing
             // missed its span, so it must keep its own instance identity.
-            let instance_id = InstanceId::new();
+            let instance = orch8_storage::testing::fixtures::InstanceBuilder::new(
+                "tenant-a",
+                "default",
+                orch8_types::ids::SequenceId::new(),
+            )
+            .state(orch8_types::instance::InstanceState::Running)
+            .build();
+            storage.create_instance(&instance).await.unwrap();
+            let instance_id = instance.id;
             let run = execute_step_dry(&storage, &handlers, exec(instance_id))
                 .with_subscriber(dispatch.clone())
                 .await

@@ -66,7 +66,7 @@ function runtimeCaps(
   };
 }
 
-async function setupExecution(tenantId: string): Promise<{
+async function setupExecution(tenantId: string, keepLive = false): Promise<{
   execution: any;
   instance: any;
   runtimeId: string;
@@ -77,6 +77,8 @@ async function setupExecution(tenantId: string): Promise<{
     sequence_id: createdSeq.id,
     tenant_id: tenantId,
     namespace: "default",
+    // Delegation admission requires a live parent; do not race a noop completing.
+    ...(keepLive ? { next_fire_at: new Date(Date.now() + 3_600_000).toISOString() } : {}),
   });
   const runtimeId = uuid();
   const execution = await client.createContinuityExecution({
@@ -1276,7 +1278,7 @@ describe("Continuity Attention, Residency, Disclosure, Federation", () => {
 
   describe("device delegation", () => {
     async function setupDelegationContext(tenantId: string) {
-      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId, true);
       await client.registerRuntime({ tenant_id: tenantId, capabilities: runtimeCaps(sourceRuntimeId) });
       const destRuntime = uuid();
       await client.registerRuntime({ tenant_id: tenantId, capabilities: runtimeCaps(destRuntime) });
