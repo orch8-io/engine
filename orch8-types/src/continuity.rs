@@ -134,6 +134,9 @@ pub struct CapsuleSchemaVersion {
 
 impl CapsuleSchemaVersion {
     pub const V1: Self = Self { major: 1, minor: 0 };
+    /// Requires execution-tree and externalized-state restoration on import.
+    pub const V1_1: Self = Self { major: 1, minor: 1 };
+    pub const CURRENT: Self = Self::V1_1;
 
     #[must_use]
     pub const fn can_read(self, offered: Self) -> bool {
@@ -449,6 +452,8 @@ impl CapsuleRequirements {
 pub struct SequenceIdentity {
     pub id: SequenceId,
     pub version: i32,
+    /// Capsule 1.1 hashes the canonical definition excluding storage-only
+    /// `created_at`; 1.0 hashes the complete definition for legacy readers.
     pub content_sha256: String,
 }
 
@@ -471,6 +476,9 @@ pub struct ArtifactReference {
 pub struct CapsulePayload {
     pub instance: CapsuleInstanceState,
     pub checkpoint: crate::checkpoint::Checkpoint,
+    /// Present for schema 1.1 and later. None identifies legacy capsules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_state: Option<CapsuleExecutionState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<crate::output::BlockOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -485,6 +493,13 @@ pub struct CapsulePayload {
     pub stream_cursors: Vec<StreamCursor>,
     #[serde(default)]
     pub redacted_audit_context: serde_json::Value,
+}
+
+/// Runtime-independent recovery rows required to resume composite blocks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct CapsuleExecutionState {
+    pub nodes: Vec<crate::execution::ExecutionNode>,
+    pub payloads: Vec<crate::output::ExternalizedEntry>,
 }
 
 /// Explicit portable subset of a runtime-local task instance. This avoids
@@ -503,13 +518,18 @@ pub struct CapsuleInstanceState {
 
 impl CapsulePayload {
     pub const MAX_OUTPUTS: usize = 10_000;
+    pub const MAX_EXECUTION_NODES: usize = 10_000;
+    pub const MAX_EXTERNALIZED_ENTRIES: usize = 10_000;
     pub const MAX_PENDING_ITEMS: usize = 10_000;
     pub const MAX_ARTIFACTS: usize = 10_000;
     pub const MAX_STREAM_CURSORS: usize = 1_000;
     pub const MAX_ENCODED_BYTES: usize = 64 * 1024 * 1024;
 
     pub fn validate_bounds(&self) -> Result<(), ContinuityError> {
-        if self.outputs.len() > Self::MAX_OUTPUTS
+        if self.execution_state.as_ref().is_some_and(|state| {
+            state.nodes.len() > Self::MAX_EXECUTION_NODES
+                || state.payloads.len() > Self::MAX_EXTERNALIZED_ENTRIES
+        }) || self.outputs.len() > Self::MAX_OUTPUTS
             || self.pending_waits.len() > Self::MAX_PENDING_ITEMS
             || self.pending_signals.len() > Self::MAX_PENDING_ITEMS
             || self.effect_ids.len() > Self::MAX_PENDING_ITEMS

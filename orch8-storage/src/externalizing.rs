@@ -137,16 +137,8 @@ pub fn externalize_fields(
     refs
 }
 
-/// Logical payload record for backup/restore. Codecs remain a backend detail;
-/// encryption remains a wrapper concern. Preserve ownership and GC timestamps.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct ExternalizedEntry {
-    pub instance_id: orch8_types::ids::InstanceId,
-    pub ref_key: String,
-    pub payload: Value,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
-}
+// Keep the existing storage API path while sharing the logical wire type.
+pub use orch8_types::output::ExternalizedEntry;
 
 pub(crate) fn decode_payload(
     payload: Option<Value>,

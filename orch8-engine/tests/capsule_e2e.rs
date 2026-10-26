@@ -126,6 +126,71 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         .await
         .unwrap()
         .unwrap();
+    // A trusted signer cannot bind this tenant's imported instance to a
+    // sequence owned by another tenant, even with a matching sequence hash.
+    let foreign_store: Arc<dyn StorageBackend> =
+        Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let mut foreign_sequence = sequence.clone();
+    foreign_sequence.tenant_id = orch8_types::ids::TenantId::new("other-account").unwrap();
+    foreign_store
+        .create_sequence(&foreign_sequence)
+        .await
+        .unwrap();
+    let mut foreign_manifest = signed.manifest.clone();
+    foreign_manifest.sequence.content_sha256 =
+        orch8_engine::capsule::sequence_content_hash(&foreign_sequence, foreign_manifest.schema)
+            .unwrap();
+    let foreign_signed =
+        orch8_publisher::capsule::sign_capsule_manifest(foreign_manifest, &signing_key).unwrap();
+    let foreign_import_id = orch8_types::ids::InstanceId::new();
+    let foreign_import = verify_and_import_paused_capsule_bytes(
+        foreign_store.as_ref(),
+        &foreign_signed,
+        &sealed,
+        CapsuleImportRequest {
+            tenant_id: &instance.tenant_id,
+            destination_runtime_id: destination_runtime,
+            destination_instance_id: Some(foreign_import_id),
+            expected_epoch: ExecutionEpoch::initial(),
+            trusted_public_keys: &trusted,
+            now: Utc::now(),
+        },
+        &encryptor,
+    )
+    .await;
+    assert!(
+        matches!(foreign_import, Err(CapsuleServiceError::OwnershipMismatch)),
+        "cross-tenant sequence import must be refused: {foreign_import:?}"
+    );
+    assert!(
+        foreign_store
+            .get_instance(foreign_import_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let mut wrong_version = signed.manifest.clone();
+    wrong_version.sequence.version += 1;
+    let wrong_version =
+        orch8_publisher::capsule::sign_capsule_manifest(wrong_version, &signing_key).unwrap();
+    assert!(matches!(
+        verify_and_import_paused_capsule_bytes(
+            isolated.as_ref(),
+            &wrong_version,
+            &sealed,
+            CapsuleImportRequest {
+                tenant_id: &instance.tenant_id,
+                destination_runtime_id: destination_runtime,
+                destination_instance_id: None,
+                expected_epoch: ExecutionEpoch::initial(),
+                trusted_public_keys: &trusted,
+                now: Utc::now()
+            },
+            &encryptor
+        )
+        .await,
+        Err(CapsuleServiceError::PayloadIdentityMismatch)
+    ));
     let destination_instance_id = orch8_types::ids::InstanceId::new();
     let (portable_import, _) = verify_and_import_paused_capsule_bytes(
         isolated.as_ref(),

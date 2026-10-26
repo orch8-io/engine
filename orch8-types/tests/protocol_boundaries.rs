@@ -98,6 +98,7 @@ fn payload(now: chrono::DateTime<Utc>) -> CapsulePayload {
             checkpoint_data: serde_json::json!({}),
             created_at: now,
         },
+        execution_state: None,
         outputs: Vec::new(),
         pending_waits: Vec::new(),
         pending_signals: Vec::new(),
@@ -539,4 +540,76 @@ fn core_ids_preserve_values_and_tenant_deserialization_rejects_wrong_types() {
 
     let error = serde_json::from_str::<TenantId>("123").unwrap_err();
     assert!(error.to_string().contains("a non-empty tenant_id string"));
+}
+
+#[test]
+fn capsule_11_requires_a_capable_reader_and_bounds_recovery_rows() {
+    let now = Utc::now();
+    let tenant = TenantId::new("tenant-versions").unwrap();
+    let runtime = RuntimeId::new();
+    let mut manifest = manifest(now, tenant.clone(), Some(runtime));
+    manifest.schema = CapsuleSchemaVersion::CURRENT;
+    assert!(matches!(
+        manifest.validate_for_import(now, &tenant, runtime, CapsuleSchemaVersion::V1),
+        Err(ContinuityError::UnsupportedSchema {
+            offered_major: 1,
+            offered_minor: 1
+        })
+    ));
+    assert!(
+        manifest
+            .validate_for_import(now, &tenant, runtime, CapsuleSchemaVersion::CURRENT)
+            .is_ok()
+    );
+    manifest.schema = CapsuleSchemaVersion::V1;
+    assert!(
+        manifest
+            .validate_for_import(now, &tenant, runtime, CapsuleSchemaVersion::CURRENT)
+            .is_ok()
+    );
+    let mut payload = payload(now);
+    let legacy = serde_json::to_value(&payload).unwrap();
+    assert!(legacy.get("execution_state").is_none());
+    assert!(
+        serde_json::from_value::<CapsulePayload>(legacy)
+            .unwrap()
+            .execution_state
+            .is_none()
+    );
+    let entry = orch8_types::output::ExternalizedEntry {
+        instance_id: payload.checkpoint.instance_id,
+        ref_key: "payload".into(),
+        payload: serde_json::Value::Null,
+        created_at: now,
+        expires_at: None,
+    };
+    payload.execution_state = Some(orch8_types::continuity::CapsuleExecutionState {
+        nodes: vec![],
+        payloads: vec![entry.clone(); CapsulePayload::MAX_EXTERNALIZED_ENTRIES],
+    });
+    assert!(payload.validate_bounds().is_ok());
+    payload
+        .execution_state
+        .as_mut()
+        .unwrap()
+        .payloads
+        .push(entry);
+    assert!(payload.validate_bounds().is_err());
+    let node = orch8_types::execution::ExecutionNode {
+        id: orch8_types::ids::ExecutionNodeId::new(),
+        instance_id: payload.checkpoint.instance_id,
+        block_id: BlockId::new("work"),
+        parent_id: None,
+        block_type: orch8_types::execution::BlockType::Step,
+        branch_index: None,
+        state: orch8_types::execution::NodeState::Pending,
+        started_at: None,
+        completed_at: None,
+    };
+    let state = payload.execution_state.as_mut().unwrap();
+    state.payloads.clear();
+    state.nodes = vec![node.clone(); CapsulePayload::MAX_EXECUTION_NODES];
+    assert!(payload.validate_bounds().is_ok());
+    payload.execution_state.as_mut().unwrap().nodes.push(node);
+    assert!(payload.validate_bounds().is_err());
 }

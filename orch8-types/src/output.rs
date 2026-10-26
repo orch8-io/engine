@@ -18,6 +18,16 @@ pub struct BlockOutput {
     pub created_at: DateTime<Utc>,
 }
 
+/// Logical externalized state, independent of backend compression/encryption.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ExternalizedEntry {
+    pub instance_id: InstanceId,
+    pub ref_key: String,
+    pub payload: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

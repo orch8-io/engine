@@ -459,6 +459,35 @@ impl EncryptingStorage {
         Ok(run)
     }
 
+    async fn encrypt_snapshot(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+    ) -> Result<crate::restore::InstanceSnapshot, StorageError> {
+        let instance = self.encrypt_instance(&snapshot.instance)?.into_owned();
+        let outputs = snapshot
+            .outputs
+            .iter()
+            .map(|output| {
+                self.encrypt_block_output(output)
+                    .map(std::borrow::Cow::into_owned)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut payloads = Vec::with_capacity(snapshot.payloads.len());
+        for entry in &snapshot.payloads {
+            let mut sealed = entry.clone();
+            sealed.payload = self
+                .seal_externalized(entry.instance_id, &entry.ref_key, &entry.payload)
+                .await?;
+            payloads.push(sealed);
+        }
+        Ok(crate::restore::InstanceSnapshot {
+            instance,
+            nodes: snapshot.nodes.clone(),
+            outputs,
+            payloads,
+        })
+    }
+
     /// Encrypt `BlockOutput.output` -- handler results (LLM responses, HTTP
     /// bodies, etc.) are the same data class as `context.data`, so they get
     /// the same at-rest protection. Returns a borrowed `Cow` when the value
@@ -798,6 +827,16 @@ passthrough_impl! {
             }
             let encrypted_outputs = outputs.iter().map(|output| self.encrypt_block_output(output).map(std::borrow::Cow::into_owned)).collect::<Result<Vec<_>, _>>()?;
             self.inner.import_capsule_instance_with_outputs(capsule_id, destination_runtime_id, encrypted_instance.as_ref(), &encrypted_checkpoint, &encrypted_outputs).await
+        }
+        async fn import_capsule_snapshot(&self, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError> {
+            snapshot.checked_nodes()?;
+            crate::restore::validate_capsule_output_import(&snapshot.instance, checkpoint, &snapshot.outputs)?;
+            let sealed = self.encrypt_snapshot(snapshot).await?;
+            let mut checkpoint = checkpoint.clone();
+            if !FieldEncryptor::is_encrypted(&checkpoint.checkpoint_data) {
+                checkpoint.checkpoint_data = self.encrypt_json_value(&checkpoint.checkpoint_data)?;
+            }
+            self.inner.import_capsule_snapshot(capsule_id, destination_runtime_id, &sealed, &checkpoint).await
         }
         async fn record_external_capsule_import(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId, imported_at: chrono::DateTime<chrono::Utc>) -> Result<orch8_types::ids::InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
@@ -1151,19 +1190,7 @@ passthrough_impl! {
     impl crate::InstanceStore for EncryptingStorage {
     async fn restore_instance_snapshot(&self, snapshot: &crate::restore::InstanceSnapshot) -> Result<bool, StorageError> {
         snapshot.checked_nodes()?;
-        let instance = self.encrypt_instance(&snapshot.instance)?.into_owned();
-        let outputs = snapshot.outputs.iter().map(|output| self.encrypt_block_output(output).map(std::borrow::Cow::into_owned)).collect::<Result<Vec<_>, _>>()?;
-        let mut payloads = Vec::with_capacity(snapshot.payloads.len());
-        for entry in &snapshot.payloads {
-            payloads.push(crate::externalizing::ExternalizedEntry {
-                instance_id: entry.instance_id, ref_key: entry.ref_key.clone(),
-                payload: self.seal_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?,
-                created_at: entry.created_at, expires_at: entry.expires_at,
-            });
-        }
-        self.inner.restore_instance_snapshot(&crate::restore::InstanceSnapshot {
-            instance, nodes: snapshot.nodes.clone(), outputs, payloads,
-        }).await
+        self.inner.restore_instance_snapshot(&self.encrypt_snapshot(snapshot).await?).await
     }
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         let encrypted = self.encrypt_instance(instance)?;

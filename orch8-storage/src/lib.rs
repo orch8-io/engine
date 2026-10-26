@@ -4168,6 +4168,31 @@ pub trait ContinuityStore: Send + Sync + 'static {
             .await
     }
 
+    /// Publish complete capsule recovery state and its immutable binding in a
+    /// single transaction. Validate ownership, unique identities and the tree
+    /// before writing. Replays preserve all existing destination state.
+    async fn import_capsule_snapshot(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        snapshot: &crate::restore::InstanceSnapshot,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<InstanceId, StorageError> {
+        if !snapshot.nodes.is_empty() || !snapshot.payloads.is_empty() {
+            return Err(StorageError::Unsupported(
+                "atomic capsule execution-state import".into(),
+            ));
+        }
+        self.import_capsule_instance_with_outputs(
+            capsule_id,
+            destination_runtime_id,
+            &snapshot.instance,
+            checkpoint,
+            &snapshot.outputs,
+        )
+        .await
+    }
+
     /// Idempotently bind a capsule to an instance hosted by an external
     /// runtime. Unlike `import_capsule_instance`, this records control-plane
     /// evidence only; the instance and checkpoint remain in the destination

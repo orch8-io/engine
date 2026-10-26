@@ -648,6 +648,30 @@ impl crate::ContinuityStore for SqliteStorage {
         checkpoint: &orch8_types::checkpoint::Checkpoint,
         outputs: &[orch8_types::output::BlockOutput],
     ) -> Result<InstanceId, StorageError> {
+        self.import_capsule_snapshot(
+            capsule_id,
+            destination_runtime_id,
+            &crate::restore::InstanceSnapshot {
+                instance: instance.clone(),
+                nodes: Vec::new(),
+                outputs: outputs.to_vec(),
+                payloads: Vec::new(),
+            },
+            checkpoint,
+        )
+        .await
+    }
+
+    async fn import_capsule_snapshot(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        snapshot: &crate::restore::InstanceSnapshot,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<InstanceId, StorageError> {
+        let nodes = snapshot.checked_nodes()?;
+        let instance = &snapshot.instance;
+        let outputs = &snapshot.outputs;
         crate::restore::validate_capsule_output_import(instance, checkpoint, outputs)?;
         let mut transaction = self
             .pool
@@ -707,6 +731,12 @@ impl crate::ContinuityStore for SqliteStorage {
         .execute(&mut *transaction)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
+        for node in nodes {
+            super::execution_tree::create_node_on(&mut transaction, node).await?;
+        }
+        for entry in &snapshot.payloads {
+            super::externalized_snapshot::restore_on(&mut transaction, entry).await?;
+        }
         for output in outputs {
             super::outputs::save_on(&mut transaction, output).await?;
         }
