@@ -359,6 +359,7 @@ impl Worker {
                 detail: format!("advertised handlers are not registered: {missing:?}"),
             });
         }
+        let cancel = deps.client.admission_token();
         let admission = Arc::clone(&deps.store.admission);
         admission.configure(options.max_concurrent_tasks);
         Ok(Arc::new(Self {
@@ -370,7 +371,7 @@ impl Worker {
             counters: Counters::default(),
             active_windows: AtomicU64::new(0),
             idle_rounds: AtomicU64::new(0),
-            cancel: CancellationToken::new(),
+            cancel,
         }))
     }
 

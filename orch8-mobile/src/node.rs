@@ -21,6 +21,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use sqlx::SqlitePool;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use orch8_types::continuity::RuntimeId;
@@ -228,6 +229,7 @@ pub(crate) struct NodeClient {
     device_id: String,
     runtime_id: RuntimeId,
     advertisement: StdMutex<Advertisement>,
+    admission: CancellationToken,
 }
 
 impl NodeClient {
@@ -273,7 +275,18 @@ impl NodeClient {
             device_id,
             runtime_id,
             advertisement: StdMutex::new(advertisement),
+            admission: CancellationToken::new(),
         })
+    }
+
+    /// Children captured before node removal must remain retired even when
+    /// their worker/pump is published after the engine's slot was cleared.
+    pub(crate) fn admission_token(&self) -> CancellationToken {
+        self.admission.child_token()
+    }
+
+    pub(crate) fn retire_admission(&self) {
+        self.admission.cancel();
     }
 
     pub fn runtime_id(&self) -> RuntimeId {

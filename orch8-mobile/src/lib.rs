@@ -312,6 +312,15 @@ impl Drop for MobileEngine {
         // outlive the engine. Durable account retirement is a separate action.
         self.cancel.cancel();
         self.catalog_handlers.shutdown();
+        if let Some(slot) = self
+            .node
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            slot.client.retire_admission();
+            slot.readvertise.cancel();
+        }
         self.request_storage_close();
     }
 }
@@ -1231,6 +1240,7 @@ impl MobileEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
         {
+            slot.client.retire_admission();
             slot.readvertise.cancel();
         }
         drop((retired_provider, retired_listener, retired_handlers));
@@ -1396,12 +1406,14 @@ impl MobileEngine {
     /// (best effort), and stops the background re-advertisement.
     pub fn unregister_node(&self) {
         self.stop_worker();
+        self.stop_delegation();
         let slot = self
             .node
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(slot) = slot {
+            slot.client.retire_admission();
             slot.readvertise.cancel();
             slot.client.update_advertisement(|ad| ad.draining = true);
             if let Err(e) = self.run_with_timeout(async { slot.client.advertise().await }) {
@@ -1832,6 +1844,9 @@ impl MobileEngine {
             })
         };
         if let Some(previous) = previous {
+            if !Arc::ptr_eq(&previous.client, &client) {
+                previous.client.retire_admission();
+            }
             previous.readvertise.cancel();
         }
         spawn_readvertise_loop(&self.runtime.handle(), Arc::clone(&client), readvertise);
