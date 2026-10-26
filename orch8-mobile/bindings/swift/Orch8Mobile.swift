@@ -1735,6 +1735,15 @@ public protocol MobileCatalogRunProtocol: AnyObject, Sendable {
     func accountId()  -> String
 
     /**
+     * Explicitly archive after the app/backend acknowledges this run. Releases
+     * staged admission and its input, retaining operation-key and outcome
+     * receipts. Returns None for active, never-materialized or unowned runs.
+     * The acknowledgement is a trusted host reference, not a server-verified
+     * credential. Retrying the same reference returns the original receipt.
+     */
+    func archiveAfterAcknowledgement(acknowledgement: String) throws  -> MobileCatalogArchiveReceipt?
+
+    /**
      * Return the resulting native state, or None if the run is not owned or a
      * concurrent materialization won. A terminal outcome is never overwritten.
      */
@@ -1831,6 +1840,23 @@ open func accountId() -> String  {
         uniffiCallStatus in
     uniffi_orch8_mobile_fn_method_mobilecatalogrun_account_id(
             self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Explicitly archive after the app/backend acknowledges this run. Releases
+     * staged admission and its input, retaining operation-key and outcome
+     * receipts. Returns None for active, never-materialized or unowned runs.
+     * The acknowledgement is a trusted host reference, not a server-verified
+     * credential. Retrying the same reference returns the original receipt.
+     */
+open func archiveAfterAcknowledgement(acknowledgement: String)throws  -> MobileCatalogArchiveReceipt?  {
+    return try  FfiConverterOptionTypeMobileCatalogArchiveReceipt.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobilecatalogrun_archive_after_acknowledgement(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(acknowledgement),uniffiCallStatus
     )
 })
 }
@@ -4700,6 +4726,85 @@ public func FfiConverterTypeMobileAccountIdentity_lower(_ value: MobileAccountId
 
 
 /**
+ * Compact durable acknowledgement, with no input, context or raw acknowledgement.
+ */
+public struct MobileCatalogArchiveReceipt: Equatable, Hashable {
+    public let instanceId: String
+    public let accountId: String
+    public let catalogId: String
+    public let acknowledgementDigest: String
+    public let archivedAt: String
+    /**
+     * None means the native row was already purged; no outcome is inferred.
+     */
+    public let outcome: InstanceStateKind?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(instanceId: String, accountId: String, catalogId: String, acknowledgementDigest: String, archivedAt: String,
+        /**
+         * None means the native row was already purged; no outcome is inferred.
+         */outcome: InstanceStateKind?) {
+        self.instanceId = instanceId
+        self.accountId = accountId
+        self.catalogId = catalogId
+        self.acknowledgementDigest = acknowledgementDigest
+        self.archivedAt = archivedAt
+        self.outcome = outcome
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension MobileCatalogArchiveReceipt: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeMobileCatalogArchiveReceipt: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MobileCatalogArchiveReceipt {
+        return
+            try MobileCatalogArchiveReceipt(
+                instanceId: FfiConverterString.read(from: &buf),
+                accountId: FfiConverterString.read(from: &buf),
+                catalogId: FfiConverterString.read(from: &buf),
+                acknowledgementDigest: FfiConverterString.read(from: &buf),
+                archivedAt: FfiConverterString.read(from: &buf),
+                outcome: FfiConverterOptionTypeInstanceStateKind.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: MobileCatalogArchiveReceipt, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.instanceId, into: &buf)
+        FfiConverterString.write(value.accountId, into: &buf)
+        FfiConverterString.write(value.catalogId, into: &buf)
+        FfiConverterString.write(value.acknowledgementDigest, into: &buf)
+        FfiConverterString.write(value.archivedAt, into: &buf)
+        FfiConverterOptionTypeInstanceStateKind.write(value.outcome, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogArchiveReceipt_lift(_ buf: RustBuffer) throws -> MobileCatalogArchiveReceipt {
+    return try FfiConverterTypeMobileCatalogArchiveReceipt.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeMobileCatalogArchiveReceipt_lower(_ value: MobileCatalogArchiveReceipt) -> RustBuffer {
+    return FfiConverterTypeMobileCatalogArchiveReceipt.lower(value)
+}
+
+
+/**
  * Engine-issued callback identity. It is never accepted as authorization by
  * any SDK method, and is never derived from mutable workflow input.
  */
@@ -6426,6 +6531,8 @@ public enum MobileCatalogNativeState: Equatable, Hashable {
     case notMaterialized
     case present(state: InstanceStateKind
     )
+    case recorded(state: InstanceStateKind
+    )
     case unavailable
 
 
@@ -6453,7 +6560,10 @@ public struct FfiConverterTypeMobileCatalogNativeState: FfiConverterRustBuffer {
         case 2: return .present(state: try FfiConverterTypeInstanceStateKind.read(from: &buf)
         )
 
-        case 3: return .unavailable
+        case 3: return .recorded(state: try FfiConverterTypeInstanceStateKind.read(from: &buf)
+        )
+
+        case 4: return .unavailable
 
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -6472,8 +6582,13 @@ public struct FfiConverterTypeMobileCatalogNativeState: FfiConverterRustBuffer {
             FfiConverterTypeInstanceStateKind.write(state, into: &buf)
 
 
-        case .unavailable:
+        case let .recorded(state):
             writeInt(&buf, Int32(3))
+            FfiConverterTypeInstanceStateKind.write(state, into: &buf)
+
+
+        case .unavailable:
+            writeInt(&buf, Int32(4))
 
         }
     }
@@ -6501,6 +6616,7 @@ public enum MobileCatalogRequestState: Equatable, Hashable {
 
     case prepared
     case cancelled
+    case archived
 
 
 
@@ -6526,6 +6642,8 @@ public struct FfiConverterTypeMobileCatalogRequestState: FfiConverterRustBuffer 
 
         case 2: return .cancelled
 
+        case 3: return .archived
+
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -6540,6 +6658,10 @@ public struct FfiConverterTypeMobileCatalogRequestState: FfiConverterRustBuffer 
 
         case .cancelled:
             writeInt(&buf, Int32(2))
+
+
+        case .archived:
+            writeInt(&buf, Int32(3))
 
         }
     }
@@ -7082,6 +7204,30 @@ fileprivate struct FfiConverterOptionTypeTokenProvider: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeMobileCatalogArchiveReceipt: FfiConverterRustBuffer {
+    typealias SwiftType = MobileCatalogArchiveReceipt?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeMobileCatalogArchiveReceipt.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeMobileCatalogArchiveReceipt.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeMobileCatalogRunSnapshot: FfiConverterRustBuffer {
     typealias SwiftType = MobileCatalogRunSnapshot?
 
@@ -7496,6 +7642,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_account_id() != 12243) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_archive_after_acknowledgement() != 44965) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobilecatalogrun_cancel() != 20162) {

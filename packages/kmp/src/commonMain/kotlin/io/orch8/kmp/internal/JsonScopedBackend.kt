@@ -104,9 +104,13 @@ private class JsonCatalogBackend(port: Orch8ScopedBridge, data: JsonObject) : Js
                 "not_materialized" -> CatalogNativeState.NotMaterialized
                 "unavailable" -> CatalogNativeState.Unavailable
                 "present" -> CatalogNativeState.Present(InstanceState.fromWire(native.string("state")))
+                "recorded" -> CatalogNativeState.Recorded(InstanceState.fromWire(native.string("state")).also { if (!it.isTerminal) malformed("nonterminal archive outcome") })
                 else -> malformed("unknown native state")
             }
-            val request = when(item.string("requestState")) { "prepared" -> CatalogRequestState.PREPARED; "cancelled" -> CatalogRequestState.CANCELLED; else -> malformed("unknown request state") }
+            val request = when(item.string("requestState")) { "prepared" -> CatalogRequestState.PREPARED; "cancelled" -> CatalogRequestState.CANCELLED; "archived" -> CatalogRequestState.ARCHIVED; else -> malformed("unknown request state") }
+            if ((state is CatalogNativeState.Recorded && request != CatalogRequestState.ARCHIVED) ||
+                (request == CatalogRequestState.ARCHIVED && state != CatalogNativeState.Unavailable && state !is CatalogNativeState.Recorded))
+                malformed("inconsistent archive history")
             CatalogRunSummary(item.string("instanceId"), accountId, catalogId, epoch, item.string("workflow"), version,
                 item.string("sequenceId"), item.string("createdAt"), request, state)
         }
@@ -143,5 +147,22 @@ private class JsonRunBackend(port: Orch8ScopedBridge, data: JsonObject) : JsonSc
     override fun completeStep(expectedUpdatedAt: String, stepName: String, outputJson: String): Boolean = payload("completeStep",port.invoke("completeStep",buildJsonObject {
         put("expectedUpdatedAt",expectedUpdatedAt);put("stepName",stepName);put("outputJson",outputJson)
     })).booleanValue()
+    override fun archiveAfterAcknowledgement(acknowledgement: String): CatalogArchiveReceipt? {
+        val value = payload("archiveAfterAcknowledgement", port.invoke("archiveAfterAcknowledgement", buildJsonObject {
+            put("acknowledgement", acknowledgement)
+        }))
+        if (value == JsonNull) return null
+        val receipt = value.objectValue()
+        if (receipt.string("instanceId") != instanceId || receipt.string("accountId") != accountId || receipt.string("catalogId") != catalogId)
+            malformed("archive owner mismatch")
+        val outcome = when (val state = receipt["outcome"]) {
+            JsonNull -> null
+            is JsonPrimitive -> if (state.isString) InstanceState.fromWire(state.content).also { if (!it.isTerminal) malformed("nonterminal archive outcome") } else malformed("invalid archive outcome")
+            else -> malformed("missing archive outcome")
+        }
+        val digest = receipt.string("acknowledgementDigest")
+        if (digest.length != 64 || digest.any { it !in '0'..'9' && it !in 'a'..'f' }) malformed("invalid acknowledgement digest")
+        return CatalogArchiveReceipt(instanceId,accountId,catalogId,digest,receipt.string("archivedAt"),outcome)
+    }
     override fun forgetCancelledRequest(): Boolean = payload("forgetCancelledRequest",port.invoke("forgetCancelledRequest")).booleanValue()
 }

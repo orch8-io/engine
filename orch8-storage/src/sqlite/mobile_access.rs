@@ -21,7 +21,8 @@ pub const LEGACY_MOBILE_OWNER_SQL: &str = "i.tenant_id = 'mobile'
 pub const CATALOG_NATIVE_IDENTITY_SQL: &str = "i.id=r.id
  AND i.tenant_id='mobile-account-' || r.account_id
  AND i.namespace='catalog-' || r.catalog_id
- AND i.sequence_id=r.selected_sequence_id AND i.created_at=r.created_at";
+ AND i.sequence_id=r.selected_sequence_id AND i.created_at=r.created_at
+ AND i.sub_tenant IS NULL AND i.parent_instance_id IS NULL";
 
 fn selection(
     access: &MobileInstanceAccess,
@@ -57,7 +58,7 @@ fn selection(
                 .push_bind(*session_epoch)
                 .push(" AND ")
                 .push(if current_execution {
-                    "r.owner_epoch=a.epoch"
+                    "r.owner_epoch=a.epoch AND r.state='prepared' AND r.archive_receipt_id IS NULL"
                 } else {
                     "r.owner_epoch<=a.epoch"
                 })

@@ -83,12 +83,14 @@ pub struct MobileCatalogRunSnapshot {
 pub enum MobileCatalogRequestState {
     Prepared,
     Cancelled,
+    Archived,
 }
 
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum MobileCatalogNativeState {
     NotMaterialized,
     Present { state: InstanceStateKind },
+    Recorded { state: InstanceStateKind },
     Unavailable,
 }
 
@@ -104,6 +106,31 @@ pub struct MobileCatalogRunSummary {
     pub created_at: String,
     pub request_state: MobileCatalogRequestState,
     pub native_state: MobileCatalogNativeState,
+}
+
+/// Compact durable acknowledgement, with no input, context or raw acknowledgement.
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct MobileCatalogArchiveReceipt {
+    pub instance_id: String,
+    pub account_id: String,
+    pub catalog_id: String,
+    pub acknowledgement_digest: String,
+    pub archived_at: String,
+    /// None means the native row was already purged; no outcome is inferred.
+    pub outcome: Option<InstanceStateKind>,
+}
+
+impl From<crate::storage::scopes::runs::archive::ArchiveReceipt> for MobileCatalogArchiveReceipt {
+    fn from(receipt: crate::storage::scopes::runs::archive::ArchiveReceipt) -> Self {
+        Self {
+            instance_id: receipt.instance_id,
+            account_id: receipt.account_id,
+            catalog_id: receipt.catalog_id,
+            acknowledgement_digest: receipt.acknowledgement_digest,
+            archived_at: receipt.archived_at,
+            outcome: receipt.outcome.map(Into::into),
+        }
+    }
 }
 
 /// Opaque pagination position. The destination catalog revalidates its scope

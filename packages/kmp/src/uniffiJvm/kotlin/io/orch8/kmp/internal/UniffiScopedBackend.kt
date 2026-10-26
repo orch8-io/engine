@@ -1,5 +1,6 @@
 package io.orch8.kmp.internal
 
+import io.orch8.kmp.CatalogArchiveReceipt
 import io.orch8.kmp.AccountIdentity
 import io.orch8.kmp.CatalogCallbackContext
 import io.orch8.kmp.CatalogConfiguration
@@ -85,11 +86,12 @@ internal class UniffiCatalogBackend(private val native: UCatalog) : CatalogBacke
             CatalogRunPage(page.items.map { item ->
                 CatalogRunSummary(item.instanceId, item.accountId, item.catalogId, item.ownerEpoch,
                     item.workflow, item.version, item.sequenceId, item.createdAt,
-                    when (item.requestState) { URequestState.PREPARED -> CatalogRequestState.PREPARED; URequestState.CANCELLED -> CatalogRequestState.CANCELLED },
+                    when (item.requestState) { URequestState.PREPARED -> CatalogRequestState.PREPARED; URequestState.CANCELLED -> CatalogRequestState.CANCELLED; URequestState.ARCHIVED -> CatalogRequestState.ARCHIVED },
                     when (val state = item.nativeState) {
                         UNativeState.NotMaterialized -> CatalogNativeState.NotMaterialized
                         UNativeState.Unavailable -> CatalogNativeState.Unavailable
                         is UNativeState.Present -> CatalogNativeState.Present(InstanceState.fromWire(state.state.name))
+                        is UNativeState.Recorded -> CatalogNativeState.Recorded(InstanceState.fromWire(state.state.name))
                     })
             }, page.next?.let { CatalogHistoryCursor(UniffiCursorBackend(it)) })
         }
@@ -114,6 +116,10 @@ internal class UniffiCatalogRunBackend(private val native: URun) : CatalogRunBac
     override fun cancel(): InstanceState? = scopedErrors { native.cancel()?.let { InstanceState.fromWire(it.name) } }
     override fun completeStep(expectedUpdatedAt: String, stepName: String, outputJson: String): Boolean =
         scopedErrors { native.completeStep(expectedUpdatedAt, stepName, outputJson) }
+    override fun archiveAfterAcknowledgement(acknowledgement: String): CatalogArchiveReceipt? = scopedErrors {
+        native.archiveAfterAcknowledgement(acknowledgement)?.let { CatalogArchiveReceipt(it.instanceId,it.accountId,it.catalogId,
+            it.acknowledgementDigest,it.archivedAt,it.outcome?.let { state -> InstanceState.fromWire(state.name) }) }
+    }
     override fun forgetCancelledRequest(): Boolean = scopedErrors { native.forgetCancelledRequest() }
     override fun closeView() = scopedErrors { native.closeView() }
     override fun dispose() = native.close()

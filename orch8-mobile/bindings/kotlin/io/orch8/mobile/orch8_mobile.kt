@@ -953,6 +953,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobilecatalogrun_account_id(
     ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobilecatalogrun_archive_after_acknowledgement(
+    ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobilecatalogrun_cancel(
     ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobilecatalogrun_catalog_id(
@@ -1187,6 +1189,8 @@ internal object UniffiLib {
     external fun uniffi_orch8_mobile_fn_free_mobilecatalogrun(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): Unit
     external fun uniffi_orch8_mobile_fn_method_mobilecatalogrun_account_id(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_orch8_mobile_fn_method_mobilecatalogrun_archive_after_acknowledgement(`ptr`: Long,`acknowledgement`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_orch8_mobile_fn_method_mobilecatalogrun_cancel(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
@@ -1530,6 +1534,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobilecatalogrun_account_id() and 0xFFFF) != 12243) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobilecatalogrun_archive_after_acknowledgement() and 0xFFFF) != 44965) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobilecatalogrun_cancel() and 0xFFFF) != 20162) {
@@ -3825,6 +3832,15 @@ public interface MobileCatalogRunInterface {
     fun `accountId`(): kotlin.String
 
     /**
+     * Explicitly archive after the app/backend acknowledges this run. Releases
+     * staged admission and its input, retaining operation-key and outcome
+     * receipts. Returns None for active, never-materialized or unowned runs.
+     * The acknowledgement is a trusted host reference, not a server-verified
+     * credential. Retrying the same reference returns the original receipt.
+     */
+    fun `archiveAfterAcknowledgement`(`acknowledgement`: kotlin.String): MobileCatalogArchiveReceipt?
+
+    /**
      * Return the resulting native state, or None if the run is not owned or a
      * concurrent materialization won. A terminal outcome is never overwritten.
      */
@@ -3973,6 +3989,28 @@ open class MobileCatalogRun: Disposable, AutoCloseable, MobileCatalogRunInterfac
     UniffiLib.uniffi_orch8_mobile_fn_method_mobilecatalogrun_account_id(
         it,
         _status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Explicitly archive after the app/backend acknowledges this run. Releases
+     * staged admission and its input, retaining operation-key and outcome
+     * receipts. Returns None for active, never-materialized or unowned runs.
+     * The acknowledgement is a trusted host reference, not a server-verified
+     * credential. Retrying the same reference returns the original receipt.
+     */
+    @Throws(MobileException::class)override fun `archiveAfterAcknowledgement`(`acknowledgement`: kotlin.String): MobileCatalogArchiveReceipt? {
+            return FfiConverterOptionalTypeMobileCatalogArchiveReceipt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobilecatalogrun_archive_after_acknowledgement(
+        it,
+
+        FfiConverterString.lower(`acknowledgement`),_status)
 }
     }
     )
@@ -7342,6 +7380,70 @@ public object FfiConverterTypeMobileAccountIdentity: FfiConverterRustBuffer<Mobi
 
 
 /**
+ * Compact durable acknowledgement, with no input, context or raw acknowledgement.
+ */
+data class MobileCatalogArchiveReceipt (
+    var `instanceId`: kotlin.String
+    ,
+    var `accountId`: kotlin.String
+    ,
+    var `catalogId`: kotlin.String
+    ,
+    var `acknowledgementDigest`: kotlin.String
+    ,
+    var `archivedAt`: kotlin.String
+    ,
+    /**
+     * None means the native row was already purged; no outcome is inferred.
+     */
+    var `outcome`: InstanceStateKind?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeMobileCatalogArchiveReceipt: FfiConverterRustBuffer<MobileCatalogArchiveReceipt> {
+    override fun read(buf: ByteBuffer): MobileCatalogArchiveReceipt {
+        return MobileCatalogArchiveReceipt(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterOptionalTypeInstanceStateKind.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: MobileCatalogArchiveReceipt) = (
+            FfiConverterString.allocationSize(value.`instanceId`) +
+            FfiConverterString.allocationSize(value.`accountId`) +
+            FfiConverterString.allocationSize(value.`catalogId`) +
+            FfiConverterString.allocationSize(value.`acknowledgementDigest`) +
+            FfiConverterString.allocationSize(value.`archivedAt`) +
+            FfiConverterOptionalTypeInstanceStateKind.allocationSize(value.`outcome`)
+    )
+
+    override fun write(value: MobileCatalogArchiveReceipt, buf: ByteBuffer) {
+            FfiConverterString.write(value.`instanceId`, buf)
+            FfiConverterString.write(value.`accountId`, buf)
+            FfiConverterString.write(value.`catalogId`, buf)
+            FfiConverterString.write(value.`acknowledgementDigest`, buf)
+            FfiConverterString.write(value.`archivedAt`, buf)
+            FfiConverterOptionalTypeInstanceStateKind.write(value.`outcome`, buf)
+    }
+}
+
+
+
+/**
  * Engine-issued callback identity. It is never accepted as authorization by
  * any SDK method, and is never derived from mutable workflow input.
  */
@@ -8627,6 +8729,15 @@ sealed class MobileCatalogNativeState {
         companion object
     }
 
+    data class Recorded(
+        val `state`: io.orch8.mobile.InstanceStateKind) : MobileCatalogNativeState()
+
+    {
+
+
+        companion object
+    }
+
     object Unavailable : MobileCatalogNativeState()
 
 
@@ -8650,7 +8761,10 @@ public object FfiConverterTypeMobileCatalogNativeState : FfiConverterRustBuffer<
             2 -> MobileCatalogNativeState.Present(
                 FfiConverterTypeInstanceStateKind.read(buf),
                 )
-            3 -> MobileCatalogNativeState.Unavailable
+            3 -> MobileCatalogNativeState.Recorded(
+                FfiConverterTypeInstanceStateKind.read(buf),
+                )
+            4 -> MobileCatalogNativeState.Unavailable
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
@@ -8663,6 +8777,13 @@ public object FfiConverterTypeMobileCatalogNativeState : FfiConverterRustBuffer<
             )
         }
         is MobileCatalogNativeState.Present -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeInstanceStateKind.allocationSize(value.`state`)
+            )
+        }
+        is MobileCatalogNativeState.Recorded -> {
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
@@ -8688,8 +8809,13 @@ public object FfiConverterTypeMobileCatalogNativeState : FfiConverterRustBuffer<
                 FfiConverterTypeInstanceStateKind.write(value.`state`, buf)
                 Unit
             }
-            is MobileCatalogNativeState.Unavailable -> {
+            is MobileCatalogNativeState.Recorded -> {
                 buf.putInt(3)
+                FfiConverterTypeInstanceStateKind.write(value.`state`, buf)
+                Unit
+            }
+            is MobileCatalogNativeState.Unavailable -> {
+                buf.putInt(4)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -8704,7 +8830,8 @@ public object FfiConverterTypeMobileCatalogNativeState : FfiConverterRustBuffer<
 enum class MobileCatalogRequestState {
 
     PREPARED,
-    CANCELLED;
+    CANCELLED,
+    ARCHIVED;
 
 
 
@@ -9124,6 +9251,38 @@ public object FfiConverterOptionalTypeTokenProvider: FfiConverterRustBuffer<Toke
         } else {
             buf.put(1)
             FfiConverterTypeTokenProvider.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeMobileCatalogArchiveReceipt: FfiConverterRustBuffer<MobileCatalogArchiveReceipt?> {
+    override fun read(buf: ByteBuffer): MobileCatalogArchiveReceipt? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeMobileCatalogArchiveReceipt.read(buf)
+    }
+
+    override fun allocationSize(value: MobileCatalogArchiveReceipt?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeMobileCatalogArchiveReceipt.allocationSize(value)
+        }
+    }
+
+    override fun write(value: MobileCatalogArchiveReceipt?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeMobileCatalogArchiveReceipt.write(value, buf)
         }
     }
 }

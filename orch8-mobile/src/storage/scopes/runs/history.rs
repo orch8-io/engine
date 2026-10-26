@@ -26,6 +26,7 @@ pub(crate) struct CatalogRunCursor {
 pub(crate) enum CatalogNativeState {
     NotMaterialized,
     Present(InstanceState),
+    Recorded(InstanceState),
     /// Native data may have been purged, or its identity/evidence is inconsistent.
     /// This makes no execution-outcome claim and never permits rematerialization.
     Unavailable,
@@ -58,7 +59,7 @@ fn summary(row: &SqliteRow) -> Result<CatalogRunSummary, StorageError> {
     let native: Option<String> = row.try_get("native_state")?;
     let receipt: Option<String> = row.try_get("receipt_id")?;
     let present: bool = row.try_get("native_row_exists")?;
-    let native_state = match (receipt.is_some(), native) {
+    let mut native_state = match (receipt.is_some(), native) {
         (true, Some(state)) => CatalogNativeState::Present(
             state
                 .parse()
@@ -67,6 +68,15 @@ fn summary(row: &SqliteRow) -> Result<CatalogRunSummary, StorageError> {
         (false, None) if !present => CatalogNativeState::NotMaterialized,
         _ => CatalogNativeState::Unavailable,
     };
+    let archived: Option<String> = row.try_get("archive_receipt_id")?;
+    if archived.is_some() {
+        let compact = super::decode(row)?;
+        let archive = super::archive::decode_receipt(row, &compact)?;
+        native_state = archive.outcome.map_or(
+            CatalogNativeState::Unavailable,
+            CatalogNativeState::Recorded,
+        );
+    }
     Ok(CatalogRunSummary {
         id: InstanceId::from_uuid(
             row.try_get::<String, _>("id")?
@@ -86,9 +96,13 @@ fn summary(row: &SqliteRow) -> Result<CatalogRunSummary, StorageError> {
         created_at: chrono::DateTime::parse_from_rfc3339(&row.try_get::<String, _>("created_at")?)
             .map_err(|_| invalid("invalid scoped run timestamp"))?
             .with_timezone(&chrono::Utc),
-        request_state: match row.try_get::<String, _>("state")?.as_str() {
-            "prepared" => CatalogRunState::Prepared,
-            "cancelled" => CatalogRunState::Cancelled,
+        request_state: match (
+            archived.is_some(),
+            row.try_get::<String, _>("state")?.as_str(),
+        ) {
+            (false, "prepared") => CatalogRunState::Prepared,
+            (false, "cancelled") => CatalogRunState::Cancelled,
+            (true, "cancelled") => CatalogRunState::Archived,
             _ => return Err(invalid("invalid scoped run state")),
         },
         native_state,
@@ -124,11 +138,15 @@ impl MobileStorage {
         let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "SELECT r.id,r.account_id,r.catalog_id,r.owner_epoch,r.selected_sequence_id,
              r.workflow_name,r.workflow_version,r.created_at,r.state,m.request_id AS receipt_id,
+             r.archive_receipt_id,r.admitted_manifest_version,r.admitted_manifest_digest,
+             r.request_digest,r.requested_version,'null' AS input,4 AS input_bytes,
+             a.receipt_json,a.receipt_bytes,a.receipt_digest,m.request_fingerprint,m.definition_fingerprint,
              i.id IS NOT NULL AS native_row_exists,
              CASE WHEN m.request_id IS NOT NULL AND ({CATALOG_NATIVE_IDENTITY_SQL}) THEN i.state END AS native_state
              FROM mobile_catalog_run_requests r
              LEFT JOIN mobile_catalog_run_materializations m ON m.request_id=r.id
              LEFT JOIN task_instances i ON i.id=r.id
+             LEFT JOIN mobile_catalog_run_archives a ON a.request_id=r.archive_receipt_id
              WHERE r.account_id=?1 AND r.catalog_id=?2 AND r.owner_epoch<=?3 AND r.id>?4
              ORDER BY r.id LIMIT ?5"
         )))

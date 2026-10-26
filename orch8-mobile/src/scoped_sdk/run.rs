@@ -150,6 +150,31 @@ impl MobileCatalogRun {
         })
     }
 
+    /// Explicitly archive after the app/backend acknowledges this run. Releases
+    /// staged admission and its input, retaining operation-key and outcome
+    /// receipts. Returns None for active, never-materialized or unowned runs.
+    /// The acknowledgement is a trusted host reference, not a server-verified
+    /// credential. Retrying the same reference returns the original receipt.
+    pub fn archive_after_acknowledgement(
+        &self,
+        acknowledgement: String,
+    ) -> Result<Option<super::MobileCatalogArchiveReceipt>, MobileError> {
+        let engine = self.view.engine()?;
+        self.view.run(&engine, async {
+            Ok(engine
+                .lifecycle
+                .mobile_storage()
+                .archive_catalog_run(
+                    &self.scope,
+                    self.id,
+                    &acknowledgement,
+                    crate::storage::scopes::runs::archive::limits(),
+                )
+                .await?
+                .map(Into::into))
+        })
+    }
+
     /// Release a cancelled, never-materialized request's quota. Materialized
     /// executions and unknown effects retain their durable evidence.
     pub fn forget_cancelled_request(&self) -> Result<bool, MobileError> {

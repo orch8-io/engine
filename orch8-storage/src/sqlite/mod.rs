@@ -471,6 +471,20 @@ impl SqliteStorage {
                     StorageError::Query(format!("{heading}: {error}"))
                 })?;
         }
+        // The generic reconciler preserves neither REFERENCES nor CHECK. This
+        // nullable ownership marker needs its FK on upgraded databases too.
+        let mut migration = helpers::begin_immediate(&self.pool).await?;
+        let columns = sqlx::query("PRAGMA table_info(mobile_catalog_run_requests)")
+            .fetch_all(&mut *migration)
+            .await?;
+        if !columns
+            .iter()
+            .any(|row| row.get::<String, _>("name") == "archive_receipt_id")
+        {
+            sqlx::query("ALTER TABLE mobile_catalog_run_requests ADD COLUMN archive_receipt_id TEXT REFERENCES mobile_catalog_run_archives(request_id)")
+                .execute(&mut *migration).await?;
+        }
+        migration.commit().await?;
         self.reconcile_columns().await?;
         for stmt in &index_stmts {
             if let Err(e) = sqlx::query(AssertSqlSafe(*stmt)).execute(&self.pool).await {

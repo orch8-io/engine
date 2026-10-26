@@ -3443,3 +3443,68 @@ when an assertion fails. The targeted Rust boundary test, TypeScript typecheck
 and all seven cron edge-case tests pass against the actual server and an isolated
 SQLite database; Postgres coverage awaits the new full CI head. Production cron
 behavior is unchanged.
+
+
+### DME145 — Explicit acknowledged archives release admission without replay
+
+User policy: archive only after app/backend acknowledgement, retaining compact
+operation-key and outcome receipts. Completed catalog requests previously kept
+consuming the 256-record hot catalog allowance even after native GC. Automatic
+removal would permit replay or lose the distinction between a recorded outcome
+and missing native data.
+
+The archive operation takes an explicit trusted host acknowledgement reference.
+It validates the current account/catalog session, frozen materialization identity
+and native owner inside the same writer transaction as compaction. Active and
+never-materialized requests return no receipt. A previously purged materialized
+run can archive only with an unknown outcome. A terminal native row contributes
+its actual state. The reference is hashed; neither raw acknowledgement nor input
+is copied into the receipt. This is a host acknowledgement contract, not remote
+credential verification.
+
+Hot admission uses a separate covering partial index excluding archived markers.
+Archival clears staged input to JSON null and releases its sequence FK, retaining
+request identity, operation key and original materialization fingerprints. An
+identical prepare retry recovers the archived ID; changed requests and start are
+refused. The stored dispatch-disabled tag remains cancelled for existing schema
+constraints, while public history explicitly reports Archived and Recorded
+outcomes. Archived is not an execution cancellation. Native contexts, trees and
+effect evidence are preserved for their existing GC policy.
+
+Schema 56 adds a compact receipt ledger and a nullable FK marker on requests.
+The upgrade explicitly adds the FK-bearing column before generic reconciliation,
+which otherwise discards REFERENCES clauses. Both FK directions preserve evidence.
+Cold record/encoded-receipt ceilings are independent and shared: 65536/32768/16384
+records and 64/32/16 MiB globally/per account/per catalog. Each receipt is at most
+4 KiB. Overflow refuses archival, leaving hot admission and input unchanged.
+Permanent deduplication has finite retention capacity; keys are never silently
+evicted. Original bounded key/metadata and materialization records remain durable.
+
+The public native API, direct JVM adapter and Swift JSON adapter expose the same
+acknowledged operation. Protocol 5 requires matched framework/adapter binaries.
+History distinguishes a recorded outcome from a live native snapshot, and keeps
+an unknown outcome unknown after GC.
+
+
+The archive ownership review reproduced a subtenant collision: changing a native
+row's subtenant still let it supply the original root catalog run's outcome.
+The new regression fails before repair. The shared native identity predicate now
+requires no subtenant and no parent, matching materialization's immutable root
+identity. Read/answer/cancel/history and archive use the same exact predicate.
+The covering-index regression also caught the first partial-index draft reading
+table rows. Including its nullable marker restores a genuinely covering hot
+quota plan, while archived receipts do not enlarge that scan.
+
+
+Final local validation: 657 mobile and 252 storage unit tests, 109 mobile
+integration/example/coverage tests, 92 JVM tests and 82 Kotlin/Native tests pass
+with no failures/skips. The final scoped suite passes 127 tests after lint
+cleanup. All-target mobile/storage Clippy passes with warnings denied. The
+current-source native library passes all five generated binding comparisons
+and the strict Swift/Kotlin/Rust four-scope host fixture, including archives,
+receipt retries, recorded history and archived-key no-restart behavior. Actual
+iOS framework/Swift bridge, SDK packaging, docs and whitespace checks pass.
+The ten archive regressions include a populated v55 upgrade/reopen, input/quota
+recovery, all cold quota dimensions, write failure after receipt insertion,
+corrupted evidence, unknown outcomes, concurrent calls, foreign/retired owners
+and the reproduced subtenant collision. No release is published.

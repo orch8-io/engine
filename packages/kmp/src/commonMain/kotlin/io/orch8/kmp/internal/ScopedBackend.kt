@@ -1,5 +1,6 @@
 package io.orch8.kmp.internal
 
+import io.orch8.kmp.CatalogArchiveReceipt
 import io.orch8.kmp.CatalogCallbackContext
 import io.orch8.kmp.CatalogConfiguration
 import io.orch8.kmp.CatalogRunPage
@@ -41,6 +42,7 @@ internal interface CatalogRunBackend : ScopedViewBackend {
     fun snapshot(): CatalogRunSnapshot?
     fun cancel(): InstanceState?
     fun completeStep(expectedUpdatedAt: String, stepName: String, outputJson: String): Boolean
+    fun archiveAfterAcknowledgement(acknowledgement: String): CatalogArchiveReceipt?
     fun forgetCancelledRequest(): Boolean
 }
 internal interface CatalogCursorBackend { fun dispose() }
