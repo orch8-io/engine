@@ -85,7 +85,7 @@ async fn collection_read_failure(method: &'static str, persisted_snapshot: bool)
 
 #[tokio::test]
 async fn first_collection_output_read_failure_remains_retryable() {
-    collection_read_failure("get_all_outputs", false).await;
+    collection_read_failure("get_latest_completed_outputs", false).await;
 }
 
 #[tokio::test]

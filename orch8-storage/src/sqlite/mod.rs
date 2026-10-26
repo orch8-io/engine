@@ -1571,6 +1571,13 @@ impl crate::OutputStore for SqliteStorage {
         outputs::get_batch(self, keys).await
     }
 
+    async fn get_latest_completed_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_latest_completed(self, instance_id).await
+    }
+
     async fn get_all_outputs(
         &self,
         instance_id: InstanceId,

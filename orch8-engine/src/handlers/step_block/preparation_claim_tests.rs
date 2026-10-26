@@ -71,7 +71,7 @@ async fn claim_loss_while_loading_templates_prevents_credentials() {
     let (storage, instance, mut step) = source().await;
     step.params["input"] = serde_json::json!("{{context.data.value}}");
     let (guarded, faults) = FaultStorage::wrap(storage.clone());
-    let pause = faults.on("get_all_outputs").times(1).pause();
+    let pause = faults.on("get_latest_completed_outputs").times(1).pause();
     let id = instance.id;
     let task = tokio::spawn(async move {
         prepare_step(

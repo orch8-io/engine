@@ -1695,6 +1695,16 @@ passthrough_impl! {
         }
         Ok(out)
     }
+    async fn get_latest_completed_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
+        let mut out = self.inner.get_latest_completed_outputs(instance_id).await?;
+        for output in &mut out {
+            self.decrypt_block_output(output)?;
+        }
+        Ok(out)
+    }
     async fn get_all_outputs(
         &self,
         instance_id: InstanceId,

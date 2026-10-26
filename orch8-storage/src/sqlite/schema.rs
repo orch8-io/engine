@@ -69,6 +69,12 @@ CREATE TABLE IF NOT EXISTS block_outputs (
     created_at TEXT NOT NULL,
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
+-- Current substantive output projection (Postgres migration 125).
+CREATE INDEX IF NOT EXISTS idx_block_outputs_current
+    ON block_outputs(instance_id, block_id, created_at DESC, id DESC)
+    WHERE (output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__'))
+      AND substr(block_id, 1, 13) <> '_interceptor:'
+      AND substr(block_id, 1, 5) <> '_sla:';
 
 CREATE TABLE IF NOT EXISTS rate_limits (
     id TEXT PRIMARY KEY,

@@ -154,7 +154,7 @@ async fn metadata_handoff(boundary: Boundary) {
     let (storage, faults) = FaultStorage::wrap(Arc::clone(&inner));
     let method = match boundary {
         Boundary::RunStart => "ensure_instance_run_started",
-        Boundary::FlatStepStamp => "get_all_outputs",
+        Boundary::FlatStepStamp => "get_latest_completed_outputs",
         Boundary::TreeGateStamp => "update_instance_context_cas",
     };
     let pause = faults.on(method).times(1).pause();
