@@ -501,6 +501,13 @@ impl Worker {
                 // never start a retry of it alongside.
                 continue;
             }
+            if self.deps.foreign_handlers.contains(handler)
+                && !crate::handlers::legacy_capacity_available()
+            {
+                // Do not churn claim/release traffic while retired native work
+                // holds every process slot. Pre-start preparation fences races.
+                continue;
+            }
             #[allow(clippy::cast_possible_truncation)]
             let response = self
                 .deps
@@ -738,6 +745,23 @@ impl Worker {
             }
             return released;
         }
+        // Reserve physical native admission before recording dispatch. This
+        // constructs an owned, unpolled future and must not enter host code.
+        let prepared = match self
+            .deps
+            .registry
+            .prepare_native_handler(&task.handler_name, self.invocation_context(task))
+        {
+            Some(Ok(future)) => Some(future),
+            Some(Err(_)) => {
+                let released = release(client, task.id, task.claim_epoch, false).await;
+                if released {
+                    self.counters.released.fetch_add(1, Ordering::Relaxed);
+                }
+                return released;
+            }
+            None => None,
+        };
         match store.mark_started(key).await {
             Ok(true) => {}
             Ok(false) => {
@@ -755,7 +779,7 @@ impl Worker {
         }
 
         *started = true;
-        let result = self.invoke(task).await;
+        let result = self.invoke(task, prepared).await;
 
         if let Err(error) = &result
             && is_device_timeout(error)
@@ -833,27 +857,38 @@ impl Worker {
         false
     }
 
-    async fn invoke(&self, task: &RemoteTask) -> Result<Value, StepError> {
-        let Some(handler) = self.deps.registry.get(&task.handler_name) else {
-            return Err(StepError::Permanent {
-                message: format!(
-                    "handler '{}' is not available on this device",
-                    task.handler_name
-                ),
-                details: None,
-            });
-        };
+    fn invocation_context(&self, task: &RemoteTask) -> orch8_engine::handlers::StepContext {
         let mut params = task.params.clone();
         if self.deps.foreign_handlers.contains(&task.handler_name) {
             inject_task_metadata(&mut params, task, &self.deps.client.worker_id());
         }
-        let ctx = orch8_engine::remote_worker::step_context(
+        orch8_engine::remote_worker::step_context(
             task,
             crate::mobile_tenant_id(),
             params,
             Arc::clone(&self.deps.storage),
-        );
-        let future = handler(ctx);
+        )
+    }
+
+    async fn invoke(
+        &self,
+        task: &RemoteTask,
+        prepared: Option<orch8_engine::handlers::PreparedStep>,
+    ) -> Result<Value, StepError> {
+        let future = if let Some(future) = prepared {
+            future
+        } else {
+            let Some(handler) = self.deps.registry.get(&task.handler_name) else {
+                return Err(StepError::Permanent {
+                    message: format!(
+                        "handler '{}' is not available on this device",
+                        task.handler_name
+                    ),
+                    details: None,
+                });
+            };
+            handler(self.invocation_context(task))
+        };
         let Some(ms) = task
             .timeout_ms
             .and_then(|ms| u64::try_from(ms).ok())

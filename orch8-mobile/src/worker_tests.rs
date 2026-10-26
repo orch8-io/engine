@@ -1724,3 +1724,6 @@ async fn denied_renewal_stops_owned_native_work_but_retains_started_evidence() {
     assert_eq!(server.count(&format!("{id}/complete")), 0);
     assert_eq!(h.inputs.lock().unwrap().len(), 1);
 }
+
+#[path = "worker/worker_tests/prepared_admission.rs"]
+mod prepared_admission;

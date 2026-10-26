@@ -405,6 +405,7 @@ impl CatalogHandlers {
                 stragglers: binding.stragglers.clone(),
                 tracking_key,
                 permits,
+                legacy_capacity: None,
                 binding: Some(binding),
                 stop: self.stop.clone(),
             },
