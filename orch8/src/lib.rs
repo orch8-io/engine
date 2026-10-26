@@ -152,6 +152,8 @@ pub use storage::Storage;
 
 /// Ed25519 key used to sign a portable execution capsule.
 pub use ed25519_dalek::SigningKey as CapsuleSigningKey;
+/// Typed pre-dispatch outcomes used by deferred native admission.
+pub use orch8_engine::error::EngineError;
 /// Context passed to step handlers during execution (params, instance
 /// context, attempt counter, storage handle).
 pub use orch8_engine::handlers::StepContext;

@@ -20,19 +20,21 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use orch8::{
-    CreateInstanceOptions, Engine, ExecutionContext, InstanceId, InstanceState, Namespace,
-    SequenceId, SignalType, StepContext, StepError, Storage,
+    CreateInstanceOptions, Engine, EngineError, ExecutionContext, InstanceId, InstanceState,
+    Namespace, SequenceId, SignalType, StepContext, StepError, Storage,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
 
+pub(crate) mod callbacks;
 pub(crate) mod database;
+pub use callbacks::Invocation;
 mod passes;
 
 /// Future returned by a host handler invocation.
 pub type InvokeFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 /// A host handler: takes the JSON request, resolves to the JSON reply.
-pub type Invoke = Arc<dyn Fn(String) -> InvokeFuture + Send + Sync>;
+pub type Invoke = Arc<dyn Fn(Invocation) -> InvokeFuture + Send + Sync>;
 
 #[derive(Clone)]
 struct Deployed {
@@ -58,6 +60,7 @@ pub struct DurableEngine {
     sequences: Mutex<HashMap<String, Vec<Deployed>>>,
     closed: Arc<AtomicBool>,
     passes: passes::Passes,
+    callbacks: Arc<callbacks::Budget>,
     database: Mutex<Option<Arc<database::Owner>>>,
 }
 
@@ -88,8 +91,16 @@ impl DurableEngine {
             sequences: Mutex::new(HashMap::new()),
             closed: Arc::new(AtomicBool::new(false)),
             passes: passes::Passes::new(pass_limit),
+            callbacks: callbacks::Budget::shared(),
             database: Mutex::new(None),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_callback_budget(path: &str, callbacks: Arc<callbacks::Budget>) -> Self {
+        let mut engine = Self::new(path);
+        engine.callbacks = callbacks;
+        engine
     }
 
     pub fn path(&self) -> &str {
@@ -151,7 +162,10 @@ impl DurableEngine {
             // by a crash, so resume it immediately on initialization.
             .stale_instance_threshold(Duration::ZERO);
         for (name, invoke) in handlers {
-            builder = builder.handler(&name, owned_host_handler(invoke, self.closed.clone()));
+            builder = builder.deferred_effect_handler(
+                &name,
+                owned_host_handler_with_budget(invoke, self.closed.clone(), self.callbacks.clone()),
+            );
         }
         let (engine, database) = database::initialize(database, builder.build()).await?;
         *lock(&self.database) = database;
@@ -347,7 +361,7 @@ impl DurableEngine {
 
     async fn snapshot(&self, engine: &Engine, id: InstanceId) -> Result<String, String> {
         let instance = engine.get_instance(id).await.map_err(err)?;
-        let outputs = latest_outputs(engine.block_outputs(id).await.map_err(err)?);
+        let outputs = latest_outputs(engine.block_outputs(id).await.map_err(err)?, true);
         Ok(json!({
             "id": id.to_string(),
             "state": instance.state,
@@ -428,10 +442,18 @@ fn parse_instance_id(id: &str) -> Result<InstanceId, String> {
         .map_err(|_| format!("invalid instance id '{id}'"))
 }
 
-/// Last recorded output per step id (retries append rows; the newest wins).
-fn latest_outputs(outputs: Vec<orch8::BlockOutput>) -> Value {
+/// Completed results exclude internal rows; snapshots additionally keep retry diagnostics.
+fn latest_outputs(outputs: Vec<orch8::BlockOutput>, retry_diagnostics: bool) -> Value {
     let mut map = Map::new();
     for output in outputs {
+        let block = output.block_id.as_str();
+        if output.output_ref.as_deref() == Some("__in_progress__")
+            || (!retry_diagnostics && output.output_ref.as_deref() == Some("__retry__"))
+            || block.starts_with("_interceptor:")
+            || block.starts_with("_sla:")
+        {
+            continue;
+        }
         map.insert(output.block_id.to_string(), output.output);
     }
     Value::Object(map)
@@ -446,18 +468,38 @@ pub(crate) fn host_handler(
 
 type InvokeStepFuture = Pin<Box<dyn Future<Output = Result<Value, StepError>> + Send>>;
 
+#[cfg(test)]
 pub(crate) fn owned_host_handler(
     invoke: Invoke,
     closed: Arc<AtomicBool>,
 ) -> impl Fn(StepContext) -> InvokeStepFuture + Send + Sync + 'static {
+    owned_host_handler_with_budget(invoke, closed, callbacks::Budget::shared())
+}
+
+fn owned_host_handler_with_budget(
+    invoke: Invoke,
+    closed: Arc<AtomicBool>,
+    budget: Arc<callbacks::Budget>,
+) -> impl Fn(StepContext) -> InvokeStepFuture + Send + Sync + 'static {
     move |ctx: StepContext| {
         let invoke = Arc::clone(&invoke);
         let closed = Arc::clone(&closed);
+        let budget = budget.clone();
         Box::pin(async move {
             if closed.load(Ordering::Acquire) {
                 return Err(StepError::ClaimLost);
             }
             ctx.verify_claim().await?;
+            let Some(physical) = budget.reserve() else {
+                return Err(ctx.effect_admission.as_ref().map_or_else(
+                    || retryable("native callback capacity is occupied".into()),
+                    |admission| {
+                        admission.reject_preflight(EngineError::AdmissionBusy {
+                            instance_id: ctx.instance_id,
+                        })
+                    },
+                ));
+            };
             let outputs = ctx.storage.get_all_outputs(ctx.instance_id).await;
             // Loading the request envelope is an asynchronous phase. Its
             // initiating claim must still own execution before host entry,
@@ -467,7 +509,7 @@ pub(crate) fn owned_host_handler(
             let request = json!({
                 "params": ctx.params,
                 "data": ctx.context.data,
-                "outputs": latest_outputs(outputs),
+                "outputs": latest_outputs(outputs, false),
                 "instance_id": ctx.instance_id.to_string(),
                 "step_id": ctx.block_id.to_string(),
                 "attempt": ctx.attempt,
@@ -478,7 +520,16 @@ pub(crate) fn owned_host_handler(
             if closed.load(Ordering::Acquire) {
                 return Err(StepError::ClaimLost);
             }
-            let reply = invoke(request).await.map_err(retryable)?;
+            if let Some(admission) = &ctx.effect_admission {
+                admission.admit().await?;
+                ctx.verify_claim().await?;
+            }
+            if closed.load(Ordering::Acquire) {
+                return Err(StepError::ClaimLost);
+            }
+            let reply = invoke(Invocation::new(request, physical))
+                .await
+                .map_err(retryable)?;
             decode_reply(&reply)
         })
     }

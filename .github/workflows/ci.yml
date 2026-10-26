@@ -100,7 +100,7 @@ jobs:
           cargo deny --locked --manifest-path fuzz/Cargo.toml check advisories
 
   node-runtime:
-    name: Node native runtime
+    name: Native host runtimes
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -120,10 +120,17 @@ jobs:
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
         with:
           key: node-native-runtime
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.10"
       - name: Build current Node native addon
         run: cargo build --locked --manifest-path packages/node-native/Cargo.toml
+      - name: Build current Python native extension
+        run: cargo build --locked --manifest-path packages/python-native/Cargo.toml
       - name: Test packed addon with real host callbacks and process restarts
         run: bash scripts/check-node-native.sh "$CARGO_TARGET_DIR/debug/liborch8_node.so"
+      - name: Test Python physical callbacks, retirement and process restarts
+        run: bash scripts/check-python-native.sh "$CARGO_TARGET_DIR/debug/lib_native.so"
 
   test:
     name: Unit Tests

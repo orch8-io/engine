@@ -87,14 +87,27 @@ impl NativeDurableEngine {
     #[napi]
     pub fn register(&self, name: String, callback: HostHandler) -> napi::Result<()> {
         let callback = Arc::new(callback);
-        let invoke: durable::Invoke = Arc::new(move |request: String| {
+        let invoke: durable::Invoke = Arc::new(move |mut invocation: durable::Invocation| {
             let callback = Arc::clone(&callback);
             Box::pin(async move {
-                let promise = callback
-                    .call_async_catch(request)
-                    .await
-                    .map_err(|error| error.to_string())?;
-                promise.await.map_err(|error| error.to_string())
+                // The Node environment owns this task. Dropping the step waiter
+                // or closing an engine cannot free a still-running JS promise.
+                tokio::spawn(async move {
+                    let request = invocation.take_request();
+                    let result = async {
+                        let promise = callback
+                            .call_async_catch(request)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        promise.await.map_err(|error| error.to_string())
+                    }
+                    .await;
+                    drop(callback);
+                    drop(invocation);
+                    result
+                })
+                .await
+                .map_err(|error| error.to_string())?
             })
         });
         self.inner.register(&name, invoke).map_err(to_napi)
