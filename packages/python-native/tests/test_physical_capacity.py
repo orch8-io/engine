@@ -10,6 +10,15 @@ from orch8_engine import Engine
 
 
 class PhysicalCapacityTest(unittest.TestCase):
+    def settled_snapshot(self, engine, instance, expected):
+        result = engine.get(instance)
+        deadline = time.monotonic() + 5
+        while result['state'] in ('running', 'scheduled') and time.monotonic() < deadline:
+            time.sleep(0.01)
+            result = engine.get(instance)
+        self.assertIn(result['state'], expected)
+        return result
+
     def deferred_snapshot(self, engine, instance):
         result = engine.run(instance, timeout=0.15)
         deadline = time.monotonic() + 5
@@ -23,6 +32,11 @@ class PhysicalCapacityTest(unittest.TestCase):
         release = []
         lock = threading.Lock()
         counts = {"active": 0, "peak": 0, "entered": 0}
+        held_ids = set()
+
+        def active_calls():
+            with lock:
+                return counts['active']
 
         def host(request):
             held = threading.Event() if request["params"].get("hold") else None
@@ -31,6 +45,7 @@ class PhysicalCapacityTest(unittest.TestCase):
                 counts["entered"] += 1
                 counts["peak"] = max(counts["peak"], counts["active"])
                 if held is not None:
+                    held_ids.add(request['instance_id'])
                     release.append(held)
             try:
                 if held is not None:
@@ -46,9 +61,27 @@ class PhysicalCapacityTest(unittest.TestCase):
             first.handler("host", host)
             try:
                 first.deploy({"name": "held", "blocks": [{"type": "step", "id": "work", "handler": "host", "params": {"hold": True}, "timeout": 50}]})
-                for _ in range(128):
-                    self.assertEqual(first.run(first.start("held"), timeout=3)["state"], "failed")
+                created = []
+                fill_deadline = time.monotonic() + 30
+                for _ in range(256):
+                    if active_calls() >= 128 or time.monotonic() >= fill_deadline:
+                        break
+                    instance = first.start('held')
+                    created.append(instance)
+                    self.assertIn(first.run(instance, timeout=3)['state'], ('failed', 'running', 'scheduled'))
+                    time.sleep(0)  # Let physically queued callbacks enter.
                 self.assertEqual(counts["active"], 128)
+                with lock:
+                    physical = set(held_ids)
+                self.assertEqual(len(physical), 128)
+                for instance in physical:
+                    self.settled_snapshot(first, instance, ('failed',))
+                for instance in created:
+                    if instance in physical or first.get(instance)['state'] == 'failed':
+                        continue
+                    first.signal(instance, 'cancel')
+                    first.run(instance, timeout=3)
+                    self.settled_snapshot(first, instance, ('failed', 'cancelled'))
                 deferred = first.start("held")
                 waiting = self.deferred_snapshot(first, deferred)
                 self.assertEqual(waiting["outputs"], {})

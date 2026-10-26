@@ -4286,3 +4286,29 @@ about application-created asynchronous work or foreign garbage collection.
 Native scoped event notifications, account-authenticated remote workers and
 outcome reporting, and the remaining ADR completion matrix stay open. No
 UniFFI/wire protocol, published SDK version or release publication changes.
+
+
+### DME167 — A logical timeout did not prove a physically held native callback
+
+[PR348's native runtime job](https://github.com/orch8-io/engine/actions/runs/40367600139/job/121729748084)
+observed 126 active Node callbacks after 128 runs had failed logically. The
+fixture assumed every timeout represented an entered, still-held callback.
+Admission/preflight can lose to the timeout, and queued host entry may lag the
+observer. The old test could therefore fail before it had actually exhausted the
+physical allowance. The Python fixture made the same assumption.
+
+Both fixtures now fill from observed host entry, with a 256-attempt/30-second
+setup bound. They record immutable instance identities for held callbacks and
+require 128 distinct physical calls. Every held instance must then reach Failed
+before the excess-work probe. Unentered spare setup requests are cancelled and
+observed terminal before successor testing, so they cannot consume the released
+slot. Deferred snapshots still require Scheduled; the next call completes only
+after actual settlement, peak physical work remains 128, and all callbacks are
+released during cleanup. Node uses its public camelCase instanceId field;
+Python uses its public instance_id field.
+
+All 13 actual packed Node addon tests and all 19 actual Python extension tests
+pass with zero failures/skips. This changes only the two capacity fixtures;
+production bindings, callback limits, schemas, ABI and versions are unchanged.
+The KMP observer source and its 116 JVM/native tests and strict Swift bridge
+verification remain unchanged. PR348 must pass all checks on its updated head.
