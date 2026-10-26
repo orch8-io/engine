@@ -3927,3 +3927,23 @@ tests, 112 JVM tests with no skips, and strict all-target workspace Clippy.
 The native RN test now treats panic output as failure even when the process exits
 successfully. This is an unpublished development ABI change requiring paired
 bindings/native artifacts; it does not publish or replace the 0.7.1 release.
+
+### DME156 — Reject foreign health responses during process startup
+
+PR340's two-scheduler CI failure reported a missing sequence, while its child
+server log showed `Address already in use`. The harness selected ports by binding
+and immediately dropping listeners, then accepted any successful health response
+on the chosen HTTP port. A different test server could therefore satisfy
+readiness while the intended child failed to bind, sending API calls to an
+unrelated database.
+
+HTTP and gRPC candidates are now reserved simultaneously to keep them distinct.
+Readiness checks child exit status and requires this generation's own successful
+HTTP-bind log before probing health, then checks child liveness again. Initial
+startup retries at most four fresh pairs, only for an explicit listener bind
+collision. Restarts preserve the already advertised addresses and fail clearly.
+A real-process regression occupies each listener port with a foreign HTTP mock,
+requires startup on a fresh pair, and proves the foreign endpoint received no
+requests. The complete three-test crash suite passes with SQLite and an isolated
+PostgreSQL database, including the exact failing two-scheduler case. The temporary
+PostgreSQL cluster was stopped and removed after validation.
