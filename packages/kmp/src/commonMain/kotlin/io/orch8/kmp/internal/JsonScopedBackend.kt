@@ -60,16 +60,16 @@ private class JsonCatalogBackend(port: Orch8ScopedBridge, data: JsonObject) : Js
                     }
                 } catch (_: Exception) { return BridgeCodec.error("permanent", "invalid native callback identity") }
                 return try { BridgeCodec.ok(JsonPrimitive(handler.execute(context, stepName, inputJson))) }
-                catch (error: Orch8HandlerException.Permanent) { BridgeCodec.error("permanent", error.message ?: "catalog handler failed") }
-                catch (error: Exception) { BridgeCodec.error("retryable", error.message ?: "catalog handler failed") }
+                catch (error: Orch8HandlerException.Permanent) { BridgeCodec.error("permanent", error.hostFailureMessage("catalog handler failed")) }
+                catch (error: Exception) { BridgeCodec.error("retryable", error.hostFailureMessage("catalog handler failed")) }
             }
         }))
     }
     override fun sync(tokens: Orch8TokenSource): SyncResult {
         val result = BridgeCodec.unwrap("scoped sync", port.sync(object : Orch8ScopedTokenSource {
-            override fun currentToken(): String = try { tokens.currentToken() } catch (_: Exception) { "" }
-            override fun refreshToken(): String = try { BridgeCodec.ok(JsonPrimitive(tokens.refreshToken())) }
-                catch (error: Exception) { BridgeCodec.error("Engine", error.message ?: "token refresh failed") }
+            override fun cachedToken(): String = tokens.cachedTokenOrEmpty()
+            override fun refreshEnvelope(): String = try { BridgeCodec.ok(JsonPrimitive(tokens.refreshToken())) }
+                catch (error: Exception) { BridgeCodec.error("Engine", error.hostFailureMessage("token refresh failed")) }
         })).objectValue()
         fun count(key: String): Int = result.number(key).let { if (it !in 0..Int.MAX_VALUE) malformed("invalid sync count") else it.toInt() }
         return SyncResult(count("added"), count("updated"), count("removed"), count("skipped"), count("signatureFailures"))

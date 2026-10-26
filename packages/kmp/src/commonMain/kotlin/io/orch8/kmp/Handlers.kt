@@ -1,5 +1,7 @@
 package io.orch8.kmp
 
+import kotlinx.coroutines.CancellationException
+
 /**
  * A native step handler. Receives the step's resolved params as JSON and
  * returns JSON that is merged into the execution context.
@@ -15,8 +17,10 @@ fun interface Orch8StepHandler {
 
 /** Supplies (and refreshes) the bearer token used for authenticated manifest sync. */
 interface Orch8TokenSource {
+    @Throws(Orch8Exception::class, CancellationException::class)
     fun currentToken(): String
 
     /** Called after a 401/403. Throw [Orch8Exception] if no fresh token is available. */
+    @Throws(Orch8Exception::class, CancellationException::class)
     fun refreshToken(): String
 }

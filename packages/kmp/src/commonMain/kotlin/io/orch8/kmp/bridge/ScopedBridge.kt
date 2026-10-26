@@ -18,7 +18,7 @@ interface Orch8ScopedHandler {
     fun execute(contextJson: String, stepName: String, inputJson: String): String
 }
 interface Orch8ScopedTokenSource {
-    fun currentToken(): String
+    fun cachedToken(): String
     /** Existing success/error envelope, with a string token on success. */
-    fun refreshToken(): String
+    fun refreshEnvelope(): String
 }

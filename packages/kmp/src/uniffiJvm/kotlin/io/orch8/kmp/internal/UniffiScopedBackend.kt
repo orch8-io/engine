@@ -61,9 +61,9 @@ internal class UniffiCatalogBackend(private val native: UCatalog) : CatalogBacke
                 handler.execute(CatalogCallbackContext(context.accountId, context.catalogId, context.ownerEpoch,
                     context.runId, context.blockId, context.attempt.toLong(), context.effectId), stepName, input)
             } catch (error: Orch8HandlerException.Permanent) {
-                throw UHandlerException.Permanent(error.message ?: "permanent catalog handler failure")
+                throw UHandlerException.Permanent(error.hostFailureMessage("permanent catalog handler failure"))
             } catch (error: Exception) {
-                throw UHandlerException.Retryable(error.message ?: "catalog handler failed")
+                throw UHandlerException.Retryable(error.hostFailureMessage("catalog handler failed"))
             }
         }, timeoutMs.toULong())
     }
