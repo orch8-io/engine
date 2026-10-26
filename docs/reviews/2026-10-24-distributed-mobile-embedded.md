@@ -3583,3 +3583,44 @@ four-scope fixture passes both installed root callbacks, scoped getter refusal,
 all contextual workflow/approval/archive flows and shutdown. The actual iOS
 framework/Swift adapter, binding parity, SDK packaging, docs and whitespace
 checks pass. No Rust/UniFFI binding or release change is involved.
+
+
+### DME148 — Dispose the JVM native owner after logical shutdown
+
+The retained-closed-facade database reopen test passed, but a separate real JNI
+resource test failed: retaining sixteen additional closed facades grew the Unix
+process descriptor count from 56 to 104. The adapter called MobileEngine.shutdown
+without disposing its generated UniFFI owner. SQLite shutdown could complete
+while each retained native engine still owned its Tokio runtime resources.
+
+The JVM/Android adapter now disposes that owner in finally, including cleanup
+failure paths. The generated call-reference counter protects already reserved
+native invocations. A volatile closed fence covers all root backend calls and
+maps a concurrent disposal IllegalStateException to typed Shutdown only after
+close wins. No lock is held across a native call or foreign cleanup. Repeated
+close remains idempotent; token-source retirement keeps its existing lifecycle.
+
+The repaired descriptor test measures 53 before and 53 after seventeen closed
+facades remain deliberately reachable. The Unix descriptor assertion allows
+bounded ambient process variance and waits for asynchronous physical teardown;
+it does not invoke GC to make disposal pass. A separate real native test verifies
+reopening a closed facade's database and a post-close root API matrix verifies
+typed errors rather than raw disposed-handle exceptions.
+
+An actual blocked host callback also survives logical close during recovery.
+The successor registers the same handler and ticks the old work without invoking
+it again; a fresh control workflow completes once. Returning the original host
+callback still causes no replay. This tests durable dispatched-effect evidence,
+not a rule that the SQLite lease must wait for every foreign callback: that lease
+follows physical SQLite lifetime. The predecessor's accepted call must also
+settle without leaking an untyped disposal exception.
+
+Only the shared JVM/Android adapter and JVM integration tests change. Common,
+Swift, native Rust and UniFFI contracts are unchanged; protocol 6 remains current.
+All 111 JVM tests pass with zero failures/skips, including the real native
+integration fixture and the new retirement/recovery cases. An injected shutdown
+failure also proves disposal happens while the original failure is preserved;
+repeated close and typed post-close errors remain correct. Documentation,
+packaging, binding parity and whitespace checks pass. The descriptor measurement
+is Unix-host coverage and does not claim an equivalent OS resource counter on
+every platform. Android consumer compilation remains a required hosted CI gate.

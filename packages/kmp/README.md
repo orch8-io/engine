@@ -506,3 +506,12 @@ application-defined `message` getter. Declared SDK errors preserve their message
 and classifications, and exact standard exception classes preserve their normal
 messages. A custom subclass gets the fixed diagnostic. Throw
 `Orch8HandlerException.Permanent` or `.Retryable` for an actionable domain error.
+
+
+`Orch8Engine.close()` retires SDK subscriptions, closes local work and disposes
+the JVM/Android UniFFI peer. Retaining a closed facade does not retain a native
+runtime per facade. Calls after close return typed `Shutdown`; repeated close is
+safe. Physically accepted host work can finish afterward. Recovery preserves its
+dispatched-effect evidence so reopening the database cannot silently replay it.
+The database recovery lease follows physical SQLite work, and a new opener may
+need to wait for that work to settle.

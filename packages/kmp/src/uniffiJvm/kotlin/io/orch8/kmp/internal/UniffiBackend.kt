@@ -62,13 +62,23 @@ internal actual fun <T> runHandlerBlocking(block: suspend () -> T): T = runBlock
 
 /** [EngineBackend] over the UniFFI Kotlin bindings (JNA). */
 internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend {
-    override fun openAccount(identity: io.orch8.kmp.AccountIdentity): AccountBackend = mapErrors {
+    override fun openAccount(identity: io.orch8.kmp.AccountIdentity): AccountBackend = withEngine {
         UniffiAccountBackend(engine.openAccount(identity.toUniffi()))
     }
 
     private val tokenSourcesLock = Any()
     private val tokenSources = java.util.WeakHashMap<DeviceSessionTokens, Unit>()
-    private var closed = false
+    @Volatile private var closed = false
+
+    private inline fun <T> withEngine(block: () -> T): T {
+        if (closed) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+        return try { mapErrors(block) } catch (error: IllegalStateException) {
+            // Disposal can win after the check but before UniFFI reserves its
+            // call reference. Already reserved native calls retain their owner.
+            if (closed) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed", error)
+            throw error
+        }
+    }
 
     private fun trackTokenSource(tokens: Orch8TokenSource) {
         synchronized(tokenSourcesLock) {
@@ -76,7 +86,7 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
             if (tokens is DeviceSessionTokens) tokenSources[tokens] = Unit
         }
     }
-    override fun registerHandler(name: String, handler: BlockingStepHandler) = mapErrors {
+    override fun registerHandler(name: String, handler: BlockingStepHandler) = withEngine {
         engine.registerHandler(
             name,
             object : UStepHandler {
@@ -92,7 +102,7 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         )
     }
 
-    override fun setListener(sink: (EngineEvent) -> Unit) {
+    override fun setListener(sink: (EngineEvent) -> Unit) = withEngine {
         engine.setListener(
             object : UEngineListener {
                 override fun onInstanceCompleted(instanceId: String, output: String) =
@@ -107,9 +117,9 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         )
     }
 
-    override fun resume() = engine.resume()
+    override fun resume() = withEngine { engine.resume() }
 
-    override fun pause() = engine.pause()
+    override fun pause() = withEngine { engine.pause() }
 
     override fun shutdown() {
         val retired = synchronized(tokenSourcesLock) {
@@ -118,14 +128,17 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
             tokenSources.keys.toList().also { tokenSources.clear() }
         }
         try { engine.shutdown() }
-        finally { retired.forEach { it.close() } }
+        finally {
+            try { retired.forEach { it.close() } }
+            finally { engine.close() }
+        }
     }
 
-    override fun tickOnce(): TickResult = mapErrors {
+    override fun tickOnce(): TickResult = withEngine {
         engine.tickOnce().let { TickResult(it.instancesAdvanced.toInt(), it.stepsExecuted.toInt(), it.hasPendingWork) }
     }
 
-    override fun runUntilIdle(maxTicks: Int, timeBudgetMs: Long): BackgroundRunResult = mapErrors {
+    override fun runUntilIdle(maxTicks: Int, timeBudgetMs: Long): BackgroundRunResult = withEngine {
         engine.runUntilIdle(maxTicks.toUInt(), timeBudgetMs.toULong()).let {
             BackgroundRunResult(
                 ticksExecuted = it.ticksExecuted.toInt(),
@@ -137,44 +150,44 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         }
     }
 
-    override fun reportPowerState(state: PowerState) = engine.reportPowerState(
-        when (state) {
+    override fun reportPowerState(state: PowerState) = withEngine {
+        engine.reportPowerState(when (state) {
             PowerState.CHARGING -> UPowerState.CHARGING
             PowerState.UNPLUGGED -> UPowerState.UNPLUGGED
             PowerState.LOW_BATTERY -> UPowerState.LOW_BATTERY
             PowerState.CRITICAL_BATTERY -> UPowerState.CRITICAL_BATTERY
-        },
-    )
+        })
+    }
 
-    override fun onPushReceived() = engine.onPushReceived()
+    override fun onPushReceived() = withEngine { engine.onPushReceived() }
 
     override fun start(sequenceName: String, inputJson: String, dedupKey: String?): String =
-        mapErrors { engine.start(sequenceName, inputJson, dedupKey) }
+        withEngine { engine.start(sequenceName, inputJson, dedupKey) }
 
-    override fun cancelInstance(instanceId: String) = mapErrors { engine.cancelInstance(instanceId) }
+    override fun cancelInstance(instanceId: String) = withEngine { engine.cancelInstance(instanceId) }
 
-    override fun getInstance(instanceId: String): InstanceSnapshot = mapErrors {
+    override fun getInstance(instanceId: String): InstanceSnapshot = withEngine {
         engine.getInstance(instanceId).let {
             InstanceSnapshot(it.instanceId, it.sequenceName, it.state.toCommon(), it.context, it.createdAt, it.updatedAt)
         }
     }
 
-    override fun activeInstances(): List<InstanceSummary> = mapErrors {
+    override fun activeInstances(): List<InstanceSummary> = withEngine {
         engine.activeInstances().map { InstanceSummary(it.instanceId, it.sequenceName, it.state.toCommon(), it.createdAt) }
     }
 
     override fun completeStep(instanceId: String, stepName: String, outputJson: String) =
-        mapErrors { engine.completeStep(instanceId, stepName, outputJson) }
+        withEngine { engine.completeStep(instanceId, stepName, outputJson) }
 
-    override fun loadSequenceFromJson(json: String) = mapErrors { engine.loadSequenceFromJson(json) }
+    override fun loadSequenceFromJson(json: String) = withEngine { engine.loadSequenceFromJson(json) }
 
-    override fun loadSequencesFromUrl(url: String): Int = mapErrors { engine.loadSequencesFromUrl(url).toInt() }
+    override fun loadSequencesFromUrl(url: String): Int = withEngine { engine.loadSequencesFromUrl(url).toInt() }
 
-    override fun loadedSequences(): List<SequenceInfo> = mapErrors {
+    override fun loadedSequences(): List<SequenceInfo> = withEngine {
         engine.loadedSequences().map { SequenceInfo(it.name, it.version) }
     }
 
-    override fun sync(manifestUrl: String, tokens: Orch8TokenSource?): SyncResult = mapErrors {
+    override fun sync(manifestUrl: String, tokens: Orch8TokenSource?): SyncResult = withEngine {
         engine.sync(manifestUrl, tokens?.toUniffi()).let {
             SyncResult(
                 added = it.added.toInt(),
@@ -186,13 +199,13 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         }
     }
 
-    override fun flushTelemetry(endpointUrl: String): FlushResult = mapErrors {
+    override fun flushTelemetry(endpointUrl: String): FlushResult = withEngine {
         engine.flushTelemetry(endpointUrl).let { FlushResult(it.sent.toLong(), it.dropped.toLong()) }
     }
 
-    override fun setDeviceContext(ctx: DeviceContext) = engine.setDeviceContext(
-        UDeviceContext(ctx.deviceId, ctx.osName, ctx.osVersion, ctx.appVersion, ctx.sdkVersion),
-    )
+    override fun setDeviceContext(ctx: DeviceContext) = withEngine {
+        engine.setDeviceContext(UDeviceContext(ctx.deviceId, ctx.osName, ctx.osVersion, ctx.appVersion, ctx.sdkVersion))
+    }
 
     override fun importContinuityCapsule(
         capsuleJson: String,
@@ -200,7 +213,7 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         payloadKeyBase64: String,
         destinationRuntimeId: String,
         destinationInstanceId: String,
-    ): ContinuityImportResult = mapErrors {
+    ): ContinuityImportResult = withEngine {
         engine.importContinuityCapsule(
             capsuleJson,
             payloadBase64,
@@ -211,39 +224,39 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
     }
 
     override fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) =
-        mapErrors { engine.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
+        withEngine { engine.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
 
-    override fun nodeRuntimeId(): String = mapErrors { engine.nodeRuntimeId() }
+    override fun nodeRuntimeId(): String = withEngine { engine.nodeRuntimeId() }
 
-    override fun setTokenProvider(tokens: Orch8TokenSource) = mapErrors {
+    override fun setTokenProvider(tokens: Orch8TokenSource) = withEngine {
         trackTokenSource(tokens)
         engine.setTokenProvider(tokens.toUniffi())
     }
 
-    override fun beginTokenProviderInstallation(tokens: Orch8TokenSource): String = mapErrors {
+    override fun beginTokenProviderInstallation(tokens: Orch8TokenSource): String = withEngine {
         trackTokenSource(tokens)
         engine.beginTokenProviderInstallation(tokens.toUniffi())
     }
-    override fun completeTokenProviderInstallation(installationId: String, token: String): Boolean = mapErrors {
+    override fun completeTokenProviderInstallation(installationId: String, token: String): Boolean = withEngine {
         engine.completeTokenProviderInstallation(installationId, token)
     }
-    override fun cancelTokenProviderInstallation(installationId: String): Boolean = mapErrors {
+    override fun cancelTokenProviderInstallation(installationId: String): Boolean = withEngine {
         engine.cancelTokenProviderInstallation(installationId)
     }
 
-    override fun registerNode(capabilities: NodeCapabilities): NodeRegistration = mapErrors {
+    override fun registerNode(capabilities: NodeCapabilities): NodeRegistration = withEngine {
         engine.registerNode(capabilities.toUniffi()).let {
             NodeRegistration(it.runtimeId, it.deviceId, it.handlers, it.expiresAt)
         }
     }
 
-    override fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?) = mapErrors {
+    override fun updateNodeStatus(connectivity: NodeConnectivity?, batteryPercent: Int?) = withEngine {
         engine.updateNodeStatus(connectivity?.toUniffi(), batteryPercent?.toUByte())
     }
 
-    override fun unregisterNode() = engine.unregisterNode()
+    override fun unregisterNode() = withEngine { engine.unregisterNode() }
 
-    override fun startWorker(options: WorkerOptions) = mapErrors {
+    override fun startWorker(options: WorkerOptions) = withEngine {
         engine.startWorker(
             UWorkerOptions(
                 maxConcurrentTasks = options.maxConcurrentTasks.toUInt(),
@@ -253,9 +266,9 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         )
     }
 
-    override fun stopWorker() = engine.stopWorker()
+    override fun stopWorker() = withEngine { engine.stopWorker() }
 
-    override fun runWorkerWindow(timeBudgetMs: Long): WorkerWindowResult = mapErrors {
+    override fun runWorkerWindow(timeBudgetMs: Long): WorkerWindowResult = withEngine {
         engine.runWorkerWindow(timeBudgetMs.toULong()).let {
             WorkerWindowResult(
                 claimed = it.claimed.toLong(),
@@ -267,23 +280,25 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         }
     }
 
-    override fun workerStats(): WorkerStats = engine.workerStats().let {
-        WorkerStats(
-            running = it.running,
-            inFlight = it.inFlight.toInt(),
-            claimed = it.claimed.toLong(),
-            completed = it.completed.toLong(),
-            failed = it.failed.toLong(),
-            released = it.released.toLong(),
-            lost = it.lost.toLong(),
-        )
+    override fun workerStats(): WorkerStats = withEngine {
+        engine.workerStats().let {
+            WorkerStats(
+                running = it.running,
+                inFlight = it.inFlight.toInt(),
+                claimed = it.claimed.toLong(),
+                completed = it.completed.toLong(),
+                failed = it.failed.toLong(),
+                released = it.released.toLong(),
+                lost = it.lost.toLong(),
+            )
+        }
     }
 
-    override fun onPushWake(envelopeJson: String): Boolean = engine.onPushWake(envelopeJson)
+    override fun onPushWake(envelopeJson: String): Boolean = withEngine { engine.onPushWake(envelopeJson) }
 
-    override fun enableBuiltin(name: String) = mapErrors { engine.enableBuiltin(name) }
+    override fun enableBuiltin(name: String) = withEngine { engine.enableBuiltin(name) }
 
-    override fun startDelegation(options: DelegationOptions) = mapErrors {
+    override fun startDelegation(options: DelegationOptions) = withEngine {
         engine.startDelegation(
             UDelegationOptions(
                 tenantId = options.tenantId,
@@ -293,9 +308,9 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
         )
     }
 
-    override fun stopDelegation() = engine.stopDelegation()
+    override fun stopDelegation() = withEngine { engine.stopDelegation() }
 
-    override fun delegate(request: DelegateRequest): String = mapErrors {
+    override fun delegate(request: DelegateRequest): String = withEngine {
         engine.delegate(
             UDelegateRequest(
                 instanceId = request.instanceId,
@@ -307,20 +322,22 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
     }
 
     override fun delegationStatus(delegationId: String): DelegationStatus =
-        mapErrors { engine.delegationStatus(delegationId).toCommon() }
+        withEngine { engine.delegationStatus(delegationId).toCommon() }
 
     override fun listDelegations(): List<DelegationStatus> =
-        mapErrors { engine.listDelegations().map { it.toCommon() } }
+        withEngine { engine.listDelegations().map { it.toCommon() } }
 
-    override fun delegationStats(): DelegationStats = engine.delegationStats().let {
-        DelegationStats(
-            running = it.running,
-            delegated = it.delegated.toLong(),
-            completed = it.completed.toLong(),
-            failed = it.failed.toLong(),
-            abandoned = it.abandoned.toLong(),
-            resumed = it.resumed.toLong(),
-        )
+    override fun delegationStats(): DelegationStats = withEngine {
+        engine.delegationStats().let {
+            DelegationStats(
+                running = it.running,
+                delegated = it.delegated.toLong(),
+                completed = it.completed.toLong(),
+                failed = it.failed.toLong(),
+                abandoned = it.abandoned.toLong(),
+                resumed = it.resumed.toLong(),
+            )
+        }
     }
 }
 
