@@ -51,6 +51,40 @@ expand/contract sequence across releases (add a new column, dual-write,
 backfill, switch reads, drop the old column), or a documented stop-the-world
 upgrade.
 
+### Online prebuild for output indexes 125/126
+
+`block_outputs` is partitioned by migration 074. PostgreSQL supports concurrent
+index builds on its leaf tables; creating the parent afterwards attaches valid
+matching leaf indexes as a metadata operation. See the
+[PostgreSQL CREATE INDEX documentation](https://www.postgresql.org/docs/14/sql-createindex.html).
+
+For large existing installations that already have migration 074, run one
+prebuild process before the upgrade, with no migrator running concurrently:
+
+```sh
+psql "$ORCH8_DATABASE_URL" -X --set=ON_ERROR_STOP=1 \
+  --file=scripts/sql/prebuild-current-output-indexes.psql
+orch8 migrate --database-url "$ORCH8_DATABASE_URL"
+```
+
+The [prebuild script](../scripts/sql/prebuild-current-output-indexes.psql) uses
+autocommit and discovers every leaf. It skips parents that already have a valid
+index, and reserves `orch8_boc_*` / `orch8_bod_*` names for its matching leaf
+definitions. Do not use `psql --single-transaction`. Run the migration only after
+the prebuild exits successfully. A failed concurrent build can leave an invalid
+index; the script reports invalid parent/prebuild indexes instead of silently
+reusing them. Repair the named invalid index and retry before migrating.
+
+`DATABASE_URL=... python3 scripts/check-output-index-prebuild.py` exercises the
+recipe in a fresh schema and removes that schema afterwards. CI runs this check
+with its test database and the `psql` client. It verifies reuse of all 32 leaf
+indexes, parent validity, repeatability and recovery from a real failed
+concurrent build.
+
+Normal migration without a prebuild remains supported and creates the indexes
+under the usual write locks. The change to migration 125 above corrects only its
+unreleased prebuild comments; its SQL definition is unchanged.
+
 ### Note: lock-heavy migrations 103-105 on large installs
 
 103 (backfill `worker_tasks.tenant_id` in one transaction plus plain index

@@ -186,8 +186,8 @@ jobs:
         with:
           toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install protoc and PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
       # Includes the cross-crate distributed-execution suites in `orch8-e2e`
       # (cloud -> phone -> cloud round trip, worker-protocol guarantees over
       # HTTP and gRPC): each scenario runs the real API + scheduler on SQLite
@@ -200,6 +200,8 @@ jobs:
         run: cargo build --locked -p orch8-server --bin orch8-server
       - name: Test
         run: cargo test --locked --workspace
+      - name: Verify partitioned output-index prebuild
+        run: python3 scripts/check-output-index-prebuild.py
       # Criterion's test mode exercises each workload without collecting
       # measurements. Keep fixtures and completion assertions covered when
       # evaluator contracts change; the scheduled workflow measures timings.

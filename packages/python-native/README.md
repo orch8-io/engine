@@ -131,6 +131,10 @@ reopening the engine cannot reset this allowance. An already-admitted call is
 not forcibly stopped, and a late result cannot overwrite its timed-out outcome.
 Snapshots omit internal in-progress/interceptor/SLA rows. Handler input also
 omits retry bookkeeping, while terminal failure diagnostics remain readable.
+A snapshot retains the current retry diagnostic while its next attempt is
+scheduled. Snapshot and handler views select current rows before decoding
+payloads, so superseded or internal history does not need to be decoded. A damaged
+selected result still fails the read.
 
 ### Handler failure diagnostics
 

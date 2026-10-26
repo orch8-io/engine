@@ -31,6 +31,108 @@ impl Drop for Directory {
     }
 }
 
+#[tokio::test]
+async fn native_current_snapshots_skip_obsolete_payloads_and_keep_retry_diagnostics() {
+    use orch8_storage::{OutputStore, testing::backends::RawPool};
+    let directory = Directory::new();
+    let path = directory
+        .0
+        .join("snapshots.db")
+        .to_string_lossy()
+        .into_owned();
+    let engine = durable::DurableEngine::new(&path);
+    engine
+        .deploy(
+            &json!({"name":"snapshot","blocks":[{"type":"step","id":"work","handler":"noop"}]})
+                .to_string(),
+        )
+        .await
+        .unwrap();
+    let id = engine
+        .start("snapshot", Some("{\"seed\":42}"), None, None)
+        .await
+        .unwrap();
+    let instance_id = orch8::InstanceId::from_uuid(uuid::Uuid::parse_str(&id).unwrap());
+    let reader = orch8_storage::sqlite::SqliteStorage::file(&path)
+        .await
+        .unwrap();
+    let at = chrono::Utc::now();
+    let make = |n, block: &str, reference: Option<&str>, value| orch8_types::output::BlockOutput {
+        id: uuid::Uuid::from_u128(n),
+        instance_id,
+        block_id: orch8_types::ids::BlockId::new(block),
+        output: value,
+        output_ref: reference.map(str::to_owned),
+        output_size: 30,
+        attempt: 0,
+        created_at: at + chrono::Duration::microseconds(i64::try_from(n).unwrap()),
+    };
+    let rows = [
+        make(1, "work", None, json!({"obsolete":true})),
+        make(
+            2,
+            "work",
+            Some("__retry__"),
+            json!({"error":"retry diagnostic","attempt":2}),
+        ),
+        make(
+            3,
+            "work",
+            Some("__in_progress__"),
+            json!({"_sentinel":true}),
+        ),
+        make(4, "_interceptor:trace", None, json!({"internal":true})),
+        make(5, "_sentinel", None, json!({"business":true})),
+        make(
+            6,
+            "retry_only",
+            Some("__retry__"),
+            json!({"error":"first retry"}),
+        ),
+    ];
+    for row in &rows {
+        reader.save_block_output(row).await.unwrap();
+    }
+    let raw = RawPool::Sqlite(reader.pool().clone());
+    for n in [1, 3, 4] {
+        raw.set_text(
+            "block_outputs",
+            "output",
+            "id",
+            &uuid::Uuid::from_u128(n).to_string(),
+            "{damaged obsolete JSON",
+        )
+        .await;
+    }
+    assert!(
+        reader.get_all_outputs(instance_id).await.is_err(),
+        "the fixture must fail if obsolete payloads are decoded"
+    );
+    let expected = json!({"work":{"error":"retry diagnostic","attempt":2},"_sentinel":{"business":true},"retry_only":{"error":"first retry"}});
+    let current: Value = serde_json::from_str(&engine.get(&id).await.unwrap()).unwrap();
+    let deadline: Value =
+        serde_json::from_str(&engine.run(&id, Some(Duration::ZERO)).await.unwrap()).unwrap();
+    assert_eq!(current["outputs"], expected);
+    assert_eq!(deadline["outputs"], expected);
+    assert_eq!(current["data"], json!({"seed":42}));
+    assert_eq!(current["state"], "scheduled");
+    assert_eq!(deadline["state"], "scheduled");
+    raw.set_text(
+        "block_outputs",
+        "output",
+        "id",
+        &uuid::Uuid::from_u128(2).to_string(),
+        "{damaged current diagnostic",
+    )
+    .await;
+    assert!(
+        engine.get(&id).await.is_err(),
+        "selected corrupt diagnostics must fail closed"
+    );
+    engine.close().await;
+    reader.close().await;
+}
+
 struct Fixture {
     engine: Arc<durable::DurableEngine>,
     budget: Arc<durable::callbacks::Budget>,

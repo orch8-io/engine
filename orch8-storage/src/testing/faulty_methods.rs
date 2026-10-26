@@ -128,6 +128,7 @@ fault_impl! {
         async fn get_block_output(&self, instance_id: InstanceId, block_id: &BlockId) -> Result<Option<BlockOutput>, StorageError>;
         async fn get_block_outputs_batch(&self, keys: &[(InstanceId, &BlockId)]) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
         async fn get_latest_completed_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
+        async fn get_latest_diagnostic_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_all_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_outputs_after_created_at(&self, instance_id: InstanceId, after: Option<DateTime<Utc>>) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_completed_block_ids(&self, instance_id: InstanceId) -> Result<Vec<BlockId>, StorageError>;

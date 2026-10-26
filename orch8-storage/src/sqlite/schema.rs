@@ -75,6 +75,12 @@ CREATE INDEX IF NOT EXISTS idx_block_outputs_current
     WHERE (output_ref IS NULL OR output_ref NOT IN ('__retry__', '__in_progress__'))
       AND substr(block_id, 1, 13) <> '_interceptor:'
       AND substr(block_id, 1, 5) <> '_sla:';
+-- Current diagnostic snapshots (Postgres migration 126).
+CREATE INDEX IF NOT EXISTS idx_block_outputs_diagnostics
+    ON block_outputs(instance_id, block_id, created_at DESC, id DESC)
+    WHERE (output_ref IS NULL OR output_ref <> '__in_progress__')
+      AND substr(block_id, 1, 13) <> '_interceptor:'
+      AND substr(block_id, 1, 5) <> '_sla:';
 
 CREATE TABLE IF NOT EXISTS rate_limits (
     id TEXT PRIMARY KEY,
