@@ -4457,3 +4457,44 @@ data. A deliberately failed concurrent unique index (SQLSTATE 23505) verifies
 refusal, explicit repair and successful retry. It passes on PostgreSQL 14.23.
 The unit CI job now installs the psql client and runs this check against its test
 database. Workflow lint, documentation and migration-safety checks pass.
+
+
+### DME172 — Capsule imports discarded completed output evidence
+
+Capsule exports included `outputs`, but import persisted only the paused instance
+and checkpoint. Every production caller discarded the returned payload, so the
+scheduler could replay completed work after migration. A regression first failed
+with zero imported outputs; after the fix, the real scheduler completes the
+remaining step while an unavailable handler for the completed step is never run.
+
+An additive storage operation publishes the immutable import binding, instance,
+checkpoint and output history in one transaction. SQLite and PostgreSQL share
+ownership/duplicate checks; encrypted storage seals outputs and checkpoints
+before entering the transaction. Custom backends reject nonempty output imports
+until they implement the atomic operation. The previous empty-history operation
+remains available. Import retries return the original destination without
+rewriting its later work.
+
+The engine checks signed source ownership and duplicate output identities,
+allocates fresh destination output IDs, and preserves relative `(created_at,id)`
+order. This avoids SQLite global-ID collisions on same-store transfers and keeps
+the winning result stable when source timestamps tie. Source timestamps and the
+returned signed payload remain unchanged.
+
+Eight storage regressions pass on SQLite, PostgreSQL 14.23 and their encrypted
+variants. An injected failure on the second output insert proves rollback of the
+first output, checkpoint, instance and binding, followed by successful retry.
+Foreign/duplicate evidence is rejected before publication. Both capsule engine
+scenarios pass, including isolated and same-store imports, tied timestamps and
+actual scheduler continuation.
+
+This fixes output restoration, not complete composite workflow portability.
+Execution trees, externalized composite state and full effect-receipt recovery
+still require a versioned portable-state contract. Export materialization bounds
+and source/destination clock skew remain separate open review items; do not infer
+full migration certification from these tests.
+
+The facade's two capsule scenarios and the mobile activation/redelivery scenario
+also pass. Raw output rows are checked for ciphertext on both encrypted backend
+variants, in addition to verifying decrypted API results. Format, documentation
+and strict all-target lint checks cover storage, engine, facade and mobile.

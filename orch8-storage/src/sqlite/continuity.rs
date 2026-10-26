@@ -630,6 +630,25 @@ impl crate::ContinuityStore for SqliteStorage {
         instance: &TaskInstance,
         checkpoint: &orch8_types::checkpoint::Checkpoint,
     ) -> Result<InstanceId, StorageError> {
+        self.import_capsule_instance_with_outputs(
+            capsule_id,
+            destination_runtime_id,
+            instance,
+            checkpoint,
+            &[],
+        )
+        .await
+    }
+
+    async fn import_capsule_instance_with_outputs(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        instance: &TaskInstance,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+        outputs: &[orch8_types::output::BlockOutput],
+    ) -> Result<InstanceId, StorageError> {
+        crate::restore::validate_capsule_output_import(instance, checkpoint, outputs)?;
         let mut transaction = self
             .pool
             .begin()
@@ -688,6 +707,9 @@ impl crate::ContinuityStore for SqliteStorage {
         .execute(&mut *transaction)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
+        for output in outputs {
+            super::outputs::save_on(&mut transaction, output).await?;
+        }
         transaction
             .commit()
             .await

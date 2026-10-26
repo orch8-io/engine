@@ -358,11 +358,8 @@ pub async fn verify_and_import_paused_capsule_bytes(
     let payload: CapsulePayload = serde_json::from_slice(&plaintext)
         .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
     payload.validate_bounds()?;
-    if payload.instance.sequence_id != signed.manifest.sequence.id
-        || payload.checkpoint.instance_id != signed.manifest.source_instance_id
-    {
-        return Err(CapsuleServiceError::PayloadIdentityMismatch);
-    }
+    let destination_id = request.destination_instance_id.unwrap_or_default();
+    let outputs = remap_capsule_outputs(&payload, &signed.manifest, destination_id)?;
     let sequence = storage
         .get_sequence(payload.instance.sequence_id)
         .await?
@@ -376,7 +373,7 @@ pub async fn verify_and_import_paused_capsule_bytes(
     let candidate = TaskInstance {
         claimed_at: None,
         sub_tenant: None,
-        id: request.destination_instance_id.unwrap_or_default(),
+        id: destination_id,
         sequence_id: payload.instance.sequence_id,
         tenant_id: request.tenant_id.clone(),
         namespace: payload.instance.namespace.clone(),
@@ -402,11 +399,12 @@ pub async fn verify_and_import_paused_capsule_bytes(
         created_at: now,
     };
     let imported_id = storage
-        .import_capsule_instance(
+        .import_capsule_instance_with_outputs(
             signed.manifest.capsule_id,
             request.destination_runtime_id,
             &candidate,
             &checkpoint,
+            &outputs,
         )
         .await?;
     let imported = if imported_id == candidate.id {
@@ -418,4 +416,36 @@ pub async fn verify_and_import_paused_capsule_bytes(
             .ok_or(CapsuleServiceError::MissingImportedInstance)?
     };
     Ok((imported, payload))
+}
+
+/// Validate signed source identity before remapping recovery evidence.
+fn remap_capsule_outputs(
+    payload: &CapsulePayload,
+    manifest: &CapsuleManifest,
+    destination: InstanceId,
+) -> Result<Vec<orch8_types::output::BlockOutput>, CapsuleServiceError> {
+    if payload.instance.sequence_id != manifest.sequence.id
+        || payload.checkpoint.instance_id != manifest.source_instance_id
+    {
+        return Err(CapsuleServiceError::PayloadIdentityMismatch);
+    }
+    let mut output_ids = std::collections::HashSet::with_capacity(payload.outputs.len());
+    if payload.outputs.iter().any(|output| {
+        output.instance_id != manifest.source_instance_id || !output_ids.insert(output.id)
+    }) {
+        return Err(CapsuleServiceError::PayloadIdentityMismatch);
+    }
+    // SQLite output IDs are globally unique. Allocate fresh IDs while preserving
+    // the source (created_at, id) order, including same-timestamp retries.
+    let mut outputs = payload.outputs.clone();
+    outputs.sort_unstable_by_key(|output| (output.created_at, output.id));
+    let mut ids = (0..outputs.len())
+        .map(|_| uuid::Uuid::now_v7())
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    for (output, id) in outputs.iter_mut().zip(ids) {
+        output.id = id;
+        output.instance_id = destination;
+    }
+    Ok(outputs)
 }
