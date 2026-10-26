@@ -6,7 +6,7 @@
 //! nothing is re-notified while its row exists).
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -28,12 +28,21 @@ const MAX_TRACKED: usize = 1000;
 // Callbacks share the runtime's blocking pool with handlers and memory probes.
 // Keep running plus queued listener work below its minimum four-thread pool.
 const MAX_IN_FLIGHT_CALLBACKS: usize = 2;
+// Retired owners may still hold native host frames. A new engine must not
+// reset their allowance; keep the same maximum as one full mobile blocking pool.
+const MAX_PROCESS_CALLBACKS: usize = 32;
+
+fn process_callback_slots() -> Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    Arc::clone(SLOTS.get_or_init(|| Arc::new(Semaphore::new(MAX_PROCESS_CALLBACKS))))
+}
 
 /// Manages listener registration and bounded deduplication of lifecycle events.
 pub(crate) struct MobileNotifier {
     listener: StdMutex<ListenerState>,
     cancelled: CancellationToken,
     callback_slots: Arc<Semaphore>,
+    process_callback_slots: Arc<Semaphore>,
     terminal_seen: Mutex<HashSet<InstanceId>>,
     waiting_seen: Mutex<HashSet<(InstanceId, BlockId)>>,
     /// Terminal instance IDs already returned for dedup cleanup. Tracked
@@ -51,7 +60,12 @@ struct ListenerState {
 // Keep physical capacity through foreign destruction as well as invocation.
 struct ListenerCall {
     listener: Arc<dyn EngineListener>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    _permit: ListenerPermit,
+}
+
+struct ListenerPermit {
+    _local: tokio::sync::OwnedSemaphorePermit,
+    _process: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl MobileNotifier {
@@ -63,10 +77,24 @@ impl MobileNotifier {
             }),
             cancelled: CancellationToken::new(),
             callback_slots: Arc::new(Semaphore::new(MAX_IN_FLIGHT_CALLBACKS)),
+            process_callback_slots: process_callback_slots(),
             terminal_seen: Mutex::new(HashSet::new()),
             waiting_seen: Mutex::new(HashSet::new()),
             cleanup_seen: Mutex::new(HashSet::new()),
         }
+    }
+
+    // Admission must precede deduplication. A busy process leaves events
+    // unseen so they can be delivered after physical host work returns.
+    fn reserve_callback(&self) -> Option<ListenerPermit> {
+        let local = Arc::clone(&self.callback_slots).try_acquire_owned().ok()?;
+        let process = Arc::clone(&self.process_callback_slots)
+            .try_acquire_owned()
+            .ok()?;
+        Some(ListenerPermit {
+            _local: local,
+            _process: process,
+        })
     }
 
     /// Replace the current listener. Called from `MobileEngine::set_listener`.
@@ -173,7 +201,7 @@ impl MobileNotifier {
             if inst.state != projected_state {
                 continue;
             }
-            let Ok(permit) = Arc::clone(&self.callback_slots).try_acquire_owned() else {
+            let Some(permit) = self.reserve_callback() else {
                 // Leave this and subsequent rows unseen so a later scan can
                 // deliver them when a listener callback actually finishes.
                 break;
@@ -268,7 +296,7 @@ impl MobileNotifier {
             if self.waiting_seen.lock().await.contains(&key) {
                 continue;
             }
-            let Ok(permit) = Arc::clone(&self.callback_slots).try_acquire_owned() else {
+            let Some(permit) = self.reserve_callback() else {
                 break;
             };
             let handler = sequence_cache
@@ -423,7 +451,9 @@ mod tests {
                 .unwrap();
             let (storage, mobile, _) =
                 runtime.block_on(setup_storage_with_terminal_instance(state));
-            let notifier = MobileNotifier::new();
+            let mut notifier = MobileNotifier::new();
+            let process_slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT_CALLBACKS));
+            notifier.process_callback_slots = process_slots.clone();
             let listener = Arc::new(GatedListener {
                 ids: std::sync::Mutex::new(Vec::new()),
                 released: (std::sync::Mutex::new(true), std::sync::Condvar::new()),
@@ -445,6 +475,7 @@ mod tests {
             runtime.block_on(async { runtime.spawn_blocking(|| ()).await.unwrap() });
             assert_eq!(admitted, MAX_IN_FLIGHT_CALLBACKS - 1);
             assert!(listener.ids.lock().unwrap().is_empty());
+            assert_eq!(process_slots.available_permits(), MAX_IN_FLIGHT_CALLBACKS);
             assert_eq!(
                 notifier.callback_slots.available_permits(),
                 MAX_IN_FLIGHT_CALLBACKS
@@ -767,4 +798,6 @@ mod tests {
             )]
         );
     }
+
+    mod capacity;
 }
