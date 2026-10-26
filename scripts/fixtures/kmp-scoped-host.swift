@@ -203,6 +203,19 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
             try checkObservation(run)
             let page: CatalogRunPage = try object { catalog.history(cursor: nil, limit: 1, completionHandler: $0) }
             try check(page.items.count == 1 && page.next == nil, "history mismatch")
+            let acknowledgement = "uploaded-" + run.instanceId
+            let receipt: CatalogArchiveReceipt = try object { run.archiveAfterAcknowledgement(acknowledgement: acknowledgement, completionHandler: $0) }
+            try check(receipt.instanceId == run.instanceId && receipt.outcome == .completed, "archive receipt mismatch")
+            let retry: CatalogArchiveReceipt = try object { run.archiveAfterAcknowledgement(acknowledgement: acknowledgement, completionHandler: $0) }
+            try check(receipt.acknowledgementDigest == retry.acknowledgementDigest && receipt.archivedAt == retry.archivedAt, "archive was not idempotent")
+            let archived: CatalogRunPage = try object { catalog.history(cursor: nil, limit: 1, completionHandler: $0) }
+            try check(archived.items[0].requestState == .archived, "archive request state missing")
+            guard let recorded = archived.items[0].nativeState as? CatalogNativeStateRecorded else { throw Failure(message: "recorded outcome missing") }
+            try check(recorded.state == .completed, "archive outcome changed")
+            let duplicate: Orch8CatalogRun = try object { catalog.prepareRun(request: CatalogRunRequest(workflow: "flow", inputJson: "{\"account_id\":\"forged\"}", operationKey: "same-key", version: nil), completionHandler: $0) }
+            try check(duplicate.instanceId == run.instanceId, "archive lost operation-key identity")
+            try refused { try unit { duplicate.start(completionHandler: $0) } }
+            duplicate.close()
         }
         let contexts = echo.delivered()
         try check(contexts.count == 8 && Set(contexts.map(\.effectId)).count == 8, "callback/effect identity mismatch")
@@ -245,6 +258,6 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
             "legacy observation failed owner isolation or event delivery")
         engine.close()
         try refused { _ = try engine.subscribeEvents(observer: legacyEvents) }
-        print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, history and close fences passed")
+        print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, acknowledged archives, deduplication, history and close fences passed")
     }
 }

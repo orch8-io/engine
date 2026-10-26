@@ -234,12 +234,16 @@ impl MobileCatalog {
                     request_state: match item.request_state {
                         CatalogRunState::Prepared => MobileCatalogRequestState::Prepared,
                         CatalogRunState::Cancelled => MobileCatalogRequestState::Cancelled,
+                        CatalogRunState::Archived => MobileCatalogRequestState::Archived,
                     },
                     native_state: match item.native_state {
                         CatalogNativeState::NotMaterialized => {
                             MobileCatalogNativeState::NotMaterialized
                         }
                         CatalogNativeState::Present(state) => MobileCatalogNativeState::Present {
+                            state: state.into(),
+                        },
+                        CatalogNativeState::Recorded(state) => MobileCatalogNativeState::Recorded {
                             state: state.into(),
                         },
                         CatalogNativeState::Unavailable => MobileCatalogNativeState::Unavailable,

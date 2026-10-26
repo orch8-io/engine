@@ -38,6 +38,7 @@ private class ObservedRunBackend : CatalogRunBackend {
     override fun start() = Unit
     override fun cancel(): InstanceState? = error("unexpected cancel")
     override fun completeStep(expectedUpdatedAt: String, stepName: String, outputJson: String): Boolean = error("unexpected answer")
+    override fun archiveAfterAcknowledgement(acknowledgement: String): CatalogArchiveReceipt? = error("unexpected archive")
     override fun forgetCancelledRequest(): Boolean = error("unexpected cleanup")
     override fun closeView() { closed = true }
     override fun dispose() { closed = true }

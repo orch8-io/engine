@@ -144,4 +144,59 @@ class ScopedBridgeBackendTest {
         assertEquals(listOf("open","shutdown"),calls)
     }
 
+    @Test
+    fun archiveReceiptsPreserveNullAndValidateOwnerOutcomeAndDigest() {
+        val fixture=ScopeFixture();val run=fixture.backend().run("run-a")
+        var response: JsonElement = JsonNull
+        fixture.run.action={method,args,_->
+            assertEquals("archiveAfterAcknowledgement",method)
+            assertEquals("host-ack",args["acknowledgement"]!!.jsonPrimitive.content)
+            ScopeReply(response)
+        }
+        assertNull(run.archiveAfterAcknowledgement("host-ack"))
+        val valid=buildJsonObject {
+            put("instanceId","run-a");put("accountId","account-a");put("catalogId","catalog-a")
+            put("acknowledgementDigest","a".repeat(64));put("archivedAt","2026-01-01T00:00:00Z");put("outcome","completed")
+        }
+        response=valid
+        assertEquals(InstanceState.COMPLETED,assertNotNull(run.archiveAfterAcknowledgement("host-ack")).outcome)
+        response=JsonObject(valid+("outcome" to JsonNull))
+        assertNull(assertNotNull(run.archiveAfterAcknowledgement("host-ack")).outcome)
+        for (bad in listOf(
+            JsonObject(valid+("accountId" to JsonPrimitive("foreign"))),
+            JsonObject(valid+("instanceId" to JsonPrimitive("foreign"))),
+            JsonObject(valid+("catalogId" to JsonPrimitive("foreign"))),
+            JsonObject(valid+("outcome" to JsonPrimitive("waiting"))),
+            JsonObject(valid+("acknowledgementDigest" to JsonPrimitive("invalid"))),
+            JsonObject(valid-"outcome"),
+        )) {
+            response=bad
+            assertFailsWith<Orch8Exception> { run.archiveAfterAcknowledgement("host-ack") }
+        }
+    }
+
+    @Test
+    fun archivedHistorySeparatesRecordedOutcomeFromUnknownOrLiveState() {
+        val fixture=ScopeFixture();val backend=fixture.backend()
+        var native: JsonObject = buildJsonObject { put("kind","recorded");put("state","completed") }
+        var request="archived"
+        fixture.catalog.action={_,_,_-> ScopeReply(buildJsonObject {
+            put("items",JsonArray(listOf(buildJsonObject {
+                put("instanceId","run-a");put("accountId","account-a");put("catalogId","catalog-a");put("ownerEpoch",6)
+                put("workflow","flow");put("version",1);put("sequenceId","sequence-a");put("createdAt","2026-01-01T00:00:00Z")
+                put("requestState",request);put("nativeState",native)
+            })));put("hasNext",false)
+        }) }
+        assertEquals(CatalogRequestState.ARCHIVED,backend.history(null,1).items.single().requestState)
+        assertEquals(CatalogNativeState.Recorded(InstanceState.COMPLETED),backend.history(null,1).items.single().nativeState)
+        request="prepared"
+        assertFailsWith<Orch8Exception> { backend.history(null,1) }
+        request="archived";native=buildJsonObject {put("kind","unavailable")}
+        assertEquals(CatalogNativeState.Unavailable,backend.history(null,1).items.single().nativeState)
+        for (kind in listOf("present","recorded")) {
+            native=buildJsonObject {put("kind",kind);put("state","waiting")}
+            assertFailsWith<Orch8Exception> { backend.history(null,1) }
+        }
+    }
+
 }

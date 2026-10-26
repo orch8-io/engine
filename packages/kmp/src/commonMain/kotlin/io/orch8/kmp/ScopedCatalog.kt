@@ -47,10 +47,16 @@ data class CatalogRunSnapshot(
 ) {
     val data: JsonElement get() = lenientJson.parseToJsonElement(dataJson)
 }
-enum class CatalogRequestState { PREPARED, CANCELLED }
+/** Acknowledgement receipt; the raw reference and workflow data are not retained here. */
+data class CatalogArchiveReceipt(
+    val instanceId: String, val accountId: String, val catalogId: String,
+    val acknowledgementDigest: String, val archivedAt: String, val outcome: InstanceState?,
+)
+enum class CatalogRequestState { PREPARED, CANCELLED, ARCHIVED }
 sealed interface CatalogNativeState {
     data object NotMaterialized : CatalogNativeState
     data class Present(val state: InstanceState) : CatalogNativeState
+    data class Recorded(val state: InstanceState) : CatalogNativeState
     data object Unavailable : CatalogNativeState
 }
 data class CatalogRunSummary(
@@ -165,6 +171,16 @@ class Orch8CatalogRun internal constructor(private val backend: CatalogRunBacken
             snapshot.catalogId == catalogId && snapshot.sessionEpoch == sessionEpoch) { "snapshot belongs to another run or session" }
         require(choice.isNotBlank() && "value" !in data)
         return completeStep(snapshot.updatedAt, stepName, JsonObject(data + ("value" to JsonPrimitive(choice))).toString())
+    }
+    /**
+     * Call after app/backend acknowledgement. Clears staged input and releases
+     * admission while retaining deduplication and outcome receipts. Active or
+     * never-materialized runs return null. The host reference is hashed, not
+     * remotely verified. Reuse the same reference when retrying.
+     */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
+    suspend fun archiveAfterAcknowledgement(acknowledgement: String): CatalogArchiveReceipt? = withContext(io) {
+        backend.archiveAfterAcknowledgement(acknowledgement)
     }
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun forgetCancelledRequest(): Boolean = withContext(io) { backend.forgetCancelledRequest() }

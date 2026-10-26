@@ -611,6 +611,7 @@ CREATE TABLE IF NOT EXISTS mobile_catalog_run_requests (
     admitted_manifest_digest TEXT NOT NULL CHECK(length(admitted_manifest_digest) = 64),
     sequence_id TEXT REFERENCES sequences(id) ON DELETE SET NULL,
     selected_sequence_id TEXT NOT NULL,
+    archive_receipt_id TEXT REFERENCES mobile_catalog_run_archives(request_id),
     workflow_name TEXT NOT NULL,
     workflow_version INTEGER NOT NULL CHECK(workflow_version > 0),
     requested_version INTEGER CHECK(requested_version IS NULL OR requested_version > 0),
@@ -644,6 +645,23 @@ CREATE TABLE IF NOT EXISTS mobile_catalog_run_materializations (
     required_handlers TEXT NOT NULL,
     materialized_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_run_hot_usage
+    ON mobile_catalog_run_requests(account_id,catalog_id,input_bytes,archive_receipt_id)
+    WHERE archive_receipt_id IS NULL;
+
+CREATE TABLE IF NOT EXISTS mobile_catalog_run_archives (
+    request_id TEXT PRIMARY KEY REFERENCES mobile_catalog_run_materializations(request_id),
+    account_id TEXT NOT NULL,
+    catalog_id TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    receipt_bytes INTEGER NOT NULL CHECK(receipt_bytes > 0 AND receipt_bytes <= 4096),
+    receipt_digest TEXT NOT NULL CHECK(length(receipt_digest) = 64),
+    FOREIGN KEY(account_id,catalog_id) REFERENCES mobile_catalogs(account_id,id),
+    CHECK(receipt_bytes = length(CAST(receipt_json AS BLOB)))
+);
+CREATE INDEX IF NOT EXISTS idx_mobile_catalog_archive_usage
+    ON mobile_catalog_run_archives(account_id,catalog_id,receipt_bytes);
 
 CREATE TABLE IF NOT EXISTS sync_metadata (
     key TEXT PRIMARY KEY,
@@ -1616,4 +1634,4 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 55;
+pub(super) const SCHEMA_VERSION: i64 = 56;

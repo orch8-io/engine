@@ -10,7 +10,7 @@
 //     import Orch8Kmp
 //     Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
 //
-// Protocol version: 4 (must equal ORCH8_BRIDGE_PROTOCOL in
+// Protocol version: 5 (must equal ORCH8_BRIDGE_PROTOCOL in
 // src/commonMain/kotlin/io/orch8/kmp/bridge/JsonBridge.kt). Every call returns
 // {"ok": value} or {"error": {"kind": "...", "message": "..."}}; all decoding,
 // validation and error mapping happen in common Kotlin.
@@ -20,7 +20,7 @@ import CoreFoundation
 import Orch8Kmp
 import Orch8Mobile
 
-private let bridgeProtocolVersion = 4
+private let bridgeProtocolVersion = 5
 
 public final class Orch8KmpBridgeFactory: NSObject, Orch8JsonBridgeFactory {
     public func create() -> Orch8JsonBridge {
@@ -609,7 +609,7 @@ private extension Dictionary where Key == String, Value == Any {
     }
 }
 
-// MARK: - Owned scoped ports (protocol 4)
+// MARK: - Owned scoped ports (protocol 5)
 
 private enum NativeScopedNode {
     case account(MobileAccount)
@@ -721,6 +721,13 @@ private final class NativeScopedPort: NSObject, Orch8ScopedBridge, @unchecked Se
             case let (.run(run), "completeStep"):
                 return NativeScopedReply(try run.completeStep(expectedUpdatedAt: args.string("expectedUpdatedAt"),
                     stepName: args.string("stepName"), outputJson: args.string("outputJson")))
+            case let (.run(run), "archiveAfterAcknowledgement"):
+                guard let value = try run.archiveAfterAcknowledgement(acknowledgement: args.string("acknowledgement")) else { return NativeScopedReply() }
+                return NativeScopedReply([
+                    "instanceId": value.instanceId, "accountId": value.accountId, "catalogId": value.catalogId,
+                    "acknowledgementDigest": value.acknowledgementDigest, "archivedAt": value.archivedAt,
+                    "outcome": value.outcome.map(Orch8KmpBridge.stateWire) as Any? ?? NSNull(),
+                ])
             case let (.run(run), "forgetCancelledRequest"):
                 return NativeScopedReply(try run.forgetCancelledRequest())
             default: throw BridgeFailure(kind: "InvalidInput", message: "unknown scoped operation")
@@ -750,9 +757,10 @@ private final class NativeScopedPort: NSObject, Orch8ScopedBridge, @unchecked Se
         case .notMaterialized: state = ["kind": "not_materialized"]
         case .unavailable: state = ["kind": "unavailable"]
         case let .present(state: native): state = ["kind": "present", "state": Orch8KmpBridge.stateWire(native)]
+        case let .recorded(state: native): state = ["kind": "recorded", "state": Orch8KmpBridge.stateWire(native)]
         }
         let request: String
-        switch value.requestState { case .prepared: request = "prepared"; case .cancelled: request = "cancelled" }
+        switch value.requestState { case .prepared: request = "prepared"; case .cancelled: request = "cancelled"; case .archived: request = "archived" }
         return ["instanceId": value.instanceId, "accountId": value.accountId, "catalogId": value.catalogId,
             "ownerEpoch": value.ownerEpoch, "workflow": value.workflow, "version": value.version,
             "sequenceId": value.sequenceId, "createdAt": value.createdAt, "requestState": request, "nativeState": state]

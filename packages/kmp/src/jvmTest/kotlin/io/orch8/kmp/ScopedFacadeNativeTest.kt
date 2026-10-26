@@ -72,6 +72,18 @@ class ScopedFacadeNativeTest {
                 assertEquals(run.instanceId,history.items.single().instanceId)
                 assertEquals(CatalogNativeState.Present(InstanceState.COMPLETED),history.items.single().nativeState)
                 assertNull(history.next)
+                val acknowledgement="uploaded-${run.instanceId}"
+                val receipt=assertNotNull(run.archiveAfterAcknowledgement(acknowledgement))
+                assertEquals(InstanceState.COMPLETED,receipt.outcome)
+                assertEquals(run.instanceId,receipt.instanceId)
+                assertEquals(receipt,run.archiveAfterAcknowledgement(acknowledgement))
+                assertNull(catalog.run(foreign.instanceId).archiveAfterAcknowledgement("foreign"))
+                assertEquals(CatalogRequestState.ARCHIVED,catalog.history(limit=1).items.single().requestState)
+                assertEquals(CatalogNativeState.Recorded(InstanceState.COMPLETED),catalog.history(limit=1).items.single().nativeState)
+                val duplicate=catalog.prepareRun(CatalogRunRequest("flow","{\"account_id\":\"forged\"}","same-key"))
+                assertEquals(run.instanceId,duplicate.instanceId)
+                assertFailsWith<Orch8Exception> { duplicate.start() }
+                duplicate.close()
             }
             assertEquals(8,contexts.size)
             assertEquals(8,contexts.map {it.effectId}.toSet().size)

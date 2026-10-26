@@ -11,6 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, sqlite::SqliteRow};
 
+pub(crate) mod archive;
 pub(crate) mod history;
 pub(crate) mod materialize;
 
@@ -24,7 +25,8 @@ pub(crate) struct CatalogRunRequest<'a> {
 }
 
 /// Trusted runtime ceilings, shared by callers using this database. Cancelled
-/// requests stay charged until explicitly forgotten; retirement deletes nothing.
+/// requests stay charged until explicitly forgotten; acknowledged materialized
+/// runs use a separate bounded archive ledger. Retirement deletes nothing.
 #[derive(Clone, Copy)]
 pub(crate) struct CatalogRunLimits {
     pub(crate) global_records: u32,
@@ -39,6 +41,7 @@ pub(crate) struct CatalogRunLimits {
 pub(crate) enum CatalogRunState {
     Prepared,
     Cancelled,
+    Archived,
 }
 
 #[derive(Debug)]
@@ -73,7 +76,12 @@ fn decode(row: &SqliteRow) -> Result<CatalogRun, StorageError> {
     validate(&workflow)?;
     let requested_version: Option<i32> = row.try_get("requested_version")?;
     let expected: String = row.try_get("request_digest")?;
-    if expected != fingerprint(&workflow, requested_version, &input)? {
+    let archive: Option<String> = row.try_get("archive_receipt_id")?;
+    if archive.as_deref().is_some_and(|marker| marker != id)
+        || (archive.is_some()
+            && (input != "null" || row.try_get::<String, _>("state")? != "cancelled"))
+        || (archive.is_none() && expected != fingerprint(&workflow, requested_version, &input)?)
+    {
         return Err(invalid("scoped run request identity is corrupt"));
     }
     Ok(CatalogRun {
@@ -96,16 +104,20 @@ fn decode(row: &SqliteRow) -> Result<CatalogRun, StorageError> {
             .with_timezone(&chrono::Utc),
         workflow,
         version: row.try_get("workflow_version")?,
-        state: match row.try_get::<String, _>("state")?.as_str() {
-            "prepared" => CatalogRunState::Prepared,
-            "cancelled" => CatalogRunState::Cancelled,
+        state: match (
+            archive.is_some(),
+            row.try_get::<String, _>("state")?.as_str(),
+        ) {
+            (false, "prepared") => CatalogRunState::Prepared,
+            (false, "cancelled") => CatalogRunState::Cancelled,
+            (true, "cancelled") => CatalogRunState::Archived,
             _ => return Err(invalid("invalid scoped run state")),
         },
         input: serde_json::from_str(&input).map_err(|_| invalid("invalid scoped run input"))?,
     })
 }
 
-const USAGE_SQL: &str = "SELECT COUNT(*), COALESCE(SUM(account_id = ?1),0), COALESCE(SUM(account_id = ?1 AND catalog_id = ?2),0), COALESCE(SUM(input_bytes),0), COALESCE(SUM(CASE WHEN account_id = ?1 THEN input_bytes ELSE 0 END),0), COALESCE(SUM(CASE WHEN account_id = ?1 AND catalog_id = ?2 THEN input_bytes ELSE 0 END),0) FROM mobile_catalog_run_requests INDEXED BY idx_mobile_catalog_run_usage";
+const USAGE_SQL: &str = "SELECT COUNT(*), COALESCE(SUM(account_id = ?1),0), COALESCE(SUM(account_id = ?1 AND catalog_id = ?2),0), COALESCE(SUM(input_bytes),0), COALESCE(SUM(CASE WHEN account_id = ?1 THEN input_bytes ELSE 0 END),0), COALESCE(SUM(CASE WHEN account_id = ?1 AND catalog_id = ?2 THEN input_bytes ELSE 0 END),0) FROM mobile_catalog_run_requests INDEXED BY idx_mobile_catalog_run_hot_usage WHERE archive_receipt_id IS NULL";
 
 fn fingerprint(workflow: &str, version: Option<i32>, input: &str) -> Result<String, StorageError> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(&(
@@ -203,6 +215,7 @@ impl MobileStorage {
                 .bind(&scope.account.id).bind(&scope.id).bind(key).fetch_optional(&mut *tx).await? {
                 let previous:String=row.try_get("request_digest")?;
                 let run=decode(&row)?;
+                if run.state == CatalogRunState::Archived { archive::read_receipt(&mut tx, &run).await?; }
                 if previous!=digest {return Err(invalid("scoped operation key belongs to another request"));}
                 if run.owner_epoch!=scope.account.epoch {return Err(invalid("scoped operation key belongs to a retired execution epoch"));}
                 tx.commit().await?;
@@ -241,6 +254,12 @@ impl MobileStorage {
         let row=sqlx::query("SELECT * FROM mobile_catalog_run_requests WHERE id = ?1 AND account_id = ?2 AND catalog_id = ?3")
             .bind(id.to_string()).bind(&scope.account.id).bind(&scope.id).fetch_optional(&mut *tx).await?;
         let result = row.as_ref().map(decode).transpose()?;
+        if let Some(run) = result
+            .as_ref()
+            .filter(|run| run.state == CatalogRunState::Archived)
+        {
+            archive::read_receipt(&mut tx, run).await?;
+        }
         tx.commit().await?;
         Ok(result)
     }

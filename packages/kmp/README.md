@@ -126,7 +126,7 @@ Kotlin/Native does not carry a Swift `throws` into Kotlin as a typed
 exception, and Kotlin cannot see UniFFI's Swift records. Keeping the Swift
 side to plain strings means all decoding, validation and error mapping run
 in common Kotlin (`JsonBridgeBackend`), where the JVM test suite covers them.
-Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 4`) when the
+Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 5`) when the
 engine opens, so a stale adapter fails immediately with a clear message.
 
 ## Swift observation
@@ -202,7 +202,7 @@ approvals and commands with the server.
 
 ## Multiple accounts and catalogs (development sources)
 
-The scoped API requires a KMP framework, protocol-4 Swift adapter, generated
+The scoped API requires a KMP framework, protocol-5 Swift adapter, generated
 bindings and native library built from the same source revision. Published
 `0.7.1` binaries do not implement it. On Android, build and stage the matching
 `orch8-mobile` AAR in a Maven repository and pass `-Porch8.dist.repo=/path/to/repo`
@@ -341,7 +341,7 @@ credentials. A sync's return or failure retires only its own ID; callbacks after
 retirement cannot invoke the source or resolve a successor. Shutdown retires all
 manifest IDs. The supplied source stays caller-owned, so sync does not close a
 source also used for a node or another call. This callback change requires the
-protocol-4 Swift bridge and KMP framework to ship together.
+protocol-5 Swift bridge and KMP framework to ship together.
 
 `EngineConfig.syncApiKey` is the **legacy** path and not for production apps:
 it still works, and the SDK logs a warning when the server reports the key is
@@ -459,3 +459,33 @@ test task fingerprints the native library so a Rust change invalidates cached
 results. Mobile CI runs this path against the host library built for the same
 commit, compiles `linkDebugFrameworkIosSimulatorArm64`, and checks the actual
 Swift/iOS bridge against that framework with `scripts/check-kmp-apple-bridge.sh`.
+
+
+Acknowledged scoped history can be archived explicitly:
+
+```kotlin
+val receipt = run.archiveAfterAcknowledgement("backend-upload:receipt-id")
+```
+
+Call this only after the app/backend has acknowledged the run. The reference is
+trusted host input, not a credential verified by the engine. Only its SHA-256
+digest is retained. The operation atomically clears staged input and releases
+hot admission quota, while retaining the operation key and materialization
+receipt. An identical prepare retry returns the same archived run; start is
+refused, including after native GC. A different request under that key is refused.
+An identical acknowledgement retry returns the original receipt, while changing
+its reference is refused. Active and never-materialized runs return null.
+
+History reports `ARCHIVED` and `CatalogNativeState.Recorded` for an outcome
+observed at archive time. If native GC already removed the run, the archive
+outcome stays null and history reports `Unavailable`. A receipt is not a native
+snapshot or an event stream. Native context, execution trees and effect evidence
+remain subject to their existing GC lifecycle; archival does not erase those.
+
+Compact receipts have separate shared ceilings: 65,536 globally, 32,768 per
+account and 16,384 per catalog, and 64/32/16 MiB of encoded receipts respectively.
+Each encoded receipt is at most 4 KiB. Existing compact keys are never silently
+evicted: archive exhaustion returns the typed resource-limit error and leaves
+staged input/admission unchanged. These are bounded retention ceilings, not a
+promise of unlimited on-device execution history. Raw operation keys and frozen
+request metadata remain in their original bounded request rows.

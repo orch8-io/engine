@@ -607,7 +607,7 @@ async fn quota_queries_use_a_covering_metadata_index_not_input_payloads() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        plan.contains("COVERING INDEX idx_mobile_catalog_run_usage"),
+        plan.contains("COVERING INDEX idx_mobile_catalog_run_hot_usage"),
         "{plan}"
     );
     assert!(
