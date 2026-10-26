@@ -3667,3 +3667,48 @@ prevents fallback to a released Orch8 AAR. Flutter embedding acquisition pins it
 engine commit and verifies the extracted jar's SHA-256; no protocol stubs or
 external package publication are involved. Rust, UniFFI and protocol 6 are
 unchanged. This gate supplements the existing JavaScript/Dart checks.
+
+
+### DME150 — Preserve token callback admission across closed engine owners
+
+The root credential object bounded refresh and manifest getter work to two
+physical callbacks, retaining each local permit through foreign destruction.
+Closing an engine and creating a successor allocated a fresh credential gate,
+so non-cooperative retired callbacks could accumulate outside that bound. A
+regression using distinct retired credential owners reproduced successor host
+entry while the shared physical allowance was exhausted.
+
+Every credential now also reserves from a process-wide 32-call semaphore before
+queueing refresh or manifest getter work. The ceiling matches the largest mobile
+runtime blocking pool; the existing two-call local ceiling still leaves room
+for other work in each engine. Admission is immediate, with no waiting queue or
+refresh backoff penalty on capacity refusal. A failed process reservation returns
+its local slot. Closing one credential closes only its local gate and never
+closes the shared process gate.
+
+Both permits travel with the physical callback through queueing, timeout,
+owner retirement and foreign provider destruction. A returning callback or an
+unwinding callback/destructor releases admission. Refresh keeps its existing
+fail-closed boolean behavior; a manifest getter reports ResourceLimit before
+entering the host. No token identity or authorization ownership is shared
+between engines.
+
+Regression coverage includes mixed refresh/manifest refusal across closed
+owners, recovery after physical return, no local-slot leak on global refusal,
+capacity retained through a retired provider destructor, and permit return on
+panic or queued cancellation. A separate subprocess exercises the actual
+default constructor and 32-call static process gate without saturating unrelated
+parallel tests. The smaller deterministic test injects a private shared gate
+while using the same production callback admission path.
+
+This bounds internally scheduled token callbacks, not arbitrary threads a host
+creates to call a synchronous cached-token setter. Scoped handler capacity is
+already shared across engine owners; legacy handler and listener process
+ceilings remain separate review items. Rust implementation changes do not
+change the UniFFI surface or protocol 6.
+
+Local validation passes all 659 mobile library tests and 109 integration,
+coverage and example-workflow tests, with zero failures or skips. The real
+default process-capacity subprocess passes as part of the full library suite.
+Committed binding parity, SDK packaging and documentation checks also pass.
+Strict mobile all-target Clippy with warnings denied and workspace formatting checks pass.
