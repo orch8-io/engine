@@ -1,5 +1,6 @@
 package io.orch8.kmp
 
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlin.time.Duration
 
@@ -11,6 +12,7 @@ interface CatalogSnapshotObserver : Orch8ObservationObserver {
 /**
  * Owns polling without retaining the engine. Closing stops the polling task and
  * releases the observer. An already accepted host callback may finish afterward.
+ * Engine close also stops SDK subscriptions immediately, including long delays.
  * Disposing a subscription does not close its run view or cancel durable work.
  */
 class CatalogSnapshotSubscription internal constructor(private val stop: () -> Unit) : AutoCloseable {
@@ -22,6 +24,7 @@ internal fun subscribeCatalogSnapshots(
     observer: CatalogSnapshotObserver,
     interval: Duration,
     io: CoroutineDispatcher,
+    owner: Job?,
 ): CatalogSnapshotSubscription = CatalogSnapshotSubscription(
-    subscribeFlow(run.observeSnapshots(interval), observer, observer::onSnapshot, io),
+    subscribeFlow(run.observeSnapshots(interval), observer, observer::onSnapshot, io, owner),
 )

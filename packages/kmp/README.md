@@ -149,7 +149,8 @@ Observers also implement `onError(Orch8Exception)` and `onComplete()`. Callbacks
 run on IO; dispatch UI changes to the main thread. Close the returned
 `Orch8ObservationSubscription` when the screen leaves. Closing one subscription
 keeps other subscriptions and workflow/delegation execution intact. Engine close
-cancels all its root subscriptions and refuses new ones. Cancellation has no
+cancels root and scoped SDK subscriptions immediately, including subscriptions
+sleeping between polls, and refuses new ones. Cancellation has no
 error/completion callback; a previously accepted host callback may finish.
 Instance/delegation streams complete on a known terminal state. Hot event and
 pending-step streams attach before the subscription call returns; events do not
@@ -157,6 +158,8 @@ replay past deliveries, while pending steps include the current list.
 
 These root subscriptions preserve legacy visibility and exclude scoped private
 data. Use the catalog run's `subscribeSnapshots` for scoped UI observation.
+Shared Kotlin Flow collectors keep their caller-owned coroutine lifecycle; cancel
+them when their UI or application owner leaves.
 Root engine lifetime still requires explicit application shutdown; wrapper GC
 tests do not prove native backend/resource destruction on every platform.
 

@@ -85,7 +85,7 @@ class Orch8Engine internal constructor(
     /** Open a trusted explicit-owner account; scoped views do not retain this engine. */
     @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun openAccount(identity: AccountIdentity): Orch8Account = offload {
-        Orch8Account(backend.openAccount(identity), ioDispatcher)
+        Orch8Account(backend.openAccount(identity), ioDispatcher, observationOwner)
     }
 
     /** Register a native handler. Must be called before [resume]. */
