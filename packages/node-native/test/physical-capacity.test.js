@@ -6,6 +6,18 @@ const { mkdtempSync, rmSync } = require('node:fs')
 const { tmpdir } = require('node:os')
 const { join } = require('node:path')
 const { Engine } = require('..')
+const { setTimeout: delay } = require('node:timers/promises')
+
+async function deferredSnapshot(engine, id) {
+  let result = await engine.run(id, { timeoutMs: 150 })
+  const deadline = Date.now() + 5000
+  while (result.state === 'running' && Date.now() < deadline) {
+    await delay(10)
+    result = await engine.get(id)
+  }
+  assert.equal(result.state, 'scheduled', 'capacity must defer before host dispatch')
+  return result
+}
 
 test('physical promise capacity survives step timeouts and engine replacement', { timeout: 60000 }, async () => {
   const directory = mkdtempSync(join(tmpdir(), 'orch8-physical-'))
@@ -29,8 +41,7 @@ test('physical promise capacity survives step timeouts and engine replacement', 
     }
     assert.equal(active, 128)
     const deferredId = await first.start('held')
-    const deferred = await first.run(deferredId, { timeoutMs: 150 })
-    assert.equal(deferred.state, 'scheduled', 'capacity must defer before host dispatch')
+    const deferred = await deferredSnapshot(first, deferredId)
     assert.deepEqual(deferred.outputs, {})
     assert.equal(entered, 128)
     await first.signal(deferredId, 'cancel')
@@ -40,7 +51,7 @@ test('physical promise capacity survives step timeouts and engine replacement', 
     successor.handler('host', host)
     await successor.deploy({ name: 'fast', blocks: [{ type: 'step', id: 'work', handler: 'host', params: { hold: false } }] })
     const fast = await successor.start('fast')
-    const waiting = await successor.run(fast, { timeoutMs: 150 })
+    const waiting = await deferredSnapshot(successor, fast)
     assert.equal(waiting.state, 'scheduled', 'new engine cannot reset unsettled admission')
     assert.equal(entered, 128)
     release.shift()()

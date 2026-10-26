@@ -131,3 +131,13 @@ reopening the engine cannot reset this allowance. An already-admitted call is
 not forcibly stopped, and a late result cannot overwrite its timed-out outcome.
 Snapshots omit internal in-progress/interceptor/SLA rows. Handler input also
 omits retry bookkeeping, while terminal failure diagnostics remain readable.
+
+### Handler failure diagnostics
+
+Error reporting reads built-in exception storage without invoking application
+`__str__`, attribute accessors or dictionary hooks. A single exact string argument
+is retained, limited to 1024 Unicode characters with lone surrogates replaced;
+other arguments use `handler failed`. `PermanentError` and its subclasses remain
+terminal. A `permanent = True` attribute is recognized among the first 64 own
+attributes; inherited properties do not determine retry policy. Prefer
+`PermanentError` for an explicit terminal contract.

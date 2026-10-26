@@ -4103,3 +4103,29 @@ This bounds invocation count, not retained bytes or per-owner fairness. Existing
 admitted opaque calls may continue after cancellation. Cooperative cancellation,
 account-scoped workers and the remaining review matrix remain open. No native
 JSON protocol, database schema, release version or publication changes.
+
+
+### DME162 — Python exception formatting could escape the host reply contract
+
+The public Python wrapper called getattr(error, "permanent") and str(error) while
+catching handler/serialization failures. A property or formatting hook could
+raise again, replacing the JSON reply with a secondary Python exception; such
+hooks could also execute arbitrary work after the logical handler had failed.
+Nine targeted baseline cases fail against the old wrapper and actual extension.
+
+The wrapper now reads args, own attributes and class ancestry through built-in
+storage descriptors. It never formats opaque argument objects or invokes
+subclass attribute/dictionary hooks. Exact single-string messages are sliced to
+1024 code points before UTF-8 sanitization. Other argument shapes use a fixed
+diagnostic. PermanentError ancestry preserves terminal policy without metaclass
+instance checks. Explicit own permanent=True markers are recognized within a
+bounded 64-attribute scan; exact string-key comparison avoids hostile colliding
+key equality. These diagnostic and marker rules are documented in the package.
+
+Ten regressions cover attribute/formatting hooks, opaque arguments, surrogate
+and oversized messages, serialization exceptions, colliding dictionary keys,
+attribute limits, dictionary subclasses, and actual native retry versus terminal
+behavior. All 19 Python tests pass against the real native extension, including
+existing hard-exit/restart and physical-capacity/runtime-retirement tests. This
+changes only Python error normalization; no Rust, protocol/schema or release
+version change and no publication.

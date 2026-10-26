@@ -114,17 +114,39 @@ async fn timeout_keeps_capacity_and_excess_work_preserves_its_prepared_attempt()
     }
     assert_eq!(fixture.budget.available(), 0);
     let (pending, result) = fixture.start_and_run(Duration::from_millis(100)).await;
-    assert_eq!(result["state"], "scheduled");
+    assert!(matches!(
+        result["state"].as_str(),
+        Some("scheduled" | "running")
+    ));
     assert_eq!(result["outputs"], json!({}));
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     let reader = orch8_storage::sqlite::SqliteStorage::file(&path)
         .await
         .unwrap();
     let id = orch8::InstanceId::from_uuid(uuid::Uuid::parse_str(&pending).unwrap());
-    let before = reader
-        .list_instance_effect_receipts(&TenantId::new("default").unwrap(), id, 8)
-        .await
-        .unwrap();
+    // The observer deadline may return while its owned scheduler pass is
+    // still rejecting admission. Observe the durable transition rather than
+    // requiring a slow runner to finish that pass within 100 milliseconds.
+    let before = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let instance = reader.get_instance(id).await.unwrap().unwrap();
+            assert!(
+                !instance.state.is_terminal(),
+                "excess work must stay deferred"
+            );
+            let receipts = reader
+                .list_instance_effect_receipts(&TenantId::new("default").unwrap(), id, 8)
+                .await
+                .unwrap();
+            if instance.state == orch8::InstanceState::Scheduled && receipts.len() == 1 {
+                break receipts;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("excess work did not settle into durable pre-dispatch deferral");
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].state, EffectState::Prepared);
     assert_eq!(before[0].attempt, 0);
