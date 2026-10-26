@@ -46,10 +46,10 @@ import java.util.concurrent.TimeUnit
 class Orch8Module(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
 
-    @Volatile private var engine: MobileEngine? = null
+    private val lifecycle = NativeEngineLifecycle()
+    private val engine: MobileEngine? get() = lifecycle.engine
     @Volatile private var handlerTimeoutMs: Long = 30_000
     @Volatile private var invalidated = false
-    private val initLock = Any()
     private val work: ExecutorService = Executors.newCachedThreadPool { r ->
         Thread(r, "orch8-rn-work").apply { isDaemon = true }
     }
@@ -68,7 +68,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
         try {
             body(eng)
         } catch (e: Exception) {
-            Orch8Errors.reject(promise, e)
+            Orch8Errors.reject(promise, if (e is IllegalStateException && engine !== eng) MobileException.Shutdown("engine retired") else e)
         }
     }
 
@@ -78,12 +78,16 @@ class Orch8Module(reactContext: ReactApplicationContext) :
             promise.reject("ENGINE_NOT_INITIALIZED", "Call initialize() first.")
             return
         }
-        work.execute {
-            try {
-                body(eng)
-            } catch (e: Exception) {
-                Orch8Errors.reject(promise, e)
+        try {
+            work.execute {
+                try {
+                    body(eng)
+                } catch (e: Exception) {
+                    Orch8Errors.reject(promise, if (e is IllegalStateException && engine !== eng) MobileException.Shutdown("engine retired") else e)
+                }
             }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            Orch8Errors.reject(promise, MobileException.Shutdown("bridge detached"))
         }
     }
 
@@ -131,8 +135,8 @@ class Orch8Module(reactContext: ReactApplicationContext) :
      * alive: a throw here would cross the UniFFI callback boundary and become
      * a Rust panic.
      */
-    internal fun sendEvent(name: String, params: WritableMap): Boolean {
-        if (invalidated) return false
+    internal fun sendEvent(scope: NativeEngineLifecycle.Scope, name: String, params: WritableMap): Boolean {
+        if (invalidated || !scope.isCurrent()) return false
         return try {
             val ctx = reactApplicationContext
             if (!ctx.hasActiveReactInstance()) return false
@@ -191,37 +195,25 @@ class Orch8Module(reactContext: ReactApplicationContext) :
             deviceId = config.str("deviceId") ?: "",
             syncApiKey = config.str("syncApiKey") ?: "",
         )
-        work.execute {
-            try {
-                synchronized(initLock) {
-                    // Release the SQLite file held by a previous engine before
-                    // opening a new one on the same path.
-                    val previous = engine
-                    engine = null
-                    if (previous != null) {
-                        pending.failAll("engine re-initialized")
-                        previous.shutdown()
-                    }
-                    val eng = MobileEngine(dbPath, cfg)
-                    eng.setListener(RNEngineListener(this))
-                    handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
-                    engine = eng
+        lifecycle.initialize(dbPath, cfg,
+            retired = { pending.failAll("engine re-initialized") },
+            configure = { eng, scope ->
+                eng.setListener(RNEngineListener(this, scope))
+                handlerTimeoutMs = cfg.handlerTimeoutMs.toLong()
+            },
+            complete = { error ->
+                if (!invalidated) {
+                    if (error == null) promise.resolve(null) else Orch8Errors.reject(promise, error, "INIT_ERROR")
                 }
-                promise.resolve(null)
-            } catch (e: Exception) {
-                Orch8Errors.reject(promise, e, "INIT_ERROR")
-            }
-        }
+            })
     }
 
     @ReactMethod
     fun shutdown(promise: Promise) {
-        val eng = engine
-        engine = null
-        pending.failAll("engine shut down")
-        work.execute {
-            eng?.shutdown()
-            promise.resolve(null)
+        lifecycle.shutdown(false, { pending.failAll("engine shut down") }) { error ->
+            if (!invalidated) {
+                if (error == null) promise.resolve(null) else Orch8Errors.reject(promise, error)
+            }
         }
     }
 
@@ -270,7 +262,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun registerHandler(name: String, promise: Promise) = withEngine(promise) { eng ->
-        eng.registerHandler(name, RNStepHandler(this, handlerTimeoutMs))
+        eng.registerHandler(name, RNStepHandler(this, handlerTimeoutMs, lifecycle.scopeOf(eng)))
         promise.resolve(null)
     }
 
@@ -283,7 +275,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun setTokenProvider(initialToken: String, promise: Promise) = withEngine(promise) { eng ->
-        eng.setTokenProvider(RNTokenProvider(this, initialToken, handlerTimeoutMs))
+        eng.setTokenProvider(RNTokenProvider(this, initialToken, handlerTimeoutMs, lifecycle.scopeOf(eng)))
         promise.resolve(null)
     }
 
@@ -554,16 +546,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     override fun invalidate() {
         invalidated = true
         pending.failAll("React Native context invalidated")
-        val eng = engine
-        engine = null
-        // Shut the engine down (releases the SQLite file and worker threads)
-        // on the work pool, then let the pool drain.
-        work.execute {
-            try {
-                eng?.shutdown()
-            } catch (ignored: Throwable) {
-            }
-        }
+        lifecycle.shutdown(true, {}) { /* The JS context has already gone. */ }
         work.shutdown()
         super.invalidate()
     }
@@ -617,11 +600,12 @@ internal class PendingHandlerCalls {
 private class RNStepHandler(
     private val module: Orch8Module,
     private val timeoutMs: Long,
+    private val scope: NativeEngineLifecycle.Scope,
 ) : StepHandler {
     override fun execute(stepName: String, input: String): String {
         val requestId = UUID.randomUUID().toString()
         module.pending.open(requestId)
-        val sent = module.sendEvent("orch8:executeStep", Arguments.createMap().apply {
+        val sent = module.sendEvent(scope, "orch8:executeStep", Arguments.createMap().apply {
             putString("requestId", requestId)
             putString("stepName", stepName)
             putString("input", input)
@@ -632,6 +616,7 @@ private class RNStepHandler(
         }
         val outcome = module.pending.await(requestId, timeoutMs)
             ?: throw HandlerException.Retryable("JS handler '$stepName' timed out after $timeoutMs ms")
+        if (!scope.isCurrent()) throw HandlerException.Retryable("engine retired")
         outcome.error?.let { message ->
             throw if (outcome.permanent) HandlerException.Permanent(message) else HandlerException.Retryable(message)
         }
@@ -648,15 +633,16 @@ private class RNTokenProvider(
     private val module: Orch8Module,
     initialToken: String,
     private val timeoutMs: Long,
+    private val scope: NativeEngineLifecycle.Scope,
 ) : TokenProvider {
     @Volatile private var token: String = initialToken
 
-    override fun currentToken(): String = token
+    override fun currentToken(): String = if (scope.isCurrent()) token else ""
 
     override fun refreshToken(): String {
         val requestId = UUID.randomUUID().toString()
         module.pending.open(requestId)
-        val sent = module.sendEvent("orch8:refreshToken", Arguments.createMap().apply {
+        val sent = module.sendEvent(scope, "orch8:refreshToken", Arguments.createMap().apply {
             putString("requestId", requestId)
         })
         if (!sent) {
@@ -665,6 +651,7 @@ private class RNTokenProvider(
         }
         val outcome = module.pending.await(requestId, timeoutMs)
             ?: throw MobileException.Engine("JS token provider timed out after $timeoutMs ms")
+        if (!scope.isCurrent()) throw MobileException.Shutdown("engine retired")
         outcome.error?.let { throw MobileException.Engine(it) }
         val fresh = outcome.output
         if (fresh.isNullOrEmpty()) throw MobileException.Engine("JS token provider returned an empty token")
@@ -679,23 +666,23 @@ private class StaticTokenProvider(private val token: String) : TokenProvider {
     override fun refreshToken(): String = token
 }
 
-private class RNEngineListener(private val module: Orch8Module) : EngineListener {
+private class RNEngineListener(private val module: Orch8Module, private val scope: NativeEngineLifecycle.Scope) : EngineListener {
     override fun onInstanceCompleted(instanceId: String, output: String) {
-        module.sendEvent("orch8:instanceCompleted", Arguments.createMap().apply {
+        module.sendEvent(scope, "orch8:instanceCompleted", Arguments.createMap().apply {
             putString("instanceId", instanceId)
             putString("output", output)
         })
     }
 
     override fun onInstanceFailed(instanceId: String, error: String) {
-        module.sendEvent("orch8:instanceFailed", Arguments.createMap().apply {
+        module.sendEvent(scope, "orch8:instanceFailed", Arguments.createMap().apply {
             putString("instanceId", instanceId)
             putString("error", error)
         })
     }
 
     override fun onStepPending(instanceId: String, stepName: String, handler: String) {
-        module.sendEvent("orch8:stepPending", Arguments.createMap().apply {
+        module.sendEvent(scope, "orch8:stepPending", Arguments.createMap().apply {
             putString("instanceId", instanceId)
             putString("stepName", stepName)
             putString("handler", handler)
