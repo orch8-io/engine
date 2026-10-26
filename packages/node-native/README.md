@@ -125,3 +125,19 @@ accessors, proxy traps, `instanceof` hooks or object coercion. Other objects use
 `handler failed`. Diagnostics are bounded to 1024 UTF-16 units, preserve complete
 surrogate pairs at the boundary, and replace lone surrogates before native JSON
 decoding. These rules also apply when input serialization throws an unusual value.
+
+### Physical callback admission (development native sources)
+
+Each loaded native binding shares 128 physical callback slots across its engines,
+matching the default scheduler step concurrency. A step timeout, cancelled waiter,
+engine close or engine replacement does not release a callback that is still
+running. Node retains admission until the real promise settles; Python retains
+it through the blocking call, captured-reference release and runtime retirement.
+Host callbacks must represent their real completion.
+
+Excess work remains scheduled before durable effect dispatch, preserving its
+attempt and prepared receipt. Run it again after capacity becomes available;
+reopening the engine cannot reset this allowance. An already-admitted call is
+not forcibly stopped, and a late result cannot overwrite its timed-out outcome.
+Snapshots omit internal in-progress/interceptor/SLA rows. Handler input also
+omits retry bookkeeping, while terminal failure diagnostics remain readable.

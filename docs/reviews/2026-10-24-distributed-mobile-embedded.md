@@ -4066,3 +4066,40 @@ standalone Node, Python and fuzz graphs. All 27 actual WASM plugin tests pass,
 including ABI shape, import rejection, fuel, memory and wall-clock limits. The
 iOS x86 CI failure was separately traced to GitHub's artifact-service request
 timeouts after a successful build; it was not an iOS compilation defect.
+
+
+### DME161 — Native timeouts returned capacity before host work settled
+
+A real Node addon probe entered 129 held promises despite the scheduler's
+128-step concurrency limit: each logical timeout freed scheduler capacity while
+the foreign promise remained active. Closing or replacing an engine did not stop
+that physical work. Repeated timeouts could therefore grow live host work without
+a corresponding bound.
+
+Node and Python now share a process-local budget per loaded binding, capped at
+128 physical invocations across engine instances. An opaque invocation owner
+moves its permit into the Node task observing actual promise settlement or the
+Python blocking closure. Logical timeout, engine close and Python runtime
+retirement cannot return that permit early. Capacity is reserved before loading
+and encoding handler outputs. Saturation rejects preflight through deferred
+effect admission, preserving the prepared receipt and attempt zero instead of
+consuming a business retry. The existing facade now exposes deferred effect
+registration with its admission contract documented.
+
+Handler input omits internal in-progress/retry/interceptor/SLA rows, using row
+metadata rather than business payload keys. Snapshots retain retry diagnostics.
+A business result containing `_sentinel` remains intact.
+
+Four Rust regressions verify physical ownership, prepared receipt continuity,
+engine replacement, blocking-runtime retirement and output filtering. All 195
+facade tests plus three doctests pass with required isolated PostgreSQL. All 13
+actual packed Node addon tests and nine actual Python extension tests pass;
+both hosts hold 128 calls across timeout/close, defer excess work, and resume only
+after real settlement. The Python test also collects the original engine and
+retires its runtime. Strict workspace Clippy passes. CI now runs both native host
+suites against same-commit libraries, including Python's minimum supported 3.10.
+
+This bounds invocation count, not retained bytes or per-owner fairness. Existing
+admitted opaque calls may continue after cancellation. Cooperative cancellation,
+account-scoped workers and the remaining review matrix remain open. No native
+JSON protocol, database schema, release version or publication changes.

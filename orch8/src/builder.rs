@@ -65,6 +65,22 @@ impl EngineBuilder {
         self
     }
 
+    /// Register a native handler that admits its effect after physical preflight.
+    ///
+    /// Before entering host code, the handler must call the context's opaque
+    /// `effect_admission.admit()` when present. Capacity rejection must use
+    /// `reject_preflight` so the scheduler can defer without a business retry.
+    /// Returning success without admission fails closed.
+    pub fn deferred_effect_handler<F, Fut>(mut self, name: &str, handler: F) -> Self
+    where
+        F: Fn(StepContext) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
+    {
+        self.handlers
+            .register_with_deferred_effect_admission(name, handler);
+        self
+    }
+
     /// Register an externally visible effect handler with durable dispatch
     /// evidence and a provider idempotency key.
     ///

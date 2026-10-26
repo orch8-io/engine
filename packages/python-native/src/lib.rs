@@ -120,16 +120,24 @@ impl DurableEngine {
     /// Register `callback(request_json: str) -> reply_json: str`.
     fn register(&self, name: &str, callback: Py<PyAny>) -> PyResult<()> {
         let callback = Arc::new(callback);
-        let invoke: durable::Invoke = Arc::new(move |request: String| {
+        let invoke: durable::Invoke = Arc::new(move |mut invocation: durable::Invocation| {
             let callback = Arc::clone(&callback);
             Box::pin(async move {
                 tokio::task::spawn_blocking(move || {
-                    Python::attach(|py| {
-                        callback
+                    let request = invocation.take_request();
+                    let result = Python::attach(|py| {
+                        let result = callback
                             .call1(py, (request,))
                             .and_then(|reply| reply.extract::<String>(py))
-                            .map_err(|error| error.to_string())
-                    })
+                            .map_err(|error| error.to_string());
+                        // A closed engine can leave this as the final host
+                        // reference. Release it with the GIL, while physical
+                        // admission still covers its possible finalizer.
+                        drop(callback);
+                        result
+                    });
+                    drop(invocation);
+                    result
                 })
                 .await
                 .map_err(|error| error.to_string())?
