@@ -202,7 +202,7 @@ async fn cancelled_registration_does_not_drop_host_code_on_the_async_worker() {
 async fn foreign_destruction_can_reenter_close_without_holding_the_registry_lock() {
     struct Reenter {
         owner: std::sync::Weak<CatalogHandlers>,
-        result: std::sync::mpsc::Sender<bool>,
+        result: std::sync::mpsc::Sender<()>,
     }
     impl StepHandler for Reenter {
         fn execute(&self, _: String, _: String) -> Result<String, HandlerError> {
@@ -212,9 +212,11 @@ async fn foreign_destruction_can_reenter_close_without_holding_the_registry_lock
     impl Drop for Reenter {
         fn drop(&mut self) {
             let owner = self.owner.upgrade().unwrap();
-            let unlocked = owner.registry_unlocked();
+            // close takes the registry mutex. Returning from it proves this
+            // destructor did not run with that mutex held by its own caller.
+            // A try_lock probe could instead see another legitimate closer.
             drop(owner.close());
-            let _ = self.result.send(unlocked);
+            let _ = self.result.send(());
         }
     }
     let (storage, sqlite) = fixture().await;
@@ -240,7 +242,7 @@ async fn foreign_destruction_can_reenter_close_without_holding_the_registry_lock
             .unwrap()
             .unwrap();
     }
-    assert!(observed.recv_timeout(Duration::from_secs(5)).unwrap());
+    observed.recv_timeout(Duration::from_secs(5)).unwrap();
 }
 
 #[test]

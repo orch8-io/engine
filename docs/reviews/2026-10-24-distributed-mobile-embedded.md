@@ -3982,3 +3982,32 @@ signatures. The local AAR is compile-only; device JNI execution is not claimed.
 Strict workspace Clippy and docs/packaging/version/actionlint checks pass.
 No artifacts are published. Native scoped observations, account-owned workers,
 delegation/reporting and the remaining ADR-0002 rollout matrix remain required.
+
+### DME158 — Exercise scoped recovery after actual process death
+
+Existing mobile kill/reopen cases dropped an engine inside the test process.
+That did not prove OS-level ownership-lock release, SQLite recovery without a
+graceful close, or callbacks dying without their destructors running. A new Unix
+subprocess case prepares four runs across two accounts/two catalogs, reopens them
+in a child, and holds two native callbacks after fsyncing their effect identities
+to an external file. Both accounts enter under the physical fairness allowance.
+A second engine is refused while the child owns the database; the parent then
+SIGKILLs and reaps that process.
+
+After restart, account/catalog IDs, session epochs and operation-key run IDs are
+unchanged. The two ambiguous effects fail without another host entry, while the
+two undispatched runs complete. Every owned snapshot remains isolated from the
+other catalogs and legacy reads. The child is killed/reaped even if an assertion
+fails, and the temporary database/effect log is automatically removed. Handlers
+for all owners are restored before scheduling, so the test does not itself
+introduce unrelated missing-handler deferrals.
+
+The full-suite run also exposed a racy existing destructor assertion: a try_lock
+probe could observe another legitimate close caller and falsely report that the
+foreign destructor held its own registry mutex. The test now requires reentrant
+close to return before its bounded deadline, directly proving the deadlock
+property, and removes the obsolete test-only probe.
+
+All 678 mobile library tests and strict all-target mobile Clippy pass. This closes
+one independent-process evidence gap; it does not complete account-owned remote
+workers, authenticated reporting, migration/disk-failure cases or ADR-0002 S1–S12.
