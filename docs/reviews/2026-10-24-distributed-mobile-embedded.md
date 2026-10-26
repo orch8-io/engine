@@ -3441,8 +3441,8 @@ future fire within one minute of the update. This proves rescheduling rather
 than weakening the comparison at the coincident boundary. Cleanup runs even
 when an assertion fails. The targeted Rust boundary test, TypeScript typecheck
 and all seven cron edge-case tests pass against the actual server and an isolated
-SQLite database; Postgres coverage awaits the new full CI head. Production cron
-behavior is unchanged.
+SQLite database. The repaired #330 head also passes the full Postgres CI E2E
+gate. Production cron behavior is unchanged.
 
 
 ### DME145 — Explicit acknowledged archives release admission without replay
@@ -3539,3 +3539,47 @@ Final local evidence: 97 JVM tests and 85 Kotlin/Native tests pass with zero
 failures/skips. The actual Swift/Kotlin/Rust host fixture and iOS framework/Swift
 bridge checks pass, along with binding parity, SDK packaging, docs and whitespace.
 No Rust, UniFFI or bridge protocol change is needed.
+
+
+### DME147 — Keep host callback failures inside the foreign-language contract
+
+Six regressions reproduced ordinary exceptions escaping error envelopes: unknown
+handler/cancellation exceptions with throwing message getters, root node and
+manifest cached-token getter failure, scoped handler/token failure, and direct
+UniFFI token-refresh conversion. Separately, the actual Swift compiler rejected
+a token source with throwing methods despite refresh documentation requiring
+Orch8Exception on failure. These were independent failures, not inferred from
+an interface shape.
+
+A shared callback diagnostic helper preserves messages only from final SDK error
+classes and exact standard exception classes. Unknown host subclasses use the
+fixed diagnostic; neither their message getter nor toString is invoked. A real
+existing regression protects ordinary IllegalStateException("camera busy")
+diagnostics, and a subclass with an overridden getter is still quarantined.
+Root/scoped coroutine handler normalization keeps the original cause and
+Permanent/Retryable classification. JSON and direct UniFFI handler/token ports
+use the same policy. Cached-token callback failures consistently return empty,
+matching the existing direct UniFFI/scoped policy; credential admission refuses
+that empty value before authenticated transport. No ambient account fallback is
+introduced.
+
+Public token-source methods now export Throws so Swift implementations can
+report a credential failure. Protocol 6 requires matched framework/adapter
+artifacts. Actual Apple compilation caught a global Objective-C selector
+collision with the nonthrowing scoped token port; its methods now use explicit
+cachedToken/refreshEnvelope names. This avoids generated underscore renaming.
+
+Common tests exercise both root token roles, scoped handler normalization,
+unknown/cancellation getters, known error preservation and direct UniFFI refresh.
+The Swift fixture forwards every operation to the real production bridge. Its
+root sync instrumentation also exercises the installed production credential
+callbacks before their operation retires; a throwing Swift token source verifies
+nonthrowing cache/error-envelope results without leaking its private diagnostic.
+Four scoped sync probes also reject a throwing getter before private transport.
+Final local validation: 106 JVM tests and 93 Kotlin/Native tests pass with zero
+failures/skips. The Swift throwing-token conformance probe that failed before
+repair now compiles against the real framework. The strict Swift/Kotlin/Rust
+four-scope fixture passes both installed root callbacks, scoped getter refusal,
+all contextual workflow/approval/archive flows and shutdown. The actual iOS
+framework/Swift adapter, binding parity, SDK packaging, docs and whitespace
+checks pass. No Rust/UniFFI binding or release change is involved.

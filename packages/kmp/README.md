@@ -126,7 +126,7 @@ Kotlin/Native does not carry a Swift `throws` into Kotlin as a typed
 exception, and Kotlin cannot see UniFFI's Swift records. Keeping the Swift
 side to plain strings means all decoding, validation and error mapping run
 in common Kotlin (`JsonBridgeBackend`), where the JVM test suite covers them.
-Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 5`) when the
+Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 6`) when the
 engine opens, so a stale adapter fails immediately with a clear message.
 
 ## Swift observation
@@ -205,7 +205,7 @@ approvals and commands with the server.
 
 ## Multiple accounts and catalogs (development sources)
 
-The scoped API requires a KMP framework, protocol-5 Swift adapter, generated
+The scoped API requires a KMP framework, protocol-6 Swift adapter, generated
 bindings and native library built from the same source revision. Published
 `0.7.1` binaries do not implement it. On Android, build and stage the matching
 `orch8-mobile` AAR in a Maven repository and pass `-Porch8.dist.repo=/path/to/repo`
@@ -344,7 +344,7 @@ credentials. A sync's return or failure retires only its own ID; callbacks after
 retirement cannot invoke the source or resolve a successor. Shutdown retires all
 manifest IDs. The supplied source stays caller-owned, so sync does not close a
 source also used for a node or another call. This callback change requires the
-protocol-5 Swift bridge and KMP framework to ship together.
+protocol-6 Swift bridge and KMP framework to ship together.
 
 `EngineConfig.syncApiKey` is the **legacy** path and not for production apps:
 it still works, and the SDK logs a warning when the server reports the key is
@@ -492,3 +492,17 @@ evicted: archive exhaustion returns the typed resource-limit error and leaves
 staged input/admission unchanged. These are bounded retention ceilings, not a
 promise of unlimited on-device execution history. Raw operation keys and frozen
 request metadata remain in their original bounded request rows.
+
+
+Token sources implement throwing `currentToken()` and `refreshToken()` methods
+on Swift, matching the shared Kotlin error contract. Cached getter failures are
+converted to an empty token at the native callback port; authenticated sync then
+fails closed before transport. Refresh failures return the bridge's typed error
+envelope. Protocol 6 requires the updated framework and Swift adapter together;
+its scoped token port uses distinct `cachedToken`/`refreshEnvelope` selectors.
+
+Unknown callback exceptions use a fixed diagnostic without reading an
+application-defined `message` getter. Declared SDK errors preserve their messages
+and classifications, and exact standard exception classes preserve their normal
+messages. A custom subclass gets the fixed diagnostic. Throw
+`Orch8HandlerException.Permanent` or `.Retryable` for an actionable domain error.

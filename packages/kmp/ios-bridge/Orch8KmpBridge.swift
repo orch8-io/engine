@@ -10,7 +10,7 @@
 //     import Orch8Kmp
 //     Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
 //
-// Protocol version: 5 (must equal ORCH8_BRIDGE_PROTOCOL in
+// Protocol version: 6 (must equal ORCH8_BRIDGE_PROTOCOL in
 // src/commonMain/kotlin/io/orch8/kmp/bridge/JsonBridge.kt). Every call returns
 // {"ok": value} or {"error": {"kind": "...", "message": "..."}}; all decoding,
 // validation and error mapping happen in common Kotlin.
@@ -20,7 +20,7 @@ import CoreFoundation
 import Orch8Kmp
 import Orch8Mobile
 
-private let bridgeProtocolVersion = 5
+private let bridgeProtocolVersion = 6
 
 public final class Orch8KmpBridgeFactory: NSObject, Orch8JsonBridgeFactory {
     public func create() -> Orch8JsonBridge {
@@ -609,7 +609,7 @@ private extension Dictionary where Key == String, Value == Any {
     }
 }
 
-// MARK: - Owned scoped ports (protocol 5)
+// MARK: - Owned scoped ports (protocol 6)
 
 private enum NativeScopedNode {
     case account(MobileAccount)
@@ -785,9 +785,9 @@ private final class ScopedHandlerAdapter: MobileCatalogStepHandler, @unchecked S
 private final class ScopedTokenAdapter: TokenProvider, @unchecked Sendable {
     private let tokens: Orch8ScopedTokenSource
     init(_ tokens: Orch8ScopedTokenSource) { self.tokens = tokens }
-    func currentToken() -> String { tokens.currentToken() }
+    func currentToken() -> String { tokens.cachedToken() }
     func refreshToken() throws -> String {
-        switch Orch8KmpBridge.unwrapCallback(tokens.refreshToken()) {
+        switch Orch8KmpBridge.unwrapCallback(tokens.refreshEnvelope()) {
         case let .success(token): return token
         case let .failure(error): throw MobileError.Engine(message: error.message)
         }

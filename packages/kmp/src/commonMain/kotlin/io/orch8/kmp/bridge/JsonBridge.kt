@@ -68,4 +68,4 @@ interface Orch8BridgeCallbacks {
 }
 
 /** Bumped when the method set or payload shapes change incompatibly. */
-const val ORCH8_BRIDGE_PROTOCOL: Int = 5
+const val ORCH8_BRIDGE_PROTOCOL: Int = 6

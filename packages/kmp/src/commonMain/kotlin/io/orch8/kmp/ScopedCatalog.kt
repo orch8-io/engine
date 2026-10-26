@@ -1,5 +1,6 @@
 package io.orch8.kmp
 
+import io.orch8.kmp.internal.hostFailureMessage
 import io.orch8.kmp.internal.AccountBackend
 import io.orch8.kmp.internal.CatalogBackend
 import io.orch8.kmp.internal.CatalogCursorBackend
@@ -108,7 +109,7 @@ class Orch8Catalog internal constructor(
             backend.registerHandler(name, BlockingCatalogStepHandler { context, step, input ->
                 try { runHandlerBlocking { handler.execute(context, step, input) } }
                 catch (error: Orch8HandlerException) { throw error }
-                catch (error: Exception) { throw Orch8HandlerException.Retryable(error.message ?: "catalog handler failed", error) }
+                catch (error: Exception) { throw Orch8HandlerException.Retryable(error.hostFailureMessage("catalog handler failed"), error) }
             }, timeoutMs)
         }
     }

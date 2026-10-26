@@ -56,7 +56,7 @@ class JsonBridgeBackendTest {
 
     @Test
     fun protocolMismatchFailsFast() {
-        for (protocol in listOf(1, 2, 99)) {
+        for (protocol in listOf(1, 2, 5, 99)) {
             val e = assertFailsWith<Orch8Exception> { open(FakeJsonBridge(protocol = protocol)) }
             assertEquals(Orch8ErrorKind.INVALID_INPUT, e.kind)
         }
@@ -492,4 +492,53 @@ class JsonBridgeBackendTest {
             assertFailsWith<Orch8Exception> { backend.delegationStatus("d") }.kind,
         )
     }
+    @Test
+    fun unknownHandlerAndRefreshFailuresStayInsideTheirNonthrowingEnvelope() {
+        val (bridge, backend) = open()
+        val failure = ThrowingMessageException()
+        backend.registerHandler("bad-message", BlockingStepHandler { _, _ -> throw failure })
+        val callback = bridge.installed!!
+        val handlerError = assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("handler",callback.executeHandler("bad-message","work","{}")) }
+        assertEquals(0, failure.reads)
+        assertTrue(handlerError.message?.contains("HOST_EXCEPTION_MESSAGE_GETTER") == false)
+        val source = object : Orch8TokenSource {
+            override fun currentToken() = "node-token"
+            override fun refreshToken(): String = throw failure
+        }
+        backend.setTokenProvider(source)
+        val id = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        val refreshError = assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("refresh",callback.refreshNodeToken(id)) }
+        assertEquals(Orch8ErrorKind.NETWORK, refreshError.kind)
+        bridge.replies["sync"] = """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        bridge.onCall = { method -> if(method=="sync") {
+            val manifestId=bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+            val error=assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("refresh",callback.refreshManifestToken(manifestId)) }
+            assertEquals(Orch8ErrorKind.NETWORK,error.kind)
+        } }
+        backend.sync("https://example.com/manifest",source)
+        assertEquals(0, failure.reads)
+        backend.shutdown()
+    }
+
+    @Test
+    fun brokenCachedTokenGettersCannotEscapeNodeOrManifestCallbacks() {
+        val (bridge, backend) = open()
+        val failure = ThrowingMessageException()
+        val source = object : Orch8TokenSource {
+            override fun currentToken(): String = throw failure
+            override fun refreshToken() = "fresh"
+        }
+        backend.setTokenProvider(source)
+        val nodeId = bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+        assertEquals("",bridge.installed!!.currentNodeToken(nodeId))
+        bridge.replies["sync"] = """{"ok":{"added":0,"updated":0,"removed":0,"skipped":0,"signatureFailures":0}}"""
+        bridge.onCall = { method -> if(method=="sync") {
+            val id=bridge.calls.last().second["providerId"]!!.jsonPrimitive.content
+            assertEquals("",bridge.installed!!.currentManifestToken(id))
+        } }
+        backend.sync("https://example.com/manifest",source)
+        assertEquals(0,failure.reads)
+        backend.shutdown()
+    }
+
 }

@@ -2,6 +2,60 @@ import Foundation
 import Orch8Kmp
 import Orch8Mobile
 
+private final class ThrowingTokens: NSObject, Orch8TokenSource, @unchecked Sendable {
+    private let lock = NSLock()
+    private var cached = 0
+    private var refreshed = 0
+    func currentToken() throws -> String {
+        lock.lock(); cached += 1; lock.unlock()
+        throw NSError(domain: "host-token-test", code: 1, userInfo: [NSLocalizedDescriptionKey: "PRIVATE_TOKEN_FAIL_DETAIL"])
+    }
+    func refreshToken() throws -> String {
+        lock.lock(); refreshed += 1; lock.unlock()
+        throw NSError(domain: "host-token-test", code: 2, userInfo: [NSLocalizedDescriptionKey: "PRIVATE_TOKEN_FAIL_DETAIL"])
+    }
+    func counts() -> (Int, Int) { lock.lock(); defer { lock.unlock() }; return (cached, refreshed) }
+}
+private final class TokenInspection: @unchecked Sendable {
+    private let lock = NSLock()
+    private var replies: [(String, String)] = []
+    func record(cached: String, refresh: String) { lock.lock(); replies.append((cached, refresh)); lock.unlock() }
+    func values() -> [(String, String)] { lock.lock(); defer { lock.unlock() }; return replies }
+}
+// Forward every operation to the actual production bridge. During an explicit
+// root sync probe, also exercise its installed native callbacks before the real
+// Rust call retires that operation's credential source.
+private final class InspectingBridge: NSObject, Orch8JsonBridge, @unchecked Sendable {
+    private let native = Orch8KmpBridge()
+    private let inspection: TokenInspection
+    private let lock = NSLock()
+    private var callbacks: Orch8BridgeCallbacks?
+    init(_ inspection: TokenInspection) { self.inspection = inspection }
+    func setCallbacks(callbacks: Orch8BridgeCallbacks) {
+        lock.lock(); self.callbacks = callbacks; lock.unlock()
+        native.setCallbacks(callbacks: callbacks)
+    }
+    func openAccount(identityJson: String) -> Orch8ScopedReply { native.openAccount(identityJson: identityJson) }
+    func call(method: String, argsJson: String) -> String {
+        if method == "sync", let data = argsJson.data(using: .utf8),
+           let args = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let provider = args["providerId"] as? String {
+            lock.lock(); let callbacks = self.callbacks; lock.unlock()
+            if let callbacks {
+                inspection.record(cached: callbacks.currentManifestToken(providerId: provider),
+                    refresh: callbacks.refreshManifestToken(providerId: provider))
+            }
+        }
+        let reply = native.call(method: method, argsJson: argsJson)
+        if method == "shutdown" { lock.lock(); callbacks = nil; lock.unlock() }
+        return reply
+    }
+}
+private final class InspectingBridgeFactory: NSObject, Orch8JsonBridgeFactory {
+    let inspection = TokenInspection()
+    func create() -> Orch8JsonBridge { InspectingBridge(inspection) }
+}
+
 private struct Failure: Error { let message: String }
 private final class ResultCell<T>: @unchecked Sendable {
     private let lock = NSLock()
@@ -164,12 +218,20 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         try FileManager.default.copyItem(at: fixture.appendingPathComponent("scoped.db"), to: database)
         let metadata = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture.appendingPathComponent("metadata.json"))) as! [String: Any]
         let cases = metadata["cases"] as! [[String: Any]]
-        Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
+        let bridgeFactory = InspectingBridgeFactory()
+        Orch8Ios.shared.install(factory: bridgeFactory)
         let invalid = directory.appendingPathComponent("must-not-open.db")
         try refused { _ = try Orch8Engine.companion.open(dbPath: invalid.path, config: configuration(environment: "test")) }
         try check(!FileManager.default.fileExists(atPath: invalid.path), "invalid config opened a database")
         let engine = try Orch8Engine.companion.open(dbPath: database.path, config: configuration())
         defer { engine.close() }
+        let rootTokens = ThrowingTokens()
+        try refused { let _: Orch8Kmp.SyncResult = try object { engine.sync(manifestUrl: "https://example.invalid/manifest", tokens: rootTokens, completionHandler: $0) } }
+        let inspected = bridgeFactory.inspection.values()
+        try check(inspected.count == 1 && inspected[0].0.isEmpty, "root cached-token failure escaped its callback")
+        let refreshEnvelope = try JSONSerialization.jsonObject(with: Data(inspected[0].1.utf8)) as! [String: Any]
+        try check(refreshEnvelope["error"] != nil && !inspected[0].1.contains("PRIVATE_TOKEN_FAIL_DETAIL"), "root refresh failure escaped or exposed host diagnostics")
+        try check(rootTokens.counts().0 >= 1 && rootTokens.counts().1 == 1, "root token probe did not cross both native callback boundaries")
         let legacyEvents = LegacyEventProbe()
         let eventSubscription = try engine.subscribeEvents(observer: legacyEvents)
         let stepSubscription = try engine.subscribePendingSteps(observer: legacyEvents)
@@ -184,6 +246,9 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
                 source: record["source"] as! String, signingAuthority: record["signingAuthority"] as! String,
                 manifestUrl: record["manifestUrl"] as! String, identityUrl: record["identityUrl"] as! String)
             let catalog: Orch8Catalog = try object { account.openCatalog(configuration: config, completionHandler: $0) }
+            let scopedTokens = ThrowingTokens()
+            try refused { let _: Orch8Kmp.SyncResult = try object { catalog.sync(tokens: scopedTokens, completionHandler: $0) } }
+            try check(scopedTokens.counts() == (1, 0), "scoped token failure reached transport or skipped its host callback")
             try unit { catalog.registerHandler(name: "echo", handler: echo, timeoutMs: 1000, completionHandler: $0) }
             let request = CatalogRunRequest(workflow: "flow", inputJson: "{\"account_id\":\"forged\"}", operationKey: "same-key", version: nil)
             let run: Orch8CatalogRun = try object { catalog.prepareRun(request: request, completionHandler: $0) }
@@ -282,6 +347,6 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         try check(scopedShutdown.counts() == (1, 0, 0), "shutdown delivered a scoped callback")
         try refused { _ = try engine.subscribeEvents(observer: legacyEvents) }
-        print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, acknowledged archives, deduplication, history, scoped shutdown and close fences passed")
+        print("KMP native host: 4 scoped workflows, 8 contextual effects, parallel approvals in both orders, acknowledged archives, deduplication, history, scoped shutdown, throwing token sources and close fences passed")
     }
 }

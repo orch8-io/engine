@@ -84,9 +84,9 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
                     try {
                         handler.execute(stepName, input)
                     } catch (e: Orch8HandlerException.Permanent) {
-                        throw UHandlerException.Permanent(e.message ?: "permanent handler failure")
+                        throw UHandlerException.Permanent(e.hostFailureMessage("permanent handler failure"))
                     } catch (e: Exception) {
-                        throw UHandlerException.Retryable(e.message ?: "retryable handler failure")
+                        throw UHandlerException.Retryable(e.hostFailureMessage("retryable handler failure"))
                     }
             },
         )
@@ -419,13 +419,13 @@ internal fun USyncException.toKind(): Orch8ErrorKind = when (this) {
 internal fun Orch8TokenSource.toUniffi(): UTokenProvider {
     val source = this
     return object : UTokenProvider {
-        override fun currentToken(): String = try { source.currentToken() } catch (_: Exception) { "" }
+        override fun currentToken(): String = source.cachedTokenOrEmpty()
 
         override fun refreshToken(): String =
             try {
                 source.refreshToken()
             } catch (e: Exception) {
-                throw UMobileException.Engine(e.message ?: "token refresh failed")
+                throw UMobileException.Engine(e.hostFailureMessage("token refresh failed"))
             }
     }
 }

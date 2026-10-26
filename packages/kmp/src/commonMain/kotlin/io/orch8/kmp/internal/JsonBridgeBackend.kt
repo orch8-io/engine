@@ -353,9 +353,9 @@ internal class JsonBridgeBackend private constructor(
             return try {
                 BridgeCodec.ok(JsonPrimitive(handler.execute(stepName, inputJson)))
             } catch (e: Orch8HandlerException.Permanent) {
-                BridgeCodec.error("permanent", e.message ?: "permanent handler failure")
+                BridgeCodec.error("permanent", e.hostFailureMessage("permanent handler failure"))
             } catch (e: Exception) {
-                BridgeCodec.error("retryable", e.message ?: "retryable handler failure")
+                BridgeCodec.error("retryable", e.hostFailureMessage("retryable handler failure"))
             }
         }
 
@@ -368,11 +368,11 @@ internal class JsonBridgeBackend private constructor(
         override fun onStepPending(instanceId: String, stepName: String, handler: String) =
             sink(EngineEvent.StepPending(instanceId, stepName, handler))
 
-        override fun currentManifestToken(providerId: String): String = tokenSources.value.manifestTokens[providerId]?.currentToken().orEmpty()
+        override fun currentManifestToken(providerId: String): String = tokenSources.value.manifestTokens[providerId]?.cachedTokenOrEmpty().orEmpty()
 
         override fun refreshManifestToken(providerId: String): String = refreshEnvelope(tokenSources.value.manifestTokens[providerId])
 
-        override fun currentNodeToken(providerId: String): String = tokenSources.value.tokens[providerId]?.currentToken().orEmpty()
+        override fun currentNodeToken(providerId: String): String = tokenSources.value.tokens[providerId]?.cachedTokenOrEmpty().orEmpty()
 
         override fun refreshNodeToken(providerId: String): String = refreshEnvelope(tokenSources.value.tokens[providerId])
 
@@ -383,9 +383,9 @@ internal class JsonBridgeBackend private constructor(
             return try {
                 BridgeCodec.ok(JsonPrimitive(tokens.refreshToken()))
             } catch (e: Orch8Exception) {
-                BridgeCodec.error(e.kind.wire, e.message ?: "token refresh failed")
+                BridgeCodec.error(e.kind.wire, e.hostFailureMessage("token refresh failed"))
             } catch (e: Exception) {
-                BridgeCodec.error("network", e.message ?: "token refresh failed")
+                BridgeCodec.error("network", e.hostFailureMessage("token refresh failed"))
             }
         }
     }

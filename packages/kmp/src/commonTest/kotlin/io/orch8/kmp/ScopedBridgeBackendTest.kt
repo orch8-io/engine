@@ -6,6 +6,8 @@ import io.orch8.kmp.internal.BridgeCodec
 import io.orch8.kmp.internal.openJsonAccount
 import kotlinx.serialization.json.*
 import kotlin.test.*
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.StandardTestDispatcher
 
 private class ScopeReply(private val value: JsonElement = JsonNull, private val child: Orch8ScopedBridge? = null) : Orch8ScopedReply {
     override fun payloadJson() = BridgeCodec.ok(value)
@@ -73,15 +75,15 @@ class ScopedBridgeBackendTest {
             override fun refreshToken()="${value}_refreshed"
         }
         first.backend().sync(tokens("alpha"));second.backend().sync(tokens("beta"))
-        assertEquals("alpha",assertNotNull(first.catalog.tokens).currentToken())
-        assertEquals("beta",assertNotNull(second.catalog.tokens).currentToken())
-        assertEquals(JsonPrimitive("alpha_refreshed"),BridgeCodec.unwrap("refresh",first.catalog.tokens!!.refreshToken()))
+        assertEquals("alpha",assertNotNull(first.catalog.tokens).cachedToken())
+        assertEquals("beta",assertNotNull(second.catalog.tokens).cachedToken())
+        assertEquals(JsonPrimitive("alpha_refreshed"),BridgeCodec.unwrap("refresh",first.catalog.tokens!!.refreshEnvelope()))
         first.backend().sync(object:Orch8TokenSource {
             override fun currentToken():String=error("broken getter")
             override fun refreshToken():String=error("broken refresh")
         })
-        assertEquals("",first.catalog.tokens!!.currentToken())
-        assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("refresh",first.catalog.tokens!!.refreshToken()) }
+        assertEquals("",first.catalog.tokens!!.cachedToken())
+        assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("refresh",first.catalog.tokens!!.refreshEnvelope()) }
     }
     @Test
     fun historyTransfersAnOwnedCursorAndNeverSerializesItAsAuthority() {
@@ -197,6 +199,45 @@ class ScopedBridgeBackendTest {
             native=buildJsonObject {put("kind",kind);put("state","waiting")}
             assertFailsWith<Orch8Exception> { backend.history(null,1) }
         }
+    }
+
+    @Test
+    fun scopedHandlerAndTokenFailureEnvelopesNeverReadUnknownExceptionMessages() {
+        val fixture=ScopeFixture();val backend=fixture.backend();val failure=ThrowingMessageException()
+        backend.registerHandler("broken",BlockingCatalogStepHandler {_,_,_->throw failure},1000)
+        val context=buildJsonObject {
+            put("accountId","account-a");put("catalogId","catalog-a");put("ownerEpoch",7)
+            put("runId","run-a");put("blockId","work");put("attempt",1);put("effectId","effect-a")
+        }
+        assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("handler",fixture.catalog.handler!!.execute(context.toString(),"work","{}")) }
+        backend.sync(object:Orch8TokenSource {
+            override fun currentToken()="token"
+            override fun refreshToken():String=throw failure
+        })
+        assertFailsWith<Orch8Exception> { BridgeCodec.unwrap("refresh",fixture.catalog.tokens!!.refreshEnvelope()) }
+        assertEquals(0,failure.reads)
+    }
+
+    @Test
+    fun scopedFacadePreservesKnownHandlerErrorsAndQuarantinesUnknownMessageGetters() = runTest {
+        val fixture=ScopeFixture();val catalog=Orch8Catalog(fixture.backend(),StandardTestDispatcher(testScheduler))
+        val unknown=ThrowingMessageException()
+        val context=buildJsonObject {
+            put("accountId","account-a");put("catalogId","catalog-a");put("ownerEpoch",7)
+            put("runId","run-a");put("blockId","work");put("attempt",1);put("effectId","effect-a")
+        }
+        for ((failure,kind,message) in listOf(
+            Triple(unknown,"retryable","catalog handler failed"),
+            Triple(Orch8HandlerException.Permanent("known-permanent"),"permanent","known-permanent"),
+            Triple(Orch8HandlerException.Retryable("known-retryable"),"retryable","known-retryable"),
+        )) {
+            catalog.registerHandler("probe",Orch8CatalogStepHandler {_,_,_->throw failure},1000)
+            val error=Json.parseToJsonElement(fixture.catalog.handler!!.execute(context.toString(),"work","{}")).jsonObject["error"]!!.jsonObject
+            assertEquals(kind,error["kind"]!!.jsonPrimitive.content)
+            assertEquals(message,error["message"]!!.jsonPrimitive.content)
+        }
+        assertEquals(0,unknown.reads)
+        catalog.close()
     }
 
 }

@@ -2,6 +2,7 @@ package io.orch8.kmp
 
 import io.orch8.kmp.internal.BlockingStepHandler
 import io.orch8.kmp.internal.EngineBackend
+import io.orch8.kmp.internal.hostFailureMessage
 import io.orch8.kmp.internal.openPlatformBackend
 import io.orch8.kmp.internal.platformIoDispatcher
 import io.orch8.kmp.internal.runHandlerBlocking
@@ -476,9 +477,9 @@ class Orch8Engine internal constructor(
             } catch (e: Orch8HandlerException) {
                 throw e
             } catch (e: CancellationException) {
-                throw Orch8HandlerException.Retryable("handler cancelled: ${e.message}", e)
+                throw Orch8HandlerException.Retryable(e.hostFailureMessage("handler cancelled"), e)
             } catch (e: Exception) {
-                throw Orch8HandlerException.Retryable(e.message ?: e::class.simpleName ?: "handler failed", e)
+                throw Orch8HandlerException.Retryable(e.hostFailureMessage("handler failed"), e)
             }
         }
 
