@@ -120,6 +120,64 @@ private func checkObservation(_ run: Orch8CatalogRun, expectShutdown: Bool = fal
     try check(accepted, "Swift subscription did not report the expected completion/error")
 }
 
+private final class BlockingSnapshotProbe: NSObject, CatalogSnapshotObserver, @unchecked Sendable {
+    private let lock = NSLock()
+    private let release = DispatchSemaphore(value: 0)
+    private var entered = 0
+    private var active = 0
+    private var errors = 0
+    func onSnapshot(snapshot: CatalogRunSnapshot?) {
+        lock.lock(); entered += 1; active += 1; lock.unlock()
+        let outcome = release.wait(timeout: .now() + 60)
+        lock.lock(); active -= 1; if outcome == .timedOut { errors += 1 }; lock.unlock()
+    }
+    func onError(error: Orch8Exception) { lock.lock(); errors += 1; lock.unlock() }
+    func onComplete() {}
+    func counts() -> (Int, Int, Int) { lock.lock(); defer { lock.unlock() }; return (entered, active, errors) }
+    func settle() { for _ in 0..<4 { release.signal() } }
+}
+private func checkObserverCapacity(_ first: Orch8CatalogRun, other: Orch8CatalogRun) throws {
+    let blocked = BlockingSnapshotProbe()
+    var subscriptions: [CatalogSnapshotSubscription] = []
+    defer { blocked.settle(); subscriptions.forEach { $0.close() } }
+    for _ in 0..<4 {
+        // A preceding completion callback may have notified the caller just
+        // before its coroutine releases admission. Observe that release.
+        let availableDeadline = Date().addingTimeInterval(10)
+        while true {
+            do {
+                subscriptions.append(try first.subscribeSnapshots(observer: blocked, pollIntervalMs: 86_400_000))
+                break
+            } catch {
+                if Date() > availableDeadline { throw error }
+                _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+            }
+        }
+    }
+    let deadline = Date().addingTimeInterval(10)
+    while blocked.counts().0 < 4 && Date() < deadline {
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+    }
+    try check(blocked.counts() == (4, 4, 0), "physical Swift observer callbacks did not enter")
+    subscriptions.forEach { $0.close() }
+    try refused {
+        let extra = try first.subscribeSnapshots(observer: ScopedShutdownProbe(), pollIntervalMs: 100)
+        extra.close()
+    }
+    try checkObservation(other)
+    try check(blocked.counts() == (4, 4, 0), "another account required old callbacks to finish")
+    blocked.settle()
+    let resumedDeadline = Date().addingTimeInterval(10)
+    while true {
+        do { try checkObservation(first); break }
+        catch {
+            if Date() > resumedDeadline { throw error }
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.005))
+        }
+    }
+    try check(blocked.counts() == (4, 0, 0), "observer callback capacity did not settle")
+}
+
 private final class ScopedShutdownProbe: NSObject, CatalogSnapshotObserver, @unchecked Sendable {
     private let lock = NSLock()
     private var snapshots = 0
@@ -293,6 +351,11 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
             try refused { try unit { duplicate.start(completionHandler: $0) } }
             duplicate.close()
         }
+        let observed = retained[0].1
+        guard let otherAccount = retained.first(where: { $0.1.accountId != observed.accountId })?.1 else {
+            throw Failure(message: "capacity fixture needs two accounts")
+        }
+        try checkObserverCapacity(observed, other: otherAccount)
         let contexts = echo.delivered()
         try check(contexts.count == 8 && Set(contexts.map(\.effectId)).count == 8, "callback/effect identity mismatch")
         for context in contexts {

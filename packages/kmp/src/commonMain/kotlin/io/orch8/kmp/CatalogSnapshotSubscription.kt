@@ -26,5 +26,5 @@ internal fun subscribeCatalogSnapshots(
     io: CoroutineDispatcher,
     owner: Job?,
 ): CatalogSnapshotSubscription = CatalogSnapshotSubscription(
-    subscribeFlow(run.observeSnapshots(interval), observer, observer::onSnapshot, io, owner),
+    subscribeFlow(run.observeSnapshots(interval), observer, observer::onSnapshot, io, owner, accountId = run.accountId),
 )

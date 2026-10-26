@@ -4242,3 +4242,47 @@ harnesses; this report separately records the CI correction. Their already-passi
 692 unit/109 integration evidence remains applicable. Their
 new exact heads must pass CI again before ordered merge. No production behavior,
 API, storage schema or release version changes; no publication.
+
+
+### DME166 — Bound KMP callback subscriptions across engine/account replacement
+
+The KMP observer adapters applied backpressure per collector but had no shared
+subscription allowance. A real JVM regression enters four blocked callbacks,
+closes their engine, then opens a successor for the same account: the baseline
+accepts another callback subscription. Repeated replacement could therefore
+retain more accepted observers and queued/polling tasks while physical callbacks
+were still running. The new regression fails against that baseline.
+
+Callback subscriptions now reserve from one loaded-KMP-runtime budget before
+retaining their dispatch record or scheduling any snapshot read: 32 globally,
+eight per engine and four per stable scoped account. Immutable count snapshots
+use StateFlow CAS; metadata contains only owned job identities and account IDs,
+with no observer equality or user callback hooks. Empty owner counters disappear
+on release. Stable account IDs exclude the session epoch, so retirement/reopen
+cannot reset the charge. Legacy subscriptions share the engine/global bounds.
+Application-owned Flow collectors retain their existing backpressure contract.
+
+The reservation follows coroutine completion, including a synchronous host
+callback that ignores logical cancellation. Clearing a subscription or closing
+its engine cannot return that charge before the callback returns. Queued
+cancellation, ordinary completion, source/callback errors and throwing error or
+completion callbacks release exactly once. Refusal raises the existing retryable
+RESOURCE_LIMIT before another read or callback task is created. Idle accepted
+subscriptions also count; callers close unused UI subscriptions explicitly.
+
+Four new tests cover engine/account/global refusal, pre-dispatch cancellation,
+callback failures, concurrent reservation, account allowance retained by blocked
+callbacks after engine close, another account making progress, and capacity
+return after actual completion. All 116 KMP JVM tests pass against the rebuilt
+same-source native library and four-scope fixture, with zero skips or failures.
+The real Kotlin/Native host framework also compiles. Its Swift bridge fixture
+now holds four actual Swift observer callbacks, closes their subscriptions,
+refuses an excess same-account observer, completes another account's observation,
+then releases and resumes the first account. Strict Swift concurrency and
+warnings-as-errors checks pass in that real host run.
+
+These are accepted-subscription count limits, not byte quotas or a guarantee
+about application-created asynchronous work or foreign garbage collection.
+Native scoped event notifications, account-authenticated remote workers and
+outcome reporting, and the remaining ADR completion matrix stay open. No
+UniFFI/wire protocol, published SDK version or release publication changes.
