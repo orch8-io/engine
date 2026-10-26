@@ -26,6 +26,8 @@ class ManifestSyncOwnershipTest {
         val innerId = AtomicReference<String>()
         val installedCallbacks = AtomicReference<Orch8BridgeCallbacks>()
         val bridge = object : Orch8JsonBridge {
+    override fun openAccount(identityJson: String): io.orch8.kmp.bridge.Orch8ScopedReply = error("unexpected scoped account call")
+
             override fun setCallbacks(callbacks: Orch8BridgeCallbacks) { installedCallbacks.set(callbacks) }
 
             override fun call(method: String, argsJson: String): String {

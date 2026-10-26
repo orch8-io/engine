@@ -10,16 +10,17 @@
 //     import Orch8Kmp
 //     Orch8Ios.shared.install(factory: Orch8KmpBridgeFactory())
 //
-// Protocol version: 3 (must equal ORCH8_BRIDGE_PROTOCOL in
+// Protocol version: 4 (must equal ORCH8_BRIDGE_PROTOCOL in
 // src/commonMain/kotlin/io/orch8/kmp/bridge/JsonBridge.kt). Every call returns
 // {"ok": value} or {"error": {"kind": "...", "message": "..."}}; all decoding,
 // validation and error mapping happen in common Kotlin.
 
 import Foundation
+import CoreFoundation
 import Orch8Kmp
 import Orch8Mobile
 
-private let bridgeProtocolVersion = 3
+private let bridgeProtocolVersion = 4
 
 public final class Orch8KmpBridgeFactory: NSObject, Orch8JsonBridgeFactory {
     public func create() -> Orch8JsonBridge {
@@ -43,6 +44,16 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         let engine = self.engine
         lock.unlock()
         engine?.setListener(listener: ListenerAdapter(callbacks: callbacks))
+    }
+
+    public func openAccount(identityJson: String) -> Orch8ScopedReply {
+        do {
+            guard let engine = currentEngine() else { throw MobileError.Shutdown(message: "engine not open") }
+            let identity = try Self.parseObject(identityJson)
+            return NativeScopedReply.scope(.account(try engine.openAccount(identity: MobileAccountIdentity(
+                accountKey: identity.string("accountKey"), issuer: identity.string("issuer"), subject: identity.string("subject")
+            ))))
+        } catch { return NativeScopedReply.failure(error) }
     }
 
     public func call(method: String, argsJson: String) -> String {
@@ -381,7 +392,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         return object
     }
 
-    private static func encode(_ object: [String: Any]) -> String {
+    fileprivate static func encode(_ object: [String: Any]) -> String {
         guard let data = try? JSONSerialization.data(withJSONObject: object),
               let text = String(data: data, encoding: .utf8)
         else {
@@ -390,11 +401,11 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         return text
     }
 
-    private static func errorEnvelope(_ e: (String, String)) -> String {
+    fileprivate static func errorEnvelope(_ e: (String, String)) -> String {
         encode(["error": ["kind": e.0, "message": e.1]])
     }
 
-    private static func describe(_ error: MobileError) -> (String, String) {
+    fileprivate static func describe(_ error: MobileError) -> (String, String) {
         switch error {
         case let .Engine(message): return ("Engine", message)
         case let .Storage(message): return ("Storage", message)
@@ -406,7 +417,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         }
     }
 
-    private static func describe(_ error: SyncError) -> (String, String) {
+    fileprivate static func describe(_ error: SyncError) -> (String, String) {
         switch error {
         case let .Network(message): return ("Network", message)
         case let .SignatureInvalid(message): return ("SignatureInvalid", message)
@@ -426,7 +437,7 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
         ]
     }
 
-    private static func stateWire(_ state: InstanceStateKind) -> String {
+    fileprivate static func stateWire(_ state: InstanceStateKind) -> String {
         switch state {
         case .scheduled: return "scheduled"
         case .running: return "running"
@@ -595,5 +606,182 @@ private extension Dictionary where Key == String, Value == Any {
             throw BridgeFailure(kind: "InvalidInput", message: "missing non-negative number '\(key)'")
         }
         return number.uint64Value
+    }
+}
+
+// MARK: - Owned scoped ports (protocol 4)
+
+private enum NativeScopedNode {
+    case account(MobileAccount)
+    case catalog(MobileCatalog)
+    case run(MobileCatalogRun)
+    case cursor(MobileCatalogHistoryCursor)
+}
+
+private final class NativeScopedReply: NSObject, Orch8ScopedReply {
+    private let json: String
+    private let handle: Orch8ScopedBridge?
+    init(_ value: Any? = nil, handle: Orch8ScopedBridge? = nil) {
+        self.json = Orch8KmpBridge.encode(["ok": value ?? NSNull()])
+        self.handle = handle
+    }
+    private init(error: (String, String)) {
+        json = Orch8KmpBridge.errorEnvelope(error)
+        handle = nil
+    }
+    func payloadJson() -> String { json }
+    func resultHandle() -> Orch8ScopedBridge? { handle }
+    static func failure(_ error: Error) -> NativeScopedReply {
+        if let error = error as? MobileError { return NativeScopedReply(error: Orch8KmpBridge.describe(error)) }
+        if let error = error as? SyncError { return NativeScopedReply(error: Orch8KmpBridge.describe(error)) }
+        if let error = error as? BridgeFailure { return NativeScopedReply(error: (error.kind, error.message)) }
+        return NativeScopedReply(error: ("Engine", String(describing: error)))
+    }
+    static func scope(_ node: NativeScopedNode) -> NativeScopedReply {
+        let port = NativeScopedPort(node)
+        return NativeScopedReply(port.descriptor(), handle: port)
+    }
+}
+
+/// Owns a native view or cursor, which itself retains only weak engine identity.
+/// No global handle table or reference to the root engine bridge is captured.
+private final class NativeScopedPort: NSObject, Orch8ScopedBridge, @unchecked Sendable {
+    private let lock = NSLock()
+    private var node: NativeScopedNode?
+    init(_ node: NativeScopedNode) { self.node = node }
+    private func snapshotNode() -> NativeScopedNode? {
+        lock.lock(); defer { lock.unlock() }; return node
+    }
+    func descriptor() -> [String: Any] {
+        switch snapshotNode() {
+        case let .account(account): return ["kind": "account", "accountId": account.accountId(), "sessionEpoch": account.sessionEpoch()]
+        case let .catalog(catalog): return ["kind": "catalog", "accountId": catalog.accountId(), "catalogId": catalog.catalogId(), "sessionEpoch": catalog.sessionEpoch()]
+        case let .run(run): return ["kind": "run", "accountId": run.accountId(), "catalogId": run.catalogId(), "sessionEpoch": run.sessionEpoch(), "instanceId": run.instanceId()]
+        case .cursor: return ["kind": "cursor"]
+        case nil: return ["kind": "disposed"]
+        }
+    }
+    func call(method: String, argsJson: String, reference: Orch8ScopedBridge?) -> Orch8ScopedReply {
+        if method == "dispose" {
+            lock.lock(); let retired = node; node = nil; lock.unlock()
+            withExtendedLifetime(retired) {}
+            return NativeScopedReply()
+        }
+        do {
+            guard let node = snapshotNode() else { throw MobileError.Shutdown(message: "scope view disposed") }
+            let args = try Orch8KmpBridge.parseObject(argsJson)
+            switch (node, method) {
+            case let (.account(account), "openCatalog"):
+                return NativeScopedReply.scope(.catalog(try account.openCatalog(configuration: MobileCatalogConfiguration(
+                    catalogKey: args.string("catalogKey"), source: args.string("source"), signingAuthority: args.string("signingAuthority"),
+                    manifestUrl: args.string("manifestUrl"), identityUrl: args.string("identityUrl")
+                ))))
+            case let (.account(account), "retire"): try account.retire()
+            case let (.account(account), "closeView"): account.closeView()
+            case let (.catalog(catalog), "closeView"): catalog.closeView()
+            case let (.run(run), "closeView"): run.closeView()
+            case let (.catalog(catalog), "prepareRun"):
+                var version: Int32?
+                if let value = args["version"], !(value is NSNull) {
+                    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                          number.doubleValue == Double(number.int64Value),
+                          let positive = Int32(exactly: number.int64Value), positive > 0
+                    else { throw BridgeFailure(kind: "InvalidInput", message: "invalid workflow version") }
+                    version = positive
+                }
+                return NativeScopedReply.scope(.run(try catalog.prepareRun(request: MobileCatalogRunRequest(
+                    workflow: args.string("workflow"), version: version, inputJson: args.string("inputJson"), operationKey: args.string("operationKey")
+                ))))
+            case let (.catalog(catalog), "run"):
+                return NativeScopedReply.scope(.run(try catalog.run(instanceId: args.string("instanceId"))))
+            case let (.catalog(catalog), "history"):
+                guard let number = args["limit"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      number.doubleValue == Double(number.int64Value), (1...128).contains(number.int64Value)
+                else { throw BridgeFailure(kind: "InvalidInput", message: "invalid history page size") }
+                var cursor: MobileCatalogHistoryCursor?
+                if let reference {
+                    guard let port = reference as? NativeScopedPort, case let .cursor(value) = port.snapshotNode()
+                    else { throw BridgeFailure(kind: "InvalidInput", message: "invalid cursor object") }
+                    cursor = value
+                }
+                let page = try catalog.history(cursor: cursor, limit: UInt32(number.int64Value))
+                return NativeScopedReply(["items": page.items.map(Self.summary), "hasNext": page.next != nil],
+                    handle: page.next.map { NativeScopedPort(.cursor($0)) })
+            case let (.run(run), "start"): try run.start()
+            case let (.run(run), "snapshot"):
+                guard let value = try run.snapshot() else { return NativeScopedReply() }
+                return NativeScopedReply([
+                    "instanceId": value.instanceId, "accountId": value.accountId, "catalogId": value.catalogId,
+                    "sessionEpoch": value.sessionEpoch, "state": Orch8KmpBridge.stateWire(value.state),
+                    "dataJson": value.dataJson, "pendingSteps": value.pendingSteps,
+                    "createdAt": value.createdAt, "updatedAt": value.updatedAt,
+                ])
+            case let (.run(run), "cancel"):
+                return NativeScopedReply(try run.cancel().map(Orch8KmpBridge.stateWire))
+            case let (.run(run), "completeStep"):
+                return NativeScopedReply(try run.completeStep(expectedUpdatedAt: args.string("expectedUpdatedAt"),
+                    stepName: args.string("stepName"), outputJson: args.string("outputJson")))
+            case let (.run(run), "forgetCancelledRequest"):
+                return NativeScopedReply(try run.forgetCancelledRequest())
+            default: throw BridgeFailure(kind: "InvalidInput", message: "unknown scoped operation")
+            }
+            return NativeScopedReply()
+        } catch { return NativeScopedReply.failure(error) }
+    }
+    func registerHandler(name: String, timeoutMs: Int64, handler: Orch8ScopedHandler) -> String {
+        do {
+            guard case let .catalog(catalog) = snapshotNode() else { throw MobileError.Shutdown(message: "catalog view disposed") }
+            guard timeoutMs > 0 else { throw BridgeFailure(kind: "InvalidInput", message: "invalid handler timeout") }
+            try catalog.registerHandler(name: name, handler: ScopedHandlerAdapter(handler), timeoutMs: UInt64(timeoutMs))
+            return NativeScopedReply().payloadJson()
+        } catch { return NativeScopedReply.failure(error).payloadJson() }
+    }
+    func sync(tokens: Orch8ScopedTokenSource) -> String {
+        do {
+            guard case let .catalog(catalog) = snapshotNode() else { throw MobileError.Shutdown(message: "catalog view disposed") }
+            let value = try catalog.sync(tokenProvider: ScopedTokenAdapter(tokens))
+            return NativeScopedReply(["added": value.added, "updated": value.updated, "removed": value.removed,
+                "skipped": value.skipped, "signatureFailures": value.signatureFailures]).payloadJson()
+        } catch { return NativeScopedReply.failure(error).payloadJson() }
+    }
+    private static func summary(_ value: MobileCatalogRunSummary) -> [String: Any] {
+        let state: [String: Any]
+        switch value.nativeState {
+        case .notMaterialized: state = ["kind": "not_materialized"]
+        case .unavailable: state = ["kind": "unavailable"]
+        case let .present(state: native): state = ["kind": "present", "state": Orch8KmpBridge.stateWire(native)]
+        }
+        let request: String
+        switch value.requestState { case .prepared: request = "prepared"; case .cancelled: request = "cancelled" }
+        return ["instanceId": value.instanceId, "accountId": value.accountId, "catalogId": value.catalogId,
+            "ownerEpoch": value.ownerEpoch, "workflow": value.workflow, "version": value.version,
+            "sequenceId": value.sequenceId, "createdAt": value.createdAt, "requestState": request, "nativeState": state]
+    }
+}
+
+private final class ScopedHandlerAdapter: MobileCatalogStepHandler, @unchecked Sendable {
+    private let handler: Orch8ScopedHandler
+    init(_ handler: Orch8ScopedHandler) { self.handler = handler }
+    func execute(context: MobileCatalogCallbackContext, stepName: String, input: String) throws -> String {
+        let json = Orch8KmpBridge.encode([
+            "accountId": context.accountId, "catalogId": context.catalogId, "ownerEpoch": context.ownerEpoch,
+            "runId": context.runId, "blockId": context.blockId, "attempt": context.attempt, "effectId": context.effectId,
+        ])
+        switch Orch8KmpBridge.unwrapCallback(handler.execute(contextJson: json, stepName: stepName, inputJson: input)) {
+        case let .success(output): return output
+        case let .failure(error) where error.kind == "permanent": throw HandlerError.Permanent(message: error.message)
+        case let .failure(error): throw HandlerError.Retryable(message: error.message)
+        }
+    }
+}
+private final class ScopedTokenAdapter: TokenProvider, @unchecked Sendable {
+    private let tokens: Orch8ScopedTokenSource
+    init(_ tokens: Orch8ScopedTokenSource) { self.tokens = tokens }
+    func currentToken() -> String { tokens.currentToken() }
+    func refreshToken() throws -> String {
+        switch Orch8KmpBridge.unwrapCallback(tokens.refreshToken()) {
+        case let .success(token): return token
+        case let .failure(error): throw MobileError.Engine(message: error.message)
+        }
     }
 }

@@ -4,8 +4,10 @@ The development Rust/UniFFI surface exposes `MobileAccount`, `MobileCatalog` and
 `MobileCatalogRun` objects. Generated Swift and Kotlin bindings expose the same
 typed objects and records. This API is not in the published v0.7.1 native binary.
 Use generated bindings with the native library built from the same source.
-Release artifacts and pins, KMP/RN/Flutter facade integration, scoped change
-observation, account-owned worker/delegation and authenticated outcome reporting
+The [common KMP facade](../packages/kmp/README.md#multiple-accounts-and-catalogs-development-sources)
+wraps these objects through direct JVM/Android adapters and a protocol-4 Swift
+bridge. Release artifacts and pins, RN/Flutter facade integration, native scoped event
+listeners, account-owned worker/delegation and authenticated outcome reporting
 remain rollout requirements. [ADR-0002](adr/0002-mobile-account-and-catalog-scopes.md) S1–S12 are not complete.
 
 ## Identity and lifetime

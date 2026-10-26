@@ -39,6 +39,7 @@ data class EngineConfig(
      * The engine still performs its own, stricter URL checks (public host,
      * port 443) when it is constructed.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun validate(): EngineConfig {
         fun positive(name: String, value: Long) {
             if (value <= 0) invalid("$name must be greater than zero (got $value)")

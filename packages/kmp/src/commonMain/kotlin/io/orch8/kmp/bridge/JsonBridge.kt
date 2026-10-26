@@ -16,6 +16,8 @@ package io.orch8.kmp.bridge
  * - failure: `{"error": {"kind": "<MobileError case>", "message": "..."}}`
  */
 interface Orch8JsonBridge {
+    fun openAccount(identityJson: String): Orch8ScopedReply
+
     fun call(method: String, argsJson: String): String
 
     /** Installed once, right after a successful `open` call. */
@@ -66,4 +68,4 @@ interface Orch8BridgeCallbacks {
 }
 
 /** Bumped when the method set or payload shapes change incompatibly. */
-const val ORCH8_BRIDGE_PROTOCOL: Int = 3
+const val ORCH8_BRIDGE_PROTOCOL: Int = 4

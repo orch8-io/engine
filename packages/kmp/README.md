@@ -126,7 +126,7 @@ Kotlin/Native does not carry a Swift `throws` into Kotlin as a typed
 exception, and Kotlin cannot see UniFFI's Swift records. Keeping the Swift
 side to plain strings means all decoding, validation and error mapping run
 in common Kotlin (`JsonBridgeBackend`), where the JVM test suite covers them.
-Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 3`) when the
+Both sides check a protocol version (`ORCH8_BRIDGE_PROTOCOL = 4`) when the
 engine opens, so a stale adapter fails immediately with a clear message.
 
 ## Usage (common code)
@@ -168,6 +168,77 @@ if (result.budgetExhausted) scheduleAnotherWindow()
 
 On a silent push, call `engine.onPushReceived()`. The next tick then syncs
 approvals and commands with the server.
+
+## Multiple accounts and catalogs (development sources)
+
+The scoped API requires a KMP framework, protocol-4 Swift adapter, generated
+bindings and native library built from the same source revision. Published
+`0.7.1` binaries do not implement it. On Android, build and stage the matching
+`orch8-mobile` AAR in a Maven repository and pass `-Porch8.dist.repo=/path/to/repo`
+when building KMP. Use a distinct development version for both artifacts through
+`ORCH8_MOBILE_VERSION`; do not replace a published version in a shared cache.
+CI compiles the Android adapter against its own commit's AAR with a unique
+version, runs real workflows on the JVM and macOS native host, and compiles the
+actual iOS framework and Swift adapter. Host tests do not replace device tests.
+
+```kotlin
+val account = engine.openAccount(AccountIdentity(accountKey, trustedIssuer, trustedSubject))
+val catalog = account.openCatalog(CatalogConfiguration(
+    catalogKey, source, signingAuthority, manifestUrl, identityUrl,
+))
+catalog.sync(accountTokenSource) // explicit, caller-owned provider for this operation
+catalog.registerHandler("load_assignment", { context, _, input ->
+    // Native-issued context identifies the original account/catalog/run/effect.
+    repository.assignmentJson(input)
+})
+val run = catalog.prepareRun(CatalogRunRequest(
+    workflow = "field-inspection", operationKey = "insp:A-12", inputJson = inputJson,
+))
+run.start() // retry prepareRun with the same key and identical request after a restart
+val snapshot = run.snapshot()
+if (snapshot != null && "capture_checklist" in snapshot.pendingSteps) {
+    val accepted = run.answer(snapshot, "capture_checklist", "complete")
+    if (!accepted) refreshScreen() // another answer or state transition won
+}
+val page = catalog.history(limit = 64)
+page.next?.use { cursor -> render(catalog.history(cursor).items) }
+```
+
+Obtain the principal and catalog configuration from trusted application state;
+workflow input cannot select either. A changed principal requires a different
+account key or explicit retirement. Root `engine.resume()` / `runUntilIdle()`
+still drive execution, while scoped reads, handlers, sync and answers use these
+owned objects. Root legacy observers do not expose scoped runs. Collect
+`run.observeSnapshots()` for owned UI state and use paginated `history()` for
+metadata. The cold snapshot flow polls only while collected, emits distinct
+values, applies collector backpressure and completes after a known terminal
+snapshot. A `null` snapshot means the native record is absent; it does not prove
+success or cancellation, including before materialization or after GC. Cancel
+collection when the screen leaves or a prepared request is abandoned. Account
+retirement and close fences propagate their typed errors. Poll intervals must
+be finite and positive for both scoped and legacy observers.
+
+Swift uses `run.subscribeSnapshots(observer:pollIntervalMs:)`, returning a
+`CatalogSnapshotSubscription` to close when its screen leaves. Implement
+`CatalogSnapshotObserver.onSnapshot`, `onError` and `onComplete`; callbacks run on
+the IO dispatcher, so dispatch UI changes to the main thread. Ordinary errors
+are delivered through `onError`, and closing a subscription cancels its task
+without closing the run or cancelling durable work. A previously accepted host
+callback may finish. The scoped raw `Flow` method is available in shared Kotlin
+and hidden from Objective-C/Swift: Kotlin's raw `Flow.collect` export only
+converts cancellation errors and can abort the process on ordinary exceptions.
+
+`close()` disposes one object, so a run survives disposal of its parent views.
+`closeView()` explicitly fences that view and its descendants. `account.retire()`
+durably retires its epoch across catalogs. None of these operations deletes
+workflow history. Keep the root engine alive for the application's runtime
+lifetime; scoped objects do not keep a stopped engine running.
+
+History reports request metadata separately from native execution state.
+`CatalogNativeState.Unavailable` after native GC does not prove success or
+failure. `forgetCancelledRequest()` only reclaims a cancelled request that was
+never materialized. Scoped credentials, reporting, workers/delegation, native event listeners
+and materialized-history reclamation remain separate work.
 
 ## Authenticating the device: device sessions (engine release after 0.7.1)
 
@@ -229,7 +300,7 @@ work. Late results cannot restore a closed source's cached token.
 Native installation tickets fence initial completion and cancellation against
 replacement through another alias. On iOS each native provider captures an
 immutable callback source ID, so retired callbacks cannot invoke a replacement
-fetcher. Protocol 3, matching native reservation APIs, and matching generated
+fetcher. Protocol 4, matching native reservation APIs, and matching generated
 bindings are required; protocol-1 and protocol-2 Swift bridges fail during open. These
 unreleased APIs must be shipped with matching native SDK artifacts after 0.7.1.
 
@@ -239,7 +310,7 @@ credentials. A sync's return or failure retires only its own ID; callbacks after
 retirement cannot invoke the source or resolve a successor. Shutdown retires all
 manifest IDs. The supplied source stays caller-owned, so sync does not close a
 source also used for a node or another call. This callback change requires the
-protocol-3 Swift bridge and KMP framework to ship together.
+protocol-4 Swift bridge and KMP framework to ship together.
 
 `EngineConfig.syncApiKey` is the **legacy** path and not for production apps:
 it still works, and the SDK logs a warning when the server reports the key is

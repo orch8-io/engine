@@ -71,52 +71,70 @@ class Orch8Engine internal constructor(
         }
     }
 
+    /** Open a trusted explicit-owner account; scoped views do not retain this engine. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
+    suspend fun openAccount(identity: AccountIdentity): Orch8Account = offload {
+        Orch8Account(backend.openAccount(identity), ioDispatcher)
+    }
+
     /** Register a native handler. Must be called before [resume]. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun registerHandler(name: String, handler: Orch8StepHandler) {
         require(name.isNotBlank()) { "handler name must not be blank" }
         backend.registerHandler(name, handler.toBlocking())
     }
 
     /** Start the engine's own foreground tick loop. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun resume() = backend.resume()
 
     /** Pause the foreground tick loop (waits for the current tick). */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun pause() = backend.pause()
 
     /** Execute one tick manually. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun tick(): TickResult = offload { backend.tickOnce() }
 
     /**
      * Drain work inside an OS-granted background window
      * (`BGTaskScheduler` / `WorkManager`). Never starts a persistent loop.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun runUntilIdle(maxTicks: Int = 25, timeBudget: Duration = 20.seconds): BackgroundRunResult {
         require(maxTicks > 0) { "maxTicks must be a positive integer" }
         require(timeBudget.isPositive()) { "timeBudget must be greater than zero" }
         return offload { backend.runUntilIdle(maxTicks, timeBudget.inWholeMilliseconds.coerceAtLeast(1)) }
     }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun reportPowerState(state: PowerState) = backend.reportPowerState(state)
 
     /** Call when a silent push arrives: forces a server sync on the next tick. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun onPushReceived() = backend.onPushReceived()
 
     /** Start a workflow instance; returns its id. [dedupKey] prevents duplicates. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun start(sequenceName: String, input: JsonObject = JsonObject(emptyMap()), dedupKey: String? = null): String =
         startJson(sequenceName, input.toString(), dedupKey)
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun startJson(sequenceName: String, inputJson: String, dedupKey: String? = null): String {
         require(sequenceName.isNotBlank()) { "sequenceName must not be blank" }
         return offload { backend.start(sequenceName, inputJson, dedupKey) }
     }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun cancelInstance(instanceId: String) {
         offload { backend.cancelInstance(instanceId) }
         _pendingSteps.update { PendingSteps.withoutInstance(it, instanceId) }
     }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun getInstance(instanceId: String): InstanceSnapshot = offload { backend.getInstance(instanceId) }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun activeInstances(): List<InstanceSummary> = offload { backend.activeInstances() }
 
     /**
@@ -126,6 +144,7 @@ class Orch8Engine internal constructor(
      * into `context.data`. A payload without a valid choice is rejected by
      * the engine and the step keeps waiting.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun answer(
         instanceId: String,
         stepName: String,
@@ -141,30 +160,39 @@ class Orch8Engine internal constructor(
      * Resume a step parked on `wait_for_input` with a raw payload. Prefer
      * [answer]; the payload must carry `"value"` set to a declared choice.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun completeStep(instanceId: String, stepName: String, output: JsonObject = JsonObject(emptyMap())) =
         completeStepJson(instanceId, stepName, output.toString())
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun completeStepJson(instanceId: String, stepName: String, outputJson: String) {
         offload { backend.completeStep(instanceId, stepName, outputJson) }
         _pendingSteps.update { PendingSteps.withoutStep(it, instanceId, stepName) }
     }
 
     /** Load a sequence definition directly (bypasses signed sync). */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun loadSequence(json: String) = offload { backend.loadSequenceFromJson(json) }
 
     /** Load a JSON array of sequences; empty [url] uses `EngineConfig.sequencesUrl`. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun loadSequencesFromUrl(url: String = ""): Int = offload { backend.loadSequencesFromUrl(url) }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun loadedSequences(): List<SequenceInfo> = offload { backend.loadedSequences() }
 
     /** Sync the Ed25519-signed sequence manifest. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun sync(manifestUrl: String, tokens: Orch8TokenSource? = null): SyncResult =
         offload { backend.sync(manifestUrl, tokens) }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun flushTelemetry(endpointUrl: String): FlushResult = offload { backend.flushTelemetry(endpointUrl) }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun setDeviceContext(ctx: DeviceContext) = backend.setDeviceContext(ctx)
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun importContinuityCapsule(
         capsuleJson: String,
         payloadBase64: String,
@@ -181,6 +209,7 @@ class Orch8Engine internal constructor(
         )
     }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) =
         offload { backend.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
 
@@ -192,6 +221,7 @@ class Orch8Engine internal constructor(
     // idempotency key for downstream side effects).
 
     /** Stable runtime UUID of this installation (the lease `worker_id`). */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun nodeRuntimeId(): String = offload { backend.nodeRuntimeId() }
 
     /**
@@ -209,6 +239,7 @@ class Orch8Engine internal constructor(
      *
      * Needs the engine release after 0.7.1.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun setTokenProvider(
         refreshTimeout: Duration = 30.seconds,
         fetchToken: suspend () -> String,
@@ -243,16 +274,19 @@ class Orch8Engine internal constructor(
      * the legacy `syncApiKey`), then re-advertises before the five-minute
      * capability TTL. Safe to call on every launch.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun registerNode(capabilities: NodeCapabilities = NodeCapabilities()): NodeRegistration =
         offload { backend.registerNode(capabilities) }
 
     /** Push fresh liveness facts (battery 0..100, connectivity). */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun updateNodeStatus(connectivity: NodeConnectivity? = null, batteryPercent: Int? = null) {
         require(batteryPercent == null || batteryPercent in 0..100) { "batteryPercent must be in 0..100" }
         offload { backend.updateNodeStatus(connectivity, batteryPercent) }
     }
 
     /** Stop the worker, advertise `draining`, stop re-advertising. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun unregisterNode() = offload { backend.unregisterNode() }
 
     /**
@@ -260,19 +294,23 @@ class Orch8Engine internal constructor(
      * handlers, heartbeats per lease, completes / fails / releases tasks.
      * Register handlers first.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun startWorker(options: WorkerOptions = WorkerOptions()) = offload { backend.startWorker(options) }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun stopWorker() = offload { backend.stopWorker() }
 
     /**
      * Claim and run remote tasks inside an OS-granted background window
      * (BGTask, WorkManager, push-wake handler). Claims even while paused.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun runWorkerWindow(timeBudget: Duration = 25.seconds): WorkerWindowResult {
         require(timeBudget.isPositive()) { "timeBudget must be greater than zero" }
         return offload { backend.runWorkerWindow(timeBudget.inWholeMilliseconds.coerceAtLeast(1)) }
     }
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun workerStats(): WorkerStats = offload { backend.workerStats() }
 
     /**
@@ -280,8 +318,10 @@ class Orch8Engine internal constructor(
      * worker polls immediately. Returns false when the push is addressed to
      * another runtime.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun onPushWake(envelopeJson: String): Boolean = backend.onPushWake(envelopeJson)
 
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun onPushWake(taskId: String? = null, runtimeId: String? = null, reason: String? = null): Boolean =
         onPushWake(
             buildJsonObject {
@@ -292,6 +332,7 @@ class Orch8Engine internal constructor(
         )
 
     /** Enable an opt-in builtin handler (`http_request`) before [resume]. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun enableBuiltin(name: String) = backend.enableBuiltin(name)
 
     // -- Delegation from phone-local workflows ------------------------------
@@ -306,9 +347,11 @@ class Orch8Engine internal constructor(
      * allowed to call the continuity API. Delegations are journaled locally
      * and survive disconnects and app kills: call again after every launch.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun startDelegation(options: DelegationOptions) = offload { backend.startDelegation(options) }
 
     /** Pause the pump. Journaled delegations resume with the next [startDelegation]. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun stopDelegation() = offload { backend.stopDelegation() }
 
     /**
@@ -316,26 +359,32 @@ class Orch8Engine internal constructor(
      * without parking a step. Returns the delegation id; read the outcome
      * with [delegationStatus]. Requires [startDelegation].
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun delegate(request: DelegateRequest): String = offload { backend.delegate(request) }
 
     /** The locally journaled state of a delegation (NOT_FOUND when unknown). */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun delegationStatus(delegationId: String): DelegationStatus {
         require(delegationId.isNotBlank()) { "delegationId must not be blank" }
         return offload { backend.delegationStatus(delegationId) }
     }
 
     /** Every journaled delegation, oldest first. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun listDelegations(): List<DelegationStatus> = offload { backend.listDelegations() }
 
     /** Pump counters (zeros while it is not running). */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
     suspend fun delegationStats(): DelegationStats = offload { backend.delegationStats() }
 
     /**
      * Cold flow of distinct statuses of one delegation, polled every
      * [pollInterval]. Completes after emitting a terminal state.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun observeDelegation(delegationId: String, pollInterval: Duration = 1.seconds): Flow<DelegationStatus> =
         flow {
+            require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
             while (true) {
                 val status = backend.delegationStatus(delegationId)
                 emit(status)
@@ -348,8 +397,10 @@ class Orch8Engine internal constructor(
      * Cold flow of distinct snapshots of one instance, polled every
      * [pollInterval]. Completes after emitting a terminal state.
      */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun observeInstance(instanceId: String, pollInterval: Duration = 500.milliseconds): Flow<InstanceSnapshot> =
         flow {
+            require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
             while (true) {
                 val snapshot = backend.getInstance(instanceId)
                 emit(snapshot)
@@ -359,8 +410,10 @@ class Orch8Engine internal constructor(
         }.distinctUntilChanged().flowOn(ioDispatcher)
 
     /** Cold flow of the active-instance list, polled every [pollInterval], distinct. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class)
     fun observeActiveInstances(pollInterval: Duration = 1.seconds): Flow<List<InstanceSummary>> =
         flow {
+            require(pollInterval.isFinite() && pollInterval.isPositive()) { "pollInterval must be finite and greater than zero" }
             while (true) {
                 emit(backend.activeInstances())
                 delay(pollInterval)
@@ -389,6 +442,7 @@ class Orch8Engine internal constructor(
         private const val EVENT_BUFFER = 256
 
         /** Open (or create) the engine database at [dbPath]. */
+        @Throws(Orch8Exception::class, IllegalArgumentException::class)
         fun open(dbPath: String, config: EngineConfig = EngineConfig()): Orch8Engine {
             require(dbPath.isNotBlank()) { "dbPath must not be blank" }
             return Orch8Engine(openPlatformBackend(dbPath, config.validate()))

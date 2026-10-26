@@ -3235,3 +3235,140 @@ strict concurrency and warnings as errors. Kotlin 2.1.0 compiles the generated
 binding and two committed JVM native tests, which both pass against the same
 library. Fresh generation matches all five binding copies; formatting, docs,
 SDK packaging and whitespace checks pass.
+
+### DME140 — Carry explicit scopes through the common KMP API and real Apple bridge
+
+The common coroutine API now exposes trusted account identities, catalogs,
+contextual handlers, per-call signed sync, durable run preparation/start,
+owned snapshots/cancellation, versioned parallel answers and opaque paginated
+history. JVM/Android adapters call the generated native objects directly.
+Protocol 4 transfers owned child/cursor ports across the Swift/Kotlin boundary;
+no global handle registry or ambient selected account is introduced. Callback
+and token adapters retain their own immutable identities/providers. Scoped
+objects keep no root engine reference. Disposing temporary parents preserves
+issued children; explicit closeView and account retirement retain their fences.
+
+The wrapper tests use an exported, checkpointed SQLite fixture with two accounts
+and two catalogs each. Its workflows are installed only by the existing trusted
+Rust test helper; there is no unsigned production install API. Both JVM and real
+Kotlin/Native host flows execute these four workflows through the common facade,
+check eight unique contextual effects, answer parallel waits in both orders,
+reject stale replies and read scoped history. The Swift host links the actual
+Kotlin framework, production Swift bridge and Rust library, without protocol
+shape mocks. Native host evidence is not an iOS simulator/device execution claim.
+
+Boundary regressions found while building this slice:
+
+- A malformed callback identity was classified as retryable. It is now permanent
+  before application handler entry; input JSON never supplies callback authority.
+- A successfully opened bridge leaked its engine when protocol validation or
+  callback installation failed. Cleanup now follows successful ownership
+  transfer and preserves the original error even when cleanup itself throws.
+- Kotlin/Native terminated the process on invalid configuration because the
+  public factory did not export its exceptions to Swift. Public throwing engine
+  and scoped operations now declare their exception contract; suspend exports
+  include cancellation. The real host regression catches invalid configuration
+  and verifies it creates no database before opening a valid engine.
+- Completing a step on a disposed JVM run escaped the common error contract.
+  It now uses the same disposed-view mapping as reads and cancellation.
+
+CI exports the trusted fixture and runs the actual common/JVM native workflows,
+the Kotlin/Native host flow, and the actual iOS framework/Swift typecheck. Android
+CI stages this commit's AAR under a unique version and compiles the KMP Android
+adapter against that artifact. This avoids silently validating development
+bindings against the older published SDK. No release is published; all runtime,
+bindings, KMP framework and protocol-4 adapter components must match.
+
+Scoped listeners/observation, RN/Flutter facades, account credential management,
+authenticated reporting, scoped workers/delegation, durable materialized-record
+reclamation and the remaining ADR S1–S12 matrix remain open. Root legacy
+observers deliberately exclude scoped runs. History still distinguishes a
+missing native record from a known execution outcome.
+
+Local validation: all 647 mobile unit tests and all 75 common/JVM tests pass
+with no skipped JVM cases when native integration is enabled. The disposed-reply
+regression fails before its mapping fix and passes in the full suite afterward.
+The actual macOS native framework/Swift/Rust flow, actual iOS simulator framework
+build and Swift bridge typecheck pass; strict Swift concurrency and warnings as
+errors are enabled. Mobile all-target Clippy, Rust formatting, actionlint, docs,
+SDK packaging and whitespace checks pass. Android source-cohort compilation is
+passed in CI against this commit’s AAR (job 121310376983); no Android device
+execution is claimed. The first native-host CI run exposed a missing root
+`target/` directory in a fresh artifact-only checkout. The harness now creates
+its work parent explicitly. A clean-root reproduction fails before this fix and
+passes the real four-workflow Swift/Kotlin/Rust flow afterward.
+
+### DME141 — Observe owned KMP runs without a polling spin or read queue
+
+The three existing legacy KMP observers accepted zero, negative and infinite
+intervals. Zero/negative delay can create a tight read loop; infinite delay can
+leave an otherwise active observer permanently stale. A regression reproduced
+the missing validation. Each observer now refuses these intervals before its
+first backend read.
+
+A scoped run now exposes `observeSnapshots()`, a cold common-code flow that
+uses the existing authorized native snapshot operation at each poll. It retains
+only the run view, applies collector backpressure, emits distinct snapshots and
+completes on a known terminal state. It never routes through the legacy global
+listener or active-instance list. Missing native state is emitted as null and
+makes no outcome claim; callers cancel collection for an abandoned prepared
+request or a departing screen. Retirement, close and backend errors remain
+visible to the collector.
+
+Controlled coroutine tests cover cold construction, distinct queued/live states,
+terminal completion, missing-record uncertainty, slow collectors, cancellation,
+close fencing and invalid intervals before reads. A real JVM/native integration
+observes two workflows under different accounts through parallel approvals and
+completion, checks every emitted owner/run/session and verifies terminal stream
+completion. This supplies common KMP polling observation; native push listeners,
+RN/Flutter observation and the rest of the full review matrix remain open.
+
+Validation passes: 82 common/JVM tests with all native integration cases enabled,
+73 common tests executed on the Kotlin/Native macOS host, and no failures/skips in
+either suite. The real Swift/Kotlin/Rust four-scope flow still passes with the
+updated framework. Actual iOS framework compilation and Swift bridge typecheck,
+actionlint, documentation and whitespace checks pass. CI now runs the common
+Kotlin/Native tests before linking its host framework. Production Rust and
+bindings are unchanged in this slice.
+
+### DME142 — Give Swift a safe lifetime and error boundary for scoped observation
+
+An actual Swift/Kotlin/Native/Rust subprocess reproduced a process abort when
+collecting the raw scoped Flow after closing its view. The generated Flow.collect
+bridge converts only CancellationException; an ordinary typed Shutdown exception
+is fatal at that foreign boundary. Annotating the flow factory cannot fix the
+separate collection boundary.
+
+Shared Kotlin keeps `observeSnapshots()`. Swift now has
+`subscribeSnapshots(observer, pollIntervalMs)` and an explicitly cancellable
+subscription. The raw scoped Flow is hidden from Objective-C exports. Snapshot,
+error and completion callbacks stay within the typed observer protocol; broken
+error callbacks cannot become unhandled native coroutine exceptions. Each
+subscription owns and cancels its own task, clears its observer reference on
+close/completion/error, and retains no root engine. Closing a subscription does
+not invalidate a run or cancel durable work; an already accepted callback may
+finish. The API accepts milliseconds directly, avoiding Kotlin Duration's ABI
+representation in Swift calls.
+
+Common tests cover completion, cancellation before scheduling, view closure and
+throwing error callbacks. The real native host fixture now checks all four
+terminal subscriptions and a closed-view error delivered to Swift without a
+process abort. Native push listeners and the pre-existing raw legacy Flow Swift
+exports still need their own supported observation boundary; this slice does
+not claim that broader interop work is complete.
+
+Final local validation: 84 common/JVM and 75 Kotlin/Native common tests pass,
+with no failures or skips, including invalid millisecond intervals and overflow
+before scheduling. The real Swift/Rust host fixture passes terminal and closed
+subscriptions without an abort. The iOS framework/Swift bridge typecheck, docs
+and whitespace checks pass. The generated header exposes the callback
+subscription and omits the raw scoped Flow.
+
+The final artifact-only CI host run also exposed Cargo's absolute debug dylib
+install name (job 121316494872). The downloaded library linked successfully but
+its loader still searched the absent producer `target/debug/deps` directory.
+The host harness now normalizes and ad-hoc signs a private copy with an
+`@rpath` install name; it preserves the input artifact and links/runs only that
+copy. An isolated library with an intentionally nonexistent producer path
+reproduces the loader abort before this fix and passes the real four-scope Swift
+workflow/subscription fixture afterward. The source library checksum is unchanged.

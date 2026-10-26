@@ -17,8 +17,10 @@ import kotlin.test.assertTrue
 
 /** Scripted stand-in for the Swift bridge: records calls, replays envelopes. */
 private class FakeJsonBridge(
-    private val protocol: Int = 3,
+    private val protocol: Int = io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL,
 ) : Orch8JsonBridge {
+    override fun openAccount(identityJson: String): io.orch8.kmp.bridge.Orch8ScopedReply = error("unexpected scoped account call")
+
     val calls = mutableListOf<Pair<String, JsonObject>>()
     val replies = mutableMapOf<String, String>()
     var installed: Orch8BridgeCallbacks? = null

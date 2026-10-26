@@ -414,3 +414,82 @@ fn public_issued_run_view_outlives_temporary_parent_views_without_pinning_the_en
     assert!(weak.upgrade().is_none());
     assert!(matches!(run.snapshot(), Err(MobileError::Shutdown)));
 }
+
+/// Portable, trusted test data for real foreign SDK execution tests. There is
+/// deliberately no production unsigned-install or fixture-export API.
+#[test]
+fn export_scoped_sdk_fixture_for_wrappers() {
+    let temporary = tempfile::tempdir().unwrap();
+    let destination = std::env::var_os("ORCH8_SCOPED_FIXTURE_DIR")
+        .map_or_else(|| temporary.path().to_owned(), std::path::PathBuf::from);
+    std::fs::create_dir_all(&destination).unwrap();
+    let database = destination.join("scoped.db");
+    let metadata = destination.join("metadata.json");
+    assert!(
+        !database.exists() && !metadata.exists(),
+        "fixture output must be fresh"
+    );
+    let config = MobileEngineConfig {
+        telemetry_enabled: false,
+        operation_timeout_ms: 10_000,
+        ..Default::default()
+    };
+    let producer =
+        MobileEngine::new(database.to_string_lossy().into_owned(), config.clone()).unwrap();
+    let mut cases = Vec::new();
+    for name in ["alice", "bob"] {
+        let account = producer.clone().open_account(identity(name)).unwrap();
+        for key in ["one", "two"] {
+            let configuration = configuration(key);
+            let catalog = account.open_catalog(configuration.clone()).unwrap();
+            install(&producer, &catalog.scope, true);
+            cases.push(serde_json::json!({
+                "accountKey":name,"issuer":"issuer","subject":name,"accountId":account.account_id(),
+                "catalogId":catalog.catalog_id(),"sessionEpoch":account.session_epoch(),
+                "catalogKey":key,"source":configuration.source,"signingAuthority":configuration.signing_authority,
+                "manifestUrl":configuration.manifest_url,"identityUrl":configuration.identity_url
+            }));
+        }
+    }
+    checkpoint_and_close(&producer);
+    let reopened = MobileEngine::new(database.to_string_lossy().into_owned(), config).unwrap();
+    for case in &cases {
+        let account = reopened
+            .clone()
+            .open_account(identity(case["accountKey"].as_str().unwrap()))
+            .unwrap();
+        assert_eq!(account.account_id(), case["accountId"].as_str().unwrap());
+        assert_eq!(
+            account.session_epoch(),
+            case["sessionEpoch"].as_i64().unwrap()
+        );
+        let catalog = account
+            .open_catalog(configuration(case["catalogKey"].as_str().unwrap()))
+            .unwrap();
+        let probe = catalog.prepare_run(request("fixture-validation")).unwrap();
+        assert_eq!(probe.cancel().unwrap(), Some(InstanceStateKind::Cancelled));
+        assert!(probe.forget_cancelled_request().unwrap());
+        assert!(catalog.history(None, 1).unwrap().items.is_empty());
+    }
+    checkpoint_and_close(&reopened);
+    std::fs::write(
+        metadata,
+        serde_json::to_vec_pretty(&serde_json::json!({"cases":cases})).unwrap(),
+    )
+    .unwrap();
+}
+
+fn checkpoint_and_close(engine: &MobileEngine) {
+    engine.runtime.block_on(async {
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(engine.sqlite.pool())
+            .await
+            .unwrap();
+    });
+    engine.shutdown();
+    engine.runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(10), engine.sqlite.close())
+            .await
+            .unwrap();
+    });
+}

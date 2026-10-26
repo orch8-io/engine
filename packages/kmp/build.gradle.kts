@@ -30,6 +30,9 @@ val iosEnabled = "ios" in enabledTargets
 // no packaged native library, so release publishing leaves it out
 // (-Porch8.kmp.targets=android,ios).
 val jvmEnabled = "jvm" in enabledTargets
+// Test-only host framework reuses the actual Darwin platform implementation.
+// It is excluded from the default publishing targets.
+val nativeHostEnabled = "nativehost" in enabledTargets
 
 if (androidEnabled) {
     apply(plugin = "com.android.library")
@@ -51,6 +54,10 @@ if (androidEnabled) {
 val uniffiJvmSources = "src/uniffiJvm/kotlin"
 
 tasks.withType<Test>().configureEach {
+    providers.gradleProperty("orch8.native.fixture.path").orNull?.let { directory ->
+        systemProperty("orch8.native.fixture.path", directory)
+        inputs.files(fileTree(directory)).withPropertyName("orch8ScopedFixture")
+    }
     providers.gradleProperty("orch8.native.lib.path").orNull?.let {
         systemProperty("jna.library.path", it)
         systemProperty("orch8.native.integration", "true")
@@ -74,6 +81,11 @@ kotlin {
         }
     }
 
+    if (nativeHostEnabled) {
+        val host = if (System.getProperty("os.arch") == "aarch64") macosArm64("nativeHost") else macosX64("nativeHost")
+        host.binaries.framework { baseName = "Orch8Kmp"; isStatic = true }
+    }
+
     if (iosEnabled) {
         listOf(iosX64(), iosArm64(), iosSimulatorArm64()).forEach { target ->
             target.binaries.framework {
@@ -91,6 +103,10 @@ kotlin {
         commonTest.dependencies {
             implementation(kotlin("test"))
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+        }
+
+        if (nativeHostEnabled) {
+            named("nativeHostMain") { kotlin.srcDir("src/iosMain/kotlin") }
         }
 
         if (jvmEnabled) {
