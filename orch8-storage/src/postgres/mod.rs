@@ -14,6 +14,7 @@ mod cluster;
 mod continuity;
 mod credentials;
 mod cron;
+mod effect_attempt;
 mod effect_dispatch;
 mod events;
 mod evidence;

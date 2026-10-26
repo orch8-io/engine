@@ -961,6 +961,14 @@ impl crate::ContinuityStore for PostgresStorage {
         decode(row.get("record"))
     }
 
+    async fn ensure_effect_attempt(
+        &self,
+        candidate: &EffectReceipt,
+        legacy_id: EffectId,
+    ) -> Result<EffectReceipt, StorageError> {
+        super::effect_attempt::ensure(self, candidate, legacy_id).await
+    }
+
     async fn find_unresolved_effect_receipt(
         &self,
         tenant_id: &TenantId,
@@ -975,6 +983,8 @@ impl crate::ContinuityStore for PostgresStorage {
                AND state IN ('dispatched','unknown')
                AND record->>'block_id'=$4
                AND (record->>'attempt')::bigint=$5
+             AND (NOT EXISTS (SELECT 1 FROM effect_block_resets r WHERE r.tenant_id=effect_receipts.tenant_id AND r.instance_id=effect_receipts.instance_id AND r.block_id=record->>'block_id')
+ OR EXISTS (SELECT 1 FROM effect_attempt_bindings b WHERE b.tenant_id=effect_receipts.tenant_id AND b.effect_id=effect_receipts.id))
              ORDER BY created_at DESC LIMIT 1",
         )
         .bind(tenant_id.as_str())
@@ -986,6 +996,40 @@ impl crate::ContinuityStore for PostgresStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn retire_effect_attempts_for_blocks(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+    ) -> Result<u64, StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT id FROM task_instances WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
+            .bind(tenant_id.as_str())
+            .bind(instance_id.into_uuid())
+            .fetch_optional(&mut *tx)
+            .await?;
+        let count =
+            super::effect_attempt::retire_on(&mut tx, tenant_id, instance_id, block_ids).await?;
+        tx.commit().await?;
+        Ok(count)
+    }
+    async fn retire_effect_attempts_for_blocks_claimed(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        super::claimed_writes::retire_effect_attempts(
+            self,
+            tenant_id,
+            instance_id,
+            block_ids,
+            claim_token,
+        )
+        .await
     }
 
     async fn delete_effect_receipts_for_blocks(

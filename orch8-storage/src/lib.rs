@@ -1,6 +1,7 @@
 mod child_adoption;
 mod child_lookup;
 mod current_outputs;
+mod effect_attempt;
 mod effect_dispatch;
 pub use effect_dispatch::EffectDispatchFence;
 mod mobile_access;
@@ -76,7 +77,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 126;
+pub const STORAGE_SCHEMA_VERSION: u32 = 127;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -4267,14 +4268,31 @@ pub trait ContinuityStore: Send + Sync + 'static {
     async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
 
     /// Insert a deterministic receipt if absent and return the durable value.
-    /// This is the crash/retry-safe entry point used by dispatch paths.
+    /// Low-level explicit-ID operation; engine preparation uses `ensure_effect_attempt`.
     async fn ensure_effect_receipt(
         &self,
         receipt: &EffectReceipt,
     ) -> Result<EffectReceipt, StorageError>;
 
+    /// Atomically select the identity for one active logical invocation.
+    /// Retry/concurrent preparation returns the same receipt. Iteration
+    /// retirement clears the binding, so a new loop intent gets a fresh ID.
+    /// `legacy_id` permits adoption of an existing pre-binding receipt without
+    /// replaying a committed or ambiguous effect during a coordinated upgrade.
+    async fn ensure_effect_attempt(
+        &self,
+        candidate: &EffectReceipt,
+        legacy_id: orch8_types::continuity::EffectId,
+    ) -> Result<EffectReceipt, StorageError> {
+        let _ = (candidate, legacy_id);
+        Err(StorageError::Unsupported(
+            "atomic effect attempt identity".into(),
+        ))
+    }
+
     /// Find an unresolved (`dispatched` or `unknown`) receipt for this exact
-    /// retry attempt of a block. Scoped to `attempt` so a prior attempt that
+    /// active retry attempt of a block; retired iteration history is excluded.
+    /// Scoped to `attempt` so a prior attempt that
     /// ended `unknown` (ambiguous outcome, needs operator/verifier
     /// resolution) blocks re-entry into *that* attempt — e.g. crash
     /// recovery, or two workers racing the same attempt — without also
@@ -4287,6 +4305,36 @@ pub trait ContinuityStore: Send + Sync + 'static {
         block_id: &orch8_types::ids::BlockId,
         attempt: u32,
     ) -> Result<Option<EffectReceipt>, StorageError>;
+
+    /// Retire active invocation identities at an iteration boundary. Preserve
+    /// ambiguous outcomes and history required by enabled workflow invariants.
+    /// Returns the number of receipts physically pruned. Custom backends must
+    /// implement the atomic reset protocol before enabling loop side effects.
+    async fn retire_effect_attempts_for_blocks(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+    ) -> Result<u64, StorageError> {
+        let _ = (tenant_id, instance_id, block_ids);
+        Err(StorageError::Unsupported(
+            "effect invocation retirement".into(),
+        ))
+    }
+
+    /// As above, only while the original scheduler claim remains current.
+    async fn retire_effect_attempts_for_blocks_claimed(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<Option<u64>, StorageError> {
+        let _ = (tenant_id, instance_id, block_ids, claim_token);
+        Err(StorageError::Unsupported(
+            "claimed effect invocation retirement".into(),
+        ))
+    }
 
     /// Delete every effect receipt recorded for the given blocks of an
     /// instance, regardless of state or attempt. Callers that wipe

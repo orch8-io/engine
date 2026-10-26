@@ -260,7 +260,7 @@ impl<'a> EffectGuard<'a> {
             return Err(blocked(&unresolved));
         }
 
-        let id = deterministic_effect_id(
+        let legacy_id = legacy_effect_id(
             execution.continuity_id,
             execution.epoch,
             instance_id,
@@ -268,8 +268,8 @@ impl<'a> EffectGuard<'a> {
             attempt,
         );
         let now = Utc::now();
-        let candidate = EffectReceipt {
-            id,
+        let mut candidate = EffectReceipt {
+            id: EffectId::new(),
             tenant_id: tenant_id.clone(),
             continuity_id: execution.continuity_id,
             epoch: execution.epoch,
@@ -289,10 +289,11 @@ impl<'a> EffectGuard<'a> {
             created_at: now,
             updated_at: now,
         };
-        let receipt = storage.ensure_effect_receipt(&candidate).await?;
+        let receipt = storage.ensure_effect_attempt(&candidate, legacy_id).await?;
+        candidate.id = receipt.id;
         if !same_effect_identity(&receipt, &candidate) {
             return Err(EngineError::InvalidConfig(
-                "deterministic effect id collided with different effect evidence".into(),
+                "effect attempt contains different effect evidence".into(),
             ));
         }
         let mut guard = Self {
@@ -755,7 +756,7 @@ fn blocked(receipt: &EffectReceipt) -> EngineError {
     }
 }
 
-fn deterministic_effect_id(
+fn legacy_effect_id(
     continuity_id: orch8_types::continuity::ContinuityId,
     epoch: orch8_types::continuity::ExecutionEpoch,
     instance_id: InstanceId,
@@ -838,6 +839,9 @@ fn same_effect_identity(left: &EffectReceipt, right: &EffectReceipt) -> bool {
         && left.block_id == right.block_id
         && left.attempt == right.attempt
         && left.request_sha256 == right.request_sha256
+        && left.kind == right.kind
+        && left.destination_fingerprint == right.destination_fingerprint
+        && left.idempotency_key == right.idempotency_key
 }
 
 #[cfg(test)]

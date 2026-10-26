@@ -279,6 +279,20 @@ pub(super) async fn delete_receipts(
     tx.commit().await?;
     Ok(Some(count))
 }
+pub(super) async fn retire_effect_attempts(
+    store: &PostgresStorage,
+    tenant: &orch8_types::ids::TenantId,
+    id: InstanceId,
+    blocks: &[orch8_types::ids::BlockId],
+    token: DateTime<Utc>,
+) -> Result<Option<u64>, StorageError> {
+    let Some(mut tx) = begin(store, id, token).await? else {
+        return Ok(None);
+    };
+    let count = super::effect_attempt::retire_on(&mut tx, tenant, id, blocks).await?;
+    tx.commit().await?;
+    Ok(Some(count))
+}
 
 /// The parent row stays locked until the new child has committed.
 pub(super) async fn create_child(

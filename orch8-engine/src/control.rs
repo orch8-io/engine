@@ -426,7 +426,7 @@ pub trait ExecutionControl: Send + Sync {
     ) -> Result<u64, EngineError> {
         if let Some(claim) = self.execution_claim() {
             same_instance(claim, id)?;
-            ContinuityStore::delete_effect_receipts_for_blocks_claimed(
+            ContinuityStore::retire_effect_attempts_for_blocks_claimed(
                 self.backend(),
                 tenant,
                 id,
@@ -436,7 +436,7 @@ pub trait ExecutionControl: Send + Sync {
             .await?
             .ok_or(EngineError::ClaimLost { instance_id: id })
         } else {
-            ContinuityStore::delete_effect_receipts_for_blocks(self.backend(), tenant, id, blocks)
+            ContinuityStore::retire_effect_attempts_for_blocks(self.backend(), tenant, id, blocks)
                 .await
                 .map_err(EngineError::Storage)
         }
