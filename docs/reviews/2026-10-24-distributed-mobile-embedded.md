@@ -4213,3 +4213,32 @@ packaging/version and whitespace checks pass.
 No wire/UniFFI API, schema, SDK version or publication changes. This fixes local
 node-generation admission, not stable authenticated account ownership for remote
 journals/delegation or the remaining scoped-worker/reporting requirements.
+
+
+### DME165 — Capacity tests confused observer deadlines with scheduler settlement
+
+[PR345's unit-test job](https://github.com/orch8-io/engine/actions/runs/40352000145/job/121674252719)
+returned Running where the new capacity regression expected Scheduled after a
+100 ms observer deadline. The facade intentionally retains an owned scheduler
+pass after that deadline. The snapshot therefore did not prove an admission
+failure; the test asserted that an overloaded runner completed the pass inside
+an arbitrary observation window. Node and Python capacity tests had the same
+short-deadline assumption.
+
+The Rust regression now permits the intermediate Running snapshot and then
+observes a Scheduled instance with exactly one durable receipt, under a bounded
+five-second wait. It still requires Prepared state, attempt zero, exactly two
+physical callbacks while full, and the identical receipt becoming Committed only
+after actual host settlement. Terminal excess work or duplicate/retried receipts
+still fail. Node and Python likewise observe scheduled state after an
+intermediate Running snapshot; host-entry/peak bounds and engine-replacement
+checks remain intact. Increasing the initial timeout alone is not the fix.
+
+All four Rust capacity contracts, 13 actual packed Node addon tests and 19 actual
+Python extension tests pass, as does strict all-target facade Clippy. This changes
+only three test harnesses. The mobile
+ownership/lifecycle source was preserved byte for byte outside those test
+harnesses; this report separately records the CI correction. Their already-passing
+692 unit/109 integration evidence remains applicable. Their
+new exact heads must pass CI again before ordered merge. No production behavior,
+API, storage schema or release version changes; no publication.
