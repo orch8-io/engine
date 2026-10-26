@@ -48,7 +48,7 @@ async fn seed_open(pool: &SqlitePool, count: i64) {
         } else {
             now + chrono::Duration::hours(1)
         };
-        sqlx::query("INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind, input, state, deadline_at, created_at, updated_at) VALUES (?1, 'instance', 'explicit', '{}', 'prepared', ?2, ?3, ?3)")
+        sqlx::query("INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind, input, state, deadline_at, created_at, updated_at, legacy_verified) VALUES (?1, 'instance', 'explicit', '{}', 'prepared', ?2, ?3, ?3, 1)")
             .bind(format!("d-{index:04}")).bind(deadline.to_rfc3339()).bind(now.to_rfc3339())
             .execute(pool).await.unwrap();
     }
@@ -112,7 +112,7 @@ async fn open_scan_progress_survives_a_database_reopen() {
 async fn seed_discovery(storage: &SqliteStorage, own: RuntimeId) -> uuid::Uuid {
     let instance = uuid::Uuid::new_v4().to_string();
     let now = now_text();
-    sqlx::query("INSERT INTO task_instances(id, sequence_id, tenant_id, namespace, state, created_at, updated_at) VALUES (?1, ?2, 'tenant', 'default', 'waiting', ?3, ?3)")
+    sqlx::query("INSERT INTO task_instances(id, sequence_id, tenant_id, namespace, state, created_at, updated_at) VALUES (?1, ?2, 'mobile', 'default', 'waiting', ?3, ?3)")
         .bind(&instance).bind(uuid::Uuid::new_v4().to_string()).bind(&now).execute(storage.pool()).await.unwrap();
     let elsewhere = RuntimeId::new();
     for index in 0..=PUMP_BATCH {
@@ -400,4 +400,353 @@ async fn a_claimed_record_without_an_epoch_is_not_polled_or_resolved() {
         state, "claimed",
         "unknown ownership must preserve recovery evidence"
     );
+}
+
+#[tokio::test]
+async fn legacy_explicit_delegation_refuses_catalog_owned_parent() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    init_tables(storage.pool()).await.unwrap();
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    for account in ["alice", "bob"] {
+        for catalog in ["one", "two"] {
+            let id =
+                crate::storage::scopes::test_support::scoped_run(&mobile, account, catalog).await;
+            let request = DelegateRequest {
+                instance_id: id.to_string(),
+                destination_runtime_id: RuntimeId::new().to_string(),
+                sub_sequence_id: uuid::Uuid::now_v7().to_string(),
+                input_json: r#"{"private":"SCOPED_CANARY"}"#.into(),
+            };
+            assert!(
+                matches!(
+                    DelegationPump::record_explicit(
+                        storage.pool(),
+                        &request,
+                        &json!({"private":"SCOPED_CANARY"}),
+                        600
+                    )
+                    .await,
+                    Err(MobileError::NotFound { .. })
+                ),
+                "legacy credential adopted {account}/{catalog}"
+            );
+        }
+    }
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mobile_delegations")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn persisted_catalog_delegation_is_not_replayed_or_exposed_by_legacy_api() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let server =
+        crate::test_support::spawn_control_plane(Arc::new(|_, _, _| (200, json!({})))).await;
+    let pump = pump_at(storage.clone(), RuntimeId::new(), server.base.clone()).await;
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    let id = crate::storage::scopes::test_support::scoped_run(&mobile, "alice", "one").await;
+    let now = chrono::Utc::now();
+    sqlx::query("INSERT INTO mobile_delegations (delegation_id, local_instance_id, kind, input, state, deadline_at, created_at, updated_at) VALUES ('scoped-old', ?1, 'explicit', ?2, 'prepared', ?3, ?4, ?4)")
+        .bind(id.to_string()).bind(r#"{"private":"SCOPED_CANARY"}"#)
+        .bind((now+chrono::Duration::hours(1)).to_rfc3339()).bind(now.to_rfc3339())
+        .execute(storage.pool()).await.unwrap();
+    assert!(
+        pump.load_open().await.unwrap().is_empty(),
+        "legacy replay adopted scoped journal"
+    );
+    assert!(
+        DelegationPump::status(storage.pool(), "scoped-old")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        DelegationPump::list(storage.pool())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM mobile_delegations WHERE delegation_id='scoped-old'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        state, "prepared",
+        "unknown ownership evidence must be retained"
+    );
+    pump.run_once().await;
+    assert!(
+        server.requests.lock().unwrap().is_empty(),
+        "scoped replay sent a legacy credential"
+    );
+}
+
+async fn legacy_parent(storage: &SqliteStorage) -> String {
+    let id = uuid::Uuid::now_v7().to_string();
+    let now = now_text();
+    sqlx::query("INSERT INTO task_instances(id,sequence_id,tenant_id,namespace,state,created_at,updated_at) VALUES (?1,?2,'mobile','default','waiting',?3,?3)")
+        .bind(&id).bind(uuid::Uuid::now_v7().to_string()).bind(now)
+        .execute(storage.pool()).await.unwrap();
+    id
+}
+
+async fn legacy_explicit(storage: &SqliteStorage, parent: &str) -> String {
+    let request = DelegateRequest {
+        instance_id: parent.into(),
+        destination_runtime_id: RuntimeId::new().to_string(),
+        sub_sequence_id: uuid::Uuid::now_v7().to_string(),
+        input_json: "{}".into(),
+    };
+    DelegationPump::record_explicit(storage.pool(), &request, &json!({}), 600)
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn accepted_legacy_delegation_survives_native_gc_but_unverified_orphans_do_not() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let pump = pump(storage.clone(), RuntimeId::new()).await;
+    let parent = legacy_parent(&storage).await;
+    let id = legacy_explicit(&storage, &parent).await;
+    sqlx::query("DELETE FROM task_instances WHERE id=?1")
+        .bind(parent)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert!(
+        DelegationPump::status(storage.pool(), &id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(pump.load_open().await.unwrap().len(), 1);
+    sqlx::query("UPDATE mobile_delegations SET legacy_verified=0 WHERE delegation_id=?1")
+        .bind(&id)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert!(pump.load_open().await.unwrap().is_empty());
+    assert!(
+        DelegationPump::status(storage.pool(), &id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mobile_delegations")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        retained, 1,
+        "unknown authority must preserve recovery evidence"
+    );
+}
+
+#[tokio::test]
+async fn catalog_receipts_override_legacy_markers_after_relabel_and_native_gc() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let pump = pump(storage.clone(), RuntimeId::new()).await;
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    let parent = crate::storage::scopes::test_support::scoped_run(&mobile, "alice", "one").await;
+    seed_open(storage.pool(), 1).await;
+    sqlx::query("UPDATE mobile_delegations SET local_instance_id=?1")
+        .bind(parent.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    for purge in [false, true] {
+        if purge {
+            sqlx::query("DELETE FROM task_instances WHERE id=?1")
+                .bind(parent.to_string())
+                .execute(storage.pool())
+                .await
+                .unwrap();
+        } else {
+            sqlx::query("UPDATE task_instances SET tenant_id='mobile' WHERE id=?1")
+                .bind(parent.to_string())
+                .execute(storage.pool())
+                .await
+                .unwrap();
+        }
+        assert!(pump.load_open().await.unwrap().is_empty());
+        assert!(
+            DelegationPump::list(storage.pool())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            DelegationPump::status(storage.pool(), "d-0000")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_discovery_and_direct_claim_cannot_adopt_catalog_tasks() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let own = RuntimeId::new();
+    let pump = pump(storage.clone(), own).await;
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    let parent = crate::storage::scopes::test_support::scoped_run(&mobile, "alice", "one").await;
+    let task = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO worker_tasks(id,instance_id,block_id,handler_name,requirements,params,created_at) VALUES (?1,?2,'work','noop',?3,?4,?5)")
+        .bind(task.to_string()).bind(parent.to_string())
+        .bind(json!({"runtime_id": RuntimeId::new()}).to_string())
+        .bind(json!({"private":"SCOPED_CANARY"}).to_string()).bind(now_text())
+        .execute(storage.pool()).await.unwrap();
+    let task = storage.get_worker_task(task).await.unwrap().unwrap();
+    // A caller retaining a loaded task cannot bypass guarded discovery.
+    for relabel in [false, true] {
+        if relabel {
+            sqlx::query("UPDATE task_instances SET tenant_id='mobile' WHERE id=?1")
+                .bind(parent.to_string())
+                .execute(storage.pool())
+                .await
+                .unwrap();
+        }
+        pump.discover().await.unwrap();
+        pump.park(&task).await.unwrap();
+        pump.reject_unclaimed(&task, "foreign rejection")
+            .await
+            .unwrap();
+        let (state, worker, epoch): (String, Option<String>, i64) =
+            sqlx::query_as("SELECT state,worker_id,claim_epoch FROM worker_tasks WHERE id=?1")
+                .bind(task.id.to_string())
+                .fetch_one(storage.pool())
+                .await
+                .unwrap();
+        assert_eq!((state.as_str(), worker, epoch), ("pending", None, 0));
+        assert!(
+            DelegationPump::list(storage.pool())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn delegation_authority_upgrade_is_atomic_and_preserves_only_proven_legacy_rows() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    init_tables(storage.pool()).await.unwrap();
+    let parent = legacy_parent(&storage).await;
+    let id = legacy_explicit(&storage, &parent).await;
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    let scoped = crate::storage::scopes::test_support::scoped_run(&mobile, "alice", "one").await;
+    seed_open(storage.pool(), 1).await;
+    sqlx::query("UPDATE mobile_delegations SET local_instance_id=?1 WHERE delegation_id='d-0000'")
+        .bind(scoped.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    // Recreate the previous schema without changing the persisted journal data.
+    sqlx::query("ALTER TABLE mobile_delegations DROP COLUMN legacy_verified")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER fail_delegation_upgrade BEFORE UPDATE ON mobile_delegations BEGIN SELECT RAISE(ABORT,'upgrade failure'); END")
+        .execute(storage.pool()).await.unwrap();
+    assert!(init_tables(storage.pool()).await.is_err());
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('mobile_delegations') WHERE name='legacy_verified')")
+        .fetch_one(storage.pool()).await.unwrap();
+    assert!(!exists, "failed backfill must roll back the schema change");
+    sqlx::query("DROP TRIGGER fail_delegation_upgrade")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    init_tables(storage.pool()).await.unwrap();
+    let verified: bool =
+        sqlx::query_scalar("SELECT legacy_verified FROM mobile_delegations WHERE delegation_id=?1")
+            .bind(&id)
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert!(verified);
+    let scoped_verified: bool = sqlx::query_scalar(
+        "SELECT legacy_verified FROM mobile_delegations WHERE delegation_id='d-0000'",
+    )
+    .fetch_one(storage.pool())
+    .await
+    .unwrap();
+    assert!(!scoped_verified, "upgrade adopted a catalog journal");
+    sqlx::query("DELETE FROM task_instances WHERE id=?1")
+        .bind(parent)
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert!(
+        DelegationPump::status(storage.pool(), &id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn scoped_journal_prefix_cannot_starve_legacy_work_in_one_page() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let pump = pump(storage.clone(), RuntimeId::new()).await;
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    let scoped = crate::storage::scopes::test_support::scoped_run(&mobile, "alice", "one").await;
+    seed_open(storage.pool(), PUMP_BATCH + 1).await;
+    sqlx::query("UPDATE mobile_delegations SET local_instance_id=?1 WHERE delegation_id<>'d-0050'")
+        .bind(scoped.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    let page = pump.load_open().await.unwrap();
+    assert_eq!(
+        page.len(),
+        1,
+        "ownership must filter before the batch limit"
+    );
+    assert_eq!(page[0].delegation_id, "d-0050");
+    pump.run_once().await;
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM mobile_delegations WHERE delegation_id='d-0050'")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(state, "abandoned");
+}
+
+#[tokio::test]
+async fn legacy_retention_does_not_delete_scoped_or_unverified_delegations() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let _pump = pump(storage.clone(), RuntimeId::new()).await;
+    let mobile = crate::storage::MobileStorage::new(storage.clone());
+    let scoped = crate::storage::scopes::test_support::scoped_run(&mobile, "alice", "one").await;
+    seed_open(storage.pool(), 3).await;
+    sqlx::query("UPDATE mobile_delegations SET state='resolved',updated_at=?1")
+        .bind((chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mobile_delegations SET local_instance_id=?1 WHERE delegation_id='d-0000'")
+        .bind(scoped.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mobile_delegations SET legacy_verified=0 WHERE delegation_id='d-0001'")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        purge_finished(storage.pool(), chrono::Utc::now() - FINISHED_RETENTION)
+            .await
+            .unwrap(),
+        1
+    );
+    let retained: Vec<String> =
+        sqlx::query_scalar("SELECT delegation_id FROM mobile_delegations ORDER BY delegation_id")
+            .fetch_all(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(retained, vec!["d-0000", "d-0001"]);
 }
