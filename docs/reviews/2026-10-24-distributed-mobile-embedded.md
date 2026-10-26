@@ -3923,7 +3923,7 @@ classifications and token/shutdown detail. A real Kotlin/Rust workflow also
 verifies permanent host failures through the foreign callback boundary.
 
 Validation passes 677 mobile library tests, 109 integration/coverage/workflow
-tests, 112 JVM tests with no skips, and strict all-target core/mobile Clippy.
+tests, 112 JVM tests with no skips, and strict all-target workspace Clippy.
 The native RN test now treats panic output as failure even when the process exits
 successfully. This is an unpublished development ABI change requiring paired
 bindings/native artifacts; it does not publish or replace the 0.7.1 release.

@@ -753,7 +753,7 @@ impl orch8_mobile::StepHandler for DelegateHandler {
         })
         .join()
         .unwrap()
-        .map_err(|message| orch8_mobile::HandlerError::Permanent { message })
+        .map_err(|detail| orch8_mobile::HandlerError::Permanent { detail })
     }
 }
 
