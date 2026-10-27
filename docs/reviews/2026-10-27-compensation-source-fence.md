@@ -72,3 +72,15 @@ The repaired stack passed all 1,586 shared E2E cases and five dedicated SSRF
 cases, with no skips, cancellations or failures. Strict all-target Clippy passed
 for storage, engine, API, gRPC, CLI and mobile; formatting, TypeScript typecheck
 and documentation checks passed. CI must revalidate the repaired commit.
+
+The next CI run passed the shared suite but exposed one older standalone
+lifecycle expectation: after compensation it waited for the source to become
+`waiting`. The contract keeps that source `paused` with `compensating` ownership.
+The test now verifies the stopped state before saving a checkpoint and again
+after migration planning and rejected apply. Effect history still pins the
+migration and its compensated receipt remains unchanged. All 221 lifecycle and
+tenant-isolation cases pass on the exact source-fence server, with no skips or
+failures. The fixture removes its own OS-temporary artifact directory after
+server shutdown; the runner confirms no new directory remains. Typecheck passes.
+This correction changes only the integration test and this review document;
+production Rust matches the previously verified repaired source-fence head.
