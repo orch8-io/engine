@@ -1348,6 +1348,11 @@ mod tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].status, EvidenceStatus::Fail);
         assert!(results[0].summary.contains("atomic duplicate refusal=true"));
+        assert!(
+            results[0]
+                .summary
+                .starts_with("duplicate effect dispatch or commit evidence detected;")
+        );
         assert_eq!(
             storage
                 .get_effect_receipt(&instance.tenant_id, earlier.effect_id())

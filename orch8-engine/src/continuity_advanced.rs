@@ -72,7 +72,12 @@ pub async fn evaluate_invariants_complete(
                 (
                     audit.duplicate_groups > 0,
                     format!(
-                        "complete effect ledger audit: {} dispatched/outcome receipts, {} duplicate groups; {} witness groups retained",
+                        "{}; complete effect ledger audit: {} dispatched/outcome receipts, {} duplicate groups; {} witness groups retained",
+                        if audit.duplicate_groups > 0 {
+                            "duplicate effect dispatch or commit evidence detected"
+                        } else {
+                            "no duplicate effect dispatch or commit evidence detected"
+                        },
                         audit.observed_receipts,
                         audit.duplicate_groups,
                         audit.witnesses.len()
@@ -235,7 +240,12 @@ pub(crate) fn evaluate_effect_audit(
         ),
         evidence_sha256,
         summary: format!(
-            "complete effect ledger audit: {} dispatched/outcome receipts, {} duplicate groups, atomic duplicate refusal={duplicate_refused}; {} witness groups retained",
+            "{}; complete effect ledger audit: {} dispatched/outcome receipts, {} duplicate groups, atomic duplicate refusal={duplicate_refused}; {} witness groups retained",
+            if failed {
+                "duplicate effect dispatch or commit evidence detected"
+            } else {
+                "no duplicate effect dispatch or commit evidence detected"
+            },
             audit.observed_receipts,
             audit.duplicate_groups,
             audit.witnesses.len()
