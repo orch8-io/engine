@@ -5215,16 +5215,17 @@ async fn compensation_plan(
         .await
         .map_err(|error| ApiError::from_storage(error, "compensation sequence"))?
         .ok_or_else(|| ApiError::NotFound("compensation sequence".into()))?;
-    let (receipts, outputs) = tokio::try_join!(
+    let (effects, outputs) = tokio::try_join!(
         state
             .storage
-            .list_effect_receipts(tenant_id, continuity_id, 10_000),
+            .collect_compensation_effects(tenant_id, continuity_id),
         state.storage.get_all_outputs(instance.id),
     )
     .map_err(|error| ApiError::from_storage(error, "compensation evidence"))?;
     let rules = orch8_engine::compensation::rules_from_sequence(&sequence);
-    let mut plan = orch8_engine::compensation::build_compensation_plan(&receipts, &rules)
-        .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
+    let mut plan =
+        orch8_engine::compensation::build_compensation_plan_from_effects(&effects, &rules)
+            .map_err(|error| ApiError::InvalidArgument(error.to_string()))?;
     let output_context = serde_json::Value::Object(
         outputs
             .into_iter()

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use orch8_storage::CompensationEffect;
 use orch8_types::continuity::{EffectReceipt, EffectState};
 use orch8_types::continuity_advanced::{CompensationPlan, CompensationPlanStep};
 use orch8_types::ids::BlockId;
@@ -98,33 +99,51 @@ pub fn rules_from_sequence(sequence: &SequenceDefinition) -> Vec<CompensationRul
     rules
 }
 
-fn visit_dependency<'a>(
+fn visit_dependency(
     block: &BlockId,
-    rules: &BTreeMap<BlockId, &'a CompensationRule>,
-    committed: &BTreeMap<BlockId, &'a EffectReceipt>,
+    rules: &BTreeMap<BlockId, &CompensationRule>,
+    committed: &BTreeMap<BlockId, Vec<&CompensationEffect>>,
     visiting: &mut BTreeSet<BlockId>,
     visited: &mut BTreeSet<BlockId>,
     ordered: &mut Vec<BlockId>,
 ) -> Result<(), CompensationPlanError> {
-    if visited.contains(block) || !committed.contains_key(block) {
-        return Ok(());
-    }
-    if !visiting.insert(block.clone()) {
-        return Err(CompensationPlanError::DependencyCycle);
-    }
-    if let Some(rule) = rules.get(block) {
-        for dependency in &rule.depends_on {
-            visit_dependency(dependency, rules, committed, visiting, visited, ordered)?;
+    // Explicit post-order frames keep valid long dependency chains off the
+    // thread stack while preserving dependency order and cycle detection.
+    let mut stack = vec![(block.clone(), false)];
+    while let Some((block, exiting)) = stack.pop() {
+        if exiting {
+            visiting.remove(&block);
+            visited.insert(block.clone());
+            ordered.push(block);
+            continue;
+        }
+        if visited.contains(&block) || !committed.contains_key(&block) {
+            continue;
+        }
+        if !visiting.insert(block.clone()) {
+            return Err(CompensationPlanError::DependencyCycle);
+        }
+        stack.push((block.clone(), true));
+        if let Some(rule) = rules.get(&block) {
+            for dependency in rule.depends_on.iter().rev() {
+                stack.push((dependency.clone(), false));
+            }
         }
     }
-    visiting.remove(block);
-    visited.insert(block.clone());
-    ordered.push(block.clone());
     Ok(())
 }
 
 pub fn build_compensation_plan(
     receipts: &[EffectReceipt],
+    rules: &[CompensationRule],
+) -> Result<CompensationPlan, CompensationPlanError> {
+    let effects: Vec<_> = receipts.iter().map(CompensationEffect::from).collect();
+    build_compensation_plan_from_effects(&effects, rules)
+}
+
+/// Plan from complete compact evidence without retaining full raw receipts.
+pub fn build_compensation_plan_from_effects(
+    effects: &[CompensationEffect],
     rules: &[CompensationRule],
 ) -> Result<CompensationPlan, CompensationPlanError> {
     let mut rules_by_block = BTreeMap::new();
@@ -138,19 +157,16 @@ pub fn build_compensation_plan(
             ));
         }
     }
-    let committed_receipts: Vec<_> = receipts
+    let mut committed: BTreeMap<BlockId, Vec<&CompensationEffect>> = BTreeMap::new();
+    for effect in effects
         .iter()
-        .filter(|receipt| {
-            matches!(
-                receipt.state,
-                EffectState::Committed | EffectState::Verified
-            )
-        })
-        .collect();
-    let committed: BTreeMap<_, _> = committed_receipts
-        .iter()
-        .map(|receipt| (receipt.block_id.clone(), *receipt))
-        .collect();
+        .filter(|r| matches!(r.state, EffectState::Committed | EffectState::Verified))
+    {
+        committed
+            .entry(effect.block_id.clone())
+            .or_default()
+            .push(effect);
+    }
     let mut visiting = BTreeSet::new();
     let mut visited = BTreeSet::new();
     let mut ordered = Vec::new();
@@ -170,16 +186,14 @@ pub fn build_compensation_plan(
     let mut hazards = Vec::new();
     let mut steps = Vec::new();
     for block in ordered {
-        let mut block_receipts: Vec<_> = committed_receipts
-            .iter()
-            .copied()
-            .filter(|receipt| receipt.block_id == block)
-            .collect();
+        let mut block_receipts = committed
+            .remove(&block)
+            .expect("ordered block was committed");
         block_receipts.sort_by(|left, right| {
             right
                 .created_at
                 .cmp(&left.created_at)
-                .then_with(|| right.id.to_string().cmp(&left.id.to_string()))
+                .then_with(|| right.id.cmp(&left.id))
         });
         for receipt in block_receipts {
             let Some(rule) = rules_by_block.get(&block) else {
@@ -200,7 +214,7 @@ pub fn build_compensation_plan(
             });
         }
     }
-    for receipt in receipts
+    for receipt in effects
         .iter()
         .filter(|receipt| receipt.state == EffectState::Unknown)
     {
@@ -521,5 +535,60 @@ mod tests {
             plan.steps[0].idempotency_key,
             format!("compensate:{}", newer.id)
         );
+    }
+    #[test]
+    fn long_dependency_chains_fit_a_small_thread_stack() {
+        let count = 5_000;
+        let effects: Vec<_> = (0..count)
+            .map(|i| CompensationEffect {
+                id: EffectId::new(),
+                block_id: BlockId::new(format!("block-{i:05}")),
+                state: EffectState::Committed,
+                created_at: Utc::now(),
+            })
+            .collect();
+        let rules: Vec<_> = (0..count)
+            .map(|i| CompensationRule {
+                effect_block_id: effects[i].block_id.clone(),
+                handler: "undo".into(),
+                params: serde_json::Value::Null,
+                depends_on: if i + 1 < count {
+                    vec![effects[i + 1].block_id.clone()]
+                } else {
+                    Vec::new()
+                },
+                verification: CompensationVerificationPolicy::HandlerResult,
+            })
+            .collect();
+        let plan = std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn(move || build_compensation_plan_from_effects(&effects, &rules).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(plan.steps.len(), count);
+        assert_eq!(plan.steps[0].effect_block_id, BlockId::new("block-00000"));
+        assert_eq!(
+            plan.steps[count - 1].effect_block_id,
+            BlockId::new("block-04999")
+        );
+    }
+
+    #[test]
+    fn receipt_uuid_breaks_timestamp_ties_without_input_order_dependence() {
+        let mut first = receipt("charge", EffectState::Committed);
+        first.id = EffectId::from_uuid(uuid::Uuid::from_u128(1));
+        let mut second = first.clone();
+        second.id = EffectId::from_uuid(uuid::Uuid::from_u128(2));
+        for receipts in [
+            vec![first.clone(), second.clone()],
+            vec![second.clone(), first.clone()],
+        ] {
+            let plan = build_compensation_plan(&receipts, &[rule("charge")]).unwrap();
+            assert_eq!(
+                plan.steps.iter().map(|s| s.effect_id).collect::<Vec<_>>(),
+                vec![second.id, first.id]
+            );
+        }
     }
 }
