@@ -199,7 +199,7 @@ async fn selection_does_not_pin_foreign_reference_during_effect_preparation() {
     .unwrap();
     let mut registry = HandlerRegistry::new();
     hub.install_resolver(&mut registry, crate::DEFAULT_BUILTINS);
-    let pause = faults.on("ensure_effect_receipt").times(1).pause();
+    let pause = faults.on("ensure_effect_attempt").times(1).pause();
     let exec = execution(&ctx, "noop");
     let run_store = backend.clone();
     let run = tokio::spawn(async move { execute_step_dry(&run_store, &registry, exec).await });
