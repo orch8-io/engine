@@ -5725,3 +5725,27 @@ six-package all-target Clippy pass. Main and origin/main are 21cb1454 after the
 verified PR363/364 merges, with merged branches cleaned. The newer foundation is
 being preserved in a draft PR while its named source/transfer/archive gates are
 still under review; the full objective remains active.
+
+#### DME190 production mobile artifact features and standalone lockfile
+
+PR365 draft CI caught artifact constructors missing in a production-only mobile
+build and a stale fuzz lockfile. The former reproduced locally without dev
+feature unification. Mobile now opts into local filesystem/memory artifacts;
+server artifact builds keep S3. The compiler feature trace verifies no object-store
+cloud/S3 feature in the production mobile dependency graph. All 13 artifact cases
+and all four locked workspace metadata gates pass, with no dependency version
+upgrades. The fuzz repair adds only the existing SHA-256 dependency reference.
+A native mobile build and refreshed CI remain the next verification steps.
+Ten obsolete, non-running test executables were removed (1,119,354,208 bytes),
+with newer-input, Cargo test-fingerprint and process checks recorded separately.
+
+DME190 update: the production mobile native library build and strict
+production-only Clippy both pass. The compiler graph verifies local artifacts
+without cloud clients, and the lock repair changes no dependency versions.
+Draft CI will be refreshed after the repair is pushed; portability/lifetime
+behavioral gates remain open.
+
+DME190 repair verification: combined six-package all-target strict Clippy passes
+after the feature split, as do production-only mobile check/build/lint, the actual
+no-cloud artifact feature trace, 13 artifact tests and all four locked graph gates.
+The repaired revision will remain a draft with its existing behavioral gates.

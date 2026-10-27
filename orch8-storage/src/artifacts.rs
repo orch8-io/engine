@@ -11,6 +11,8 @@
 //!
 //! Bytes live in the object store under `"<instance_id>/<artifact_id>"`; the
 //! small [`ArtifactRef`] returned at store time travels in step outputs.
+//! `artifacts-local` provides filesystem/memory storage without cloud clients;
+//! the server `artifacts` feature additionally enables S3.
 
 use std::sync::Arc;
 
@@ -125,6 +127,7 @@ impl ObjectArtifactStore {
     ///
     /// # Errors
     /// Returns an error if the client cannot be constructed from `cfg`.
+    #[cfg(feature = "artifacts")]
     pub fn s3(cfg: &S3Config) -> Result<Self, StorageError> {
         let mut builder = object_store::aws::AmazonS3Builder::new()
             .with_bucket_name(&cfg.bucket)
@@ -444,6 +447,7 @@ mod tests {
         assert_eq!(b.len(), 1);
     }
 
+    #[cfg(feature = "artifacts")]
     #[test]
     fn s3_backend_builds_from_config() {
         // Construction only — no network. Proves the config → client path.

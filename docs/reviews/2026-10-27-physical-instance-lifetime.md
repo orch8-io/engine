@@ -316,3 +316,32 @@ point-index tests pass with the captured-cut predicates. Strict all-target lint
 passes across the six affected packages. The newer foundation is being saved as
 a draft for continued review; it is not declared complete or ready to merge.
 Remaining source/transfer gates and the broader goal remain active.
+
+## Draft CI production-feature repair
+
+The first PR365 CI run exposed two build-coverage gaps: production mobile used
+an artifact placeholder without memory/filesystem constructors (dev dependency
+feature unification hid this locally), and the standalone fuzz lockfile omitted
+storage's now-required SHA-256 dependency. A production-only mobile check
+reproduced the missing constructors before repair.
+
+Mobile now explicitly requests `artifacts-local`. That feature provides the
+existing filesystem/memory implementation without object-store cloud clients;
+the existing server `artifacts` feature retains S3. The actual production compiler
+feature graph verifies storage has only `artifacts-local` and object_store has
+filesystem support without aws/aws-base/cloud-base. All 13 artifact tests pass,
+including memory/local round trips and server S3 construction. All four exact
+locked dependency metadata checks pass; the fuzz lock repair adds only the
+existing SHA-256 dependency reference, with no package version upgrades/removals.
+The native production build and refreshed draft CI are being checked separately.
+
+The repaired production mobile library now builds its native library outputs and
+passes strict production-only Clippy. The feature trace and all four locked
+metadata gates remain green; server/local artifact compatibility passes all 13
+cases. Refreshing the draft head is the next step; its remaining behavioral
+review gates are unchanged.
+
+The combined server/mobile feature union also passes strict all-target Clippy
+across all six packages after the repair. Production mobile check/build/lint,
+actual no-cloud feature trace, 13 artifact compatibility cases and all four
+locked graph gates are verified before the repaired draft revision is pushed.

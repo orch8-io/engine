@@ -45,8 +45,10 @@ default = ["compression", "postgres", "artifacts", "byok"]
 compression = ["dep:zstd"]
 # Postgres backend (`postgres` module, tenant partitioning) + sqlx TLS.
 postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring-webpki", "artifacts"]
-# Object-store backed artifact store (local FS / S3 / in-memory).
-artifacts = ["dep:object_store"]
+# Local files / in-memory artifacts for on-device and embedded runtimes.
+artifacts-local = ["dep:object_store"]
+# Server feature retains S3 alongside local/in-memory backends.
+artifacts = ["artifacts-local", "object_store/aws"]
 # Customer-owned payload vault with envelope encryption (AWS KMS / static key).
 # Test infrastructure (`orch8_storage::testing`): fault-injecting storage,
 # fixtures, backend matrix. Enabled only by dev-dependencies.

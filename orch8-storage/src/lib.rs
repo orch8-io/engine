@@ -19,9 +19,9 @@ mod mobile_access;
 pub use child_adoption::ChildAdoption;
 pub use mobile_access::MobileInstanceAccess;
 pub mod api_key_cache;
-#[cfg(feature = "artifacts")]
+#[cfg(feature = "artifacts-local")]
 pub mod artifacts;
-#[cfg(not(feature = "artifacts"))]
+#[cfg(not(feature = "artifacts-local"))]
 #[path = "artifacts_disabled.rs"]
 pub mod artifacts;
 pub mod compression;
