@@ -461,34 +461,40 @@ pub(super) async fn complete(
     claim: &WorkerClaim,
     output: &serde_json::Value,
 ) -> Result<bool, StorageError> {
+    let epoch = i64::try_from(claim.claim_epoch)
+        .map_err(|_| StorageError::Constraint("worker claim epoch exceeds SQL range".into()))?;
     let mut tx = store.pool.begin().await?;
-    let row: Option<(i64,)> = sqlx::query_as(
-        r"UPDATE worker_tasks
+    let result = async {
+        let row: Option<(i64,)> = sqlx::query_as(
+            r"UPDATE worker_tasks
           SET state = 'completed', output = $3, completed_at = NOW()
           WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed'
           RETURNING claim_epoch",
-    )
-    .bind(task_id)
-    .bind(&claim.worker_id)
-    .bind(output)
-    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
-    .fetch_optional(&mut *tx)
-    .await?;
-    if row.is_some() {
-        insert_attempt_events(
-            &mut tx,
-            &[transition_event(
-                task_id,
-                claim.claim_epoch,
-                Some(claim.worker_id.clone()),
-                WorkerAttemptEventKind::Completed,
-                None,
-            )],
         )
+        .bind(task_id)
+        .bind(&claim.worker_id)
+        .bind(output)
+        .bind(epoch)
+        .fetch_optional(&mut *tx)
         .await?;
+        if row.is_some() {
+            super::worker_outcome::insert_on(&mut tx, task_id, claim, output).await?;
+            insert_attempt_events(
+                &mut tx,
+                &[transition_event(
+                    task_id,
+                    claim.claim_epoch,
+                    Some(claim.worker_id.clone()),
+                    WorkerAttemptEventKind::Completed,
+                    None,
+                )],
+            )
+            .await?;
+        }
+        Ok(row.is_some())
     }
-    tx.commit().await?;
-    Ok(row.is_some())
+    .await;
+    super::finish_transaction(tx, result).await
 }
 
 pub(super) async fn fail(

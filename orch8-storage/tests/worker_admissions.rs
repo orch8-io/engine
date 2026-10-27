@@ -374,3 +374,206 @@ async fn sqlite_reopen_keeps_admission_and_does_not_republish_work() {
     );
     storage.pool().close().await;
 }
+
+orch8_storage::backend_test!(async fn accepted_outcome_survives_hot_gc_and_enforces_exact_claim_and_tenant(b) {
+    use orch8_types::{ids::TenantId, worker::WorkerClaim};
+    use orch8_storage::testing::backends::RawPool;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","original-worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("original-worker",held.claim_epoch);
+    let output=json!({"secret":"OUTCOME_PRIVATE_CANARY"});
+    assert!(storage.complete_worker_task(id,&claim,&output).await.unwrap());
+    assert!(!storage.complete_worker_task(id,&claim,&json!({"secret":"changed"})).await.unwrap());
+    let accepted=storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap();
+    assert_eq!(accepted.output,output);
+    assert_eq!(accepted.invocation.as_ref().unwrap(), &storage.get_worker_dispatch_admission(&fence.tenant_id,id).await.unwrap().unwrap().invocation);
+    assert!(!format!("{accepted:?}").contains("OUTCOME_PRIVATE_CANARY"));
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{
+            assert!(sqlx::query("UPDATE worker_accepted_outcomes SET record=record WHERE task_id=?1").bind(id.to_string()).execute(pool).await.is_err());
+            assert!(sqlx::query("DELETE FROM worker_accepted_outcomes WHERE task_id=?1").bind(id.to_string()).execute(pool).await.is_err());
+            if b.name().starts_with("encrypted") {let raw:String=sqlx::query_scalar("SELECT record FROM worker_accepted_outcomes WHERE task_id=?1").bind(id.to_string()).fetch_one(pool).await.unwrap();assert!(!raw.contains("OUTCOME_PRIVATE_CANARY"));}
+        },
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{
+            assert!(sqlx::query("UPDATE worker_accepted_outcomes SET record=record WHERE task_id=$1").bind(id).execute(pool).await.is_err());
+            assert!(sqlx::query("DELETE FROM worker_accepted_outcomes WHERE task_id=$1").bind(id).execute(pool).await.is_err());
+            if b.name().starts_with("encrypted") {let raw:String=sqlx::query_scalar("SELECT record::text FROM worker_accepted_outcomes WHERE task_id=$1").bind(id).fetch_one(pool).await.unwrap();assert!(!raw.contains("OUTCOME_PRIVATE_CANARY"));}
+        },
+    }
+    storage.delete_worker_task(id).await.unwrap();
+    assert_eq!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap(),accepted);
+    for wrong in [WorkerClaim::new("other-worker",claim.claim_epoch),WorkerClaim::new("original-worker",claim.claim_epoch+1),WorkerClaim::new("original-worker",u64::MAX)] {
+        assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&wrong).await.unwrap().is_none());
+    }
+    assert!(storage.get_worker_accepted_outcome(Some(&TenantId::unchecked("other-tenant")),id,&claim).await.unwrap().is_none());
+});
+
+orch8_storage::backend_test!(async fn accepted_outcome_insert_failure_rolls_back_completion_and_attempt_event(b) {
+    use orch8_types::worker::{WorkerClaim,WorkerTaskState,WorkerAttemptEventKind};
+    use orch8_storage::testing::backends::RawPool;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::raw_sql("CREATE TRIGGER reject_outcome_test BEFORE INSERT ON worker_accepted_outcomes BEGIN SELECT RAISE(ABORT,'injected outcome failure'); END;").execute(pool).await.unwrap();},
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("CREATE FUNCTION reject_outcome_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected outcome failure'; END $$; CREATE TRIGGER reject_outcome_test BEFORE INSERT ON worker_accepted_outcomes FOR EACH ROW EXECUTE FUNCTION reject_outcome_test();").execute(pool).await.unwrap();},
+    }
+    assert!(storage.complete_worker_task(id,&claim,&json!({"value":"original"})).await.is_err());
+    let after=storage.get_worker_task(id).await.unwrap().unwrap();
+    assert_eq!(after.state,WorkerTaskState::Claimed);assert!(after.output.is_none());
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().is_none());
+    assert!(!storage.list_worker_task_attempt_events(id,100).await.unwrap().iter().any(|e|e.event==WorkerAttemptEventKind::Completed));
+});
+
+orch8_storage::backend_test!(async fn accepted_outcome_concurrent_payloads_have_one_durable_winner(b) {
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let left=json!({"value":"left"});let right=json!({"value":"right"});
+    let (a,b)=tokio::join!(storage.complete_worker_task(id,&claim,&left),storage.complete_worker_task(id,&claim,&right));
+    let a=a.unwrap();let b=b.unwrap();assert_ne!(a,b);
+    let accepted=storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap();
+    assert_eq!(accepted.output,if a {left} else {right});
+    assert_eq!(storage.get_worker_task(id).await.unwrap().unwrap().output,Some(accepted.output));
+});
+
+#[tokio::test]
+async fn sqlite_reopen_keeps_original_accepted_outcome_after_hot_gc() {
+    use orch8_storage::{WorkerStore, sqlite::SqliteStorage};
+    use orch8_types::worker::WorkerClaim;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("outcome.sqlite");
+    let file = file.to_str().unwrap();
+    let storage = SqliteStorage::file(file).await.unwrap();
+    let (task, fence, _) = fixture(&storage).await;
+    let id = published(
+        &storage
+            .admit_worker_dispatch(&intent(task, fence.clone()))
+            .await
+            .unwrap(),
+    );
+    let held = storage
+        .claim_worker_tasks("remote.work", "worker", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let claim = WorkerClaim::new("worker", held.claim_epoch);
+    let original = json!({"result":"durable"});
+    assert!(
+        storage
+            .complete_worker_task(id, &claim, &original)
+            .await
+            .unwrap()
+    );
+    let accepted = storage
+        .get_worker_accepted_outcome(Some(&fence.tenant_id), id, &claim)
+        .await
+        .unwrap()
+        .unwrap();
+    storage.delete_worker_task(id).await.unwrap();
+    storage.pool().close().await;
+    drop(storage);
+    let storage = SqliteStorage::file(file).await.unwrap();
+    assert_eq!(
+        storage
+            .get_worker_accepted_outcome(Some(&fence.tenant_id), id, &claim)
+            .await
+            .unwrap()
+            .unwrap(),
+        accepted
+    );
+    storage.pool().close().await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_outcome_downgrade_preserves_accepted_evidence() {
+    use orch8_types::worker::WorkerClaim;
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let down = include_str!("../../migrations/down/134_worker_accepted_outcomes.sql");
+    let up = include_str!("../../migrations/134_worker_accepted_outcomes.sql");
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let (task, fence, _) = fixture(b.storage.as_ref()).await;
+    let id = published(
+        &b.storage
+            .admit_worker_dispatch(&intent(task, fence.clone()))
+            .await
+            .unwrap(),
+    );
+    let held = b
+        .storage
+        .claim_worker_tasks("remote.work", "worker", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let claim = WorkerClaim::new("worker", held.claim_epoch);
+    assert!(
+        b.storage
+            .complete_worker_task(id, &claim, &json!({"value":"original"}))
+            .await
+            .unwrap()
+    );
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    let error = sqlx::raw_sql(down).execute(&mut *tx).await.unwrap_err();
+    assert!(error.to_string().contains("outcomes must be retained"));
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        b.storage
+            .get_worker_accepted_outcome(Some(&fence.tenant_id), id, &claim)
+            .await
+            .unwrap()
+            .unwrap()
+            .output,
+        json!({"value":"original"})
+    );
+}
+
+orch8_storage::backend_test!(async fn accepted_outcome_uses_authoritative_parent_tenant_for_legacy_rows(b) {
+    use orch8_storage::testing::backends::RawPool;
+    use orch8_types::{ids::TenantId,worker::WorkerClaim};
+    let storage=b.storage.as_ref();
+    for mirror in [None,Some("foreign-mirror")] {
+        let(task,fence,_)=fixture(storage).await;
+        storage.create_worker_task(&task).await.unwrap();
+        let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+        let claim=WorkerClaim::new("worker",held.claim_epoch);
+        match &b.raw {
+            RawPool::Sqlite(pool)=>{sqlx::query("UPDATE worker_tasks SET tenant_id=?1 WHERE id=?2").bind(mirror).bind(task.id.to_string()).execute(pool).await.unwrap();},
+            #[cfg(feature="postgres")]
+            RawPool::Postgres(pool)=>{sqlx::query("UPDATE worker_tasks SET tenant_id=$1 WHERE id=$2").bind(mirror).bind(task.id).execute(pool).await.unwrap();},
+        }
+        assert!(storage.complete_worker_task(task.id,&claim,&json!({"result":"original"})).await.unwrap());
+        assert_eq!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),task.id,&claim).await.unwrap().unwrap().tenant_id,fence.tenant_id);
+        assert!(storage.get_worker_accepted_outcome(Some(&TenantId::unchecked("foreign-mirror")),task.id,&claim).await.unwrap().is_none());
+    }
+});
+
+orch8_storage::backend_test!(async fn completion_never_saturates_an_out_of_range_claim_epoch(b) {
+    use orch8_storage::testing::backends::RawPool;
+    use orch8_types::worker::{WorkerClaim,WorkerTaskState};
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    storage.claim_worker_tasks("remote.work","worker",1).await.unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::query("UPDATE worker_tasks SET claim_epoch=?1 WHERE id=?2").bind(i64::MAX).bind(id.to_string()).execute(pool).await.unwrap();},
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::query("UPDATE worker_tasks SET claim_epoch=$1 WHERE id=$2").bind(i64::MAX).bind(id).execute(pool).await.unwrap();},
+    }
+    let oversized=WorkerClaim::new("worker",u64::MAX);
+    assert!(storage.complete_worker_task(id,&oversized,&json!({"value":"wrong"})).await.is_err());
+    assert_eq!(storage.get_worker_task(id).await.unwrap().unwrap().state,WorkerTaskState::Claimed);
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&oversized).await.unwrap().is_none());
+});

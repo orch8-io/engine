@@ -468,18 +468,22 @@ pub(super) async fn complete(
     claim: &WorkerClaim,
     output: &serde_json::Value,
 ) -> Result<bool, StorageError> {
-    let mut tx = storage.pool.begin().await?;
+    let epoch = i64::try_from(claim.claim_epoch)
+        .map_err(|_| StorageError::Constraint("worker claim epoch exceeds SQL range".into()))?;
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let result = async {
     let result = sqlx::query("UPDATE worker_tasks SET state='completed', output=?3, completed_at=?4 WHERE id=?1 AND worker_id=?2 AND state='claimed' AND claim_epoch=?5")
         .bind(task_id.to_string())
         .bind(&claim.worker_id)
         .bind(serde_json::to_string(output)?)
         .bind(ts(Utc::now()))
-        .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+        .bind(epoch)
         .execute(&mut *tx)
         .await
         ?;
     let changed = result.rows_affected() > 0;
     if changed {
+        super::worker_outcome::insert_on(&mut tx, task_id, claim, output).await?;
         insert_attempt_events(
             &mut tx,
             &[transition_event(
@@ -492,8 +496,9 @@ pub(super) async fn complete(
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(changed)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 #[instrument(skip(storage), fields(%task_id, worker_id, retryable))]

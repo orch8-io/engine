@@ -1207,6 +1207,28 @@ pub(crate) async fn complete_task(
     Json(req): Json<CompleteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    let replay_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    let accepted = state
+        .storage
+        .get_worker_accepted_outcome(
+            tenant_ctx.as_ref().map(|ctx| &ctx.tenant_id),
+            task_id,
+            &replay_claim,
+        )
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    // Keep the existing hot-history integration retry. After GC the receipt
+    // still acknowledges acceptance; durable native reconciliation is separate.
+    if accepted.is_some()
+        && state
+            .storage
+            .get_worker_task(task_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+            .is_none()
+    {
+        return Ok(StatusCode::OK);
+    }
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
         .storage
@@ -1277,7 +1299,11 @@ pub(crate) async fn complete_task(
     // The committed output wins on a retry (the worker may resend a
     // regenerated payload); a first completion uses the request's.
     let mut req = req;
-    if completion_retry && let Some(stored) = pre_task.output.clone() {
+    if completion_retry
+        && let Some(stored) = accepted
+            .map(|receipt| receipt.output)
+            .or_else(|| pre_task.output.clone())
+    {
         req.output = stored;
     }
 

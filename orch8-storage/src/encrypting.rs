@@ -2158,6 +2158,15 @@ passthrough_impl! {
         }
         Ok(tasks)
     }
+    async fn get_worker_accepted_outcome(
+        &self, tenant_id: Option<&TenantId>, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
+        let mut outcome = self.inner.get_worker_accepted_outcome(tenant_id, task_id, claim).await?;
+        if let Some(outcome) = &mut outcome {
+            outcome.output = self.decrypt_json_value(&outcome.output)?;
+        }
+        Ok(outcome)
+    }
     async fn complete_worker_task(
         &self,
         task_id: Uuid,

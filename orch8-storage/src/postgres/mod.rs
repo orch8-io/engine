@@ -60,6 +60,7 @@ mod worker_admission;
 mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
+mod worker_outcome;
 mod worker_version_pins;
 mod workers;
 
@@ -1772,6 +1773,14 @@ impl crate::WorkerStore for PostgresStorage {
         .await
     }
 
+    async fn get_worker_accepted_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
+        worker_outcome::get(self, tenant_id, task_id, claim).await
+    }
     async fn complete_worker_task(
         &self,
         task_id: Uuid,

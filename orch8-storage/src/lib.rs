@@ -9,6 +9,7 @@ mod effect_attempt;
 pub mod local_migration;
 pub mod worker_admission;
 pub mod worker_invocation;
+pub mod worker_outcome;
 pub use compensation_start::CompensationStart;
 mod effect_dispatch;
 mod effect_receipts;
@@ -91,7 +92,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 132;
+pub const STORAGE_SCHEMA_VERSION: u32 = 134;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -2086,7 +2087,17 @@ pub trait WorkerStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
-    /// Mark a claimed task as completed with output. Verifies `worker_id` ownership.
+    /// Read the original accepted result for an exact winning claim. A tenant
+    /// scope is mandatory for scoped callers; None is reserved for trusted root callers.
+    /// This acknowledges acceptance only, not successful native integration.
+    async fn get_worker_accepted_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError>;
+
+    /// Mark a claimed task as completed and journal its original output in one transaction.
     async fn complete_worker_task(
         &self,
         task_id: Uuid,

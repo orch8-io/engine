@@ -6122,3 +6122,49 @@ Invariant audit results still follow publication and need durable reconciliation
 Legacy backup/key rotation compatibility, compensation invocation identity and
 independent offline-owner/outcome handling remain broader review gates. Passing
 these tests does not prove those contracts or justify merging the draft.
+
+### DME198 follow-up: accepted success evidence (implementation checkpoint)
+
+The new lost-acknowledgement regression reproduced `NotFound` when a paused
+workflow's completed hot task was collected. Both completion transports now look
+up immutable acceptance evidence using the authenticated tenant and exact winning
+worker ID/claim epoch. A matching replay acknowledges the original acceptance;
+its regenerated payload cannot overwrite the retained result. HTTP retains its
+existing hot-history integration retry and uses the journal's original payload.
+gRPC receipt replays acknowledge acceptance without repeating native writes.
+This distinction is deliberate: neither acknowledgement proves native integration.
+
+Migration 134 and SQLite schema 65 add `worker_accepted_outcomes`, with no foreign
+keys to hot tasks or native history. The winning completion, original stored
+output, admitted invocation (or explicitly retained legacy binding), and Completed
+attempt event commit in one transaction. An insertion error rolls all of them
+back. SQLite takes its writer reservation before the multi-statement operation;
+both backends await rollback on failure. Oversized SQL claim epochs are rejected
+instead of saturated. The encryption decorator seals the payload before storage
+and decrypts it only after indexed scope and fingerprint validation. Debug output
+excludes payloads. Update/delete guards and downgrade retention checks protect the
+journal. SQLite reopening preserves receipts after hot collection.
+
+The published 55f5e6c4 CI run finished with 24/25 checks passing. Four API coverage
+failure cases created synthetic queue rows without a durable run/step identity;
+the fixture now stamps that identity before dispatch capture. Source checks remain
+strict. Migration structure checks additionally caught the previously stale
+reported schema constant and a missing rollback header; both are corrected here.
+
+Acceptance of success evidence is only one part of DME198. Effect settlement
+still precedes task acceptance in a separate transaction. Native context/output,
+exact activation completion and an Applied receipt still need one fenced
+transaction, followed by bounded recovery independent of worker retries. Paused
+results are now durably retained but are not yet automatically integrated on
+resume. Failures/retries, delegation, issued-claim principal retention, snapshot
+consistency, explicit acknowledged archive and the protocol floor remain open.
+The success journal must not be represented as a completed outcome protocol or a
+reason to merge/release the draft.
+
+Checkpoint validation passes 2,810 tests: 60 admission/outcome, 111 invocation,
+20 resolution, 136 integration, 42 encryption, 15 migration, 2,145 engine unit,
+29 distributed, 149 gRPC and 103 API coverage cases. PostgreSQL is required in
+the backend matrix. Strict all-target lint passes for storage, gRPC and API;
+formatting and whitespace checks pass. The overflow regression proves that a
+completion cannot saturate an oversized caller epoch to a real i64::MAX lease.
+These results cover accepted-success retention, not the remaining protocol gates.

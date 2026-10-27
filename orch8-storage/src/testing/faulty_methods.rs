@@ -195,6 +195,7 @@ fault_impl! {
         async fn claim_worker_tasks(&self, handler_name: &str, worker_id: &str, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn claim_worker_tasks_for_tenant(&self, handler_name: &str, worker_id: &str, tenant_id: &TenantId, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn claim_worker_tasks_matching(&self, handler_name: &str, worker_id: &str, tenant_id: Option<&TenantId>, queue_name: Option<&str>, capabilities: &RuntimeCapabilities, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
+        async fn get_worker_accepted_outcome(&self, tenant_id: Option<&TenantId>, task_id: Uuid, claim: &WorkerClaim) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError>;
         async fn complete_worker_task(&self, task_id: Uuid, claim: &WorkerClaim, output: &serde_json::Value) -> Result<bool, StorageError>;
         async fn fail_worker_task(&self, task_id: Uuid, claim: &WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
         async fn heartbeat_worker_task(&self, task_id: Uuid, claim: &WorkerClaim) -> Result<bool, StorageError>;

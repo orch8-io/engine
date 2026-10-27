@@ -1,3 +1,4 @@
+-- Remove empty admission tables and hot-spec guards; refuse to erase retained dispatch evidence.
 LOCK TABLE worker_task_admissions IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
  IF EXISTS(SELECT 1 FROM worker_task_admissions) THEN

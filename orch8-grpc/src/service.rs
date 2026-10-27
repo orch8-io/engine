@@ -1993,6 +1993,19 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
         let caller_tenant = caller_tenant(&req).cloned();
+        let replay_claim =
+            WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
+        // Acceptance is independent of hot history and current workflow ownership.
+        // Replaying an acknowledgement never applies caller-supplied output again.
+        if self
+            .storage
+            .get_worker_accepted_outcome(caller_tenant.as_ref(), task_id, &replay_claim)
+            .await
+            .map_err(storage_err)?
+            .is_some()
+        {
+            return Ok(Response::new(proto::Empty {}));
+        }
         let (pre_task, pre_instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         // W3C trace context echoed by the worker (gRPC metadata `traceparent`)
