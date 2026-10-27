@@ -27,6 +27,9 @@
  */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
@@ -401,13 +404,14 @@ function signEnvelope(unsigned: Record<string, unknown>): string {
 
 describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
   let server: ServerHandle | undefined;
+  const artifactPath = join(tmpdir(), `continuity-integ-isolation-artifacts-${uuid()}`);
 
   before(async () => {
     server = await startServer({
       env: {
         ORCH8_ENCRYPTION_KEY: "9c".repeat(32),
         ORCH8_ARTIFACT_BACKEND: "local",
-        ORCH8_ARTIFACT_PATH: `/tmp/continuity-integ-isolation-artifacts-${uuid()}`,
+        ORCH8_ARTIFACT_PATH: artifactPath,
         ORCH8_LOG_LEVEL: "error",
         ORCH8_FEDERATION_PEERS: JSON.stringify([federationPeer]),
       },
@@ -416,6 +420,7 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
 
   after(async () => {
     await stopServer(server);
+    await rm(artifactPath, { recursive: true, force: true });
   });
 
   // ====================================================================
@@ -3914,7 +3919,9 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       // dispatch but never itself saves a checkpoint, so one must be saved
       // here first — matching the same precondition pausedContinuityFixture
       // establishes for every other migration test in this file.
-      await client.waitForState(setup.instance.id, "waiting");
+      // Compensation parks the source durably; finishing rollback never resumes it.
+      await client.waitForState(setup.instance.id, "paused");
+      assert.equal((await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId)).state, "compensating");
       await client.saveCheckpoint(setup.instance.id, {
         safe_boundary: "post-compensation",
         context_snapshot: {},
@@ -3947,6 +3954,8 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         setup.tenantId,
       );
       assert.equal(effectsAfterAttempt[0]!.state, "compensated", "a rejected apply attempt must not disturb existing effect state");
+      assert.equal((await client.getInstance(setup.instance.id)).state, "paused", "migration planning/apply must preserve the stopped source");
+      assert.equal((await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId)).state, "compensating");
     });
 
     it("releasing a budget reservation after a migration bumped the execution epoch is rejected (reservation now belongs to a stale epoch)", async () => {
