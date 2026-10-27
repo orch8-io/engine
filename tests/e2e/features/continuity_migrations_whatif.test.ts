@@ -742,6 +742,47 @@ describe("Continuity Migrations & What-If", () => {
     assert.equal(handlerResults.length, 1);
   });
 
+  it("a parallel human wait completes after migration rollback without replaying its completed branch", async () => {
+    const tenantId = `mig-parallel-resume-${uuid().slice(0, 8)}`;
+    const sequence = testSequence("mig-parallel-resume", [{
+      type: "parallel",
+      id: "fanout",
+      branches: [
+        [step("gate", "human_review", {}, { wait_for_input: {
+          prompt: "continue?", choices: [{ label: "Continue", value: "continue" }],
+        } })],
+        [step("side", "noop")],
+      ],
+    }], { tenantId });
+    await client.createSequence(sequence);
+    const instance = await client.createInstance({
+      sequence_id: sequence.id, tenant_id: tenantId, namespace: "default",
+      context: { data: { retained: "parallel" } },
+    });
+    const waiting = await client.waitForState(instance.id, "waiting");
+    const before = await client.getOutputs(instance.id);
+    assert.equal(before.filter((output) => output.block_id === "side").length, 1);
+    await client.saveCheckpoint(instance.id, { context_snapshot: waiting.context?.data });
+    const execution = await client.createContinuityExecution({
+      tenant_id: tenantId, instance_id: instance.id, runtime_id: uuid(),
+    });
+    const target = await client.createSequence(sameShapeTarget(sequence));
+    const plan = await client.planContinuityMigration({
+      tenant_id: tenantId, continuity_id: execution.continuity_id,
+      to_sequence_id: target.id, to_version: 2,
+    });
+    assert.ok(!plan.finding_codes.includes("INCOMPATIBLE:EXECUTION_GRAPH"));
+    await client.applyContinuityMigration(plan.id, { tenant_id: tenantId, approved: true });
+    await client.rollbackContinuityMigration(plan.id, { tenant_id: tenantId });
+    assert.deepEqual(await client.getOutputs(instance.id), before);
+    await client.sendCustomSignal(instance.id, "human_input:gate", { value: "continue" });
+    await client.waitForState(instance.id, "completed");
+    const after = await client.getOutputs(instance.id);
+    assert.equal(after.filter((output) => output.block_id === "side").length, 1);
+    const afterIds = new Set(after.map((output) => output.id));
+    assert.ok(before.every((output) => afterIds.has(output.id)), "prior output history was lost");
+  });
+
   it("rollback advances the epoch again", async () => {
     const tenantId = `mig-rb-epoch-${uuid().slice(0, 8)}`;
     const { execution, sequence } = await pausedContinuityFixture(tenantId, "mig-rollback-epoch");

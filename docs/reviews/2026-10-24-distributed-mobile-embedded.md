@@ -5927,3 +5927,99 @@ result. TypeScript checking, minimal embedded storage lint and formatting pass. 
 rotation compatibility, atomic provenance, worker completion integration and the
 other transport/archive merge gates remain open. This follow-up is not evidence
 that PR365 is ready to merge.
+
+#### DME197 retain the source definition through snapshot commit (fixed)
+
+The PostgreSQL snapshot reader loaded the source sequence without retaining a
+row lock. Local migration locks the destination definition, then compares its
+full source fingerprint before updating the migration record. A concurrent
+non-key source-definition update could commit after that comparison and before
+the migration committed. The same reader is used by physical transfer capture.
+SQLite already holds its writer reservation across the read and commit.
+
+A controlled PostgreSQL regression pauses migration at its first record write,
+after its final source proof. Before the fix, a source handler-definition edit
+commits while migration is paused; the regression fails with “source definition
+changed after the migration's final source proof.” The reader now takes FOR
+SHARE on the source sequence, retained by the enclosing transaction. KEY SHARE
+would allow the non-key definition edit. The writer must wait until migration
+commits and then remains free to edit the original definition. All 21 local snapshot tests and 175 transfer-cut tests pass, including the
+controlled source-definition race.
+
+#### DME198 durable worker outcome integration must bind the invocation (open)
+
+HTTP completion in orch8-api/src/workers.rs settles the effect, marks the task
+completed, then separately writes native output/context/node/state. Its retry
+path can repair a crash between these writes, but skips the old continuity-epoch
+fence for an already completed task and finds a currently live node by block id.
+A later migration or loop invocation can therefore be mistaken for the original
+integration target. Paused/retired/foreign-owner native execution deliberately
+skips propagation after accepting the task outcome; that evidence must remain
+recoverable without the original worker retrying forever.
+
+gRPC complete_task in orch8-grpc/src/service.rs uses the same separate task and
+native writes, but rejects an already completed task instead of recovering the
+integration. It also validates merged context size after settling the effect and
+completing the task. Both snapshot readers currently exclude pending/claimed
+workers but do not transport or reconcile a completed-but-unintegrated outcome.
+Worker tasks carry continuity_epoch and effect_id, but no immutable native node
+or invocation-generation binding. Cleanup/re-dispatch can remove old task rows.
+
+Required next contract: one durable outcome and integration receipt per task
+invocation, separate from hot task history, with exact tenant/physical execution,
+continuity epoch, sequence and native node/generation binding. Atomic native
+integration must consume the retained outcome at most once and preserve it when
+the native target is paused, retired, migrated or gone. HTTP, gRPC, delegation
+and background recovery must share this operation; a completion retry recovers
+the original result without injecting it into a newer invocation. Context bounds
+must be checked before first outcome commit while already durable provider
+outcomes remain recorded for reconciliation. Pending integrations must be
+reconciled or transported explicitly before a migration/transfer can certify a
+complete recovery point. Blanket refusal of all waiting workflows is not a fix.
+
+Verification must cover process failure after task completion, paused completion
+followed by resume without another worker call, duplicate HTTP/gRPC callbacks,
+old callbacks after loop reuse or migration, simultaneous completion/lease expiry,
+completed outcome during capture, malformed/oversized output, scoped encryption,
+receipt retention after native/task GC, and delegation recovery. DME198 remains
+a merge gate; passing DME196 migration tests does not prove this contract.
+
+
+#### DME199 retained execution nodes must keep their branch identity (fixed)
+
+The migration compatibility check indexed block type and parent id, but omitted
+branch_index. Moving a block to another parallel/race branch, router route or
+try/catch arm retains its id/type/parent while changing the executable meaning
+of the retained node. Completed native nodes also participate in branch outcome
+selection, so accepting a completed node under a different branch is unsafe.
+
+Two regressions fail before the fix: a waiting parallel node can change branch
+without refusal, and a negative persisted branch index is accepted. The target
+index now uses the same child-slice traversal and branch positions as native
+build_nodes, and checks the retained branch identity as well as type and parent.
+Unchanged nested loop/foreach bodies remain supported; a blanket refusal of
+suspended/dynamic execution is not introduced. All 93 evaluator tests pass.
+All 28 local recovery HTTP cases pass across plain/encrypted SQLite/PostgreSQL,
+including rejection of a real parallel branch move, compatible parallel
+apply/rollback with unchanged node identities/states and queued input, and
+planning classification. Planning now reports INCOMPATIBLE:EXECUTION_GRAPH
+before apply independently checks the coherent recovery point. All three
+continuity E2E suites pass on PostgreSQL and SQLite (300 cases per backend:
+239 unchanged cases plus the final 61-case migration suite rerun). A real
+parallel human wait completes after rollback without replaying its completed
+sibling branch or losing prior output history. Strict all-target Clippy,
+TypeScript checking and formatting pass. Sibling execution order, dynamic
+injection and invocation generation remain separate review gates.
+
+DME198 binding design follow-up: task id/claim epoch must identify the durable
+outcome; block id alone cannot identify its native integration target. Existing
+RuntimeContext.run_id distinguishes retry/resume/DLQ runs, but is shared across
+loop iterations and parallel activities. A tree outcome therefore also needs the
+original node identity and activation generation (verify node.started_at reset
+semantics before using that timestamp as a nonce). Flat execution needs the
+original run/step-start binding. A global step counter is insufficient because
+other parallel nodes can legitimately advance it. Capture the binding atomically
+at durable dispatch, retain the accepted outcome/integration receipt independently
+of native/task GC, and do not infer a missing legacy invocation binding from a
+currently live node with the same block id. Scope/authentication for receipt
+replay must remain enforceable when hot native rows have been collected.

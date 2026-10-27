@@ -4865,6 +4865,19 @@ async fn plan_live_migration(
             .filter(|output| !target_blocks.contains(output.block_id.as_str()))
             .map(|output| format!("CHECKPOINT_OUTPUT_REMOVED:{}", output.block_id.as_str())),
     );
+    // Planning reports retained-graph incompatibility before the caller asks
+    // to apply it. Apply independently checks its coherent source snapshot.
+    if !orch8_engine::evaluator::migration_incompatibilities(
+        state.storage.as_ref(),
+        &instance,
+        &target,
+    )
+    .await
+    .map_err(|e| ApiError::Conflict(format!("migration target graph: {e}")))?
+    .is_empty()
+    {
+        finding_codes.push("INCOMPATIBLE:EXECUTION_GRAPH".into());
+    }
     finding_codes.sort();
     finding_codes.dedup();
     let historical_validation_passed = Box::pin(validate_migration_history(

@@ -13,21 +13,102 @@ use orch8_types::{
         MigrationPlanId, StateTransform,
     },
     execution::{BlockType, ExecutionNode, NodeState},
-    ids::{BlockId, ExecutionNodeId},
+    ids::{BlockId, ExecutionNodeId, InstanceId},
     instance::InstanceState,
+    sequence::{BlockDefinition, SequenceDefinition},
     signal::{Signal, SignalType},
 };
 use reqwest::StatusCode;
 use serde_json::json;
 
 async fn fixture(storage: &dyn StorageBackend) -> (LiveMigrationRecord, ContinuityExecution) {
-    let source = SequenceBuilder::new("local-http")
+    fixture_shape(storage, false, false).await
+}
+
+fn recovery_sequences(branching: bool, moved: bool) -> (SequenceDefinition, SequenceDefinition) {
+    let mut source = SequenceBuilder::new("local-http")
         .step("gate", "human_review")
         .build();
-    storage.create_sequence(&source).await.unwrap();
+    if branching {
+        let gate = source.blocks.remove(0);
+        let other = SequenceBuilder::new("local-http")
+            .step("other", "noop")
+            .build()
+            .blocks
+            .remove(0);
+        source.blocks.push(BlockDefinition::Parallel(Box::new(
+            orch8_types::sequence::ParallelDef {
+                id: BlockId::new("fanout"),
+                branches: vec![vec![gate], vec![other]],
+            },
+        )));
+    }
     let mut target = source.clone();
     target.id = orch8_types::ids::SequenceId::new();
     target.version = 2;
+    if moved && let BlockDefinition::Parallel(parallel) = &mut target.blocks[0] {
+        parallel.branches.reverse();
+    }
+    (source, target)
+}
+
+async fn seed_recovery_nodes(storage: &dyn StorageBackend, instance: InstanceId, branching: bool) {
+    let parent = ExecutionNodeId::new();
+    let mut nodes = vec![(
+        "gate",
+        BlockType::Step,
+        branching.then_some(parent),
+        branching.then_some(0),
+        NodeState::Waiting,
+    )];
+    if branching {
+        nodes.insert(
+            0,
+            (
+                "fanout",
+                BlockType::Parallel,
+                None,
+                None,
+                NodeState::Running,
+            ),
+        );
+        nodes.push((
+            "other",
+            BlockType::Step,
+            Some(parent),
+            Some(1),
+            NodeState::Pending,
+        ));
+    }
+    for (block, block_type, parent_id, branch_index, state) in nodes {
+        storage
+            .create_execution_node(&ExecutionNode {
+                id: if block == "fanout" {
+                    parent
+                } else {
+                    ExecutionNodeId::new()
+                },
+                instance_id: instance,
+                block_id: BlockId::new(block),
+                parent_id,
+                block_type,
+                branch_index,
+                state,
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+    }
+}
+
+async fn fixture_shape(
+    storage: &dyn StorageBackend,
+    branching: bool,
+    moved: bool,
+) -> (LiveMigrationRecord, ContinuityExecution) {
+    let (source, target) = recovery_sequences(branching, moved);
+    storage.create_sequence(&source).await.unwrap();
     storage.create_sequence(&target).await.unwrap();
     let mut instance = InstanceBuilder::for_sequence(&source)
         .state(InstanceState::Waiting)
@@ -36,20 +117,7 @@ async fn fixture(storage: &dyn StorageBackend) -> (LiveMigrationRecord, Continui
     instance.context.runtime.current_step = Some(BlockId::new("gate"));
     instance.next_fire_at = Some(Utc::now() + Duration::hours(2));
     storage.create_instance(&instance).await.unwrap();
-    storage
-        .create_execution_node(&ExecutionNode {
-            id: ExecutionNodeId::new(),
-            instance_id: instance.id,
-            block_id: BlockId::new("gate"),
-            parent_id: None,
-            block_type: BlockType::Step,
-            branch_index: None,
-            state: NodeState::Waiting,
-            started_at: Some(Utc::now()),
-            completed_at: None,
-        })
-        .await
-        .unwrap();
+    seed_recovery_nodes(storage, instance.id, branching).await;
     storage
         .enqueue_signal(&Signal {
             id: uuid::Uuid::new_v4(),
@@ -175,4 +243,41 @@ orch8_storage::backend_test!(artifacts = true, async fn local_rollback_does_not_
     let response=client.post(url(&base,record.plan.id,"rollback")).json(&json!({"tenant_id":owner.tenant_id})).send().await.unwrap();assert_eq!(response.status(),StatusCode::CONFLICT);
     assert_eq!(storage.get_instance(owner.current_instance_id).await.unwrap().unwrap().sequence_id,record.plan.to_sequence_id);
     assert_eq!(storage.get_continuity_execution(&owner.tenant_id,owner.continuity_id).await.unwrap().unwrap().epoch,applied.applied_epoch.unwrap());
+});
+
+orch8_storage::backend_test!(artifacts = true, async fn local_migration_refuses_rebinding_retained_nodes_to_different_branches(b) {
+    let storage=b.storage.clone();let(record,owner)=fixture_shape(storage.as_ref(),true,true).await;
+    let before=storage.get_execution_tree(owner.current_instance_id).await.unwrap();
+    let server=spawn_test_server_on(storage.clone(),None).await;
+    let response=reqwest::Client::new().post(url(&server.v1_url(),record.plan.id,"apply")).json(&json!({"tenant_id":owner.tenant_id,"approved":true})).send().await.unwrap();
+    let status=response.status();let body=response.text().await.unwrap();assert_eq!(status,StatusCode::CONFLICT,"{body}");assert!(body.contains("branch"),"{body}");
+    assert_eq!(storage.get_continuity_execution(&owner.tenant_id,owner.continuity_id).await.unwrap().unwrap(),owner);
+    assert_eq!(storage.get_live_migration(&owner.tenant_id,record.plan.id).await.unwrap().unwrap().state,LiveMigrationState::Planned);
+    assert_eq!(serde_json::to_value(storage.get_execution_tree(owner.current_instance_id).await.unwrap()).unwrap(),serde_json::to_value(before).unwrap());
+    assert_eq!(storage.get_pending_signals(owner.current_instance_id).await.unwrap().len(),1);
+    assert!(!storage.is_physical_instance_retired(owner.current_instance_id).await.unwrap());
+});
+
+orch8_storage::backend_test!(artifacts = true, async fn local_migration_keeps_compatible_parallel_wait_nodes_and_can_roll_back(b) {
+    let storage=b.storage.clone();let(record,owner)=fixture_shape(storage.as_ref(),true,false).await;
+    let before=storage.get_execution_tree(owner.current_instance_id).await.unwrap();let original=serde_json::to_value(&before).unwrap();
+    let server=spawn_test_server_on(storage.clone(),None).await;let client=reqwest::Client::new();let base=server.v1_url();
+    apply(&client,&base,&record).await;
+    assert_eq!(serde_json::to_value(storage.get_execution_tree(owner.current_instance_id).await.unwrap()).unwrap(),original);
+    let response=client.post(url(&base,record.plan.id,"rollback")).json(&json!({"tenant_id":owner.tenant_id})).send().await.unwrap();let status=response.status();let body=response.text().await.unwrap();assert_eq!(status,StatusCode::OK,"{body}");
+    assert_eq!(serde_json::to_value(storage.get_execution_tree(owner.current_instance_id).await.unwrap()).unwrap(),original);
+    assert_eq!(storage.get_pending_signals(owner.current_instance_id).await.unwrap().len(),1);
+});
+
+orch8_storage::backend_test!(artifacts = true, async fn migration_planning_reports_retained_graph_incompatibility(b) {
+    let storage=b.storage.clone();let server=spawn_test_server_on(storage.clone(),None).await;let client=reqwest::Client::new();
+    for moved in [false,true] {
+        let(record,owner)=fixture_shape(storage.as_ref(),true,moved).await;
+        let response=client.post(format!("{}/continuity/migrations/plan",server.v1_url())).json(&json!({"tenant_id":owner.tenant_id,"continuity_id":owner.continuity_id,"to_sequence_id":record.plan.to_sequence_id,"to_version":2})).send().await.unwrap();
+        let status=response.status();let body=response.text().await.unwrap();assert_eq!(status,StatusCode::OK,"{body}");
+        let plan:LiveMigrationPlan=serde_json::from_str(&body).unwrap();
+        assert_eq!(plan.finding_codes.iter().any(|c|c=="INCOMPATIBLE:EXECUTION_GRAPH"),moved,"{body}");
+        if moved {assert_eq!(plan.disposition,MigrationDisposition::Incompatible);}
+        assert_eq!(storage.get_continuity_execution(&owner.tenant_id,owner.continuity_id).await.unwrap().unwrap(),owner,"planning must not change authority");
+    }
 });

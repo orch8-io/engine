@@ -398,3 +398,21 @@ format/key rotation compatibility, live graph/invocation generation semantics,
 atomic provenance and source/child evidence races remain review gates alongside
 the transport/archive contracts above. A green draft build must not be treated
 as proof of those remaining contracts.
+
+
+Source-definition and retained-branch follow-up (DME197/DME199): PostgreSQL
+snapshot reads now retain FOR SHARE on the source sequence through commit. A
+controlled post-proof writer race fails before the change and waits correctly
+after it; 175 cut and 21 local snapshot tests pass. Migration planning and apply
+also check exact retained branch identity using the native build_nodes child
+traversal. This rejects branch moves while preserving unchanged nested
+loop/foreach and parallel human-wait workflows. All 93 evaluator and 28 local
+recovery HTTP cases pass. All 300 continuity E2E cases pass per database backend,
+including actual parallel rollback continuation without repeating a completed
+branch. Strict affected-package lint and TypeScript checks pass.
+
+DME198 remains open: completion acceptance and native output integration are
+separate writes, HTTP retry and gRPC recovery differ, and a block id does not
+bind an old callback to its original invocation. The outcome/integration receipt
+must survive hot task/native history GC and be shared by both transports,
+delegation and background recovery. These checks do not certify that contract.

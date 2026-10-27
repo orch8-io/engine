@@ -481,17 +481,24 @@ pub fn migration_snapshot_incompatibilities(
 ) -> Vec<String> {
     use std::collections::HashMap;
 
-    type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>)>;
-    fn walk<'a>(blocks: &'a [BlockDefinition], parent: Option<&'a BlockId>, index: &mut Index<'a>) {
+    type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>, Option<usize>)>;
+    fn walk<'a>(
+        blocks: &'a [BlockDefinition],
+        parent: Option<&'a BlockId>,
+        branch: Option<usize>,
+        index: &mut Index<'a>,
+    ) {
         for block in blocks {
             let (id, block_type) = block_meta(block);
-            index.insert(id, (block_type, parent));
-            for_each_child_slice(block, &mut |_, children| walk(children, Some(id), index));
+            index.insert(id, (block_type, parent, branch));
+            for_each_child_slice(block, &mut |branch, children| {
+                walk(children, Some(id), branch, index);
+            });
         }
     }
 
     let mut index = Index::new();
-    walk(blocks, None, &mut index);
+    walk(blocks, None, None, &mut index);
 
     let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
     let mut problems = Vec::new();
@@ -500,7 +507,7 @@ pub fn migration_snapshot_incompatibilities(
             node.state,
             NodeState::Pending | NodeState::Running | NodeState::Waiting
         );
-        let Some((block_type, parent)) = index.get(&node.block_id) else {
+        let Some((block_type, parent, branch)) = index.get(&node.block_id) else {
             if live {
                 problems.push(format!(
                     "block '{}' is {:?} in the instance's execution tree but does not exist in the target sequence",
@@ -515,6 +522,15 @@ pub fn migration_snapshot_incompatibilities(
                 node.block_id, node.block_type, block_type
             ));
             continue;
+        }
+        let tree_branch = node
+            .branch_index
+            .and_then(|value| usize::try_from(value).ok());
+        if node.branch_index.is_some_and(|value| value < 0) || tree_branch != *branch {
+            problems.push(format!(
+                "block '{}' sits in branch {:?} in the instance's execution tree but in branch {:?} in the target sequence",
+                node.block_id, node.branch_index, branch,
+            ));
         }
         let tree_parent = node
             .parent_id

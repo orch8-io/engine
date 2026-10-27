@@ -145,7 +145,9 @@ pub(super) async fn read(
     let Some(checkpoint) = super::checkpoints::get_latest_on(conn, instance.id).await? else {
         return Ok(Read::Refused(CapsuleCutRefusal::MissingCheckpoint));
     };
-    let Some(sequence) = sqlx::query_as::<_,super::rows::SequenceRow>("SELECT id,tenant_id,namespace,name,definition,version,deprecated,status,created_at FROM sequences WHERE id=$1").bind(instance.sequence_id.into_uuid()).fetch_optional(&mut *conn).await? else { return Ok(Read::Refused(CapsuleCutRefusal::MissingSequence)); };
+    // Retain the exact source definition through the caller's final commit.
+    // KEY SHARE would permit concurrent non-key definition edits.
+    let Some(sequence) = sqlx::query_as::<_,super::rows::SequenceRow>("SELECT id,tenant_id,namespace,name,definition,version,deprecated,status,created_at FROM sequences WHERE id=$1 FOR SHARE").bind(instance.sequence_id.into_uuid()).fetch_optional(&mut *conn).await? else { return Ok(Read::Refused(CapsuleCutRefusal::MissingSequence)); };
     let sequence = sequence.into_definition()?;
     let outputs = super::outputs::get_all_on(conn, instance.id).await?;
     let nodes = super::execution_tree::get_tree_on(conn, instance.id).await?;

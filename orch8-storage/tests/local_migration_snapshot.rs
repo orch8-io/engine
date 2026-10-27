@@ -168,3 +168,136 @@ orch8_storage::backend_test!(async fn local_commit_rejects_changed_children_and_
         assert!(!storage.is_physical_instance_retired(id).await.unwrap());
     }
 });
+
+#[cfg(feature = "postgres")]
+mod definition_races {
+    use super::*;
+    use orch8_storage::{LiveMigrationTransition, local_migration::LocalMigrationSnapshot};
+    use orch8_types::{error::StorageError, sequence::SequenceDefinition};
+    use std::time::Duration as StdDuration;
+
+    async fn apply_snapshot(
+        storage: &dyn StorageBackend,
+        request: &LocalMigrationSnapshotRequest,
+        snapshot: &LocalMigrationSnapshot,
+        target: &SequenceDefinition,
+    ) -> Result<bool, StorageError> {
+        let mut next = request.execution.clone();
+        next.epoch = next.epoch.checked_next().unwrap();
+        next.updated_at = Utc::now();
+        let mut applied = snapshot.record.clone();
+        applied.state = LiveMigrationState::Applied;
+        applied.applied_epoch = Some(next.epoch);
+        applied.applied_at = Some(next.updated_at);
+        let checkpoint = Checkpoint {
+            id: uuid::Uuid::new_v4(),
+            instance_id: next.current_instance_id,
+            checkpoint_data: snapshot.source.checkpoint.checkpoint_data.clone(),
+            created_at: next.updated_at,
+        };
+        storage
+            .commit_live_migration_transition(LiveMigrationTransition {
+                tenant_id: &request.execution.tenant_id,
+                expected_record: &snapshot.record,
+                next_record: &applied,
+                expected_execution: &request.execution,
+                next_execution: &next,
+                expected_instance_state: snapshot.source.instance.state,
+                expected_instance_updated_at: request.expected_instance_updated_at,
+                expected_checkpoint_id: snapshot.source.checkpoint.id,
+                expected_source_fingerprint: &snapshot.fingerprint,
+                expected_target_sequence: target,
+                next_instance_state: InstanceState::Paused,
+                next_fire_at: None,
+                next_sequence_id: target.id,
+                next_context: &snapshot.source.instance.context,
+                checkpoint: &checkpoint,
+                forbid_effects_epoch: None,
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn postgres_source_definition_stays_locked_after_commit_proof() {
+        let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+            return;
+        };
+        let request = fixture(b.storage.as_ref()).await;
+        let Capture::Ready(snapshot) = b
+            .storage
+            .prepare_local_migration_snapshot(&request)
+            .await
+            .unwrap()
+        else {
+            panic!("snapshot refused")
+        };
+        let source_id = snapshot.source.sequence.id;
+        let mut target = snapshot.source.sequence.clone();
+        target.id = snapshot.record.plan.to_sequence_id;
+        target.version = snapshot.record.plan.to_version;
+        b.storage.create_sequence(&target).await.unwrap();
+        let key = i64::from(uuid::Uuid::new_v4().as_fields().0 & 0x7fff_ffff);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
+            "CREATE FUNCTION pause_migration_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock({key}); RETURN NEW; END $$;
+             CREATE TRIGGER pause_migration_commit BEFORE UPDATE ON live_migrations FOR EACH ROW EXECUTE FUNCTION pause_migration_commit();"
+        ))).execute(b.pg_pool()).await.unwrap();
+        let mut gate = b.pg_pool().begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(key)
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let storage = b.storage.clone();
+        let migrating = tokio::spawn(async move {
+            apply_snapshot(storage.as_ref(), &request, &snapshot, &target).await
+        });
+        let pid = tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                let pid: Option<i32> = sqlx::query_scalar("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=$1::bigint::oid AND NOT granted LIMIT 1")
+                    .bind(key).fetch_optional(b.pg_pool()).await.unwrap();
+                if let Some(pid) = pid { break pid; }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        }).await;
+        let Ok(pid) = pid else {
+            gate.rollback().await.unwrap();
+            migrating.abort();
+            panic!("migration never reached its post-proof barrier");
+        };
+        let pool = b.pg_pool().clone();
+        let editing = tokio::spawn(async move {
+            sqlx::query("UPDATE sequences SET definition=jsonb_set(definition,'{blocks,0,handler}','\"new-handler\"'::jsonb) WHERE id=$1")
+                .bind(source_id.into_uuid()).execute(&pool).await
+        });
+        let waited = tokio::time::timeout(StdDuration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE 'UPDATE sequences%')")
+                    .bind(pid).fetch_one(b.pg_pool()).await.unwrap();
+                if blocked { break true; }
+                if editing.is_finished() { break false; }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        }).await.unwrap_or(false);
+        gate.rollback().await.unwrap();
+        let committed = tokio::time::timeout(StdDuration::from_secs(10), migrating)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let edited = tokio::time::timeout(StdDuration::from_secs(10), editing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(committed);
+        assert_eq!(
+            edited.rows_affected(),
+            1,
+            "definition edits remain usable after the migration commits"
+        );
+        assert!(
+            waited,
+            "source definition changed after the migration's final source proof"
+        );
+    }
+}
