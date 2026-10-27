@@ -34,7 +34,7 @@ fn cut(row: &DbRow) -> Result<CapsuleSourceCut, StorageError> {
         sealed_payload: row.try_get("sealed_payload")?,
     })
 }
-async fn owner(
+pub(super) async fn owner(
     conn: &mut sqlx::SqliteConnection,
     expected: &ContinuityExecution,
 ) -> Result<Option<ContinuityExecution>, StorageError> {

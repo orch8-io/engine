@@ -1,5 +1,7 @@
 //! Portable-continuity control-plane endpoints.
 
+mod local_recovery;
+
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -35,10 +37,10 @@ use orch8_types::continuity_advanced::{
     ExtractedEffectMock, ExtractedTestFixture, FaultInjection, FaultKind, FaultLabRun,
     FaultProfile, FederationEnvelope, FederationPeerId, ForkEffectMode, GeneratedScenario,
     InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
-    LiveMigrationState, MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule,
-    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, RecommendationId,
-    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
-    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
+    LiveMigrationState, MigrationDisposition, MigrationPlanId, OptimizationRecommendation,
+    OwnershipTransition, ProviderCandidate, RecommendationId, ReservationState, ResidencyEvidence,
+    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
+    WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::release::{InFlightPolicy, ReleaseDecision, ReleaseState, WorkflowRelease};
@@ -5008,26 +5010,24 @@ async fn apply_live_migration(
     if target.tenant_id != tenant_id || target.version != record.plan.to_version {
         return Err(ApiError::Conflict("target sequence changed".into()));
     }
-    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
-        ApiError::Unavailable(
-            "live migration is disabled without a configured engine encryption key".into(),
-        )
-    })?;
-    let signed_capsule = orch8_engine::capsule::export_paused_capsule(
-        state.storage.as_ref(),
-        orch8_engine::capsule::CapsuleExportRequest {
-            continuity: execution.clone(),
-            destination_runtime_id: None,
-            requirements: CapsuleRequirements::default(),
-            expires_at: record.rollback_expires_at,
-            signing_key_id: crypto.signing_key_id.clone(),
-            encryption_key_id: crypto.encryption_key_id.clone(),
-        },
-        &crypto.signing_key,
-        &crypto.payload_encryptor,
-    )
-    .await
-    .map_err(|error| ApiError::Conflict(format!("rollback capsule export failed: {error}")))?;
+    let (rollback_capsule, recovery) =
+        local_recovery::prepare(&state, &record, &execution, &instance).await?;
+    let target_blocks =
+        orch8_engine::evaluator::merged_blocks(state.storage.as_ref(), instance.id, &target)
+            .await
+            .map_err(|e| ApiError::Conflict(format!("migration target graph: {e}")))?;
+    let incompatibilities = orch8_engine::evaluator::migration_snapshot_incompatibilities(
+        &recovery.source.instance,
+        &target_blocks,
+        &recovery.source.execution_state.nodes,
+    );
+    if !incompatibilities.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "migration cannot rebind live nodes: {}",
+            incompatibilities.join("; ")
+        )));
+    }
+    let instance = recovery.source.instance;
     let transformed = orch8_engine::continuity_advanced::apply_state_transforms(
         &record.source_checkpoint.checkpoint_data,
         &record.plan.transforms,
@@ -5048,13 +5048,7 @@ async fn apply_live_migration(
     next_record.state = LiveMigrationState::Applied;
     next_record.applied_epoch = Some(next_execution.epoch);
     next_record.applied_at = Some(now);
-    next_record.rollback_capsule = Some(MigrationRollbackCapsule {
-        capsule_id: signed_capsule.manifest.capsule_id,
-        payload_artifact: signed_capsule.manifest.payload_artifact,
-        manifest_sha256: signed_capsule.manifest_sha256,
-        public_key: signed_capsule.public_key,
-        signature: signed_capsule.signature,
-    });
+    next_record.rollback_capsule = Some(rollback_capsule);
     let checkpoint = orch8_types::checkpoint::Checkpoint {
         id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
@@ -5070,7 +5064,12 @@ async fn apply_live_migration(
             expected_execution: &execution,
             next_execution: &next_execution,
             expected_instance_state: instance.state,
+            expected_instance_updated_at: instance.updated_at,
+            expected_checkpoint_id: record.source_checkpoint.id,
+            expected_source_fingerprint: &recovery.fingerprint,
+            expected_target_sequence: &target,
             next_instance_state: orch8_types::instance::InstanceState::Paused,
+            next_fire_at: None,
             next_sequence_id: target.id,
             next_context: &next_context,
             checkpoint: &checkpoint,
@@ -5117,22 +5116,7 @@ async fn rollback_live_migration(
             "migration is not inside its active rollback window".into(),
         ));
     }
-    let rollback_capsule = record.rollback_capsule.as_ref().ok_or_else(|| {
-        ApiError::Conflict("migration has no retained pre-migration capsule".into())
-    })?;
-    let capsule_payload = state
-        .storage
-        .get_artifact(&rollback_capsule.payload_artifact.key)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "rollback capsule"))?
-        .ok_or_else(|| ApiError::Conflict("rollback capsule artifact is unavailable".into()))?;
-    if capsule_payload.len() as u64 != rollback_capsule.payload_artifact.bytes
-        || hex_sha256(&capsule_payload) != rollback_capsule.payload_artifact.sha256
-    {
-        return Err(ApiError::Conflict(
-            "rollback capsule artifact failed integrity verification".into(),
-        ));
-    }
+    let recovery = local_recovery::load(&state, &record).await?;
     let applied_epoch = record
         .applied_epoch
         .ok_or_else(|| ApiError::Conflict("migration has no applied epoch".into()))?;
@@ -5146,9 +5130,22 @@ async fn rollback_live_migration(
             "migration target changed or resumed before rollback".into(),
         ));
     }
-    let source_context: orch8_types::context::ExecutionContext =
-        serde_json::from_value(record.source_context.clone())
-            .map_err(|error| ApiError::Internal(format!("invalid rollback context: {error}")))?;
+    let target_checkpoint = state
+        .storage
+        .get_latest_checkpoint(instance.id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "migration target checkpoint"))?
+        .ok_or_else(|| ApiError::Conflict("migration target checkpoint is missing".into()))?;
+    let current_snapshot = local_recovery::capture(
+        &state,
+        &record,
+        &execution,
+        record
+            .applied_at
+            .ok_or_else(|| ApiError::Conflict("migration has no applied timestamp".into()))?,
+    )
+    .await?;
+    let source_context = recovery.instance.context;
     let now = Utc::now();
     let mut next_execution = execution.clone();
     next_execution.epoch = execution
@@ -5174,7 +5171,14 @@ async fn rollback_live_migration(
             expected_execution: &execution,
             next_execution: &next_execution,
             expected_instance_state: instance.state,
+            expected_instance_updated_at: record
+                .applied_at
+                .ok_or_else(|| ApiError::Conflict("migration has no applied timestamp".into()))?,
+            expected_checkpoint_id: target_checkpoint.id,
+            expected_source_fingerprint: &current_snapshot.fingerprint,
+            expected_target_sequence: &recovery.sequence,
             next_instance_state: record.source_state,
+            next_fire_at: recovery.instance.next_fire_at,
             next_sequence_id: record.plan.from_sequence_id,
             next_context: &source_context,
             checkpoint: &checkpoint,

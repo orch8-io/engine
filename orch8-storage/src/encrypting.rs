@@ -397,6 +397,28 @@ impl EncryptingStorage {
         Ok(run)
     }
 
+    async fn open_source_snapshot(
+        &self,
+        snapshot: &mut crate::capsule_export::CapsuleSourceSnapshot,
+    ) -> Result<(), StorageError> {
+        self.decrypt_instance(&mut snapshot.instance)?;
+        snapshot.checkpoint.checkpoint_data =
+            self.decrypt_json_value(&snapshot.checkpoint.checkpoint_data)?;
+        for output in &mut snapshot.outputs {
+            self.decrypt_block_output(output)?;
+        }
+        let mut budget = crate::capsule_export::CaptureBudget::new();
+        budget.add(&snapshot.instance)?;
+        budget.add(&snapshot.outputs)?;
+        for entry in &mut snapshot.execution_state.payloads {
+            entry.payload = self
+                .open_externalized(entry.instance_id, &entry.ref_key, &entry.payload)
+                .await?;
+            budget.add(&entry.payload)?;
+        }
+        Ok(())
+    }
+
     fn encrypt_live_migration(
         &self,
         record: &orch8_types::continuity_advanced::LiveMigrationRecord,
@@ -850,23 +872,19 @@ passthrough_impl! {
             }
             self.inner.import_capsule_recovery(capsule_id, destination_runtime_id, &sealed, &checkpoint, effects).await
         }
+        async fn prepare_local_migration_snapshot(&self, request: &crate::local_migration::LocalMigrationSnapshotRequest) -> Result<crate::local_migration::LocalMigrationSnapshotCapture,StorageError> {
+            let mut captured=self.inner.prepare_local_migration_snapshot(request).await?;
+            if let crate::local_migration::LocalMigrationSnapshotCapture::Ready(snapshot)=&mut captured {
+                self.open_source_snapshot(&mut snapshot.source).await?;
+                snapshot.record=self.decrypt_live_migration(snapshot.record.clone())?;
+            }
+            Ok(captured)
+        }
         async fn capture_capsule_cut(&self, request: &crate::capsule_export::CapsuleCutRequest) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError> {
             let mut captured = self.inner.capture_capsule_cut(request).await?;
             if let crate::capsule_export::CapsuleCutCapture::Ready(cut) = &mut captured
                 && let Some(snapshot) = &mut cut.snapshot {
-                    let opened = async {
-                        self.decrypt_instance(&mut snapshot.instance)?;
-                        snapshot.checkpoint.checkpoint_data = self.decrypt_json_value(&snapshot.checkpoint.checkpoint_data)?;
-                        for output in &mut snapshot.outputs { self.decrypt_block_output(output)?; }
-                        let mut budget = crate::capsule_export::CaptureBudget::new();
-                        budget.add(&snapshot.instance)?;
-                        budget.add(&snapshot.outputs)?;
-                        for entry in &mut snapshot.execution_state.payloads {
-                            entry.payload = self.open_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?;
-                            budget.add(&entry.payload)?;
-                        }
-                        Ok::<(),StorageError>(())
-                    }.await;
+                    let opened=self.open_source_snapshot(snapshot).await;
                     if let Err(error) = opened {
                         self.inner.abort_preparing_capsule_cut(&request.owner.tenant_id, cut.id).await?;
                         return Err(error);
@@ -991,7 +1009,12 @@ passthrough_impl! {
                     expected_execution: transition.expected_execution,
                     next_execution: transition.next_execution,
                     expected_instance_state: transition.expected_instance_state,
+                    expected_instance_updated_at: transition.expected_instance_updated_at,
+                    expected_checkpoint_id: transition.expected_checkpoint_id,
+                    expected_source_fingerprint: transition.expected_source_fingerprint,
+                    expected_target_sequence: transition.expected_target_sequence,
                     next_instance_state: transition.next_instance_state,
+                    next_fire_at: transition.next_fire_at,
                     next_sequence_id: transition.next_sequence_id,
                     next_context: encrypted_context.as_ref(),
                     checkpoint: &encrypted_checkpoint,

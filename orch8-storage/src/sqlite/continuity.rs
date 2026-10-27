@@ -693,6 +693,13 @@ impl crate::ContinuityStore for SqliteStorage {
         .await
     }
 
+    async fn prepare_local_migration_snapshot(
+        &self,
+        request: &crate::local_migration::LocalMigrationSnapshotRequest,
+    ) -> Result<crate::local_migration::LocalMigrationSnapshotCapture, StorageError> {
+        super::local_migration::prepare(self, request).await
+    }
+
     async fn capture_capsule_cut(
         &self,
         request: &crate::capsule_export::CapsuleCutRequest,
@@ -2029,17 +2036,23 @@ impl crate::ContinuityStore for SqliteStorage {
             expected_execution,
             next_execution,
             expected_instance_state,
+            expected_instance_updated_at: _,
+            expected_checkpoint_id: _,
+            expected_source_fingerprint: _,
+            expected_target_sequence: _,
             next_instance_state,
+            next_fire_at,
             next_sequence_id,
             next_context,
             checkpoint,
             forbid_effects_epoch,
         } = transition;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        transition.validate()?;
+        let mut tx = super::helpers::begin_immediate(&self.pool).await?;
+        if !super::local_migration::lock_transition(&mut tx, &transition).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         if let Some(epoch) = forbid_effects_epoch {
             let blocked: i64 = sqlx::query_scalar(
                 "SELECT EXISTS(
@@ -2094,12 +2107,13 @@ impl crate::ContinuityStore for SqliteStorage {
         .map_err(|error| StorageError::Query(error.to_string()))?;
         let instance = sqlx::query(
             "UPDATE task_instances
-             SET sequence_id=?, context=?, state=?, next_fire_at=NULL, updated_at=?
+             SET sequence_id=?, context=?, state=?, next_fire_at=?, claimed_at=NULL, updated_at=?
              WHERE id=? AND tenant_id=? AND state=?",
         )
         .bind(next_sequence_id.to_string())
         .bind(serde_json::to_string(next_context).map_err(StorageError::Serialization)?)
         .bind(state_name(next_instance_state)?)
+        .bind(next_fire_at.map(|t| t.to_rfc3339()))
         .bind(&updated_at)
         .bind(expected_execution.current_instance_id.to_string())
         .bind(tenant_id.as_str())
@@ -2116,11 +2130,7 @@ impl crate::ContinuityStore for SqliteStorage {
                 .map_err(|error| StorageError::Query(error.to_string()))?;
             return Ok(false);
         }
-        sqlx::query("DELETE FROM execution_tree WHERE instance_id=?")
-            .bind(expected_execution.current_instance_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        // In-place migration keeps native nodes and suspension identities.
         sqlx::query(
             "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
              VALUES (?,?,?,?)",

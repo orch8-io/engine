@@ -382,9 +382,19 @@ until explicit release, while mixed terminal GC continues deleting healthy work.
 Downgrade checks lock before inspecting active evidence, including a controlled
 PostgreSQL downgrade waiting behind capture.
 
-A newly observed merge gate remains: live migration currently prepares its
-rollback capsule through physical-transfer export, then tries to migrate the
-retired source in place. It needs a coherent local recovery-snapshot path that
-preserves physical ownership and revalidates apply/rollback atomically. The
-transfer retirement guard must remain enforced. The E2E retry-idempotence
-assertion also needs alignment with the durable export response contract.
+Live migration now uses a separate purpose-bound signed/encrypted local recovery
+snapshot instead of physical-transfer export. It retains the physical owner,
+execution nodes and inbox; rollback restores the original timer deadline. Commit
+rechecks complete persisted source/plan evidence, the target definition, epoch,
+checkpoint, native timestamp and recovery expiry after lock waits. Retirement
+remains enforced. Identical exported-handoff retries assert the original durable
+response. The local recovery work passes 146 Rust regressions and all 299 cases
+in the three continuity E2E suites on each of PostgreSQL and SQLite, including
+actual post-rollback human-input completion with one acceptance receipt and one
+handler result. Strict all-target and minimal embedded storage lint pass.
+
+This closes the observed migration/transfer interaction, while legacy recovery
+format/key rotation compatibility, live graph/invocation generation semantics,
+atomic provenance and source/child evidence races remain review gates alongside
+the transport/archive contracts above. A green draft build must not be treated
+as proof of those remaining contracts.

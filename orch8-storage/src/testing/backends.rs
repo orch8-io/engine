@@ -370,31 +370,60 @@ impl TestBackend {
     /// authority or worker-admission condition the scenario intends to test.
     #[cfg(feature = "artifacts-local")]
     pub async fn sqlite_and_postgres_with_artifacts() -> Vec<Self> {
-        let sqlite = SqliteStorage::in_memory()
-            .await
-            .expect("in-memory SQLite storage")
-            .with_artifact_store(Arc::new(crate::artifacts::ObjectArtifactStore::memory()));
-        let out = vec![Self {
-            kind: BackendKind::Sqlite,
-            raw: RawPool::Sqlite(sqlite.pool().clone()),
-            storage: Arc::new(sqlite),
+        let kinds = &[
+            BackendKind::Sqlite,
             #[cfg(feature = "postgres")]
-            schema: None,
-        }];
-        #[cfg(feature = "postgres")]
-        let mut out = out;
-        #[cfg(feature = "postgres")]
-        if let Some(TestPostgres { storage, schema }) = TestPostgres::fresh().await {
-            let storage = storage
-                .with_artifact_store(Arc::new(crate::artifacts::ObjectArtifactStore::memory()));
-            out.push(Self {
-                kind: BackendKind::Postgres,
-                raw: RawPool::Postgres(storage.pool().clone()),
-                storage: Arc::new(storage),
-                schema: Some(schema),
-            });
+            BackendKind::Postgres,
+        ];
+        let mut out = Vec::new();
+        for &kind in kinds {
+            if let Some(backend) = Self::open_with_artifacts(kind).await {
+                out.push(backend);
+            }
         }
         out
+    }
+
+    /// Open an isolated artifact-capable matrix leg, retaining encryption and
+    /// schema ownership exactly as in `open`.
+    #[cfg(feature = "artifacts-local")]
+    pub async fn open_with_artifacts(kind: BackendKind) -> Option<Self> {
+        let base = match kind {
+            BackendKind::Sqlite | BackendKind::EncryptedSqlite => {
+                let storage = SqliteStorage::in_memory()
+                    .await
+                    .expect("in-memory SQLite storage")
+                    .with_artifact_store(Arc::new(crate::artifacts::ObjectArtifactStore::memory()));
+                Self {
+                    kind: BackendKind::Sqlite,
+                    raw: RawPool::Sqlite(storage.pool().clone()),
+                    storage: Arc::new(storage),
+                    #[cfg(feature = "postgres")]
+                    schema: None,
+                }
+            }
+            #[cfg(feature = "postgres")]
+            BackendKind::Postgres | BackendKind::EncryptedPostgres => {
+                let TestPostgres { storage, schema } = TestPostgres::fresh().await?;
+                let storage = storage
+                    .with_artifact_store(Arc::new(crate::artifacts::ObjectArtifactStore::memory()));
+                Self {
+                    kind: BackendKind::Postgres,
+                    raw: RawPool::Postgres(storage.pool().clone()),
+                    storage: Arc::new(storage),
+                    schema: Some(schema),
+                }
+            }
+            #[cfg(not(feature = "postgres"))]
+            BackendKind::Postgres | BackendKind::EncryptedPostgres => {
+                panic!("orch8-storage was built without the postgres feature")
+            }
+        };
+        Some(if kind.is_encrypted() {
+            base.encrypted(kind)
+        } else {
+            base
+        })
     }
 
     /// `"sqlite"`, `"postgres"`, ... for assertion messages.
@@ -586,6 +615,9 @@ impl Drop for PgSchema {
 /// `sqlite`, `postgres`, `encrypted_sqlite`, `encrypted_postgres`.
 #[macro_export]
 macro_rules! backend_test {
+    (artifacts = true, $(#[$meta:meta])* async fn $name:ident($b:ident) $body:block) => {
+        $crate::backend_test!(@matrix open_with_artifacts [sqlite,postgres,encrypted_sqlite,encrypted_postgres] [$(#[$meta])*] $name $b $body);
+    };
     ($(#[$meta:meta])* async fn $name:ident($b:ident) $body:block) => {
         $crate::backend_test!(
             kinds = [sqlite, postgres, encrypted_sqlite, encrypted_postgres],
@@ -593,19 +625,21 @@ macro_rules! backend_test {
         );
     };
     (kinds = [$($kind:ident),+ $(,)?], $(#[$meta:meta])* async fn $name:ident($b:ident) $body:block) => {
+        $crate::backend_test!(@matrix open [$($kind),+] [$(#[$meta])*] $name $b $body);
+    };
+    (@matrix $factory:ident [$($kind:ident),+] [$($attr:tt)*] $name:ident $b:ident $body:block) => {
         #[allow(non_snake_case)]
         mod $name {
-            #[allow(unused_imports)]
-            use super::*;
-            $crate::backend_test!(@legs [$(#[$meta])*] [$($kind),+] $b $body);
+            #[allow(unused_imports)] use super::*;
+            $crate::backend_test!(@legs $factory [$($attr)*] [$($kind),+] $b $body);
         }
     };
-    (@legs [$($attr:tt)*] [] $b:ident $body:block) => {};
-    (@legs [$($attr:tt)*] [$kind:ident $(, $rest:ident)*] $b:ident $body:block) => {
+    (@legs $factory:ident [$($attr:tt)*] [] $b:ident $body:block) => {};
+    (@legs $factory:ident [$($attr:tt)*] [$kind:ident $(, $rest:ident)*] $b:ident $body:block) => {
         #[tokio::test]
         $($attr)*
         async fn $kind() {
-            let Some($b) = $crate::testing::backends::TestBackend::open(
+            let Some($b) = $crate::testing::backends::TestBackend::$factory(
                 $crate::backend_test!(@kind $kind),
             )
             .await
@@ -614,7 +648,7 @@ macro_rules! backend_test {
             };
             $body
         }
-        $crate::backend_test!(@legs [$($attr)*] [$($rest),*] $b $body);
+        $crate::backend_test!(@legs $factory [$($attr)*] [$($rest),*] $b $body);
     };
     (@kind sqlite) => { $crate::testing::backends::BackendKind::Sqlite };
     (@kind postgres) => { $crate::testing::backends::BackendKind::Postgres };

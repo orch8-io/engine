@@ -466,6 +466,19 @@ pub async fn migration_incompatibilities(
     instance: &TaskInstance,
     target: &SequenceDefinition,
 ) -> Result<Vec<String>, EngineError> {
+    let blocks = merged_blocks(storage, instance.id, target).await?;
+    let tree = storage.get_execution_tree(instance.id).await?;
+    Ok(migration_snapshot_incompatibilities(
+        instance, &blocks, &tree,
+    ))
+}
+
+/// Validate the exact recovery snapshot that will be rechecked at commit.
+pub fn migration_snapshot_incompatibilities(
+    instance: &TaskInstance,
+    blocks: &[BlockDefinition],
+    tree: &[ExecutionNode],
+) -> Vec<String> {
     use std::collections::HashMap;
 
     type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>)>;
@@ -477,14 +490,12 @@ pub async fn migration_incompatibilities(
         }
     }
 
-    let blocks = merged_blocks(storage, instance.id, target).await?;
     let mut index = Index::new();
-    walk(&blocks, None, &mut index);
+    walk(blocks, None, &mut index);
 
-    let tree = storage.get_execution_tree(instance.id).await?;
     let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
     let mut problems = Vec::new();
-    for node in &tree {
+    for node in tree {
         let live = matches!(
             node.state,
             NodeState::Pending | NodeState::Running | NodeState::Waiting
@@ -529,7 +540,7 @@ pub async fn migration_incompatibilities(
     }
     problems.sort();
     problems.dedup();
-    Ok(problems)
+    problems
 }
 
 fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {

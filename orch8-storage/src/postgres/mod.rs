@@ -29,6 +29,7 @@ mod externalized_snapshot;
 mod federation;
 mod instances;
 mod kv_state;
+mod local_migration;
 mod misc;
 mod mobile_access;
 mod mobile_sync;

@@ -5886,3 +5886,44 @@ downgrade. All four controlled scenarios refuse stale authority/history loss
 after the wait. The final test orchestration passes strict lint. SQLite-only
 embedded-feature lint, formatting, documentation and whitespace checks pass.
 The DME196 migration/retry E2E work and broader transfer/archive gates remain open.
+
+
+DME196 local recovery follow-up (work in progress): live migration now prepares a
+bounded local source snapshot without a transfer cut, owner change, or physical
+retirement. A separate purpose-bound signed/encrypted envelope authenticates the
+plan, tenant, continuity, physical instance, original epoch, source definition,
+checkpoint and expiry. Its stable create-only artifact has a durable independent
+expiry cleanup reservation before upload. Rollback authenticates both the bytes
+and the complete stored reference; a bare matching artifact hash is insufficient.
+
+Commit locks continuity, native instance and plan; checks the exact target
+sequence definition, native timestamp, latest checkpoint and a canonical digest
+of the complete raw persisted plan/source evidence. Encryption decorators retain
+that raw digest while opening source fields. Native execution nodes and queued
+inputs remain in place; rollback restores the original absolute timer deadline.
+No retirement guard is relaxed. PostgreSQL child-row locks protect existing
+outputs, nodes, externalized payloads, checkpoints and effect receipts while the
+final evidence is checked. Insert/callback races and generation semantics still
+need their separate broader review.
+
+Local verification: 16 HTTP cases pass across plain/encrypted SQLite/PostgreSQL,
+including signed recovery with node/input/deadline preservation, changed source
+context, newer paused target context and tampered signature metadata. Storage
+snapshot cases (20), migration storage cases (14), compensation-start cases (56)
+and effect transfer cases (40) pass. The latter now assert export itself freezes
+authority, retired sources reject forward state writes, and direct provider entry
+still fails. The new stale-evidence cases change output, execution tree, plan
+payload or target definition without advancing native updated_at; each refuses
+commit without advancing the owner/checkpoint or retiring the instance.
+
+The stricter transition metadata/version validation and final expiry-after-wait
+fencing pass the complete 146-case Rust regression run and strict all-target
+Clippy across storage, engine and API. The three previously failing TypeScript
+suites pass 299 cases per backend with fresh PostgreSQL/SQLite suite databases
+(239 unchanged cases plus the final 60-case migration suite rerun). The rollback
+case now delivers a real human response, reaches completion, preserves all prior
+output history and produces exactly one acceptance receipt and one handler
+result. TypeScript checking, minimal embedded storage lint and formatting pass. Legacy rollback envelope/key
+rotation compatibility, atomic provenance, worker completion integration and the
+other transport/archive merge gates remain open. This follow-up is not evidence
+that PR365 is ready to merge.

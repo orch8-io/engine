@@ -57,6 +57,7 @@ mod federation;
 mod helpers;
 mod instances;
 mod kv_state;
+mod local_migration;
 mod memory;
 mod misc;
 mod mobile_execution;

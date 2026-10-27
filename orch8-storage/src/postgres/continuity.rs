@@ -707,6 +707,13 @@ impl crate::ContinuityStore for PostgresStorage {
         .await
     }
 
+    async fn prepare_local_migration_snapshot(
+        &self,
+        request: &crate::local_migration::LocalMigrationSnapshotRequest,
+    ) -> Result<crate::local_migration::LocalMigrationSnapshotCapture, StorageError> {
+        super::local_migration::prepare(self, request).await
+    }
+
     async fn capture_capsule_cut(
         &self,
         request: &crate::capsule_export::CapsuleCutRequest,
@@ -2009,17 +2016,23 @@ impl crate::ContinuityStore for PostgresStorage {
             expected_execution,
             next_execution,
             expected_instance_state,
+            expected_instance_updated_at: _,
+            expected_checkpoint_id: _,
+            expected_source_fingerprint: _,
+            expected_target_sequence: _,
             next_instance_state,
+            next_fire_at,
             next_sequence_id,
             next_context,
             checkpoint,
             forbid_effects_epoch,
         } = transition;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        transition.validate()?;
+        let mut tx = self.pool.begin().await?;
+        if !super::local_migration::lock_transition(&mut tx, &transition).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         if let Some(epoch) = forbid_effects_epoch {
             let blocked: bool = sqlx::query_scalar(
                 "SELECT EXISTS(
@@ -2073,7 +2086,7 @@ impl crate::ContinuityStore for PostgresStorage {
         .map_err(|error| StorageError::Query(error.to_string()))?;
         let instance = sqlx::query(
             "UPDATE task_instances
-             SET sequence_id=$1, context=$2, state=$3, next_fire_at=NULL, updated_at=$4
+             SET sequence_id=$1, context=$2, state=$3, next_fire_at=$8, claimed_at=NULL, updated_at=$4
              WHERE id=$5 AND tenant_id=$6 AND state=$7",
         )
         .bind(next_sequence_id.into_uuid())
@@ -2083,6 +2096,7 @@ impl crate::ContinuityStore for PostgresStorage {
         .bind(expected_execution.current_instance_id.into_uuid())
         .bind(tenant_id.as_str())
         .bind(state_name(expected_instance_state)?)
+        .bind(next_fire_at)
         .execute(&mut *tx)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
@@ -2095,11 +2109,7 @@ impl crate::ContinuityStore for PostgresStorage {
                 .map_err(|error| StorageError::Query(error.to_string()))?;
             return Ok(false);
         }
-        sqlx::query("DELETE FROM execution_tree WHERE instance_id=$1")
-            .bind(expected_execution.current_instance_id.into_uuid())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        // In-place migration keeps native nodes and suspension identities.
         sqlx::query(
             "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
              VALUES ($1,$2,$3,$4)",

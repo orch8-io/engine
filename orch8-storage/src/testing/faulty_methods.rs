@@ -479,6 +479,7 @@ fault_impl! {
         async fn import_capsule_snapshot(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn import_capsule_recovery(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint, effects: Option<&crate::portable_effects::CapsuleEffectImport>) -> Result<InstanceId, StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId, imported_at: DateTime<Utc>) -> Result<InstanceId, StorageError>;
+        async fn prepare_local_migration_snapshot(&self, request: &crate::local_migration::LocalMigrationSnapshotRequest) -> Result<crate::local_migration::LocalMigrationSnapshotCapture,StorageError>;
         async fn capture_capsule_cut(&self, request: &crate::capsule_export::CapsuleCutRequest) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError>;
         async fn seal_capsule_cut(&self, tenant: &TenantId, id: CapsuleId, manifest: &CapsuleManifest, sealed: &[u8]) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError>;
         async fn abort_preparing_capsule_cut(&self, tenant: &TenantId, id: CapsuleId) -> Result<bool, StorageError>;

@@ -6,6 +6,7 @@ mod compensation_start;
 mod compensation_update;
 mod current_outputs;
 mod effect_attempt;
+pub mod local_migration;
 pub use compensation_start::CompensationStart;
 mod effect_dispatch;
 mod effect_receipts;
@@ -4551,6 +4552,18 @@ pub trait ContinuityStore: Send + Sync + 'static {
         Err(StorageError::Unsupported("portable effect guards".into()))
     }
 
+    /// Read a bounded local migration recovery point without changing native
+    /// or continuity authority. Registers expiry cleanup before artifact I/O.
+    async fn prepare_local_migration_snapshot(
+        &self,
+        request: &crate::local_migration::LocalMigrationSnapshotRequest,
+    ) -> Result<crate::local_migration::LocalMigrationSnapshotCapture, StorageError> {
+        let _ = request;
+        Err(StorageError::Unsupported(
+            "local migration recovery snapshots".into(),
+        ))
+    }
+
     /// Capture one consistent source state and revoke source admission before
     /// any artifact publication. Retries return the durable original cut.
     async fn capture_capsule_cut(
@@ -4956,7 +4969,14 @@ pub struct LiveMigrationTransition<'a> {
     pub expected_execution: &'a ContinuityExecution,
     pub next_execution: &'a ContinuityExecution,
     pub expected_instance_state: orch8_types::instance::InstanceState,
+    /// Native version captured with the local recovery point (apply), or the
+    /// original applied timestamp (rollback). State alone cannot fence edits.
+    pub expected_instance_updated_at: DateTime<Utc>,
+    pub expected_checkpoint_id: Uuid,
+    pub expected_source_fingerprint: &'a str,
+    pub expected_target_sequence: &'a SequenceDefinition,
     pub next_instance_state: orch8_types::instance::InstanceState,
+    pub next_fire_at: Option<DateTime<Utc>>,
     pub next_sequence_id: SequenceId,
     pub next_context: &'a orch8_types::context::ExecutionContext,
     pub checkpoint: &'a orch8_types::checkpoint::Checkpoint,

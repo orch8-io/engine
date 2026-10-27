@@ -709,14 +709,37 @@ describe("Continuity Migrations & What-If", () => {
       to_sequence_id: createdTarget.id,
       to_version: target.version,
     });
+    const beforeMigrationOutputs = await client.getOutputs(instance.id);
     await client.applyContinuityMigration(plan.id, { tenant_id: tenantId });
     const rolledBack = await client.rollbackContinuityMigration(plan.id, {
       tenant_id: tenantId,
     });
     assert.equal(rolledBack.state, "rolled_back");
     const afterInstance = await client.getInstance(instance.id);
-    assert.equal((afterInstance as any).sequence_id, sequence.id);
+    assert.equal(afterInstance.sequence_id, sequence.id);
     assert.equal(afterInstance.state, "waiting");
+    assert.deepEqual(afterInstance.context?.data, { keep: "original" });
+    const beforeResponseOutputs = await client.getOutputs(instance.id);
+    assert.deepEqual(beforeResponseOutputs, beforeMigrationOutputs);
+    // Acceptance appends a durable gate receipt and one handler result. Check
+    // them separately so a replayed handler cannot hide among bookkeeping.
+    await client.sendCustomSignal(instance.id, "human_input:gate", { value: "continue" });
+    await client.waitForState(instance.id, "completed");
+    const outputs = await client.getOutputs(instance.id);
+    const beforeIds = new Set(beforeResponseOutputs.map((output) => output.id));
+    const appended = outputs.filter((output) => !beforeIds.has(output.id));
+    assert.equal(appended.length, 2, JSON.stringify(appended));
+    assert.ok(appended.every((output) => output.block_id === "gate"));
+    const receipts = appended.filter(({ output }) =>
+      output !== null && typeof output === "object" && "_orch8_human_gate" in output
+    );
+    assert.equal(receipts.length, 1);
+    assert.ok(receipts[0]);
+    assert.deepEqual(receipts[0].output, { value: "continue", _orch8_human_gate: true });
+    const handlerResults = appended.filter(({ output }) =>
+      output !== null && typeof output === "object" && "type" in output && output.type === "human_review"
+    );
+    assert.equal(handlerResults.length, 1);
   });
 
   it("rollback advances the epoch again", async () => {
