@@ -40,3 +40,5 @@ cases pass against the exact isolated server and PostgreSQL. Strict all-target
 Clippy passes across storage, engine, API, gRPC, CLI and mobile. Formatting,
 TypeScript typecheck and documentation checks pass. The prerequisite recovery
 and source-fence PRs and this change still require their own CI/merge proofs.
+
+The recovery OpenAPI repair is included. The combined branch passes all 367 API library tests, all 16 HTTP safety cases and strict all-target API Clippy. This synchronization changes documentation and generated API contracts; runtime handler bodies and mutation guards are unchanged.
