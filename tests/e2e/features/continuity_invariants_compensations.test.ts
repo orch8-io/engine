@@ -877,6 +877,18 @@ describe("Continuity Compensation Runs", () => {
       assert.ok(plan.hazards.some((h: string) => h.startsWith("NO_COMPENSATION_RULE:charge:")));
     });
 
+    it("preview preserves an in-flight effect as a hazard before its worker settles", async () => {
+      const setup = await compensableExecution("comp-preview-in-flight", { compensation: null });
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects.length, 1);
+      assert.equal(effects[0]!.state, "dispatched");
+      const plan = await client.previewContinuityCompensation(setup.execution.continuity_id, {
+        tenant_id: setup.tenantId,
+      });
+      assert.deepEqual(plan.steps, []);
+      assert.ok(plan.hazards.includes(`IN_FLIGHT_EFFECT_MUST_BE_SETTLED:charge:${effects[0]!.id}`));
+    });
+
     it("preview surfaces an UNKNOWN_EFFECT_MUST_BE_RESOLVED hazard for unresolved effects", async () => {
       const setup = await compensableExecution("comp-preview-unknown", { compensation: null });
       const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);

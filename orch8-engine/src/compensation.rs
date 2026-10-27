@@ -214,15 +214,17 @@ pub fn build_compensation_plan_from_effects(
             });
         }
     }
-    for receipt in effects
-        .iter()
-        .filter(|receipt| receipt.state == EffectState::Unknown)
-    {
-        hazards.push(format!(
-            "UNKNOWN_EFFECT_MUST_BE_RESOLVED:{}:{}",
-            receipt.block_id.as_str(),
-            receipt.id
-        ));
+    for receipt in effects {
+        let reason = match receipt.state {
+            EffectState::Planned | EffectState::Prepared => "PENDING_EFFECT_MUST_BE_SETTLED",
+            EffectState::Dispatched => "IN_FLIGHT_EFFECT_MUST_BE_SETTLED",
+            EffectState::Unknown => "UNKNOWN_EFFECT_MUST_BE_RESOLVED",
+            EffectState::Committed
+            | EffectState::Verified
+            | EffectState::Compensated
+            | EffectState::Abandoned => continue,
+        };
+        hazards.push(format!("{reason}:{}:{}", receipt.block_id, receipt.id));
     }
     hazards.sort();
     Ok(CompensationPlan { steps, hazards })
@@ -588,6 +590,38 @@ mod tests {
             assert_eq!(
                 plan.steps.iter().map(|s| s.effect_id).collect::<Vec<_>>(),
                 vec![second.id, first.id]
+            );
+        }
+    }
+    #[test]
+    fn all_unsettled_effect_states_remain_visible_as_compensation_hazards() {
+        let receipts = [
+            receipt("planned", EffectState::Planned),
+            receipt("prepared", EffectState::Prepared),
+            receipt("dispatched", EffectState::Dispatched),
+            receipt("unknown", EffectState::Unknown),
+            receipt("committed", EffectState::Committed),
+            receipt("verified", EffectState::Verified),
+            receipt("compensated", EffectState::Compensated),
+            receipt("abandoned", EffectState::Abandoned),
+        ];
+        let plan =
+            build_compensation_plan(&receipts, &[rule("committed"), rule("verified")]).unwrap();
+        assert_eq!(plan.steps.len(), 2);
+        assert_eq!(
+            plan.hazards.len(),
+            4,
+            "unsettled work must not disappear from a compensation plan"
+        );
+        for (prefix, effect) in [
+            ("PENDING_EFFECT_MUST_BE_SETTLED", &receipts[0]),
+            ("PENDING_EFFECT_MUST_BE_SETTLED", &receipts[1]),
+            ("IN_FLIGHT_EFFECT_MUST_BE_SETTLED", &receipts[2]),
+            ("UNKNOWN_EFFECT_MUST_BE_RESOLVED", &receipts[3]),
+        ] {
+            assert!(
+                plan.hazards
+                    .contains(&format!("{prefix}:{}:{}", effect.block_id, effect.id))
             );
         }
     }

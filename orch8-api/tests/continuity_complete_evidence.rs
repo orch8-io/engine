@@ -18,8 +18,24 @@ use orch8_types::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-#[allow(clippy::too_many_lines)] // one fixture seeds a full history and its late unsafe evidence
 async fn fixture(compensate: bool) -> (Arc<SqliteStorage>, ContinuityExecution, RuntimeId) {
+    let states: Vec<_> = (0..10_022)
+        .map(|ordinal| {
+            if ordinal < 10_000 || ordinal == 10_021 {
+                EffectState::Committed
+            } else {
+                EffectState::Unknown
+            }
+        })
+        .collect();
+    fixture_with_states(compensate, &states).await
+}
+
+#[allow(clippy::too_many_lines)] // one fixture binds ownership/definition to caller-selected durable evidence
+async fn fixture_with_states(
+    compensate: bool,
+    states: &[EffectState],
+) -> (Arc<SqliteStorage>, ContinuityExecution, RuntimeId) {
     let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let mut sequence = SequenceBuilder::new("complete-evidence")
         .step("charge", "noop")
@@ -82,7 +98,7 @@ async fn fixture(compensate: bool) -> (Arc<SqliteStorage>, ContinuityExecution, 
             .await
             .unwrap();
     }
-    for ordinal in 0..10_022_u128 {
+    for (ordinal, state) in (0_u128..).zip(states.iter().copied()) {
         let receipt = EffectReceipt {
             id: EffectId::from_uuid(uuid::Uuid::from_u128(ordinal + 1)),
             tenant_id: owner.tenant_id.clone(),
@@ -91,11 +107,7 @@ async fn fixture(compensate: bool) -> (Arc<SqliteStorage>, ContinuityExecution, 
             instance_id: instance.id,
             block_id: BlockId::new("charge"),
             kind: EffectKind::Worker,
-            state: if ordinal < 10_000 || ordinal == 10_021 {
-                EffectState::Committed
-            } else {
-                EffectState::Unknown
-            },
+            state,
             destination_fingerprint: "payments".into(),
             request_sha256: if ordinal == 10_021 {
                 "request-10000".into()
@@ -369,4 +381,102 @@ async fn compensation_plan_includes_late_commits_and_late_unknown_hazards() {
         .unwrap();
     assert_eq!(saved["steps"], created["steps"]);
     assert_eq!(saved["hazards"], plan["hazards"]);
+}
+
+async fn post_value(
+    server: &orch8_api::test_harness::BackendTestServer,
+    path: &str,
+    body: &Value,
+) -> Value {
+    reqwest::Client::new()
+        .post(format!("{}{path}", server.base_url))
+        .json(body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn complete_single_rollback(
+    server: &orch8_api::test_harness::BackendTestServer,
+    owner: &ContinuityExecution,
+    run: &Value,
+) -> Value {
+    let id = run["id"].as_str().unwrap();
+    let claimed = post_value(
+        server,
+        &format!("/api/v1/continuity/compensations/{id}/claim"),
+        &json!({"tenant_id":owner.tenant_id,"worker_id":"compensator","lease_seconds":60}),
+    )
+    .await;
+    assert_eq!(
+        claimed["plan"]["effect_id"],
+        run["steps"][0]["plan"]["effect_id"]
+    );
+    post_value(
+        server,
+        &format!(
+            "/api/v1/continuity/compensations/{id}/steps/{}/complete",
+            claimed["plan"]["effect_id"].as_str().unwrap()
+        ),
+        &json!({"tenant_id":owner.tenant_id,"worker_id":"compensator"}),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn unsettled_work_prevents_clean_completion_and_can_be_compensated_after_settlement() {
+    let (storage, owner, _) = fixture_with_states(
+        true,
+        &[
+            EffectState::Committed,
+            EffectState::Dispatched,
+            EffectState::Planned,
+            EffectState::Prepared,
+        ],
+    )
+    .await;
+    let server = spawn_test_server_on(storage, None).await;
+    let path = format!(
+        "/api/v1/continuity/executions/{}/compensations",
+        owner.continuity_id
+    );
+    let scope = json!({"tenant_id":owner.tenant_id});
+    let run = post_value(&server, &path, &scope).await;
+    assert_eq!(run["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(run["hazards"].as_array().unwrap().len(), 3);
+    let finished = complete_single_rollback(&server, &owner, &run).await;
+    assert_eq!(finished["state"], "completed_with_residuals");
+    assert_eq!(finished["residual_effects"].as_array().unwrap().len(), 3);
+    // The backend later confirms the in-flight outcome and abandons work that
+    // never dispatched. A new plan must compensate only the newly committed ID.
+    for (id, state) in [
+        (2, EffectState::Committed),
+        (3, EffectState::Abandoned),
+        (4, EffectState::Abandoned),
+    ] {
+        post_value(
+            &server,
+            &format!(
+                "/api/v1/continuity/effects/{}/resolve",
+                EffectId::from_uuid(uuid::Uuid::from_u128(id))
+            ),
+            &json!({"tenant_id":owner.tenant_id,"state":state}),
+        )
+        .await;
+    }
+    let resumed = post_value(&server, &path, &scope).await;
+    assert_eq!(resumed["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        resumed["steps"][0]["plan"]["effect_id"],
+        EffectId::from_uuid(uuid::Uuid::from_u128(2)).to_string()
+    );
+    assert!(resumed["hazards"].as_array().unwrap().is_empty());
+    let complete = complete_single_rollback(&server, &owner, &resumed).await;
+    assert_eq!(complete["state"], "completed");
+    assert!(complete["residual_effects"].as_array().unwrap().is_empty());
 }
