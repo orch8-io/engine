@@ -57,3 +57,5 @@ run response schemas; generic continuity registration preserves those typed
 operations. All 367 API unit tests pass, including route inventory and generated
 request/parameter/response contracts, alongside all 15 HTTP safety cases and
 strict all-target API Clippy. Runtime handler bodies are unchanged.
+
+The CI generated-client gate caught the expected OpenAPI fingerprint change. The representative Rust and JavaScript clients regenerate, compile/check and execute successfully; the regenerated contract fingerprint is updated and the complete generated-client gate passes locally.
