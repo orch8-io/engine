@@ -2261,3 +2261,47 @@ async fn sqlite_captured_guards_use_point_indexes() {
         "guard query coverage unexpectedly shrank: {queries}"
     );
 }
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_downgrade_dependencies_are_scoped_to_the_source_cut_schema() {
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let schema = b.pg_schema().unwrap();
+    let shadow = format!("orch8_shadow_{}", uuid::Uuid::new_v4().simple());
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA \"{shadow}\"; CREATE TABLE \"{shadow}\".physical_instance_retirements(id uuid); CREATE FUNCTION \"{shadow}\".enforce_captured_native_authority() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$; SET LOCAL search_path TO \"{schema}\",\"{shadow}\",public;")))
+        .execute(&mut *tx).await.unwrap();
+    let result = async {
+        sqlx::raw_sql(include_str!(
+            "../../migrations/down/131_captured_source_authority.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/down/130_physical_instance_retirements.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        sqlx::raw_sql(include_str!(
+            "../../migrations/down/129_capsule_source_cuts.sql"
+        ))
+        .execute(&mut *tx)
+        .await?;
+        let untouched: bool = sqlx::query_scalar(
+            "SELECT to_regclass($1) IS NOT NULL AND to_regprocedure($2) IS NOT NULL",
+        )
+        .bind(format!("{shadow}.physical_instance_retirements"))
+        .bind(format!("{shadow}.enforce_captured_native_authority()"))
+        .fetch_one(&mut *tx)
+        .await?;
+        Ok::<_, sqlx::Error>(untouched)
+    }
+    .await;
+    tx.rollback().await.unwrap();
+    assert!(
+        matches!(result, Ok(true)),
+        "downgrade consulted or changed an unrelated schema: {result:?}"
+    );
+}

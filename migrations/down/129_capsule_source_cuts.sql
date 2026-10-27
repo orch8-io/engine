@@ -2,7 +2,12 @@
 -- Serialize the emptiness check with capture, publication and history writers.
 LOCK TABLE continuity_executions, task_instances, capsule_source_cuts, capsule_artifact_retirements IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
- IF to_regclass('physical_instance_retirements') IS NOT NULL THEN
+ -- Resolve dependencies in the schema of the locked source-cut table.
+ -- A later search_path schema may contain an independent installation.
+ IF EXISTS (SELECT 1 FROM pg_class dependency
+            JOIN pg_class source ON source.oid='capsule_source_cuts'::regclass
+            WHERE dependency.relnamespace=source.relnamespace
+              AND dependency.relname='physical_instance_retirements') THEN
   RAISE EXCEPTION 'Roll back physical instance retirement migration first; source recording guards must survive';
  END IF;
  IF EXISTS(SELECT 1 FROM capsule_source_cuts LIMIT 1) OR EXISTS(SELECT 1 FROM capsule_artifact_retirements LIMIT 1) THEN
