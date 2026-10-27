@@ -194,6 +194,12 @@ pub enum ExecutionCmd {
         continuity_id: Uuid,
         request: PathBuf,
     },
+    /// Recover the currently active compensation run for an execution.
+    CompensationActive {
+        continuity_id: Uuid,
+        #[arg(long)]
+        tenant_id: String,
+    },
     /// Inspect a durable compensation run.
     CompensationGet {
         run_id: Uuid,
@@ -758,6 +764,13 @@ pub async fn run_execution(
                 format,
             )
             .await
+        }
+        ExecutionCmd::CompensationActive { continuity_id, tenant_id } => {
+            let response = client
+                .get(format!("{base}/continuity/executions/{continuity_id}/compensations/active"))
+                .query(&[("tenant_id", tenant_id)])
+                .send().await?;
+            print_response(response, format).await
         }
         ExecutionCmd::CompensationGet { run_id, tenant_id } => {
             let response = client

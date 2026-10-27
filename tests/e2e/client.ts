@@ -677,9 +677,13 @@ export class Orch8Client {
     );
   }
 
+  async getActiveContinuityCompensation(continuityId: string, tenantId: string): Promise<ApiResponse> {
+    return this.#get(`/continuity/executions/${continuityId}/compensations/active${toQuery({ tenant_id: tenantId })}`);
+  }
+
   async createContinuityCompensation(
     continuityId: string,
-    req: Record<string, unknown>,
+    req: { tenant_id: string; request_id?: string },
   ): Promise<ApiResponse> {
     return this.#post(`/continuity/executions/${continuityId}/compensations`, req);
   }

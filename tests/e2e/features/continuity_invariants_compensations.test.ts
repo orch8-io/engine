@@ -943,6 +943,53 @@ describe("Continuity Compensation Runs", () => {
   // ------------------------------------------------------------------
 
   describe("compensation run creation", () => {
+    it("recovers a durable creation intent after a discarded response and completion", async () => {
+      const setup = await committedCompensableExecution("comp-intent-replay");
+      const body = { tenant_id: setup.tenantId, request_id: uuid() };
+      await client.createContinuityCompensation(setup.execution.continuity_id, body);
+      const recovered = await client.createContinuityCompensation(setup.execution.continuity_id, body);
+      const active = await client.getActiveContinuityCompensation(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(active.id, recovered.id);
+      const claim = await client.claimContinuityCompensation(recovered.id, { tenant_id: setup.tenantId, worker_id: "intent-worker" });
+      const completed = await client.completeContinuityCompensation(recovered.id, claim.plan.effect_id, { tenant_id: setup.tenantId, worker_id: "intent-worker" });
+      assert.equal(completed.state, "completed");
+      const replay = await client.createContinuityCompensation(setup.execution.continuity_id, body);
+      assert.equal(replay.id, recovered.id);
+      assert.equal(replay.state, "completed");
+      assert.deepEqual(replay.steps, completed.steps);
+      await rejects(client.getActiveContinuityCompensation(setup.execution.continuity_id, setup.tenantId), 404);
+    });
+
+    it("coalesces simultaneous creation requests for one durable intent", async () => {
+      const setup = await committedCompensableExecution("comp-intent-race");
+      const body = { tenant_id: setup.tenantId, request_id: uuid() };
+      const [first, second] = await Promise.all([
+        client.createContinuityCompensation(setup.execution.continuity_id, body),
+        client.createContinuityCompensation(setup.execution.continuity_id, body),
+      ]);
+      assert.equal(first.id, second.id);
+      assert.deepEqual(first.steps, second.steps);
+      assert.equal((await client.getActiveContinuityCompensation(setup.execution.continuity_id, setup.tenantId)).id, first.id);
+    });
+
+    it("keeps distinct and foreign intents from replaying an active request", async () => {
+      const setup = await committedCompensableExecution("comp-intent-scope");
+      const request = uuid();
+      await client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId, request_id: request });
+      await rejects(client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId, request_id: uuid() }), 409);
+      await rejects(client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: tid("foreign-intent"), request_id: request }), 404);
+      await rejects(client.getActiveContinuityCompensation(setup.execution.continuity_id, tid("foreign-active")), 404);
+    });
+
+    it("recovers a legacy creation using the active-run lookup", async () => {
+      const setup = await committedCompensableExecution("comp-legacy-active");
+      await client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId });
+      await rejects(client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId }), 409);
+      const active = await client.getActiveContinuityCompensation(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(active.state, "planned");
+      assert.equal(active.steps.length, 1);
+    });
+
     it("stops forward work durably while accepting an in-flight worker outcome", async () => {
       const prefix = "comp-durable-fence";
       const setup = await compensableExecution(prefix, {

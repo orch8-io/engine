@@ -183,6 +183,10 @@ pub fn routes() -> Router<AppState> {
             "/continuity/executions/{id}/compensations",
             post(create_compensation_run),
         )
+        .route(
+            "/continuity/executions/{id}/compensations/active",
+            get(get_active_compensation_run),
+        )
         .route("/continuity/compensations/{id}", get(get_compensation_run))
         .route(
             "/continuity/compensations/{id}/claim",
@@ -5203,6 +5207,82 @@ struct CompensationScopeRequest {
     tenant_id: TenantId,
 }
 
+/// A request UUID is a durable intent identifier, never an authorization token.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateCompensationRequest {
+    tenant_id: TenantId,
+    request_id: Option<uuid::Uuid>,
+}
+
+fn compensation_request_run_id(
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+    request_id: uuid::Uuid,
+) -> CompensationRunId {
+    let mut digest = Sha256::new();
+    digest.update(b"orch8-compensation-request-v1\0");
+    digest.update((tenant_id.as_str().len() as u64).to_be_bytes());
+    digest.update(tenant_id.as_str().as_bytes());
+    digest.update(continuity_id.as_uuid().as_bytes());
+    digest.update(request_id.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.finalize()[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x80;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    CompensationRunId::from_uuid(uuid::Uuid::from_bytes(bytes))
+}
+
+async fn read_requested_compensation_run(
+    storage: &dyn orch8_storage::StorageBackend,
+    tenant_id: &TenantId,
+    continuity_id: ContinuityId,
+    requested_run_id: Option<CompensationRunId>,
+) -> Result<Option<CompensationRunRecord>, ApiError> {
+    let Some(id) = requested_run_id else {
+        return Ok(None);
+    };
+    let run = storage
+        .get_compensation_run(tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "compensation request"))?;
+    if run.as_ref().is_some_and(|record| {
+        record.id != id || record.tenant_id != *tenant_id || record.continuity_id != continuity_id
+    }) {
+        return Err(ApiError::Conflict(
+            "compensation request record scope mismatch".into(),
+        ));
+    }
+    Ok(run)
+}
+
+#[cfg(test)]
+mod compensation_request_tests {
+    use super::*;
+
+    #[test]
+    fn request_identity_is_stable_and_separates_tenant_continuity_and_intent() {
+        let tenant = TenantId::new("tenant-one").unwrap();
+        let other = TenantId::new("tenant-two").unwrap();
+        let continuity = ContinuityId::new();
+        let request = uuid::Uuid::new_v4();
+        let id = compensation_request_run_id(&tenant, continuity, request);
+        assert_eq!(
+            id,
+            compensation_request_run_id(&tenant, continuity, request)
+        );
+        assert_ne!(id, compensation_request_run_id(&other, continuity, request));
+        assert_ne!(
+            id,
+            compensation_request_run_id(&tenant, ContinuityId::new(), request)
+        );
+        assert_ne!(
+            id,
+            compensation_request_run_id(&tenant, continuity, uuid::Uuid::new_v4())
+        );
+    }
+}
+
 async fn compensation_plan(
     state: &AppState,
     tenant_id: &TenantId,
@@ -5269,13 +5349,58 @@ async fn create_compensation_run(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<ContinuityId>,
-    Json(body): Json<CompensationScopeRequest>,
+    Json(body): Json<CreateCompensationRequest>,
 ) -> Result<(StatusCode, Json<CompensationRunRecord>), ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let run_id = CompensationRunId::new();
+    let requested_id = body
+        .request_id
+        .map(|request| compensation_request_run_id(&tenant_id, id, request));
+    if let Some(run) =
+        read_requested_compensation_run(state.storage.as_ref(), &tenant_id, id, requested_id)
+            .await?
+    {
+        return Ok((StatusCode::OK, Json(run)));
+    }
+    let run_id = requested_id.unwrap_or_else(CompensationRunId::new);
+    match admit_compensation_run(&state, &tenant_id, id, run_id).await {
+        Ok(run) => Ok((StatusCode::CREATED, Json(run))),
+        Err(error) => {
+            // A concurrent winner or lost commit acknowledgement may have
+            // made this exact intent durable while planning/admission failed.
+            if let Some(run) = read_requested_compensation_run(
+                state.storage.as_ref(),
+                &tenant_id,
+                id,
+                Some(run_id),
+            )
+            .await?
+            {
+                return Ok((StatusCode::OK, Json(run)));
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn admit_compensation_run(
+    state: &AppState,
+    tenant_id: &TenantId,
+    id: ContinuityId,
+    run_id: CompensationRunId,
+) -> Result<CompensationRunRecord, ApiError> {
     for _ in 0..8 {
-        let (execution, instance, effects, plan) =
-            compensation_plan(&state, &tenant_id, id).await?;
+        if state
+            .storage
+            .get_active_compensation_run(tenant_id, id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "active compensation run"))?
+            .is_some()
+        {
+            return Err(ApiError::Conflict(
+                "this continuity execution already has an active compensation run".into(),
+            ));
+        }
+        let (execution, instance, effects, plan) = compensation_plan(state, tenant_id, id).await?;
         if !matches!(
             execution.state,
             OwnershipState::Owned | OwnershipState::Completed | OwnershipState::Compensating
@@ -5332,12 +5457,28 @@ async fn create_compensation_run(
                 error => ApiError::from_storage(error, "compensation run"),
             })?;
         if created {
-            return Ok((StatusCode::CREATED, Json(run)));
+            return Ok(run);
         }
     }
     Err(ApiError::Conflict(
         "compensation source kept changing; retry after it settles".into(),
     ))
+}
+
+async fn get_active_compensation_run(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<TenantQuery>,
+) -> Result<Json<CompensationRunRecord>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let run = state
+        .storage
+        .get_active_compensation_run(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "active compensation run"))?
+        .ok_or_else(|| ApiError::NotFound("active compensation run".into()))?;
+    Ok(Json(run))
 }
 
 async fn get_compensation_run(

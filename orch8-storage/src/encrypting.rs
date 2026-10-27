@@ -976,6 +976,10 @@ passthrough_impl! {
             let encrypted = self.encrypt_compensation_run(run)?;
             self.inner.create_compensation_run(&encrypted).await
         }
+        async fn get_active_compensation_run(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError> {
+            self.inner.get_active_compensation_run(tenant_id, continuity_id).await?
+                .map(|run| self.decrypt_compensation_run(run)).transpose()
+        }
         async fn get_compensation_run(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::CompensationRunId) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError> {
             self.inner
                 .get_compensation_run(tenant_id, id)

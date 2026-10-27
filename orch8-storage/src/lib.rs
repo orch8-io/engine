@@ -4793,6 +4793,19 @@ pub trait ContinuityStore: Send + Sync + 'static {
         run: &orch8_types::continuity_advanced::CompensationRunRecord,
     ) -> Result<bool, StorageError>;
 
+    /// The sole active run for a continuity, using the active-run unique
+    /// index. This permits recovery when a legacy creation response was lost.
+    async fn get_active_compensation_run(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError> {
+        let _ = (tenant_id, continuity_id);
+        Err(StorageError::Unsupported(
+            "active compensation lookup".into(),
+        ))
+    }
+
     async fn get_compensation_run(
         &self,
         tenant_id: &TenantId,

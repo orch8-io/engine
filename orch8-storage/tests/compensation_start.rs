@@ -266,3 +266,59 @@ orch8_storage::backend_test!(async fn compensation_fence_rejects_late_attempt_pr
     assert!(b.storage.ensure_effect_attempt(&effect,EffectId::new()).await.is_err());
     assert!(b.storage.get_effect_receipt(&owner.tenant_id,effect.id).await.unwrap().is_none());
 });
+
+orch8_storage::backend_test!(async fn active_compensation_lookup_tracks_states_and_preserves_encrypted_params(b) {
+    use orch8_types::continuity_advanced::{CompensationRunState,CompensationStepState};
+    let (owner,instance,mut effect,mut run)=fixture(b.storage.as_ref()).await;
+    run.steps[0].plan.verification=orch8_types::sequence::CompensationVerificationPolicy::Manual;
+    assert!(b.storage.get_active_compensation_run(&owner.tenant_id,owner.continuity_id).await.unwrap().is_none());
+    let effects=b.storage.collect_compensation_effects(&owner.tenant_id,owner.continuity_id).await.unwrap();
+    assert!(b.storage.begin_compensation_run(CompensationStart {run:&run,execution:&owner,instance:&instance,effects:&effects}).await.unwrap());
+    for state in [CompensationRunState::Planned,CompensationRunState::Running,CompensationRunState::AwaitingVerification] {
+        if state!=CompensationRunState::Planned {
+            let expected=run.version;run.version+=1;run.state=state;run.steps[0].attempt=1;
+            run.steps[0].state=if state==CompensationRunState::Running {CompensationStepState::Claimed} else {CompensationStepState::VerificationPending};
+            run.steps[0].lease_owner=(state==CompensationRunState::Running).then(||"reader-test".into());
+            run.steps[0].lease_expires_at=(state==CompensationRunState::Running).then(||Utc::now()+Duration::minutes(1));
+            assert!(b.storage.cas_compensation_run(&owner.tenant_id,expected,&run).await.unwrap());
+        }
+        let active=b.storage.get_active_compensation_run(&owner.tenant_id,owner.continuity_id).await.unwrap().unwrap();
+        assert_eq!(active.id,run.id);assert_eq!(active.state,state);assert_eq!(active.version,run.version);
+        assert_eq!(active.steps[0].plan.params,json!({"secret":"compensation-only"}));
+    }
+    assert!(b.storage.get_active_compensation_run(&orch8_types::ids::TenantId::new("foreign-tenant").unwrap(),owner.continuity_id).await.unwrap().is_none());
+    assert!(b.storage.get_active_compensation_run(&owner.tenant_id,ContinuityId::new()).await.unwrap().is_none());
+    effect.transition(EffectState::Compensated,Utc::now()).unwrap();
+    assert!(b.storage.cas_effect_receipt(&owner.tenant_id,effect.id,EffectState::Committed,&effect).await.unwrap());
+    let expected=run.version;run.version+=1;run.state=CompensationRunState::Completed;run.steps[0].state=CompensationStepState::Succeeded;run.completed_at=Some(Utc::now());
+    assert!(b.storage.cas_compensation_run(&owner.tenant_id,expected,&run).await.unwrap());
+    assert!(b.storage.get_active_compensation_run(&owner.tenant_id,owner.continuity_id).await.unwrap().is_none());
+    assert_eq!(b.storage.get_compensation_run(&owner.tenant_id,run.id).await.unwrap().unwrap().state,CompensationRunState::Completed);
+});
+
+orch8_storage::backend_test!(async fn compensation_lookups_reject_corrupt_scope_and_indexed_state(b) {
+    for (field,value) in [
+        ("tenant_id","foreign-tenant".to_owned()),
+        ("continuity_id",ContinuityId::new().to_string()),
+        ("id",uuid::Uuid::new_v4().to_string()),
+        ("state","completed".to_owned()),
+        ("version",String::new()),
+    ] {
+        let (owner,instance,_effect,run)=fixture(b.storage.as_ref()).await;
+        let effects=b.storage.collect_compensation_effects(&owner.tenant_id,owner.continuity_id).await.unwrap();
+        assert!(b.storage.begin_compensation_run(CompensationStart {run:&run,execution:&owner,instance:&instance,effects:&effects}).await.unwrap());
+        if b.kind.is_postgres() {
+            if field=="version" {
+                sqlx::query("UPDATE compensation_runs SET version=version+1 WHERE id=$1").bind(run.id.into_uuid()).execute(b.pg_pool()).await.unwrap();
+            } else {
+                sqlx::query("UPDATE compensation_runs SET record=jsonb_set(record,ARRAY[$1::text],to_jsonb($2::text)) WHERE id=$3").bind(field).bind(&value).bind(run.id.into_uuid()).execute(b.pg_pool()).await.unwrap();
+            }
+        } else if field=="version" {
+            sqlx::query("UPDATE compensation_runs SET version=version+1 WHERE id=?1").bind(run.id.to_string()).execute(b.sqlite_pool()).await.unwrap();
+        } else {
+            sqlx::query("UPDATE compensation_runs SET record=json_set(record,?1,?2) WHERE id=?3").bind(format!("$.{field}")).bind(&value).bind(run.id.to_string()).execute(b.sqlite_pool()).await.unwrap();
+        }
+        assert!(b.storage.get_active_compensation_run(&owner.tenant_id,owner.continuity_id).await.is_err(),"active lookup accepted inconsistent {field}");
+        assert!(b.storage.get_compensation_run(&owner.tenant_id,run.id).await.is_err(),"known-ID lookup accepted inconsistent {field}");
+    }
+});
