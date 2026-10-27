@@ -80,46 +80,6 @@ async fn source_admission(
     (admission, task)
 }
 
-async fn activate(
-    storage: &dyn StorageBackend,
-    source: &ContinuityExecution,
-    instance: &TaskInstance,
-    runtime: RuntimeId,
-) {
-    let next = ContinuityExecution {
-        current_instance_id: instance.id,
-        owner_runtime_id: runtime,
-        epoch: source.epoch.checked_next().unwrap(),
-        state: OwnershipState::Owned,
-        updated_at: Utc::now(),
-        ..source.clone()
-    };
-    if let Some(current) = storage
-        .get_continuity_execution(&source.tenant_id, source.continuity_id)
-        .await
-        .unwrap()
-    {
-        assert!(
-            storage
-                .cas_continuity_owner(
-                    &source.tenant_id,
-                    source.continuity_id,
-                    current.epoch,
-                    current.owner_runtime_id,
-                    &next
-                )
-                .await
-                .unwrap()
-        );
-    } else {
-        storage.create_continuity_execution(&next).await.unwrap();
-    }
-    storage
-        .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
-        .await
-        .unwrap();
-}
-
 async fn run_destination(
     storage: Arc<dyn StorageBackend>,
     instance: &TaskInstance,
@@ -459,7 +419,17 @@ async fn transfer(destination: Option<Arc<dyn StorageBackend>>, scenario: Scenar
     .await
     .unwrap();
     assert_no_unclaimed_entry(&destination, &imported, &owner).await;
-    activate(destination.as_ref(), &owner, &imported, runtime).await;
+    let activated = orch8_engine::capsule::activate_imported_capsule(
+        destination.as_ref(),
+        &owner.tenant_id,
+        signed.manifest.capsule_id,
+        runtime,
+        imported.id,
+        Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(activated.state, InstanceState::Scheduled);
     assert_no_unclaimed_entry(&source, &instance, &owner).await;
 
     if !ambiguous {

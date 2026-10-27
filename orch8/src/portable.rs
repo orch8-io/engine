@@ -180,6 +180,25 @@ impl Engine {
         Ok(instance)
     }
 
+    /// Accept and schedule an imported capsule after app/backend acknowledgement
+    /// of exclusive ownership. Repeated acknowledgement preserves current state.
+    pub async fn activate_portable_capsule(
+        &self,
+        capsule_id: orch8_types::continuity::CapsuleId,
+        destination_runtime_id: RuntimeId,
+        destination_instance_id: InstanceId,
+    ) -> Result<TaskInstance, Error> {
+        Ok(orch8_engine::capsule::activate_imported_capsule(
+            self.storage_backend().as_ref(),
+            self.tenant_id(),
+            capsule_id,
+            destination_runtime_id,
+            destination_instance_id,
+            Utc::now(),
+        )
+        .await?)
+    }
+
     /// Preflight permits pending ownership and exact accepted redelivery.
     /// The atomic storage import enforces immutable identity under concurrency.
     async fn check_import_identity(

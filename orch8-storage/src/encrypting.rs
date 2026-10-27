@@ -848,6 +848,7 @@ passthrough_impl! {
             }
             self.inner.import_capsule_recovery(capsule_id, destination_runtime_id, &sealed, &checkpoint, effects).await
         }
+        async fn activate_capsule_import(&self, tenant: &TenantId, capsule: orch8_types::continuity::CapsuleId, runtime: orch8_types::continuity::RuntimeId, instance: InstanceId, now: DateTime<Utc>) -> Result<(), StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId, imported_at: chrono::DateTime<chrono::Utc>) -> Result<orch8_types::ids::InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &orch8_types::ids::TenantId, capabilities: &orch8_types::continuity::RuntimeCapabilities) -> Result<(), StorageError>;

@@ -410,6 +410,48 @@ async fn portable_capsule_round_trip_is_verified_and_idempotent() {
         .expect("idempotent capsule redelivery");
     assert_eq!(redelivered.id, imported.id);
     assert_eq!(redelivered.state, InstanceState::Paused);
+    let capsule_id = capsule.signed_manifest.manifest.capsule_id;
+    assert!(
+        destination
+            .activate_portable_capsule(capsule_id, RuntimeId::new(), imported.id)
+            .await
+            .is_err()
+    );
+    let scheduled = destination
+        .activate_portable_capsule(capsule_id, destination_runtime, imported.id)
+        .await
+        .unwrap();
+    assert_eq!(scheduled.state, InstanceState::Scheduled);
+    for _ in 0..20 {
+        destination.tick_once().await.unwrap();
+        if destination.get_instance(imported.id).await.unwrap().state == InstanceState::Waiting {
+            break;
+        }
+    }
+    let waiting = destination.get_instance(imported.id).await.unwrap();
+    assert_eq!(waiting.state, InstanceState::Waiting);
+    let retried = destination
+        .activate_portable_capsule(capsule_id, destination_runtime, imported.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&waiting).unwrap(),
+        serde_json::to_value(&retried).unwrap()
+    );
+    let redelivered = destination
+        .import_portable_capsule(
+            &capsule,
+            destination_runtime,
+            Some(imported.id),
+            &trusted_keys,
+            &encryptor,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(waiting).unwrap(),
+        serde_json::to_value(redelivered).unwrap()
+    );
 }
 
 /// The agent preset includes the native durable agent stack and can execute a

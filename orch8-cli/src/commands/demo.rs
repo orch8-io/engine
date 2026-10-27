@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use orch8_engine::capsule::{
-    CapsuleExportRequest, CapsuleImportRequest, export_paused_capsule,
+    CapsuleExportRequest, CapsuleImportRequest, activate_imported_capsule, export_paused_capsule,
     verify_and_import_paused_capsule_bytes,
 };
 use orch8_storage::artifacts::ObjectArtifactStore;
@@ -530,47 +530,15 @@ async fn import_and_activate(
         destination_instance_id,
     )
     .await?;
-    let pending = storage
-        .get_continuity_execution(&signed.manifest.tenant_id, signed.manifest.continuity_id)
-        .await?
-        .context("capsule import did not retain pending ownership")?;
-    if pending.tenant_id != signed.manifest.tenant_id
-        || pending.continuity_id != signed.manifest.continuity_id
-        || pending.current_instance_id != instance.id
-        || pending.owner_runtime_id != signed.manifest.source_runtime_id
-        || pending.epoch != signed.manifest.epoch
-        || pending.state != OwnershipState::Transferring
-    {
-        bail!("imported capsule ownership is not pending activation");
-    }
-    let accepted = ContinuityExecution {
-        continuity_id: pending.continuity_id,
-        tenant_id: pending.tenant_id.clone(),
-        current_instance_id: instance.id,
-        owner_runtime_id: destination_runtime_id,
-        epoch: pending.epoch.checked_next()?,
-        state: OwnershipState::Owned,
-        updated_at: Utc::now(),
-    };
-    let claimed = storage
-        .cas_continuity_owner(
-            &pending.tenant_id,
-            pending.continuity_id,
-            pending.epoch,
-            pending.owner_runtime_id,
-            &accepted,
-        )
-        .await?;
-    if !claimed {
-        bail!("destination ownership changed concurrently");
-    }
-    storage
-        .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
-        .await?;
-    storage
-        .get_instance(instance.id)
-        .await?
-        .context("activated instance disappeared")
+    Ok(activate_imported_capsule(
+        storage,
+        &signed.manifest.tenant_id,
+        signed.manifest.capsule_id,
+        destination_runtime_id,
+        instance.id,
+        Utc::now(),
+    )
+    .await?)
 }
 
 fn random_key() -> [u8; 32] {

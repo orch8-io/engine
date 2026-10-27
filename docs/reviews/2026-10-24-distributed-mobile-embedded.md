@@ -4770,3 +4770,51 @@ Mobile activation still needs one transaction for accepting ownership and
 scheduling, with repeated activation preserving already progressed states.
 Pending event/wait/family portability, bounded source materialization, and the
 full principal/platform acceptance matrix remain required review work.
+
+### DME179 — atomic capsule activation and acknowledgement retries (in review)
+
+The public mobile roundtrip reproduced a delayed activation acknowledgement
+changing a legitimate `Waiting` execution back to `Scheduled`. The previous
+implementation also accepted ownership and scheduled the instance in separate
+commits, leaving an owned but unscheduled run after a crash or storage failure.
+
+A storage transaction now validates the persisted manifest and verified import
+proof for the requested tenant, capsule, runtime, and destination instance. It
+locks continuity ownership before the instance, matching effect dispatch and
+GC. Only the expected transferring source epoch may become the destination's
+next owned epoch. Ownership, location history, and initial scheduling commit
+together. A scheduling error rolls all three back. Initial activation requires
+a paused, unclaimed instance; SQLite also enforces the registered mobile
+account/catalog execution predicate.
+
+An exact accepted acknowledgement is a no-write operation, preserving scheduling,
+waits, manual pauses, completion/failure/cancellation, timestamps, and live
+claims. It cannot reverse a later ownership transfer. A missing verified import
+proof fails closed. Custom backends must implement the atomic operation;
+encryption and fault-injection decorators forward it.
+
+The Rust embeddable facade exposes `activate_portable_capsule`, and mobile
+activation uses the same storage operation with the mobile runtime's own tenant
+rather than inferring authority from the requested instance. Identity conflicts
+remain invalid mobile input while storage failures preserve their retryable
+error class. Mobile import redelivery now reports the persisted state; a second
+regression first reproduced a `"paused"` response for an already waiting run.
+
+Current validation: all 59 recovery storage cases pass, including all four plain
+and encrypted SQLite/PostgreSQL variants of concurrent activation, final-write
+rollback, claim/state preservation, and stale transfer refusal. SQLite reopen
+retains an acknowledged wait, and a registered account without catalog admission
+cannot be scheduled. The public mobile wait regression and actual Rust facade
+scheduler roundtrip pass. All 40 effect-transfer cases pass through
+the real atomic activation API. A fault injected after the activation commit
+simulates a lost acknowledgement; retry preserves a subsequently claimed run
+on every backend. All four mobile continuity cases, the public Rust facade
+roundtrip, and strict all-target Clippy pass. Freshly rebuilt bindings pass
+14 Node and 20 Python checks. Hosted gates remain required before merge.
+No migration is needed.
+
+Activation remains a trusted-host operation performed after app/backend
+acknowledgement of exclusive ownership. A local database cannot independently
+prove current ownership in another offline database. The atomic source export
+cut, complete wait/event/family portability, and scoped mobile import admission
+remain required follow-up work for the overall transfer contract.
