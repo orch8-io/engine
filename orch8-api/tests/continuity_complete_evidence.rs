@@ -19,11 +19,20 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 #[allow(clippy::too_many_lines)] // one fixture seeds a full history and its late unsafe evidence
-async fn fixture() -> (Arc<SqliteStorage>, ContinuityExecution, RuntimeId) {
+async fn fixture(compensate: bool) -> (Arc<SqliteStorage>, ContinuityExecution, RuntimeId) {
     let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
-    let sequence = SequenceBuilder::new("complete-evidence")
+    let mut sequence = SequenceBuilder::new("complete-evidence")
         .step("charge", "noop")
         .build();
+    if compensate {
+        let orch8_types::sequence::BlockDefinition::Step(step) = &mut sequence.blocks[0] else {
+            unreachable!()
+        };
+        step.compensation = Some(
+            serde_json::from_value(json!({"handler":"refund", "params":{"receipt_backed":true}}))
+                .unwrap(),
+        );
+    }
     storage.create_sequence(&sequence).await.unwrap();
     let instance = InstanceBuilder::for_sequence(&sequence)
         .state(InstanceState::Paused)
@@ -126,7 +135,7 @@ async fn resolve_unknowns(storage: &SqliteStorage, owner: &ContinuityExecution) 
 
 #[tokio::test]
 async fn manual_invariants_cannot_certify_a_safe_prefix_of_a_larger_ledger() {
-    let (storage, owner, _) = fixture().await;
+    let (storage, owner, _) = fixture(false).await;
     let server = spawn_test_server_on(storage.clone(), None).await;
     let response = reqwest::Client::new()
         .post(format!(
@@ -217,7 +226,7 @@ async fn manual_invariants_cannot_certify_a_safe_prefix_of_a_larger_ledger() {
 
 #[tokio::test]
 async fn handoff_preview_rejects_late_unknown_effects_and_reports_the_complete_count() {
-    let (storage, owner, destination) = fixture().await;
+    let (storage, owner, destination) = fixture(false).await;
     let server = spawn_test_server_on(storage, None).await;
     let response = reqwest::Client::new()
         .post(format!(
@@ -245,7 +254,7 @@ async fn handoff_preview_rejects_late_unknown_effects_and_reports_the_complete_c
 
 #[tokio::test]
 async fn handoff_admission_rechecks_late_uncertainty_after_a_valid_preview() {
-    let (storage, owner, destination) = fixture().await;
+    let (storage, owner, destination) = fixture(false).await;
     resolve_unknowns(&storage, &owner).await;
     let server = spawn_test_server_on(storage.clone(), None).await;
     let client = reqwest::Client::new();
@@ -293,4 +302,71 @@ async fn handoff_admission_rechecks_late_uncertainty_after_a_valid_preview() {
             .unwrap(),
         owner
     );
+}
+
+#[tokio::test]
+async fn compensation_plan_includes_late_commits_and_late_unknown_hazards() {
+    let (storage, owner, _) = fixture(true).await;
+    let server = spawn_test_server_on(storage, None).await;
+    let plan: Value = reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/continuity/executions/{}/compensations/preview",
+            server.base_url, owner.continuity_id
+        ))
+        .json(&json!({"tenant_id":owner.tenant_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        plan["steps"].as_array().unwrap().len(),
+        10_001,
+        "a late committed effect was omitted from compensation"
+    );
+    assert_eq!(
+        plan["hazards"].as_array().unwrap().len(),
+        21,
+        "late uncertainty must remain visible"
+    );
+    assert_eq!(
+        plan["steps"][0]["effect_id"],
+        EffectId::from_uuid(uuid::Uuid::from_u128(10_022)).to_string()
+    );
+    let created: Value = reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/continuity/executions/{}/compensations",
+            server.base_url, owner.continuity_id
+        ))
+        .json(&json!({"tenant_id":owner.tenant_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["steps"].as_array().unwrap().len(), 10_001);
+    assert_eq!(created["residual_effects"].as_array().unwrap().len(), 21);
+    let saved: Value = reqwest::Client::new()
+        .get(format!(
+            "{}/api/v1/continuity/compensations/{}",
+            server.base_url,
+            created["id"].as_str().unwrap()
+        ))
+        .query(&[("tenant_id", owner.tenant_id.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved["steps"], created["steps"]);
+    assert_eq!(saved["hazards"], plan["hazards"]);
 }

@@ -1299,6 +1299,14 @@ impl crate::ContinuityStore for SqliteStorage {
             .collect()
     }
 
+    async fn collect_compensation_effects(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<Vec<crate::CompensationEffect>, StorageError> {
+        super::effect_receipts::compensation(self, tenant_id, continuity_id).await
+    }
+
     async fn summarize_effect_receipts(
         &self,
         tenant_id: &TenantId,

@@ -8,8 +8,8 @@ mod effect_receipts;
 pub mod portable_effects;
 pub use effect_dispatch::EffectDispatchFence;
 pub use effect_receipts::{
-    EffectAtMostOnceAudit, EffectDuplicateWitness, EffectLedgerStatus, EffectReceiptCursor,
-    EffectReceiptPage,
+    CompensationEffect, EffectAtMostOnceAudit, EffectDuplicateWitness, EffectLedgerStatus,
+    EffectReceiptCursor, EffectReceiptPage,
 };
 mod mobile_access;
 pub use child_adoption::ChildAdoption;
@@ -4418,6 +4418,20 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<EffectReceipt>, StorageError>;
+
+    /// Read complete compensation evidence from one SELECT snapshot. Decode
+    /// raw rows incrementally and retain only compact committed/verified/unknown
+    /// records. Memory scales with the plan output, not unrelated raw history.
+    async fn collect_compensation_effects(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<Vec<CompensationEffect>, StorageError> {
+        let _ = (tenant_id, continuity_id);
+        Err(StorageError::Unsupported(
+            "complete compensation evidence".into(),
+        ))
+    }
 
     /// State counts over the complete ledger plus at most 16 unresolved and
     /// unknown witnesses, all from one backend snapshot. No prefix verdicts.

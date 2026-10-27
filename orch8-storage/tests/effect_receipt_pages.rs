@@ -187,7 +187,115 @@ orch8_storage::backend_test!(async fn complete_safety_queries_refuse_unclassifia
             .bind(receipt.id.into_uuid()).execute(pool).await.unwrap(); }
     }
     assert!(b.storage.summarize_effect_receipts(&receipt.tenant_id, receipt.continuity_id).await.is_err());
+    assert!(b.storage.collect_compensation_effects(&receipt.tenant_id, receipt.continuity_id).await.is_err());
     assert!(b.storage.audit_effect_at_most_once(&receipt.tenant_id, receipt.continuity_id, receipt.kind, None).await.is_err());
     let unrelated = b.storage.summarize_effect_receipts(&TenantId::unchecked("foreign"), receipt.continuity_id).await.unwrap();
     assert_eq!(unrelated.receipt_count, 0);
 });
+
+orch8_storage::backend_test!(async fn compensation_collection_preserves_late_outcomes_without_a_receipt_limit(b) {
+    let mut receipt = fixture(b.storage.as_ref()).await;
+    for _ in 0..10_001 {
+        receipt.id = EffectId::new();
+        b.storage.create_effect_receipt(&receipt).await.unwrap();
+    }
+    let mut expected = std::collections::BTreeSet::new();
+    for state in [EffectState::Committed, EffectState::Verified, EffectState::Unknown] {
+        receipt.id = EffectId::new(); receipt.state = state;
+        expected.insert(receipt.id);
+        b.storage.create_effect_receipt(&receipt).await.unwrap();
+    }
+    let effects = b.storage.collect_compensation_effects(&receipt.tenant_id, receipt.continuity_id).await.unwrap();
+    assert_eq!(effects.iter().map(|r| r.id).collect::<std::collections::BTreeSet<_>>(), expected);
+    assert_eq!(effects.len(), 3);
+    for (tenant, continuity) in [(TenantId::unchecked("foreign"), receipt.continuity_id), (receipt.tenant_id.clone(), ContinuityId::new())] {
+        assert!(b.storage.collect_compensation_effects(&tenant, continuity).await.unwrap().is_empty());
+    }
+});
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_compensation_collection_keeps_one_snapshot_during_concurrent_settlement() {
+    use orch8_storage::testing::backends::TestBackend;
+    let Some(b) = TestBackend::postgres().await else {
+        return;
+    };
+    let mut first = fixture(b.storage.as_ref()).await;
+    first.id = EffectId::from_uuid(uuid::Uuid::from_u128(1));
+    first.state = EffectState::Committed;
+    b.storage.create_effect_receipt(&first).await.unwrap();
+    let mut second = first.clone();
+    second.id = EffectId::from_uuid(uuid::Uuid::from_u128(2));
+    b.storage.create_effect_receipt(&second).await.unwrap();
+    let key = i64::from(uuid::Uuid::new_v4().as_fields().0 & 0x7fff_ffff);
+    // The view pauses the reader on its second row. Updating the underlying
+    // table while it is paused must not change the SELECT's original snapshot.
+    let ddl = sqlx::AssertSqlSafe(format!(
+        "ALTER TABLE effect_receipts RENAME TO compensation_snapshot_source;
+         CREATE FUNCTION compensation_snapshot_barrier(value UUID) RETURNS UUID LANGUAGE plpgsql AS $$
+         BEGIN IF value='{}'::UUID THEN PERFORM pg_advisory_xact_lock({key}); END IF; RETURN value; END $$;
+         CREATE VIEW effect_receipts AS SELECT compensation_snapshot_barrier(id) AS id,
+         tenant_id,continuity_id,record FROM compensation_snapshot_source;", second.id));
+    sqlx::raw_sql(ddl).execute(b.pg_pool()).await.unwrap();
+    let mut gate = b.pg_pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(key)
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let storage = b.storage.clone();
+    let tenant = first.tenant_id.clone();
+    let continuity = first.continuity_id;
+    let reader = tokio::spawn(async move {
+        storage
+            .collect_compensation_effects(&tenant, continuity)
+            .await
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let reached_barrier = loop {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=$1::bigint::oid AND NOT granted)")
+            .bind(key).fetch_one(b.pg_pool()).await.unwrap();
+        if waiting {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    second.state = EffectState::Unknown;
+    if reached_barrier {
+        sqlx::query(
+            "UPDATE compensation_snapshot_source SET state='unknown',record=$1 WHERE id=$2",
+        )
+        .bind(serde_json::to_value(&second).unwrap())
+        .bind(second.id.into_uuid())
+        .execute(b.pg_pool())
+        .await
+        .unwrap();
+    }
+    gate.rollback().await.unwrap();
+    if !reached_barrier {
+        reader.abort();
+    }
+    assert!(
+        reached_barrier,
+        "reader never reached the controlled snapshot barrier"
+    );
+    let effects = tokio::time::timeout(std::time::Duration::from_secs(10), reader)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(effects.len(), 2);
+    assert!(effects.iter().all(|r| r.state == EffectState::Committed));
+    let refreshed = b
+        .storage
+        .collect_compensation_effects(&first.tenant_id, first.continuity_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        refreshed.iter().find(|r| r.id == second.id).unwrap().state,
+        EffectState::Unknown
+    );
+}

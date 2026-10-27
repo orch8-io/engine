@@ -498,6 +498,7 @@ fault_impl! {
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &TenantId, next: &EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &TenantId, next: &EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<EffectReceipt>, StorageError>;
+        async fn collect_compensation_effects(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Vec<crate::CompensationEffect>, StorageError>;
         async fn summarize_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<crate::EffectLedgerStatus, StorageError>;
         async fn audit_effect_at_most_once(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, kind: orch8_types::continuity::EffectKind, candidate: Option<&orch8_types::continuity::EffectReceipt>) -> Result<crate::EffectAtMostOnceAudit, StorageError>;
         async fn page_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, after: Option<&crate::EffectReceiptCursor>, limit: u32) -> Result<crate::EffectReceiptPage, StorageError>;

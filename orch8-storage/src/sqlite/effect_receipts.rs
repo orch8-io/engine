@@ -139,3 +139,34 @@ pub(super) async fn status(
         serde_json::from_str(&row.get::<String, _>("unknown_sample"))?,
     )
 }
+
+/// A single SELECT retains one database snapshot through the whole stream;
+/// paginated independent reads could skip state changes between pages.
+pub(super) async fn compensation(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    continuity: ContinuityId,
+) -> Result<Vec<crate::CompensationEffect>, StorageError> {
+    use futures::TryStreamExt;
+    let mut rows = sqlx::query(
+        "SELECT id,record FROM effect_receipts WHERE tenant_id=?1 AND continuity_id=?2",
+    )
+    .bind(tenant.as_str())
+    .bind(continuity.to_string())
+    .fetch(&store.pool);
+    let mut effects = Vec::new();
+    while let Some(row) = rows.try_next().await? {
+        let id = EffectId::from_uuid(
+            row.try_get::<String, _>("id")?
+                .parse()
+                .map_err(|error: uuid::Error| StorageError::Constraint(error.to_string()))?,
+        );
+        let receipt: orch8_types::continuity::EffectReceipt =
+            decode(&row.get::<String, _>("record"))?;
+        crate::effect_receipts::validate(&receipt, tenant, continuity, id)?;
+        if crate::effect_receipts::compensation_relevant(receipt.state) {
+            effects.push(crate::CompensationEffect::from(&receipt));
+        }
+    }
+    Ok(effects)
+}
