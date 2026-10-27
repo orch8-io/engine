@@ -135,7 +135,7 @@ pub(crate) fn validate_known_states(invalid: i64) -> Result<(), StorageError> {
 }
 
 /// Minimal immutable planning fields. Raw receipt records are decoded one at a
-/// time; only actionable outcomes and uncertainty need retained plan evidence.
+/// time; actionable outcomes and all unsettled work remain plan evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompensationEffect {
     pub id: EffectId,
@@ -158,7 +158,10 @@ impl From<&EffectReceipt> for CompensationEffect {
 pub(crate) fn compensation_relevant(state: orch8_types::continuity::EffectState) -> bool {
     matches!(
         state,
-        orch8_types::continuity::EffectState::Committed
+        orch8_types::continuity::EffectState::Planned
+            | orch8_types::continuity::EffectState::Prepared
+            | orch8_types::continuity::EffectState::Dispatched
+            | orch8_types::continuity::EffectState::Committed
             | orch8_types::continuity::EffectState::Verified
             | orch8_types::continuity::EffectState::Unknown
     )

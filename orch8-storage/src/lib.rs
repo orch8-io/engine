@@ -4420,8 +4420,8 @@ pub trait ContinuityStore: Send + Sync + 'static {
     ) -> Result<Vec<EffectReceipt>, StorageError>;
 
     /// Read complete compensation evidence from one SELECT snapshot. Decode
-    /// raw rows incrementally and retain only compact committed/verified/unknown
-    /// records. Memory scales with the plan output, not unrelated raw history.
+    /// raw rows incrementally and retain compact actionable outcomes plus all
+    /// unsettled work. Memory scales with plan evidence, not raw history.
     async fn collect_compensation_effects(
         &self,
         tenant_id: &TenantId,

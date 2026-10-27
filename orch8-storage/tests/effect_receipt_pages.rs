@@ -195,6 +195,7 @@ orch8_storage::backend_test!(async fn complete_safety_queries_refuse_unclassifia
 
 orch8_storage::backend_test!(async fn compensation_collection_preserves_late_outcomes_without_a_receipt_limit(b) {
     let mut receipt = fixture(b.storage.as_ref()).await;
+    receipt.state = EffectState::Abandoned;
     for _ in 0..10_001 {
         receipt.id = EffectId::new();
         b.storage.create_effect_receipt(&receipt).await.unwrap();
@@ -299,3 +300,19 @@ async fn postgres_compensation_collection_keeps_one_snapshot_during_concurrent_s
         EffectState::Unknown
     );
 }
+
+orch8_storage::backend_test!(async fn compensation_collection_keeps_every_unsettled_state(b) {
+    let mut receipt = fixture(b.storage.as_ref()).await;
+    let mut expected = std::collections::BTreeMap::new();
+    for state in [EffectState::Planned, EffectState::Prepared, EffectState::Dispatched, EffectState::Unknown,
+                  EffectState::Committed, EffectState::Verified, EffectState::Compensated, EffectState::Abandoned] {
+        receipt.id = EffectId::new(); receipt.state = state;
+        b.storage.create_effect_receipt(&receipt).await.unwrap();
+        if !matches!(state, EffectState::Compensated | EffectState::Abandoned) {
+            expected.insert(receipt.id, state);
+        }
+    }
+    let effects = b.storage.collect_compensation_effects(&receipt.tenant_id, receipt.continuity_id).await.unwrap();
+    assert_eq!(effects.len(), 6);
+    assert_eq!(effects.into_iter().map(|e| (e.id, e.state)).collect::<std::collections::BTreeMap<_,_>>(), expected);
+});
