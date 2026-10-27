@@ -4675,3 +4675,44 @@ suite passes, alongside 10 dispatch-authority, 16 guard-discovery, 24 distribute
 for types, storage, engine, facade and mobile. Real PostgreSQL migration 127
 rollback refuses both active bindings and retired markers; an empty rollback
 and reapply succeed. Hosted platform gates remain required before merge.
+
+### DME177 — bounded effect-ledger enumeration at capsule export
+
+The long-running history review reproduced successful publication of a truncated
+capsule: 10,000 effect receipts exported successfully, and adding a 10,001st
+receipt still produced another valid manifest because the legacy list operation
+silently caps results. The reproduction used a real encrypted artifact, not a
+mock list or an inferred count.
+
+A new storage page operation follows the existing covering index on tenant,
+continuity, physical `created_at` and ID, with at most 1,000 rows per read. Its
+cursor comes from SQL columns rather than JSON receipt timestamps: PostgreSQL
+rounds timestamp precision while the serialized receipt retains nanoseconds.
+Using the JSON timestamp can repeat or skip rows at a page boundary. Encrypted
+and fault wrappers forward the same operation. Indexed tenant/continuity/ID must
+also agree with the JSON record before a page is returned. Custom backends fail
+closed until they implement pagination.
+
+Export follows pages through the end, checks identity and cursor progress, and
+rejects histories exceeding the existing capsule item limit before publishing an
+artifact or manifest. An exact-limit capsule is decrypted and imported into a
+separate store with every expected effect ID present; the extra receipt must
+produce a size error and leave the artifact count unchanged. The four-backend
+matrix covers timestamp rounding, ID ties, page caps, empty reads, scope
+isolation and corrupt JSON ownership.
+
+This fixes silent truncation; it does not establish a source snapshot, carry full
+receipt outcome/active-binding state, or solve large-history portability. Those
+remain required work. Long-running history needs its explicit acknowledged
+archive/compact-receipt policy rather than silently dropping guard evidence.
+Export still needs an atomic writer fence, bounded materialization of other
+state, and complete event/wait/family portability before the broader handoff
+contract is achieved.
+
+DME177 validation: 25 targeted results pass (12 storage page-matrix cases,
+8 engine capsule cases, 2 embeddable facade cases and 3 mobile continuity cases).
+The original overflow test first published a truncated manifest, then passes
+with exact-ID roundtrip verification and unchanged artifact count on overflow.
+Strict all-target Clippy passes for types/storage/engine/facade/mobile. Format,
+diff and documentation checks pass. No migration is needed: both stores already
+have the covering index used by the new keyset query. Hosted gates remain pending.

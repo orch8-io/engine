@@ -46,6 +46,46 @@ pub(super) async fn export(
     Ok(CapsuleExecutionState { nodes, payloads })
 }
 
+/// Never publish the capped prefix returned by the legacy ledger list API.
+pub(super) async fn effect_ids(
+    storage: &dyn StorageBackend,
+    owner: &orch8_types::continuity::ContinuityExecution,
+) -> Result<Vec<orch8_types::continuity::EffectId>, CapsuleServiceError> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursor = None;
+    loop {
+        let page = storage
+            .page_effect_receipts(&owner.tenant_id, owner.continuity_id, cursor.as_ref(), 1000)
+            .await?;
+        if page
+            .next
+            .as_ref()
+            .is_some_and(|next| page.receipts.last().map(|receipt| receipt.id) != Some(next.id))
+        {
+            return Err(CapsuleServiceError::PayloadIdentityMismatch);
+        }
+        if ids.len() + page.receipts.len() > CapsulePayload::MAX_PENDING_ITEMS {
+            return Err(CapsuleServiceError::PayloadTooLarge);
+        }
+        for receipt in page.receipts {
+            if receipt.tenant_id != owner.tenant_id
+                || receipt.continuity_id != owner.continuity_id
+                || !seen.insert(receipt.id)
+            {
+                return Err(CapsuleServiceError::PayloadIdentityMismatch);
+            }
+            ids.push(receipt.id);
+        }
+        match page.next {
+            None => break,
+            Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
+            Some(_) => return Err(CapsuleServiceError::PayloadIdentityMismatch),
+        }
+    }
+    Ok(ids)
+}
+
 pub(super) fn validate_version(
     payload: &CapsulePayload,
     schema: CapsuleSchemaVersion,

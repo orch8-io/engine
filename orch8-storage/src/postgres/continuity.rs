@@ -1227,6 +1227,16 @@ impl crate::ContinuityStore for PostgresStorage {
             .collect()
     }
 
+    async fn page_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        after: Option<&crate::EffectReceiptCursor>,
+        limit: u32,
+    ) -> Result<crate::EffectReceiptPage, StorageError> {
+        super::effect_receipts::page(self, tenant_id, continuity_id, after, limit).await
+    }
+
     async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO provenance_entries

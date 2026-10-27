@@ -859,6 +859,7 @@ passthrough_impl! {
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
+        async fn page_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, after: Option<&crate::EffectReceiptCursor>, limit: u32) -> Result<crate::EffectReceiptPage, StorageError>;
         async fn append_provenance(&self, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<(), StorageError>;
         async fn get_provenance_head(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
