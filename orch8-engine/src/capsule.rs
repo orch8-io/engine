@@ -236,6 +236,7 @@ pub async fn export_paused_capsule_manifest(
     if sequence.tenant_id != instance.tenant_id {
         return Err(CapsuleServiceError::OwnershipMismatch);
     }
+    let effect_ids = state::effect_ids(storage, &request.continuity).await?;
     let outputs = storage.get_all_outputs(instance.id).await?;
     let payload = CapsulePayload {
         instance: CapsuleInstanceState {
@@ -253,16 +254,7 @@ pub async fn export_paused_capsule_manifest(
         outputs,
         pending_waits: Vec::new(),
         pending_signals: Vec::new(),
-        effect_ids: storage
-            .list_effect_receipts(
-                &request.continuity.tenant_id,
-                request.continuity.continuity_id,
-                10_000,
-            )
-            .await?
-            .into_iter()
-            .map(|receipt| receipt.id)
-            .collect(),
+        effect_ids,
         artifacts: Vec::new(),
         stream_cursors: Vec::new(),
         redacted_audit_context: serde_json::Value::Null,

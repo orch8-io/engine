@@ -3,7 +3,9 @@ mod child_lookup;
 mod current_outputs;
 mod effect_attempt;
 mod effect_dispatch;
+mod effect_receipts;
 pub use effect_dispatch::EffectDispatchFence;
+pub use effect_receipts::{EffectReceiptCursor, EffectReceiptPage};
 mod mobile_access;
 pub use child_adoption::ChildAdoption;
 pub use mobile_access::MobileInstanceAccess;
@@ -4411,6 +4413,23 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<EffectReceipt>, StorageError>;
+
+    /// Keyset page of at most 1,000 receipts, ordered by physical SQL
+    /// (`created_at`, `id`). Use this for complete enumeration; the legacy list
+    /// is capped at 10,000. Zero limit returns an empty terminal page.
+    /// Pages do not establish a snapshot: exporters must also fence writers.
+    async fn page_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        after: Option<&EffectReceiptCursor>,
+        limit: u32,
+    ) -> Result<EffectReceiptPage, StorageError> {
+        let _ = (tenant_id, continuity_id, after, limit);
+        Err(StorageError::Unsupported(
+            "effect receipt pagination".into(),
+        ))
+    }
 
     /// List the universal effect ledger for one runtime-local instance.
     async fn list_instance_effect_receipts(
