@@ -1521,6 +1521,7 @@ pub(super) async fn list_instance_gc_candidates(
 const CONTINUITY_CHILD_TABLES: &[&str] = &[
     "continuity_stream_frames",
     "continuity_streams",
+    "effect_attempt_bindings",
     "effect_receipts",
     "provenance_entries",
     "placement_decisions",

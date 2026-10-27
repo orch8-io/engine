@@ -4630,3 +4630,48 @@ storage/engine/facade/mobile, and fresh actual 14 Node plus 20 Python tests. The
 proxy retry now reloads durable storage as the API does; a stale fixture could
 otherwise conceal treating a waiting timestamp as a live claim. Format, diff and
 documentation checks pass. Full platform/release certification remains open.
+
+### DME176 — durable identities for repeated loop effects
+
+A real scheduler/provider-deduplication regression reproduced lost work on all
+four storage variants: separate `for_each` iterations reused the effect ID
+computed from continuity, epoch, instance, block and retry attempt. A provider
+using that ID as its idempotency key suppressed the second item. Hashing the
+request instead would still suppress two legitimate identical items.
+
+Migration 127 (SQLite schema 57) adds an active invocation binding. Atomic
+preparation selects one fresh provider ID; concurrent preparations and recovery
+of that same active attempt reuse the selected receipt. Existing deterministic
+receipts are adopted with their original ID and state during a coordinated
+upgrade. A separate retry-policy attempt keeps its existing distinct-intent
+semantics. This does not promise exactly-once provider execution.
+
+Iteration reset now retires active bindings separately from receipt history.
+Persistent block reset markers prevent a retained legacy receipt being adopted
+again as the next iteration. Uncertain dispatched/unknown receipts survive for
+reconciliation. Enabled workflow invariants retain resolved history; otherwise
+resolved iteration receipts are pruned. Unstarted planned/prepared rows can be
+removed because admission never occurred. The reset and retention decision are
+atomic, and claimed reset requires the original live scheduler claim. An
+explicit low-level destructive delete remains separate from iteration retirement.
+
+Configure invariants before execution: enabling one later cannot reconstruct
+previously discarded evidence. Retained uncertain or guarded history requires
+explicit resolution and the normal lifecycle/archive policy. Reset markers are
+bounded by blocks per instance and cascade with instance deletion.
+
+Deployment requires draining existing runtimes and upgrading writers together.
+Older binaries do not participate in the binding/reset protocol. Rollback refuses
+to discard nonempty bindings or reset markers; it requires explicit lifecycle
+cleanup after draining. No release is published by this change. Portable receipts
+and an atomic source export cut remain separate open review work.
+
+DME176 validation: the provider-deduplication regression failed on all four
+backends before the fix. All 12 loop/provider/guard cases and 22 storage identity,
+concurrency, legacy-state, rollback, claim and reopen cases now pass. The guarded
+loop requires durable invariant failure evidence. The full 2,127 engine unit
+suite passes, alongside 10 dispatch-authority, 16 guard-discovery, 24 distributed,
+11 mobile admission and 41 native facade cases. All-target strict Clippy passes
+for types, storage, engine, facade and mobile. Real PostgreSQL migration 127
+rollback refuses both active bindings and retired markers; an empty rollback
+and reapply succeed. Hosted platform gates remain required before merge.

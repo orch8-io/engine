@@ -484,10 +484,13 @@ fault_impl! {
         async fn prune_expired_runtime_capabilities(&self, expired_before: DateTime<Utc>, limit: u32) -> Result<u64, StorageError>;
         async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError>;
         async fn ensure_effect_receipt(&self, receipt: &EffectReceipt) -> Result<EffectReceipt, StorageError>;
+        async fn ensure_effect_attempt(&self, candidate: &EffectReceipt, legacy_id: EffectId) -> Result<EffectReceipt, StorageError>;
         async fn find_unresolved_effect_receipt(&self, tenant_id: &TenantId, continuity_id: ContinuityId, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<EffectReceipt>, StorageError>;
     async fn delete_effect_receipts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn retire_effect_attempts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
 
         async fn delete_effect_receipts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
+        async fn retire_effect_attempts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &TenantId, id: EffectId) -> Result<Option<EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &TenantId, id: EffectId, expected_state: EffectState, next: &EffectReceipt) -> Result<bool, StorageError>;
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &TenantId, next: &EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;

@@ -847,10 +847,13 @@ passthrough_impl! {
         async fn prune_expired_runtime_capabilities(&self, expired_before: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<u64, StorageError>;
         async fn create_effect_receipt(&self, receipt: &orch8_types::continuity::EffectReceipt) -> Result<(), StorageError>;
         async fn ensure_effect_receipt(&self, receipt: &orch8_types::continuity::EffectReceipt) -> Result<orch8_types::continuity::EffectReceipt, StorageError>;
+        async fn ensure_effect_attempt(&self, candidate: &orch8_types::continuity::EffectReceipt, legacy_id: orch8_types::continuity::EffectId) -> Result<orch8_types::continuity::EffectReceipt, StorageError>;
         async fn find_unresolved_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, instance_id: orch8_types::ids::InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
     async fn delete_effect_receipts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn retire_effect_attempts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
 
         async fn delete_effect_receipts_for_blocks(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
+        async fn retire_effect_attempts_for_blocks(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId, expected_state: orch8_types::continuity::EffectState, next: &orch8_types::continuity::EffectReceipt) -> Result<bool, StorageError>;
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;

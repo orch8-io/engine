@@ -279,7 +279,7 @@ async fn interrupted_iteration_reset_retains_the_original_poll_deadline() {
     let inner: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
     let (storage, faults) = FaultStorage::wrap(Arc::clone(&inner));
     faults
-        .on("delete_effect_receipts_for_blocks_claimed")
+        .on("retire_effect_attempts_for_blocks_claimed")
         .times(1)
         .fail_transient();
     let calls = Arc::new(AtomicUsize::new(0));

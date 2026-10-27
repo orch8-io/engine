@@ -1120,6 +1120,27 @@ CREATE INDEX IF NOT EXISTS idx_effect_receipts_ambiguous_gc
     ON effect_receipts(tenant_id, continuity_id)
     WHERE state IN ('dispatched', 'unknown');
 
+CREATE TABLE IF NOT EXISTS effect_attempt_bindings (
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 0),
+    instance_id TEXT NOT NULL REFERENCES task_instances(id) ON DELETE CASCADE,
+    block_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL CHECK (attempt >= 0),
+    effect_id TEXT NOT NULL REFERENCES effect_receipts(id) ON DELETE CASCADE,
+    PRIMARY KEY (tenant_id, continuity_id, epoch, instance_id, block_id, attempt),
+    FOREIGN KEY (tenant_id, continuity_id) REFERENCES continuity_executions(tenant_id, continuity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_effect_attempt_bindings_receipt ON effect_attempt_bindings(effect_id);
+
+CREATE INDEX IF NOT EXISTS idx_effect_attempt_bindings_instance ON effect_attempt_bindings(instance_id);
+CREATE TABLE IF NOT EXISTS effect_block_resets (
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL REFERENCES task_instances(id) ON DELETE CASCADE,
+    block_id TEXT NOT NULL,
+    PRIMARY KEY (instance_id, tenant_id, block_id)
+);
+
 CREATE TABLE IF NOT EXISTS provenance_entries (
     id TEXT PRIMARY KEY,
     continuity_id TEXT NOT NULL REFERENCES continuity_executions(continuity_id),
@@ -1652,4 +1673,4 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 56;
+pub(super) const SCHEMA_VERSION: i64 = 57;
