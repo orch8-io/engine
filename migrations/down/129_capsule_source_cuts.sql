@@ -1,4 +1,6 @@
 -- Remove durable source-cut tables only after explicit recovery reconciliation.
+-- Serialize the emptiness check with capture, publication and history writers.
+LOCK TABLE continuity_executions, task_instances, capsule_source_cuts, capsule_artifact_retirements IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
  IF to_regclass('physical_instance_retirements') IS NOT NULL THEN
   RAISE EXCEPTION 'Roll back physical instance retirement migration first; source recording guards must survive';

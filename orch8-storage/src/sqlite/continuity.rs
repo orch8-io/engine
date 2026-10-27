@@ -43,6 +43,18 @@ fn to_i64(value: u64, field: &str) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::Query(format!("{field} exceeds SQLite INTEGER range")))
 }
 
+// Use durable identity evidence and separate active-cut point lookups. A
+// combined OR over captured/sealed/retired/acknowledged cuts cannot use the
+// active partial indexes and would scan retained history on every owner CAS.
+const OWNER_CAS_SQL: &str = "UPDATE continuity_executions
+ SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
+ WHERE tenant_id = ? AND continuity_id = ? AND epoch = ? AND owner_runtime_id = ?
+ AND state <> 'compensating'
+ AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=?10)
+ AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=?10 AND cut.state IN ('captured','sealed'))
+ AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=continuity_executions.tenant_id
+   AND cut.continuity_id=continuity_executions.continuity_id AND cut.state IN ('captured','sealed') AND cut.state='captured')";
+
 // Both lookup paths must agree on scope and indexed progress before returning
 // a durable outcome, including when recovering a lost creation response.
 fn compensation_run_from_row(
@@ -261,31 +273,20 @@ impl crate::ContinuityStore for SqliteStorage {
             ));
         }
         let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
-        let result = sqlx::query(
-            "UPDATE continuity_executions
-             SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
-             WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
-               AND owner_runtime_id = ?
-               AND state <> 'compensating'
-               AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut
-                   WHERE cut.tenant_id=continuity_executions.tenant_id
-                     AND cut.continuity_id=continuity_executions.continuity_id
-                     AND cut.source_instance_id=?
-                     AND cut.state IN ('captured','sealed','retired','acknowledged'))",
-        )
-        .bind(to_i64(next.epoch.get(), "next epoch")?)
-        .bind(next.owner_runtime_id.to_string())
-        .bind(state_name(next.state)?)
-        .bind(encode(next)?)
-        .bind(next.updated_at.to_rfc3339())
-        .bind(tenant_id.as_str())
-        .bind(id.to_string())
-        .bind(to_i64(expected_epoch.get(), "expected epoch")?)
-        .bind(expected_owner.to_string())
-        .bind(next.current_instance_id.to_string())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
+        let result = sqlx::query(OWNER_CAS_SQL)
+            .bind(to_i64(next.epoch.get(), "next epoch")?)
+            .bind(next.owner_runtime_id.to_string())
+            .bind(state_name(next.state)?)
+            .bind(encode(next)?)
+            .bind(next.updated_at.to_rfc3339())
+            .bind(tenant_id.as_str())
+            .bind(id.to_string())
+            .bind(to_i64(expected_epoch.get(), "expected epoch")?)
+            .bind(expected_owner.to_string())
+            .bind(next.current_instance_id.to_string())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
         if result.rows_affected() != 1 {
             transaction
                 .rollback()
@@ -2347,4 +2348,51 @@ async fn commit_export(
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod captured_query_plan_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owner_cas_uses_indexed_identity_proofs() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {OWNER_CAS_SQL}"
+        )))
+        .bind(0_i64)
+        .bind("runtime")
+        .bind("owned")
+        .bind("{}")
+        .bind("now")
+        .bind("tenant")
+        .bind("continuity")
+        .bind(0_i64)
+        .bind("runtime")
+        .bind("physical")
+        .fetch_all(storage.pool())
+        .await
+        .unwrap();
+        let plan = rows
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_capsule_source_cut_instance"),
+            "missing source point lookup: {plan}"
+        );
+        assert!(
+            plan.contains("idx_capsule_source_cut_active"),
+            "missing continuity point lookup: {plan}"
+        );
+        assert!(
+            plan.contains("SEARCH retired"),
+            "missing permanent identity point lookup: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN cut"),
+            "owner CAS scans retained cut history: {plan}"
+        );
+    }
 }

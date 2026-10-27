@@ -355,3 +355,36 @@ The combined server/mobile feature union also passes strict all-target Clippy
 across all six packages after the repair. Production mobile check/build/lint,
 actual no-cloud feature trace, 13 artifact compatibility cases and all four
 locked graph gates are verified before the repaired draft revision is pushed.
+
+## Captured-source authority follow-up
+
+Migration 131 / SQLite 62 extends enforcement to the unsealed captured phase.
+Direct native forward writes, new claim/fire times and ownership reassignment
+are rejected by the database, including indexed/JSON state disagreement. A
+captured continuity cannot be assigned to a fresh destination through generic
+CAS until the source cut is sealed. Same-owner compensation fencing and native
+terminal outcomes remain admissible evidence. Active source-cut deletion needs
+explicit abort, retirement or acknowledgement first.
+
+Abort releases the captured cut before restoring ownership/native state within
+one transaction. Rollback must restore the cut fence if restoration fails.
+Captured-source quarantine is atomic with the SQLite version-62 marker and
+must not scan completed history on every reopen. PostgreSQL guards run after
+row/uniqueness waits with fresh volatile reads. These checks close neither the
+other child-evidence snapshot races nor transport/archive semantics; those
+remain required work.
+
+Final captured-authority verification includes 175 source-cut scenarios, the
+full compensation/recovery/storage/migration suites, both actual SQLite guard
+and owner-CAS point-query plans, 701 mobile tests and 47 engine/HTTP cases.
+Native active-cut cleanup guards preserve local suspension/input/outcome rows
+until explicit release, while mixed terminal GC continues deleting healthy work.
+Downgrade checks lock before inspecting active evidence, including a controlled
+PostgreSQL downgrade waiting behind capture.
+
+A newly observed merge gate remains: live migration currently prepares its
+rollback capsule through physical-transfer export, then tries to migrate the
+retired source in place. It needs a coherent local recovery-snapshot path that
+preserves physical ownership and revalidates apply/rollback atomically. The
+transfer retirement guard must remain enforced. The E2E retry-idempotence
+assertion also needs alignment with the durable export response contract.

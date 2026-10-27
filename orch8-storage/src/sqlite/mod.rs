@@ -556,6 +556,20 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
         }
+        sqlx::raw_sql(include_str!("captured_source.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        let captured_quarantined: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=62)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !captured_quarantined {
+            sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('scheduled','running','waiting','paused') AND (state!='paused' OR claimed_at IS NOT NULL OR next_fire_at IS NOT NULL) AND EXISTS(SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed') AND cut.state='captured')")
+                .execute(&mut *retirement).await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(62)")
+                .execute(&mut *retirement)
+                .await?;
+        }
         retirement.commit().await?;
         self.backfill_legacy_api_key_capabilities().await?;
         self.record_schema_version().await?;

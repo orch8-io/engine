@@ -141,7 +141,7 @@ orch8_storage::backend_test!(async fn capture_revokes_claims_and_retries_the_ori
     let current=b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap();
     assert_eq!(current.state,InstanceState::Paused);assert!(current.claimed_at.is_none());assert!(current.next_fire_at.is_none());
     let owner=b.storage.get_continuity_execution(&request.owner.tenant_id,request.owner.continuity_id).await.unwrap().unwrap();assert_eq!(owner.state,OwnershipState::Transferring);
-    b.storage.update_instance_state(current.id,InstanceState::Running,None).await.unwrap();
+    assert!(b.storage.update_instance_state(current.id,InstanceState::Running,None).await.is_err());
     let mut late=snapshot.outputs[0].clone();late.id=uuid::Uuid::now_v7();late.output=json!({"late":true});b.storage.save_block_output(&late).await.unwrap();
     let retry=capture(b.storage.as_ref(),&request).await;assert_eq!(retry.id,cut.id);
     assert_eq!(serde_json::to_value(retry.snapshot).unwrap(),serde_json::to_value(cut.snapshot).unwrap());
@@ -633,13 +633,19 @@ async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidenc
     // An empty installation can roll back and reapply without changing the
     // independent continuity schema. Reapplying is safe after an ambiguous DDL ack.
     // Roll migrations back in dependency order, then restore both layers.
+    let captured_down = include_str!("../../migrations/down/131_captured_source_authority.sql");
+    let captured_up = include_str!("../../migrations/131_captured_source_authority.sql");
+    assert!(sqlx::raw_sql(retirement_down).execute(pool).await.is_err());
+    sqlx::raw_sql(captured_down).execute(pool).await.unwrap();
     sqlx::raw_sql(retirement_down).execute(pool).await.unwrap();
     sqlx::raw_sql(down).execute(pool).await.unwrap();
     sqlx::raw_sql(up).execute(pool).await.unwrap();
     sqlx::raw_sql(up).execute(pool).await.unwrap();
     sqlx::raw_sql(retirement_up).execute(pool).await.unwrap();
+    sqlx::raw_sql(captured_up).execute(pool).await.unwrap();
     let request = fixture(b.storage.as_ref()).await;
     let cut = capture(b.storage.as_ref(), &request).await;
+    assert!(sqlx::raw_sql(captured_down).execute(pool).await.is_err());
     assert!(sqlx::raw_sql(down).execute(pool).await.is_err());
     let bytes = b"recovery must survive a refused downgrade";
     let header = manifest(&cut, bytes);
@@ -656,6 +662,7 @@ async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidenc
             .as_deref(),
         Some(bytes.as_slice())
     );
+    assert!(sqlx::raw_sql(captured_down).execute(pool).await.is_err());
     let accepted = ContinuityExecution {
         epoch: request.owner.epoch.checked_next().unwrap(),
         owner_runtime_id: request.destination_runtime_id.unwrap(),
@@ -1127,7 +1134,7 @@ async fn restore_pre_guard_source_schedule(
     match &backend.raw {
         orch8_storage::testing::backends::RawPool::Sqlite(pool) => {
             let mut tx = pool.begin().await.unwrap();
-            sqlx::query("DROP TRIGGER physical_retirement_native_update")
+            sqlx::raw_sql("DROP TRIGGER physical_retirement_native_update; DROP TRIGGER captured_source_native_update;")
                 .execute(&mut *tx)
                 .await
                 .unwrap();
@@ -1142,13 +1149,17 @@ async fn restore_pre_guard_source_schedule(
                 .execute(&mut *tx)
                 .await
                 .unwrap();
+            sqlx::raw_sql(include_str!("../src/sqlite/captured_source.sql"))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             tx.commit().await.unwrap();
         }
         #[cfg(feature = "postgres")]
         orch8_storage::testing::backends::RawPool::Postgres(pool) => {
             let mut tx = pool.begin().await.unwrap();
-            sqlx::query(
-                "ALTER TABLE task_instances DISABLE TRIGGER physical_retirement_native_update",
+            sqlx::raw_sql(
+                "ALTER TABLE task_instances DISABLE TRIGGER physical_retirement_native_update; ALTER TABLE task_instances DISABLE TRIGGER captured_source_native_update;",
             )
             .execute(&mut *tx)
             .await
@@ -1160,8 +1171,8 @@ async fn restore_pre_guard_source_schedule(
             .execute(&mut *tx)
             .await
             .unwrap();
-            sqlx::query(
-                "ALTER TABLE task_instances ENABLE TRIGGER physical_retirement_native_update",
+            sqlx::raw_sql(
+                "ALTER TABLE task_instances ENABLE TRIGGER physical_retirement_native_update; ALTER TABLE task_instances ENABLE TRIGGER captured_source_native_update;",
             )
             .execute(&mut *tx)
             .await
@@ -1177,15 +1188,9 @@ async fn legacy_retired_source(
     let storage = backend.storage.as_ref();
     let request = fixture(storage).await;
     let cut = capture(storage, &request).await;
-    // Model an older writer that resumed/queued work between capture and seal.
-    storage
-        .update_instance_state(
-            request.owner.current_instance_id,
-            InstanceState::Scheduled,
-            Some(Utc::now()),
-        )
-        .await
-        .unwrap();
+    // Inject pre-guard state, restoring both native guards before exercising
+    // retirement, history GC and every operational polling path.
+    restore_pre_guard_source_schedule(backend, request.owner.current_instance_id).await;
     let pending: orch8_types::worker::WorkerTask = serde_json::from_value(json!({
         "id": uuid::Uuid::new_v4(), "instance_id": request.owner.current_instance_id,
         "block_id": "legacy", "handler_name": "retired_source", "params": {}, "context": {},
@@ -1294,15 +1299,9 @@ async fn captured_source_with_late_queue(
     let storage = backend.storage.as_ref();
     let request = fixture(storage).await;
     let cut = capture(storage, &request).await;
-    // A stale writer queued this after the consistent capture boundary.
-    storage
-        .update_instance_state(
-            request.owner.current_instance_id,
-            InstanceState::Scheduled,
-            Some(Utc::now()),
-        )
-        .await
-        .unwrap();
+    // Inject an inconsistent pre-guard row, then reinstall database guards
+    // before proving operational claims still skip it.
+    restore_pre_guard_source_schedule(backend, request.owner.current_instance_id).await;
     let task = serde_json::from_value(json!({"id":uuid::Uuid::new_v4(), "instance_id":request.owner.current_instance_id,
         "block_id":"late-queue", "handler_name":"captured-source", "params":{},"context":{},"attempt":0,"state":"pending","created_at":Utc::now()})).unwrap();
     insert_pre_guard_pending(backend, &task).await;
@@ -1736,4 +1735,529 @@ async fn sqlite_quarantine_upgrade_is_atomic_and_not_repeated_on_reopen() {
             .unwrap()
     );
     reopened.close().await;
+}
+
+orch8_storage::backend_test!(async fn captured_native_writes_require_explicit_abort(b) {
+    let request=fixture(b.storage.as_ref()).await;
+    let cut=capture(b.storage.as_ref(),&request).await;
+    let id=request.owner.current_instance_id;
+    for state in [InstanceState::Scheduled,InstanceState::Running,InstanceState::Waiting] {
+        assert!(b.storage.update_instance_state(id,state,Some(Utc::now())).await.is_err(),"captured source accepted a direct {state:?} write");
+        assert_eq!(b.storage.get_instance(id).await.unwrap().unwrap().state,InstanceState::Paused);
+    }
+    assert!(!matches!(b.storage.conditional_update_instance_state(id,InstanceState::Paused,InstanceState::Running,None).await,Ok(true)));
+    assert!(b.storage.abort_preparing_capsule_cut(&request.owner.tenant_id,cut.id).await.unwrap());
+    assert_eq!(b.storage.get_instance(id).await.unwrap().unwrap().state,InstanceState::Waiting);
+    b.storage.update_instance_state(id,InstanceState::Running,None).await.unwrap();
+});
+
+orch8_storage::backend_test!(async fn captured_owner_cannot_advance_to_a_fresh_destination_before_seal(b) {
+    let request=fixture(b.storage.as_ref()).await;
+    let cut=capture(b.storage.as_ref(),&request).await;
+    let mut destination=b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap();
+    destination.id=InstanceId::new();b.storage.create_instance(&destination).await.unwrap();
+    let frozen=b.storage.get_continuity_execution(&request.owner.tenant_id,request.owner.continuity_id).await.unwrap().unwrap();
+    let next=ContinuityExecution {current_instance_id:destination.id,owner_runtime_id:request.destination_runtime_id.unwrap(),
+        epoch:frozen.epoch.checked_next().unwrap(),state:OwnershipState::Owned,updated_at:Utc::now(),..frozen.clone()};
+    assert!(!b.storage.cas_continuity_owner(&frozen.tenant_id,frozen.continuity_id,frozen.epoch,frozen.owner_runtime_id,&next).await.unwrap(),"unsealed capture admitted a new owner");
+    assert_eq!(b.storage.get_continuity_execution(&frozen.tenant_id,frozen.continuity_id).await.unwrap().unwrap(),frozen);
+    let bytes=b"explicit publication precedes destination ownership";
+    b.storage.seal_capsule_cut(&frozen.tenant_id,cut.id,&manifest(&cut,bytes),bytes).await.unwrap();
+    assert!(b.storage.cas_continuity_owner(&frozen.tenant_id,frozen.continuity_id,frozen.epoch,frozen.owner_runtime_id,&next).await.unwrap());
+});
+
+async fn raw_owner_write(
+    b: &orch8_storage::testing::backends::TestBackend,
+    next: &ContinuityExecution,
+) -> Result<(), orch8_types::error::StorageError> {
+    let state = serde_json::to_value(next.state)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_owned();
+    match &b.raw {
+        orch8_storage::testing::backends::RawPool::Sqlite(pool) => {
+            sqlx::query("UPDATE continuity_executions SET state=?1,record=?2,epoch=?3,owner_runtime_id=?4 WHERE tenant_id=?5 AND continuity_id=?6")
+                .bind(state).bind(serde_json::to_string(next).unwrap()).bind(i64::try_from(next.epoch.get()).unwrap()).bind(next.owner_runtime_id.to_string())
+                .bind(next.tenant_id.as_str()).bind(next.continuity_id.to_string()).execute(pool).await?;
+        }
+        #[cfg(feature = "postgres")]
+        orch8_storage::testing::backends::RawPool::Postgres(pool) => {
+            sqlx::query("UPDATE continuity_executions SET state=$1,record=$2,epoch=$3,owner_runtime_id=$4 WHERE tenant_id=$5 AND continuity_id=$6")
+                .bind(state).bind(serde_json::to_value(next).unwrap()).bind(i64::try_from(next.epoch.get()).unwrap()).bind(next.owner_runtime_id.into_uuid())
+                .bind(next.tenant_id.as_str()).bind(next.continuity_id.into_uuid()).execute(pool).await?;
+        }
+    }
+    Ok(())
+}
+
+orch8_storage::backend_test!(async fn captured_database_owner_guard_blocks_old_writers_and_preserves_compensation(b) {
+    let request=fixture(b.storage.as_ref()).await;
+    let _cut=capture(b.storage.as_ref(),&request).await;
+    let frozen=b.storage.get_continuity_execution(&request.owner.tenant_id,request.owner.continuity_id).await.unwrap().unwrap();
+    for variant in 0..5 {
+        let mut next=frozen.clone();
+        match variant {
+            0=>next.state=OwnershipState::Owned,
+            1=>next.state=OwnershipState::Completed,
+            2=>next.current_instance_id=InstanceId::new(),
+            3=>next.owner_runtime_id=RuntimeId::new(),
+            _=>next.epoch=next.epoch.checked_next().unwrap(),
+        }
+        assert!(raw_owner_write(&b,&next).await.is_err(),"captured owner accepted old-writer variant {variant}");
+        assert_eq!(b.storage.get_continuity_execution(&frozen.tenant_id,frozen.continuity_id).await.unwrap().unwrap(),frozen);
+    }
+    // Evidence timestamp refresh and a same-owner compensation fence admit no
+    // new forward authority; compensation may still settle existing effects.
+    raw_owner_write(&b,&frozen).await.unwrap();
+    let fenced=ContinuityExecution {state:OwnershipState::Compensating,..frozen};
+    raw_owner_write(&b,&fenced).await.unwrap();
+});
+
+orch8_storage::backend_test!(async fn captured_source_cannot_be_assigned_to_another_continuity(b) {
+    let request=fixture(b.storage.as_ref()).await;
+    let _cut=capture(b.storage.as_ref(),&request).await;
+    let another=ContinuityExecution {continuity_id:ContinuityId::new(),..request.owner.clone()};
+    assert!(b.storage.create_continuity_execution(&another).await.is_err(),"new continuity adopted a captured physical source");
+    assert!(b.storage.get_continuity_execution(&another.tenant_id,another.continuity_id).await.unwrap().is_none());
+});
+
+orch8_storage::backend_test!(async fn captured_terminal_outcome_is_preserved_by_abort(b) {
+    let request=fixture(b.storage.as_ref()).await;let cut=capture(b.storage.as_ref(),&request).await;
+    b.storage.update_instance_state(request.owner.current_instance_id,InstanceState::Completed,None).await.unwrap();
+    assert!(b.storage.abort_preparing_capsule_cut(&request.owner.tenant_id,cut.id).await.unwrap());
+    assert_eq!(b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap().state,InstanceState::Completed);
+});
+
+orch8_storage::backend_test!(async fn active_cut_cannot_be_deleted_without_explicit_retirement(b) {
+    use orch8_storage::testing::backends::RawPool;
+    for sealed in [false,true] {
+        let request=fixture(b.storage.as_ref()).await;let cut=capture(b.storage.as_ref(),&request).await;
+        if sealed {let bytes=b"preserve active recovery point";b.storage.seal_capsule_cut(&request.owner.tenant_id,cut.id,&manifest(&cut,bytes),bytes).await.unwrap();}
+        let refused=match &b.raw {
+            RawPool::Sqlite(pool)=>sqlx::query("DELETE FROM capsule_source_cuts WHERE capsule_id=?1").bind(cut.id.to_string()).execute(pool).await.is_err(),
+            #[cfg(feature="postgres")]
+            RawPool::Postgres(pool)=>sqlx::query("DELETE FROM capsule_source_cuts WHERE capsule_id=$1").bind(cut.id.into_uuid()).execute(pool).await.is_err(),
+        };
+        assert!(refused,"active recovery point was deleted");
+        assert_eq!(capture(b.storage.as_ref(),&request).await.id,cut.id);
+        if !sealed {
+            assert!(b.storage.abort_preparing_capsule_cut(&request.owner.tenant_id,cut.id).await.unwrap());
+            match &b.raw {
+                RawPool::Sqlite(pool)=>{sqlx::query("DELETE FROM capsule_source_cuts WHERE capsule_id=?1").bind(cut.id.to_string()).execute(pool).await.unwrap();}
+                #[cfg(feature="postgres")]
+                RawPool::Postgres(pool)=>{sqlx::query("DELETE FROM capsule_source_cuts WHERE capsule_id=$1").bind(cut.id.into_uuid()).execute(pool).await.unwrap();}
+            }
+        }
+    }
+});
+
+orch8_storage::backend_test!(async fn captured_record_state_cannot_disagree_with_indexed_authority(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let request=fixture(b.storage.as_ref()).await;let _cut=capture(b.storage.as_ref(),&request).await;
+    let mut record=serde_json::to_value(&request.owner).unwrap();record["state"]=json!("owned");
+    let refused=match &b.raw {
+        RawPool::Sqlite(pool)=>sqlx::query("UPDATE continuity_executions SET record=?1 WHERE tenant_id=?2 AND continuity_id=?3")
+            .bind(record.to_string()).bind(request.owner.tenant_id.as_str()).bind(request.owner.continuity_id.to_string()).execute(pool).await.is_err(),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>sqlx::query("UPDATE continuity_executions SET record=$1 WHERE tenant_id=$2 AND continuity_id=$3")
+            .bind(record).bind(request.owner.tenant_id.as_str()).bind(request.owner.continuity_id.into_uuid()).execute(pool).await.is_err(),
+    };
+    assert!(refused,"JSON owner state bypassed the indexed authority guard");
+});
+
+orch8_storage::backend_test!(async fn failed_abort_rolls_back_cut_release_and_owner_restoration(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let request=fixture(b.storage.as_ref()).await;let cut=capture(b.storage.as_ref(),&request).await;
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::raw_sql("CREATE TRIGGER fail_abort_restore BEFORE UPDATE ON continuity_executions WHEN NEW.state='owned' BEGIN SELECT RAISE(ABORT,'test failed owner restoration'); END;").execute(pool).await.unwrap();},
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("CREATE FUNCTION fail_abort_restore() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test failed owner restoration'; END $$;
+            CREATE TRIGGER fail_abort_restore BEFORE UPDATE ON continuity_executions FOR EACH ROW WHEN (NEW.state='owned') EXECUTE FUNCTION fail_abort_restore();").execute(pool).await.unwrap();},
+    }
+    assert!(b.storage.abort_preparing_capsule_cut(&request.owner.tenant_id,cut.id).await.is_err());
+    assert_eq!(capture(b.storage.as_ref(),&request).await.id,cut.id,"failed abort released the durable cut");
+    assert_eq!(b.storage.get_continuity_execution(&request.owner.tenant_id,request.owner.continuity_id).await.unwrap().unwrap().state,OwnershipState::Transferring);
+    assert!(b.storage.update_instance_state(request.owner.current_instance_id,InstanceState::Running,None).await.is_err());
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::query("DROP TRIGGER fail_abort_restore").execute(pool).await.unwrap();}
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("DROP TRIGGER fail_abort_restore ON continuity_executions; DROP FUNCTION fail_abort_restore();").execute(pool).await.unwrap();}
+    }
+    assert!(b.storage.abort_preparing_capsule_cut(&request.owner.tenant_id,cut.id).await.unwrap());
+    assert_eq!(b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap().state,InstanceState::Waiting);
+});
+
+#[cfg(feature = "postgres")]
+#[derive(Clone, Copy)]
+enum LegacyAuthorityMutation {
+    Native,
+    NativeDelete,
+    Owner,
+    Downgrade,
+}
+
+#[cfg(feature = "postgres")]
+async fn legacy_authority_mutation(
+    pool: &sqlx::PgPool,
+    source: ContinuityExecution,
+    destination: InstanceId,
+    mutation: LegacyAuthorityMutation,
+) -> Result<(), sqlx::Error> {
+    match mutation {
+        LegacyAuthorityMutation::Downgrade => sqlx::raw_sql(include_str!(
+            "../../migrations/down/131_captured_source_authority.sql"
+        ))
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        LegacyAuthorityMutation::Owner => {
+            let next = ContinuityExecution {
+                current_instance_id: destination,
+                owner_runtime_id: RuntimeId::new(),
+                epoch: source.epoch.checked_next().unwrap(),
+                ..source
+            };
+            sqlx::query("UPDATE continuity_executions SET state='owned',epoch=$1,owner_runtime_id=$2,record=$3 WHERE tenant_id=$4 AND continuity_id=$5")
+                .bind(i64::try_from(next.epoch.get()).unwrap()).bind(next.owner_runtime_id.into_uuid()).bind(serde_json::to_value(&next).unwrap())
+                .bind(next.tenant_id.as_str()).bind(next.continuity_id.into_uuid()).execute(pool).await.map(|_|())
+        }
+        LegacyAuthorityMutation::NativeDelete => {
+            sqlx::query("DELETE FROM task_instances WHERE id=$1")
+                .bind(source.current_instance_id.into_uuid())
+                .execute(pool)
+                .await
+                .map(|_| ())
+        }
+        LegacyAuthorityMutation::Native => {
+            sqlx::query("UPDATE task_instances SET state='running',claimed_at=NOW() WHERE id=$1")
+                .bind(source.current_instance_id.into_uuid())
+                .execute(pool)
+                .await
+                .map(|_| ())
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_legacy_authority_writes_recheck_capture_after_parent_wait() {
+    use orch8_storage::testing::backends::TestBackend;
+    use std::time::Duration as StdDuration;
+    for mutation in [
+        LegacyAuthorityMutation::Native,
+        LegacyAuthorityMutation::NativeDelete,
+        LegacyAuthorityMutation::Owner,
+        LegacyAuthorityMutation::Downgrade,
+    ] {
+        let Some(b) = TestBackend::postgres().await else {
+            return;
+        };
+        let request = fixture(b.storage.as_ref()).await;
+        let mut destination = b
+            .storage
+            .get_instance(request.owner.current_instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+        destination.id = InstanceId::new();
+        destination.state = InstanceState::Paused;
+        b.storage.create_instance(&destination).await.unwrap();
+        let key = i64::from(uuid::Uuid::new_v4().as_fields().0 & 0x7fff_ffff);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION pause_captured_source() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock({key}); RETURN NEW; END $$;
+            CREATE TRIGGER pause_captured_source BEFORE INSERT ON capsule_source_cuts FOR EACH ROW EXECUTE FUNCTION pause_captured_source();"))).execute(b.pg_pool()).await.unwrap();
+        let mut gate = b.pg_pool().begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(key)
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let storage = b.storage.clone();
+        let capture_request = request.clone();
+        let capturing =
+            tokio::spawn(async move { storage.capture_capsule_cut(&capture_request).await });
+        let capture_pid=tokio::time::timeout(StdDuration::from_secs(10),async {loop {
+            let pid:Option<i32>=sqlx::query_scalar("SELECT pid FROM pg_locks WHERE locktype='advisory' AND objid=$1::bigint::oid AND NOT granted LIMIT 1").bind(key).fetch_optional(b.pg_pool()).await.unwrap();
+            if let Some(pid)=pid {break pid;} tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }}).await;
+        let Ok(capture_pid) = capture_pid else {
+            gate.rollback().await.unwrap();
+            capturing.abort();
+            panic!("capture did not reach its parent-held barrier")
+        };
+        let pool = b.pg_pool().clone();
+        let source = request.owner.clone();
+        let writing = tokio::spawn(async move {
+            legacy_authority_mutation(&pool, source, destination.id, mutation).await
+        });
+        let waited=tokio::time::timeout(StdDuration::from_secs(10),async {loop {
+            let blocked:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))").bind(capture_pid).fetch_one(b.pg_pool()).await.unwrap();
+            if blocked {break;}tokio::time::sleep(StdDuration::from_millis(10)).await;
+        }}).await.is_ok();
+        gate.rollback().await.unwrap();
+        let cut = tokio::time::timeout(StdDuration::from_secs(10), capturing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let result = tokio::time::timeout(StdDuration::from_secs(10), writing)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(waited, "old writer did not wait on capture's parent lock");
+        assert!(matches!(cut, CapsuleCutCapture::Ready(_)));
+        assert!(
+            result.is_err(),
+            "old writer missed the captured cut after its parent wait"
+        );
+        assert_eq!(
+            b.storage
+                .get_instance(request.owner.current_instance_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Paused
+        );
+        assert_eq!(
+            b.storage
+                .get_continuity_execution(&request.owner.tenant_id, request.owner.continuity_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            OwnershipState::Transferring
+        );
+    }
+}
+
+#[tokio::test]
+async fn sqlite_captured_quarantine_upgrade_is_atomic_and_runs_once() {
+    use orch8_storage::{InstanceStore, sqlite::SqliteStorage};
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("captured-quarantine.db");
+    let path = path.to_str().unwrap();
+    let storage = SqliteStorage::file(path).await.unwrap();
+    let request = fixture(&storage).await;
+    let cut = capture(&storage, &request).await;
+    sqlx::raw_sql("DROP TRIGGER captured_source_native_update; DELETE FROM schema_versions WHERE version=62;
+        CREATE TRIGGER fail_captured_upgrade BEFORE INSERT ON schema_versions WHEN NEW.version=62 BEGIN SELECT RAISE(ABORT,'test interrupted captured quarantine'); END;")
+        .execute(storage.pool()).await.unwrap();
+    sqlx::query("UPDATE task_instances SET state='running',claimed_at='legacy',next_fire_at='2099-01-01T00:00:00Z' WHERE id=?1").bind(request.owner.current_instance_id.to_string()).execute(storage.pool()).await.unwrap();
+    storage.close().await;
+    assert!(SqliteStorage::file(path).await.is_err());
+    let raw = sqlx::SqlitePool::connect(&format!("sqlite://{path}"))
+        .await
+        .unwrap();
+    let old: (String, Option<String>) =
+        sqlx::query_as("SELECT state,claimed_at FROM task_instances WHERE id=?1")
+            .bind(request.owner.current_instance_id.to_string())
+            .fetch_one(&raw)
+            .await
+            .unwrap();
+    assert_eq!(old, ("running".into(), Some("legacy".into())));
+    let complete: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=62)")
+            .fetch_one(&raw)
+            .await
+            .unwrap();
+    assert!(!complete);
+    sqlx::query("DROP TRIGGER fail_captured_upgrade")
+        .execute(&raw)
+        .await
+        .unwrap();
+    raw.close().await;
+    let storage = SqliteStorage::file(path).await.unwrap();
+    let native = storage
+        .get_instance(request.owner.current_instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(native.state, InstanceState::Paused);
+    assert!(native.claimed_at.is_none());
+    assert!(native.next_fire_at.is_none());
+    assert_eq!(native.context.data, json!({"secret":"ctx-cut-only"}));
+    assert_eq!(capture(&storage, &request).await.id, cut.id);
+    assert!(
+        storage
+            .update_instance_state(native.id, InstanceState::Running, None)
+            .await
+            .is_err()
+    );
+    sqlx::raw_sql("CREATE TRIGGER fail_repeated_captured_quarantine BEFORE UPDATE ON task_instances WHEN EXISTS(SELECT 1 FROM capsule_source_cuts WHERE state='captured') BEGIN SELECT RAISE(ABORT,'completed quarantine must not repeat'); END;")
+        .execute(storage.pool()).await.unwrap();
+    storage.close().await;
+    let storage = SqliteStorage::file(path).await.unwrap();
+    assert_eq!(
+        storage
+            .get_instance(native.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Paused
+    );
+    storage.close().await;
+}
+
+orch8_storage::backend_test!(async fn captured_paused_source_refuses_new_claim_and_fire_time(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let request=fixture(b.storage.as_ref()).await;let _cut=capture(b.storage.as_ref(),&request).await;
+    for claim in [true,false] {
+        let refused=match &b.raw {
+            RawPool::Sqlite(pool)=>sqlx::query(if claim {"UPDATE task_instances SET claimed_at='2099-01-01T00:00:00Z' WHERE id=?1"} else {"UPDATE task_instances SET next_fire_at='2099-01-01T00:00:00Z' WHERE id=?1"})
+                .bind(request.owner.current_instance_id.to_string()).execute(pool).await.is_err(),
+            #[cfg(feature="postgres")]
+            RawPool::Postgres(pool)=>sqlx::query(if claim {"UPDATE task_instances SET claimed_at=NOW() WHERE id=$1"} else {"UPDATE task_instances SET next_fire_at=NOW() WHERE id=$1"})
+                .bind(request.owner.current_instance_id.into_uuid()).execute(pool).await.is_err(),
+        };
+        assert!(refused,"paused captured source accepted a new claim or fire time");
+    }
+    let frozen=b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap();
+    assert!(frozen.claimed_at.is_none());assert!(frozen.next_fire_at.is_none());
+});
+
+orch8_storage::backend_test!(async fn captured_physical_identity_cannot_be_recreated_after_native_deletion(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let request=fixture(b.storage.as_ref()).await;let cut=capture(b.storage.as_ref(),&request).await;
+    let frozen=b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap();
+    // Inject native history loss from before the cleanup guard existed. The
+    // current API must still refuse identity reuse; authorization-dependent
+    // snapshot replay is a separate recovery contract.
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{
+            let mut tx=pool.begin().await.unwrap();
+            sqlx::query("DROP TRIGGER captured_source_native_delete").execute(&mut *tx).await.unwrap();
+            sqlx::query("DELETE FROM task_instances WHERE id=?1").bind(frozen.id.to_string()).execute(&mut *tx).await.unwrap();
+            sqlx::raw_sql(include_str!("../src/sqlite/captured_source.sql")).execute(&mut *tx).await.unwrap();tx.commit().await.unwrap();
+        }
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{
+            let mut tx=pool.begin().await.unwrap();
+            sqlx::query("ALTER TABLE task_instances DISABLE TRIGGER captured_source_native_delete").execute(&mut *tx).await.unwrap();
+            sqlx::query("DELETE FROM task_instances WHERE id=$1").bind(frozen.id.into_uuid()).execute(&mut *tx).await.unwrap();
+            sqlx::query("ALTER TABLE task_instances ENABLE TRIGGER captured_source_native_delete").execute(&mut *tx).await.unwrap();tx.commit().await.unwrap();
+        }
+    }
+    assert!(b.storage.create_instance(&frozen).await.is_err(),"captured physical identity was recreated");
+    assert!(b.storage.get_instance(frozen.id).await.unwrap().is_none());
+    assert_eq!(b.raw.count("capsule_source_cuts","capsule_id",&cut.id.to_string()).await,1,"native deletion discarded durable cut evidence");
+});
+
+orch8_storage::backend_test!(async fn captured_source_cannot_be_adopted_by_raw_foreign_tenant_owner(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let request=fixture(b.storage.as_ref()).await;let _cut=capture(b.storage.as_ref(),&request).await;
+    let another=ContinuityExecution {continuity_id:ContinuityId::new(),tenant_id:TenantId::unchecked("foreign-owner"),..request.owner.clone()};
+    let error=match &b.raw {
+        RawPool::Sqlite(pool)=>sqlx::query("INSERT INTO continuity_executions(continuity_id,tenant_id,epoch,owner_runtime_id,state,record,updated_at) VALUES(?1,?2,0,?3,'owned',?4,?5)")
+            .bind(another.continuity_id.to_string()).bind(another.tenant_id.as_str()).bind(another.owner_runtime_id.to_string()).bind(serde_json::to_string(&another).unwrap()).bind(Utc::now().to_rfc3339()).execute(pool).await.unwrap_err().to_string(),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>sqlx::query("INSERT INTO continuity_executions(continuity_id,tenant_id,epoch,owner_runtime_id,state,record,updated_at) VALUES($1,$2,0,$3,'owned',$4,$5)")
+            .bind(another.continuity_id.into_uuid()).bind(another.tenant_id.as_str()).bind(another.owner_runtime_id.into_uuid()).bind(serde_json::to_value(&another).unwrap()).bind(Utc::now()).execute(pool).await.unwrap_err().to_string(),
+    };
+    assert!(error.contains("captured source"),"foreign-scope refusal did not use the captured authority guard: {error}");
+    assert!(b.storage.get_continuity_execution(&another.tenant_id,another.continuity_id).await.unwrap().is_none());
+});
+
+orch8_storage::backend_test!(async fn active_cut_native_cleanup_requires_explicit_abort_or_acknowledgement(b) {
+    use orch8_storage::testing::backends::RawPool;
+    for sealed in [false,true] {
+        let request=fixture(b.storage.as_ref()).await;let cut=capture(b.storage.as_ref(),&request).await;
+        if sealed {let bytes=b"native evidence is not yet transport proof";b.storage.seal_capsule_cut(&request.owner.tenant_id,cut.id,&manifest(&cut,bytes),bytes).await.unwrap();}
+        // A late terminal outcome does not certify transport of local waits,
+        // signals or independent callback evidence; generic GC must retain it.
+        b.storage.update_instance_state(request.owner.current_instance_id,InstanceState::Completed,None).await.unwrap();
+        assert_eq!(b.storage.purge_terminal_instances(&[request.owner.current_instance_id]).await.unwrap(),0);
+        let mut healthy=b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap();
+        healthy.id=InstanceId::new();b.storage.create_instance(&healthy).await.unwrap();
+        assert_eq!(b.storage.purge_terminal_instances(&[request.owner.current_instance_id,healthy.id]).await.unwrap(),1,"retained source must not block healthy history GC");
+        assert!(b.storage.get_instance(healthy.id).await.unwrap().is_none());
+        let refused=match &b.raw {
+            RawPool::Sqlite(pool)=>sqlx::query("DELETE FROM task_instances WHERE id=?1").bind(request.owner.current_instance_id.to_string()).execute(pool).await.is_err(),
+            #[cfg(feature="postgres")]
+            RawPool::Postgres(pool)=>sqlx::query("DELETE FROM task_instances WHERE id=$1").bind(request.owner.current_instance_id.into_uuid()).execute(pool).await.is_err(),
+        };
+        assert!(refused,"active source native payload was discarded");
+        assert_eq!(b.storage.get_instance(request.owner.current_instance_id).await.unwrap().unwrap().context.data,json!({"secret":"ctx-cut-only"}));
+        assert_eq!(capture(b.storage.as_ref(),&request).await.id,cut.id);
+        if sealed {
+            let accepted=ContinuityExecution {current_instance_id:InstanceId::new(),epoch:request.owner.epoch.checked_next().unwrap(),
+                owner_runtime_id:request.destination_runtime_id.unwrap(),state:OwnershipState::Owned,..request.owner.clone()};
+            b.storage.acknowledge_capsule_cut(&request.owner.tenant_id,cut.id,&accepted).await.unwrap();
+        } else {
+            assert!(b.storage.abort_preparing_capsule_cut(&request.owner.tenant_id,cut.id).await.unwrap());
+        }
+        assert_eq!(b.storage.purge_terminal_instances(&[request.owner.current_instance_id]).await.unwrap(),1,"explicit release must permit ordinary native GC");
+    }
+});
+
+#[tokio::test]
+async fn sqlite_captured_guards_use_point_indexes() {
+    use orch8_storage::sqlite::SqliteStorage;
+    use sqlx::Row;
+    let storage = SqliteStorage::in_memory().await.unwrap();
+    let definitions: Vec<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='trigger' AND name LIKE 'captured_source_%'",
+    )
+    .fetch_all(storage.pool())
+    .await
+    .unwrap();
+    let mut queries = 0;
+    // Read the installed guards themselves so a future predicate edit cannot
+    // leave a copied EXPLAIN fixture green while production regresses.
+    for definition in definitions {
+        let mut rest = definition.as_str();
+        while let Some(start) = rest.find("EXISTS(") {
+            let body = &rest[start + 7..];
+            let mut depth = 1;
+            let end = body
+                .char_indices()
+                .find_map(|(i, c)| {
+                    match c {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    (depth == 0).then_some(i)
+                })
+                .unwrap();
+            let mut select = body[..end].to_owned();
+            rest = &body[end + 1..];
+            for (name, value) in [
+                ("NEW.record", "'{\"current_instance_id\":\"physical\"}'"),
+                ("OLD.record", "'{\"current_instance_id\":\"physical\"}'"),
+                ("NEW.tenant_id", "'tenant'"),
+                ("OLD.tenant_id", "'tenant'"),
+                ("NEW.continuity_id", "'continuity'"),
+                ("OLD.continuity_id", "'continuity'"),
+                ("NEW.id", "'physical'"),
+                ("OLD.id", "'physical'"),
+            ] {
+                select = select.replace(name, value);
+            }
+            let rows = sqlx::query(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {select}")))
+                .fetch_all(storage.pool())
+                .await
+                .unwrap();
+            let plan = rows
+                .iter()
+                .map(|r| r.get::<String, _>("detail"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                plan.contains("SEARCH capsule_source_cuts")
+                    && plan.contains("idx_capsule_source_cut_"),
+                "captured guard is not a point lookup: {select}\n{plan}"
+            );
+            assert!(
+                !plan.contains("SCAN capsule_source_cuts"),
+                "captured guard scans retained history: {plan}"
+            );
+            queries += 1;
+        }
+    }
+    assert!(
+        queries >= 7,
+        "guard query coverage unexpectedly shrank: {queries}"
+    );
 }

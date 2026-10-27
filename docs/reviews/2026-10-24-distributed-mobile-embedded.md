@@ -5797,3 +5797,92 @@ engine, API, gRPC, CLI and mobile. A separate SQLite-only storage library lint
 with artifacts-local/test-util and no default features also passes, covering
 the artifact-enabled test helper without PostgreSQL. Formatting, documentation
 and whitespace checks pass. The broader transfer/archival gates remain open.
+
+#### DME193 captured-source authority requires database enforcement
+
+A four-backend baseline reproduced twelve unsafe transitions: direct native
+forward-state writes after capture, raw old-writer ownership restoration, and
+generic owner CAS advancing to a fresh physical destination before sealing.
+The existing CAS predicate only rejected a destination that was itself a frozen
+source; it did not freeze the originating continuity during capture.
+
+PostgreSQL migration 131 and SQLite schema 62 add captured-source native and
+owner guards. Native forward state, fresh claim/fire time, physical recreation,
+owner/runtime/epoch/instance changes and JSON/indexed-state disagreement are
+refused. A same-owner transferring timestamp refresh, compensation fence and
+terminal native outcome remain admissible. Active captured/sealed cuts cannot
+be silently deleted by an ordinary history sweep. Explicit unsealed abort marks
+the cut aborted before restoring the owner/native state inside the same
+transaction; a failure must roll back that release as well. Sealed publication
+still permits ownership at a fresh destination; it never permits source revival.
+
+SQLite installs complete trigger bodies outside the schema splitter. Its
+captured-source quarantine and version-62 completion marker commit atomically,
+then future opens skip the historical scan. PostgreSQL uses volatile AFTER
+checks to re-read cuts committed while an older native/owner writer waited.
+Pre-guard test fixtures explicitly disable/reinstall guards to inject invalid
+legacy rows, rather than using normal forward APIs to create forbidden state.
+
+New cases exercise authority rejection, valid abort, post-seal ownership,
+compensation/terminal outcome preservation, abort rollback, active-cut deletion,
+JSON/index disagreement, controlled PostgreSQL parent waits and interrupted
+SQLite upgrade/reopen. All 175 source-cut cases, 56 compensation cases, 67 portable-recovery cases,
+136 storage integration cases and 15 migration checks pass. All 701 mobile
+case tests and 47 engine/HTTP integration cases also pass. Strict all-target
+lint across the six affected runtime packages passes.
+The broader child-evidence snapshot, suspension transport, accepted-transfer
+receipt, archive and immutable-invocation gates remain open.
+
+#### DME194 report the actual storage migration ceiling
+
+The shared storage schema constant still reported 129 while the published draft
+already contained migration 130. It now reports 131 alongside the new forward
+migration. The migration-ceiling regression compares this constant with the
+actual newest migration file, covering health/backup metadata drift.
+
+#### DME195 retain active native history and keep admission checks indexed
+
+Ordinary terminal purge already skips active source cuts; new mixed-batch
+regressions verify it still deletes a healthy terminal sibling. Older raw DELETE
+writers lacked that protection. Database guards now retain captured/sealed native
+rows and their local input/suspension/outcome history until explicit abort,
+retirement or acknowledgement. After release, normal terminal GC still succeeds.
+An injected pre-guard missing native row cannot be recreated under the captured
+physical ID, and its cut evidence remains. SQLite authorization-dependent replay
+of already-lost native history is not certified by this result.
+
+The installed SQLite trigger predicates initially caused full cut-table scans;
+a regression reads their actual SQL from sqlite_master and EXPLAINs every cut
+lookup. Explicit partial-index predicates and three separate owner identity
+lookups now make all seven installed guard lookups indexed point searches.
+Generic owner CAS also had a retained-history scan. It now uses the independent
+permanent retirement key and separate active source/continuity point lookups on
+both databases. A private-statement SQLite EXPLAIN test proves those exact CAS
+queries use the existing identity and partial indexes without scanning history.
+No extra history index or payload copy is added.
+
+#### DME196 live migration must not retire its own rollback source (open)
+
+PR365 head 349a7b87's E2E logs expose a production interaction: the live migration
+apply endpoint in orch8-api/src/continuity.rs calls export_paused_capsule to
+prepare a rollback capsule. That API now seals a physical ownership transfer,
+permanently retiring the same source that the subsequent in-place migration
+tries to retain. The database correctly refuses the revival. Live migration and
+rollback need a separate coherent local recovery snapshot contract that does not
+pretend a snapshot is a runtime handoff; do not relax source retirement to make
+these tests pass. This is a merge gate alongside the remaining transport/archive
+contracts. The E2E suite also retains an obsolete expectation that repeating an
+identical exported handoff returns 409; the durable export retry contract instead
+recovers the original response. That assertion needs updating and verification.
+
+The same head's unit job exposed another artifact-free cloud fixture. The real
+cloud/phone harness now configures isolated in-memory artifacts on each backend
+so in-flight handoff tests reach worker/effect admission. All eight roundtrip
+scenarios and strict harness/scenario lint pass.
+
+DME193/DME195 final concurrency verification also includes native deletion
+waiting behind capture, alongside native forward update, owner replacement and
+downgrade. All four controlled scenarios refuse stale authority/history loss
+after the wait. The final test orchestration passes strict lint. SQLite-only
+embedded-feature lint, formatting, documentation and whitespace checks pass.
+The DME196 migration/retry E2E work and broader transfer/archive gates remain open.

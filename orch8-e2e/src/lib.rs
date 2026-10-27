@@ -1137,7 +1137,12 @@ async fn open_storage(
             let path = dir.path().join("cloud.db");
             let sqlite = SqliteStorage::file(path.to_str().expect("utf-8 path"))
                 .await
-                .expect("sqlite");
+                .expect("sqlite")
+                // Cloud handoff scenarios need configured artifacts so they
+                // reach execution/worker admission rather than config refusal.
+                .with_artifact_store(Arc::new(
+                    orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                ));
             let raw = RawPool::Sqlite(sqlite.pool().clone());
             (Arc::new(sqlite), raw, None, Some(dir))
         }
@@ -1150,7 +1155,10 @@ async fn open_storage(
                 .expect("create schema");
             let pg = PostgresStorage::new(url, 16, Some(&schema))
                 .await
-                .expect("postgres storage");
+                .expect("postgres storage")
+                .with_artifact_store(Arc::new(
+                    orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                ));
             pg.run_migrations().await.expect("migrations");
             let raw = RawPool::Postgres(pg.pool().clone());
             (Arc::new(pg), raw, Some((admin, schema)), None)

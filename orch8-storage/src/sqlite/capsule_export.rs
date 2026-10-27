@@ -221,9 +221,11 @@ pub(super) async fn abort(
         updated_at: chrono::Utc::now(),
         ..current
     };
+    // Release the cut first inside this transaction, so the database guards
+    // authorize restoration only as part of an explicit atomic abort.
+    sqlx::query("UPDATE capsule_source_cuts SET state='aborted',snapshot=NULL WHERE tenant_id=?1 AND capsule_id=?2 AND state='captured'").bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
     save_owner(&mut tx, &restored).await?;
     sqlx::query("UPDATE task_instances SET state=?1,next_fire_at=?2,updated_at=?3 WHERE id=?4 AND tenant_id=?5 AND state='paused' AND claimed_at IS NULL AND updated_at=?6").bind(snapshot.instance.state.to_string()).bind(snapshot.instance.next_fire_at.map(|t|t.to_rfc3339())).bind(restored.updated_at.to_rfc3339()).bind(restored.current_instance_id.to_string()).bind(tenant.as_str()).bind(stored.request.now.to_rfc3339()).execute(&mut *tx).await?;
-    sqlx::query("UPDATE capsule_source_cuts SET state='aborted',snapshot=NULL WHERE tenant_id=?1 AND capsule_id=?2 AND state='captured'").bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(true)
 }

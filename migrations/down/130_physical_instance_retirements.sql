@@ -1,5 +1,10 @@
 -- An empty installation can roll back; never remove live security evidence.
+-- Serialize the emptiness check with capture, publication and history writers.
+LOCK TABLE continuity_executions, task_instances, capsule_source_cuts, physical_instance_retirements IN ACCESS EXCLUSIVE MODE;
 DO $$ BEGIN
+ IF to_regprocedure('enforce_captured_native_authority()') IS NOT NULL THEN
+  RAISE EXCEPTION 'Roll back captured-source authority migration first';
+ END IF;
  IF EXISTS(SELECT 1 FROM physical_instance_retirements LIMIT 1) THEN
   RAISE EXCEPTION 'Cannot remove permanent physical instance retirement evidence';
  END IF;

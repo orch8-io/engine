@@ -287,10 +287,10 @@ impl crate::ContinuityStore for PostgresStorage {
              WHERE tenant_id = $6 AND continuity_id = $7 AND epoch = $8
                AND owner_runtime_id = $9
                AND state <> 'compensating'
-               AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut
-                   WHERE cut.tenant_id=$6 AND cut.continuity_id=$7
-                     AND cut.source_instance_id=$10
-                     AND cut.state IN ('captured','sealed','retired','acknowledged'))",
+               AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=$10)
+               AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=$10 AND cut.state IN ('captured','sealed'))
+               AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=$6 AND cut.continuity_id=$7
+                   AND cut.state IN ('captured','sealed') AND cut.state='captured')",
         )
         .bind(to_i64(next.epoch.get(), "next epoch")?)
         .bind(next.owner_runtime_id.into_uuid())
