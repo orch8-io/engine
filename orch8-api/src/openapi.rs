@@ -261,6 +261,11 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         "create_compensation_run",
     ),
     (
+        "/continuity/executions/{id}/compensations/active",
+        HttpMethod::Get,
+        "get_active_compensation_run",
+    ),
+    (
         "/continuity/compensations/{id}",
         HttpMethod::Get,
         "get_compensation_run",
@@ -376,6 +381,14 @@ fn continuity_operation_description(operation_id: &str) -> Option<&'static str> 
 impl Modify for ContinuityOpenApi {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         for (path, method, operation_id) in CONTINUITY_OPERATIONS {
+            // Preserve endpoint-specific request, parameter and response schemas.
+            if openapi
+                .paths
+                .get_path_operation(path, method.clone())
+                .is_some()
+            {
+                continue;
+            }
             let responses = ResponsesBuilder::new()
                 .response("default", Response::new("Continuity API response"))
                 .build();
@@ -432,6 +445,8 @@ impl Modify for EmbedSecurity {
         (url = "/", description = "Unversioned (deprecated, backward-compat)"),
     ),
     paths(
+        crate::continuity::create_compensation_run,
+        crate::continuity::get_active_compensation_run,
         // Health
         crate::health::liveness,
         crate::health::readiness,
@@ -685,6 +700,8 @@ impl Modify for EmbedSecurity {
         crate::continuity::product_api::validate_commercial_plan,
     ),
     components(schemas(
+        crate::continuity::CreateCompensationRequest,
+        orch8_types::continuity_advanced::CompensationRunRecord,
         // Findings & preflight
         orch8_types::finding::Finding,
         orch8_types::finding::FindingSeverity,
@@ -1034,6 +1051,52 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn compensation_recovery_openapi_has_callable_scopes_and_replay_schemas() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let create = &document["paths"]["/continuity/executions/{id}/compensations"]["post"];
+        assert_eq!(create["requestBody"]["required"], true);
+        assert_eq!(
+            create["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/CreateCompensationRequest"
+        );
+        let request = &document["components"]["schemas"]["CreateCompensationRequest"];
+        assert_eq!(request["required"], serde_json::json!(["tenant_id"]));
+        assert_eq!(request["additionalProperties"], false);
+        assert!(
+            request["properties"]["request_id"]
+                .to_string()
+                .contains("uuid")
+        );
+        for status in ["200", "201"] {
+            assert_eq!(
+                create["responses"][status]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/CompensationRunRecord"
+            );
+        }
+        assert!(create["responses"].get("409").is_some());
+        assert!(create["responses"].get("422").is_some());
+        let active = &document["paths"]["/continuity/executions/{id}/compensations/active"]["get"];
+        let parameters = active["parameters"].as_array().unwrap();
+        for (name, location) in [("id", "path"), ("tenant_id", "query")] {
+            assert!(
+                parameters
+                    .iter()
+                    .any(|p| p["name"] == name && p["in"] == location && p["required"] == true)
+            );
+        }
+        assert!(active["responses"].get("404").is_some());
+        assert_eq!(
+            active["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/CompensationRunRecord"
+        );
+        assert!(
+            document["components"]["schemas"]["CompensationRunRecord"]["properties"]
+                .get("id")
+                .is_some()
+        );
+    }
 
     #[test]
     fn continuity_router_paths_are_all_registered_in_openapi() {

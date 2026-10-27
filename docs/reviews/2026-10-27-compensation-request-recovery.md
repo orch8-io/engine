@@ -49,3 +49,11 @@ recovery command builds and exposes the expected scoped command-line interface.
 Strict all-target Clippy passes for storage, engine, API, gRPC, CLI and mobile;
 formatting, TypeScript typecheck and documentation checks pass. CI and the
 source-fence prerequisite must pass before this follow-up is merged.
+
+The full API unit suite exposed a missing OpenAPI operation for active recovery.
+That operation is now registered. Creation and active lookup use typed path
+annotations with required scopes, a strict optional-request-ID body and durable
+run response schemas; generic continuity registration preserves those typed
+operations. All 367 API unit tests pass, including route inventory and generated
+request/parameter/response contracts, alongside all 15 HTTP safety cases and
+strict all-target API Clippy. Runtime handler bodies are unchanged.
