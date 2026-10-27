@@ -119,13 +119,13 @@ backend_test!(async fn unavailable_commit_policy_cannot_be_treated_as_no_guard(b
     b.storage.create_instance(&instance).await.unwrap();
     let token=b.storage.claim_due_instances(Utc::now()+chrono::Duration::seconds(1),1,0).await.unwrap().pop().unwrap().claimed_at;
     let (storage,faults)=FaultStorage::wrap(b.storage.clone());
-    faults.on("list_effect_commit_guards").times(1).fail_transient();
+    faults.on("load_effect_guards").times(1).fail_transient();
     let calls=Arc::new(AtomicUsize::new(0));let count=calls.clone();let mut registry=HandlerRegistry::new();
     registry.register("http_request",move |_|{let count=count.clone();async move{count.fetch_add(1,Ordering::SeqCst);Ok(json!({"done":true}))}});
     let exec=||StepExecParams{claim_token:token,instance_id:instance.id,tenant_id:instance.tenant_id.clone(),block_id:BlockId::new("work"),handler_name:"http_request".into(),params:json!({"url":"https://provider.example/action"}),context:ExecutionContext::default(),attempt:0,timeout:None,externalize_threshold:0,wait_for_input:None,cache_key:None,output_schema:None};
     assert!(execute_step_dry(&storage,&registry,exec()).await.is_err());
     assert_eq!(calls.load(Ordering::SeqCst),0);
-    assert_eq!(faults.calls("list_effect_commit_guards"),1);
+    assert_eq!(faults.calls("load_effect_guards"),1);
     let scope=b.storage.get_continuity_execution_by_instance(&instance.tenant_id,instance.id).await.unwrap().unwrap();
     assert_eq!(b.storage.list_effect_receipts(&instance.tenant_id,scope.continuity_id,10).await.unwrap()[0].state,EffectState::Prepared);
     execute_step_dry(&storage,&registry,exec()).await.unwrap();

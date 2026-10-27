@@ -56,6 +56,9 @@ pub enum CapsuleServiceError {
     #[error("capsule is missing required portable execution state")]
     MissingExecutionState,
 
+    #[error("capsule is missing complete portable effect recovery evidence")]
+    MissingEffectState,
+
     #[error("continuity execution is not owned by the source instance")]
     OwnershipMismatch,
     #[error("instance must be paused before capsule export")]
@@ -236,7 +239,26 @@ pub async fn export_paused_capsule_manifest(
     if sequence.tenant_id != instance.tenant_id {
         return Err(CapsuleServiceError::OwnershipMismatch);
     }
-    let effect_ids = state::effect_ids(storage, &request.continuity).await?;
+    let receipts = state::effect_receipts(storage, &request.continuity).await?;
+    let effect_ids = receipts.iter().map(|receipt| receipt.id).collect();
+    let (active_attempts, reset_blocks) =
+        storage.export_effect_attempts(&request.continuity).await?;
+    let commit_guards = storage
+        .load_effect_guards(
+            &instance.tenant_id,
+            request.continuity.continuity_id,
+            sequence.id,
+            sequence.version,
+            None,
+        )
+        .await?;
+    let mut effect_state = orch8_types::continuity::CapsuleEffectState {
+        receipts,
+        active_attempts,
+        reset_blocks,
+        commit_guards,
+    };
+    state::complete_legacy_bindings(&request.continuity, &mut effect_state)?;
     let outputs = storage.get_all_outputs(instance.id).await?;
     let payload = CapsulePayload {
         instance: CapsuleInstanceState {
@@ -251,6 +273,7 @@ pub async fn export_paused_capsule_manifest(
         },
         checkpoint: checkpoint.clone(),
         execution_state: Some(state::export(storage, instance.id).await?),
+        effect_state: Some(effect_state),
         outputs,
         pending_waits: Vec::new(),
         pending_signals: Vec::new(),
@@ -426,22 +449,22 @@ pub async fn verify_and_import_paused_capsule_bytes(
         candidate,
         outputs,
     )?;
+    let effects = state::effect_import(&payload, signed)?;
     let imported_id = storage
-        .import_capsule_snapshot(
+        .import_capsule_recovery(
             signed.manifest.capsule_id,
             request.destination_runtime_id,
             &snapshot,
             &checkpoint,
+            Some(&effects),
         )
         .await?;
-    let imported = if imported_id == snapshot.instance.id {
-        snapshot.instance
-    } else {
-        storage
-            .get_instance(imported_id)
-            .await?
-            .ok_or(CapsuleServiceError::MissingImportedInstance)?
-    };
+    // An explicit destination ID can also be an idempotent redelivery. Always
+    // return persisted state, which may have advanced since the first import.
+    let imported = storage
+        .get_instance(imported_id)
+        .await?
+        .ok_or(CapsuleServiceError::MissingImportedInstance)?;
     Ok((imported, payload))
 }
 

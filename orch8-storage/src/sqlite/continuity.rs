@@ -81,11 +81,8 @@ impl crate::ContinuityStore for SqliteStorage {
             handoff_id: None,
             entered_at: execution.updated_at,
         };
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
+        super::portable_effects::check_namespace_on(&mut transaction, execution).await?;
         sqlx::query(
             "INSERT INTO continuity_executions
              (continuity_id, tenant_id, epoch, owner_runtime_id, state, record, updated_at)
@@ -164,6 +161,13 @@ impl crate::ContinuityStore for SqliteStorage {
         tenant_id: &TenantId,
         instance_id: InstanceId,
     ) -> Result<Option<ContinuityExecution>, StorageError> {
+        // A quarantined import already belongs to the source namespace even
+        // when the source owner still points at another runtime-local instance.
+        let imported=sqlx::query("SELECT ce.record FROM capsule_effect_imports p JOIN continuity_executions ce ON ce.tenant_id=p.tenant_id AND ce.continuity_id=p.continuity_id WHERE p.tenant_id=?1 AND p.instance_id=?2 LIMIT 1")
+            .bind(tenant_id.as_str()).bind(instance_id.to_string()).fetch_optional(&self.pool).await?;
+        if let Some(row) = imported {
+            return decode(&row.get::<String, _>("record")).map(Some);
+        }
         // Current owner first (indexed on the current-instance expression),
         // then the location history (indexed on tenant + instance); see the
         // Postgres twin for why these are two lookups rather than `OR EXISTS`.
@@ -669,6 +673,32 @@ impl crate::ContinuityStore for SqliteStorage {
         snapshot: &crate::restore::InstanceSnapshot,
         checkpoint: &orch8_types::checkpoint::Checkpoint,
     ) -> Result<InstanceId, StorageError> {
+        self.import_capsule_recovery(
+            capsule_id,
+            destination_runtime_id,
+            snapshot,
+            checkpoint,
+            None,
+        )
+        .await
+    }
+
+    async fn import_capsule_recovery(
+        &self,
+        capsule_id: CapsuleId,
+        destination_runtime_id: RuntimeId,
+        snapshot: &crate::restore::InstanceSnapshot,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+        effects: Option<&crate::portable_effects::CapsuleEffectImport>,
+    ) -> Result<InstanceId, StorageError> {
+        if let Some(effects) = effects {
+            effects.validate(snapshot.instance.sequence_id)?;
+            if effects.source.tenant_id != snapshot.instance.tenant_id {
+                return Err(StorageError::Constraint(
+                    "portable effect tenant mismatch".into(),
+                ));
+            }
+        }
         let nodes = snapshot.checked_nodes()?;
         let instance = &snapshot.instance;
         let outputs = &snapshot.outputs;
@@ -711,6 +741,15 @@ impl crate::ContinuityStore for SqliteStorage {
                 .parse::<uuid::Uuid>()
                 .map(InstanceId::from_uuid)
                 .map_err(|error| StorageError::Query(error.to_string()))?;
+            super::portable_effects::check_replay(
+                self,
+                &instance.tenant_id,
+                capsule_id,
+                destination_runtime_id,
+                id,
+                effects,
+            )
+            .await?;
             return Ok(id);
         }
         super::instances::bind_instance_insert(
@@ -739,6 +778,16 @@ impl crate::ContinuityStore for SqliteStorage {
         }
         for output in outputs {
             super::outputs::save_on(&mut transaction, output).await?;
+        }
+        if let Some(effects) = effects {
+            super::portable_effects::import_on(
+                &mut transaction,
+                capsule_id,
+                destination_runtime_id,
+                instance,
+                effects,
+            )
+            .await?;
         }
         transaction
             .commit()
@@ -1001,14 +1050,13 @@ impl crate::ContinuityStore for SqliteStorage {
         attempt: u32,
     ) -> Result<Option<EffectReceipt>, StorageError> {
         let row = sqlx::query(
-            "SELECT record FROM effect_receipts
-             WHERE tenant_id=? AND continuity_id=? AND instance_id=?
-               AND state IN ('dispatched','unknown')
-               AND json_extract(record, '$.block_id')=?
-               AND json_extract(record, '$.attempt')=?
-             AND (NOT EXISTS (SELECT 1 FROM effect_block_resets r WHERE r.tenant_id=effect_receipts.tenant_id AND r.instance_id=effect_receipts.instance_id AND r.block_id=json_extract(record, '$.block_id'))
- OR EXISTS (SELECT 1 FROM effect_attempt_bindings b WHERE b.tenant_id=effect_receipts.tenant_id AND b.effect_id=effect_receipts.id))
-             ORDER BY created_at DESC LIMIT 1",
+            "SELECT record FROM effect_receipts e WHERE tenant_id=?1 AND continuity_id=?2
+               AND state IN ('dispatched','unknown') AND (
+                 (instance_id=?3 AND json_extract(record,'$.block_id')=?4 AND json_extract(record,'$.attempt')=?5
+                  AND NOT EXISTS(SELECT 1 FROM effect_block_resets r WHERE r.tenant_id=e.tenant_id AND r.instance_id=?3 AND r.block_id=?4))
+                 OR id IN (SELECT b.effect_id FROM effect_attempt_bindings b JOIN continuity_executions c ON c.tenant_id=b.tenant_id AND c.continuity_id=b.continuity_id AND c.epoch=b.epoch
+                  WHERE b.tenant_id=?1 AND b.continuity_id=?2 AND b.instance_id=?3 AND b.block_id=?4 AND b.attempt=?5))
+             ORDER BY created_at DESC,id DESC LIMIT 1",
         )
         .bind(tenant_id.as_str())
         .bind(continuity_id.to_string())
@@ -1248,6 +1296,29 @@ impl crate::ContinuityStore for SqliteStorage {
         limit: u32,
     ) -> Result<crate::EffectReceiptPage, StorageError> {
         super::effect_receipts::page(self, tenant_id, continuity_id, after, limit).await
+    }
+
+    async fn export_effect_attempts(
+        &self,
+        owner: &ContinuityExecution,
+    ) -> Result<
+        (
+            Vec<orch8_types::continuity::CapsuleEffectBinding>,
+            Vec<orch8_types::ids::BlockId>,
+        ),
+        StorageError,
+    > {
+        super::portable_effects::attempts(self, owner).await
+    }
+    async fn load_effect_guards(
+        &self,
+        tenant: &TenantId,
+        continuity: ContinuityId,
+        sequence: orch8_types::ids::SequenceId,
+        version: i32,
+        kind: Option<orch8_types::continuity::EffectKind>,
+    ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
+        super::portable_effects::guards(self, tenant, continuity, sequence, version, kind).await
     }
 
     async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError> {

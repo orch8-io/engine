@@ -136,7 +136,9 @@ impl CapsuleSchemaVersion {
     pub const V1: Self = Self { major: 1, minor: 0 };
     /// Requires execution-tree and externalized-state restoration on import.
     pub const V1_1: Self = Self { major: 1, minor: 1 };
-    pub const CURRENT: Self = Self::V1_1;
+    /// Requires outcome receipts, active aliases and frozen commit guards.
+    pub const V1_2: Self = Self { major: 1, minor: 2 };
+    pub const CURRENT: Self = Self::V1_2;
 
     #[must_use]
     pub const fn can_read(self, offered: Self) -> bool {
@@ -479,6 +481,9 @@ pub struct CapsulePayload {
     /// Present for schema 1.1 and later. None identifies legacy capsules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_state: Option<CapsuleExecutionState>,
+    /// Required in 1.2; receipt origins and provider IDs remain unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_state: Option<CapsuleEffectState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<crate::output::BlockOutput>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -500,6 +505,23 @@ pub struct CapsulePayload {
 pub struct CapsuleExecutionState {
     pub nodes: Vec<crate::execution::ExecutionNode>,
     pub payloads: Vec<crate::output::ExternalizedEntry>,
+}
+
+/// An active invocation at the source, bound to immutable origin evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CapsuleEffectBinding {
+    pub block_id: BlockId,
+    pub attempt: u32,
+    pub effect_id: EffectId,
+}
+
+/// Full effect recovery evidence; ownership authority remains in the manifest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct CapsuleEffectState {
+    pub receipts: Vec<EffectReceipt>,
+    pub active_attempts: Vec<CapsuleEffectBinding>,
+    pub reset_blocks: Vec<BlockId>,
+    pub commit_guards: Vec<crate::continuity_advanced::WorkflowInvariant>,
 }
 
 /// Explicit portable subset of a runtime-local task instance. This avoids
@@ -529,6 +551,11 @@ impl CapsulePayload {
         if self.execution_state.as_ref().is_some_and(|state| {
             state.nodes.len() > Self::MAX_EXECUTION_NODES
                 || state.payloads.len() > Self::MAX_EXTERNALIZED_ENTRIES
+        }) || self.effect_state.as_ref().is_some_and(|state| {
+            state.receipts.len() > Self::MAX_PENDING_ITEMS
+                || state.active_attempts.len() > Self::MAX_PENDING_ITEMS
+                || state.reset_blocks.len() > Self::MAX_PENDING_ITEMS
+                || state.commit_guards.len() > Self::MAX_PENDING_ITEMS
         }) || self.outputs.len() > Self::MAX_OUTPUTS
             || self.pending_waits.len() > Self::MAX_PENDING_ITEMS
             || self.pending_signals.len() > Self::MAX_PENDING_ITEMS

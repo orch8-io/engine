@@ -18,3 +18,19 @@ pub(crate) fn validate(
     }
     Ok(())
 }
+
+pub(crate) fn validate_bound(
+    existing: &EffectReceipt,
+    candidate: &EffectReceipt,
+) -> Result<(), StorageError> {
+    if existing.tenant_id != candidate.tenant_id
+        || existing.continuity_id != candidate.continuity_id
+        || existing.block_id != candidate.block_id
+        || existing.attempt != candidate.attempt
+    {
+        return Err(StorageError::Conflict(
+            "effect alias contains different intent evidence".into(),
+        ));
+    }
+    Ok(())
+}

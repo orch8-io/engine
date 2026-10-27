@@ -32,6 +32,7 @@ mod outputs;
 mod placement;
 mod plugins;
 mod pools;
+mod portable_effects;
 mod progress_shares;
 mod push_outbox;
 mod queue_dispatch;

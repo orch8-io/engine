@@ -158,11 +158,9 @@ impl Engine {
             return Err(Error::NotFound("capsule tenant".into()));
         }
         let manifest = &capsule.signed_manifest.manifest;
-        // M7: reject identity conflicts *before* the import persists a
-        // paused instance -- there is no instance delete API, so a conflict
-        // detected afterwards used to leave an orphaned instance behind.
-        // The post-import check below still catches a concurrent racer.
-        self.check_import_identity(manifest, destination_instance_id)
+        // Reject known conflicts before decrypting. The storage import also
+        // validates ownership and namespace inside its atomic transaction.
+        self.check_import_identity(manifest, destination_runtime_id, destination_instance_id)
             .await?;
         let (instance, _) = orch8_engine::capsule::verify_and_import_paused_capsule_bytes(
             self.storage_backend().as_ref(),
@@ -179,38 +177,15 @@ impl Engine {
             payload_encryptor,
         )
         .await?;
-        let pending = ContinuityExecution {
-            continuity_id: manifest.continuity_id,
-            tenant_id: self.tenant_id().clone(),
-            current_instance_id: instance.id,
-            owner_runtime_id: manifest.source_runtime_id,
-            epoch: manifest.epoch,
-            state: OwnershipState::Transferring,
-            updated_at: Utc::now(),
-        };
-        let durable = self
-            .storage_backend()
-            .ensure_continuity_execution(&pending)
-            .await?;
-        if !same_continuity_identity(&durable, &pending) {
-            return Err(Error::Config(
-                "imported capsule conflicts with an existing continuity identity".into(),
-            ));
-        }
-        self.storage_backend()
-            .save_capsule_manifest(&capsule.signed_manifest.manifest)
-            .await?;
         Ok(instance)
     }
 
-    /// Pre-import conflict check: any continuity already recorded for this
-    /// capsule's continuity id (or for the requested destination instance)
-    /// must be the `Transferring` record a previous import of the same
-    /// capsule would have written; anything else can never pass the
-    /// post-import identity check.
+    /// Preflight permits pending ownership and exact accepted redelivery.
+    /// The atomic storage import enforces immutable identity under concurrency.
     async fn check_import_identity(
         &self,
         manifest: &orch8_types::continuity::CapsuleManifest,
+        destination_runtime_id: RuntimeId,
         destination_instance_id: Option<InstanceId>,
     ) -> Result<(), Error> {
         let conflict = || {
@@ -226,8 +201,25 @@ impl Engine {
                 && existing.owner_runtime_id == manifest.source_runtime_id
                 && existing.epoch == manifest.epoch
                 && existing.state == OwnershipState::Transferring
-                && destination_instance_id.is_none_or(|id| existing.current_instance_id == id);
-            if !matches_pending {
+                && (existing.current_instance_id == manifest.source_instance_id
+                    || destination_instance_id.is_none_or(|id| existing.current_instance_id == id));
+            let already_accepted = manifest.epoch.checked_next().ok() == Some(existing.epoch)
+                && existing.owner_runtime_id == destination_runtime_id
+                && matches!(
+                    existing.state,
+                    OwnershipState::Owned | OwnershipState::Completed
+                )
+                && destination_instance_id.is_none_or(|id| id == existing.current_instance_id)
+                && self
+                    .storage_backend()
+                    .is_capsule_import_instance(
+                        tenant,
+                        manifest.capsule_id,
+                        destination_runtime_id,
+                        existing.current_instance_id,
+                    )
+                    .await?;
+            if !matches_pending && !already_accepted {
                 return Err(conflict());
             }
         }
@@ -250,15 +242,6 @@ impl Engine {
             Err(Error::NotFound(format!("instance {}", instance.id)))
         }
     }
-}
-
-fn same_continuity_identity(left: &ContinuityExecution, right: &ContinuityExecution) -> bool {
-    left.continuity_id == right.continuity_id
-        && left.tenant_id == right.tenant_id
-        && left.current_instance_id == right.current_instance_id
-        && left.owner_runtime_id == right.owner_runtime_id
-        && left.epoch == right.epoch
-        && left.state == right.state
 }
 
 fn validate_export_options(options: &CapsuleExportOptions) -> Result<(), Error> {
@@ -370,66 +353,6 @@ mod tests {
                     "case: {case}: the error must name the {label}: {result:?}"
                 ),
             }
-        }
-    }
-
-    fn execution() -> ContinuityExecution {
-        ContinuityExecution {
-            continuity_id: ContinuityId::new(),
-            tenant_id: orch8_types::ids::TenantId::unchecked("tenant_1"),
-            current_instance_id: InstanceId::new(),
-            owner_runtime_id: RuntimeId::new(),
-            epoch: ExecutionEpoch::initial(),
-            state: OwnershipState::Owned,
-            updated_at: Utc::now(),
-        }
-    }
-
-    #[test]
-    fn continuity_identity_covers_every_field_except_freshness() {
-        type Mutation = fn(&mut ContinuityExecution);
-        let cases: [(&str, Mutation, bool); 7] = [
-            (
-                "continuity id",
-                |e| e.continuity_id = ContinuityId::new(),
-                false,
-            ),
-            (
-                "tenant",
-                |e| e.tenant_id = orch8_types::ids::TenantId::unchecked("tenant_2"),
-                false,
-            ),
-            (
-                "current instance",
-                |e| e.current_instance_id = InstanceId::new(),
-                false,
-            ),
-            (
-                "owner runtime",
-                |e| e.owner_runtime_id = RuntimeId::new(),
-                false,
-            ),
-            ("epoch", |e| e.epoch = ExecutionEpoch::from_u64(9), false),
-            (
-                "ownership state",
-                |e| e.state = OwnershipState::Transferring,
-                false,
-            ),
-            (
-                "updated_at only",
-                |e| e.updated_at += Duration::hours(1),
-                true,
-            ),
-        ];
-        for (case, mutate, same) in cases {
-            let base = execution();
-            let mut other = base.clone();
-            mutate(&mut other);
-            assert_eq!(
-                same_continuity_identity(&base, &other),
-                same,
-                "case: {case}"
-            );
         }
     }
 }

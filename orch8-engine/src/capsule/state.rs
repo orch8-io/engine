@@ -47,10 +47,10 @@ pub(super) async fn export(
 }
 
 /// Never publish the capped prefix returned by the legacy ledger list API.
-pub(super) async fn effect_ids(
+pub(super) async fn effect_receipts(
     storage: &dyn StorageBackend,
     owner: &orch8_types::continuity::ContinuityExecution,
-) -> Result<Vec<orch8_types::continuity::EffectId>, CapsuleServiceError> {
+) -> Result<Vec<orch8_types::continuity::EffectReceipt>, CapsuleServiceError> {
     let mut ids = Vec::new();
     let mut seen = HashSet::new();
     let mut cursor = None;
@@ -75,7 +75,7 @@ pub(super) async fn effect_ids(
             {
                 return Err(CapsuleServiceError::PayloadIdentityMismatch);
             }
-            ids.push(receipt.id);
+            ids.push(receipt);
         }
         match page.next {
             None => break,
@@ -86,12 +86,60 @@ pub(super) async fn effect_ids(
     Ok(ids)
 }
 
+/// Adopt only exact pre-binding IDs at the current source location. Retired
+/// generations and receipt origins from earlier hops are history, not aliases.
+pub(super) fn complete_legacy_bindings(
+    owner: &orch8_types::continuity::ContinuityExecution,
+    state: &mut orch8_types::continuity::CapsuleEffectState,
+) -> Result<(), CapsuleServiceError> {
+    let mut keys: HashSet<_> = state
+        .active_attempts
+        .iter()
+        .map(|binding| (binding.block_id.clone(), binding.attempt))
+        .collect();
+    let resets: HashSet<_> = state.reset_blocks.iter().collect();
+    for receipt in &state.receipts {
+        if receipt.instance_id != owner.current_instance_id
+            || receipt.epoch != owner.epoch
+            || keys.contains(&(receipt.block_id.clone(), receipt.attempt))
+            || resets.contains(&receipt.block_id)
+        {
+            continue;
+        }
+        let legacy = crate::effect_guard::legacy_effect_id(
+            owner.continuity_id,
+            owner.epoch,
+            owner.current_instance_id,
+            &receipt.block_id,
+            receipt.attempt,
+        );
+        if receipt.id == legacy {
+            state
+                .active_attempts
+                .push(orch8_types::continuity::CapsuleEffectBinding {
+                    block_id: receipt.block_id.clone(),
+                    attempt: receipt.attempt,
+                    effect_id: receipt.id,
+                });
+            keys.insert((receipt.block_id.clone(), receipt.attempt));
+        } else if !receipt.state.is_resolved() {
+            return Err(CapsuleServiceError::MissingEffectState);
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn validate_version(
     payload: &CapsulePayload,
     schema: CapsuleSchemaVersion,
 ) -> Result<(), CapsuleServiceError> {
     if (schema == CapsuleSchemaVersion::V1) != payload.execution_state.is_none() {
         return Err(CapsuleServiceError::MissingExecutionState);
+    }
+    if (schema.minor >= 2) != payload.effect_state.is_some()
+        || (payload.effect_state.is_none() && !payload.effect_ids.is_empty())
+    {
+        return Err(CapsuleServiceError::MissingEffectState);
     }
     Ok(())
 }
@@ -264,6 +312,35 @@ fn rewrite_markers(
     Ok(())
 }
 
+/// Bind portable outcomes and active aliases to the verified immutable header.
+pub(super) fn effect_import(
+    payload: &CapsulePayload,
+    signed: &orch8_publisher::capsule::SignedCapsuleManifest,
+) -> Result<orch8_storage::portable_effects::CapsuleEffectImport, CapsuleServiceError> {
+    let effects = orch8_storage::portable_effects::CapsuleEffectImport {
+        manifest: signed.manifest.clone(),
+        source: orch8_types::continuity::ContinuityExecution {
+            continuity_id: signed.manifest.continuity_id,
+            tenant_id: signed.manifest.tenant_id.clone(),
+            current_instance_id: signed.manifest.source_instance_id,
+            owner_runtime_id: signed.manifest.source_runtime_id,
+            epoch: signed.manifest.epoch,
+            state: orch8_types::continuity::OwnershipState::Owned,
+            updated_at: signed.manifest.issued_at,
+        },
+        manifest_sha256: signed.manifest_sha256.clone(),
+        state: payload.effect_state.clone().unwrap_or_default(),
+    };
+    effects.validate(payload.instance.sequence_id)?;
+    let ids: std::collections::HashSet<_> = payload.effect_ids.iter().copied().collect();
+    if ids.len() != payload.effect_ids.len()
+        || ids != effects.state.receipts.iter().map(|r| r.id).collect()
+    {
+        return Err(CapsuleServiceError::PayloadIdentityMismatch);
+    }
+    Ok(effects)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -285,10 +362,37 @@ mod tests {
             Err(CapsuleServiceError::MissingExecutionState)
         ));
         payload.execution_state = Some(CapsuleExecutionState::default());
+        assert!(validate_version(&payload, CapsuleSchemaVersion::V1_1).is_ok());
+        assert!(matches!(
+            validate_version(&payload, CapsuleSchemaVersion::CURRENT),
+            Err(CapsuleServiceError::MissingEffectState)
+        ));
+        payload.effect_state = Some(orch8_types::continuity::CapsuleEffectState::default());
         assert!(validate_version(&payload, CapsuleSchemaVersion::CURRENT).is_ok());
+        assert!(matches!(
+            validate_version(&payload, CapsuleSchemaVersion::V1_1),
+            Err(CapsuleServiceError::MissingEffectState)
+        ));
         assert!(matches!(
             validate_version(&payload, CapsuleSchemaVersion::V1),
             Err(CapsuleServiceError::MissingExecutionState)
+        ));
+    }
+
+    #[test]
+    fn legacy_capsules_cannot_claim_effect_identity_without_outcome_evidence() {
+        let mut payload = payload();
+        payload
+            .effect_ids
+            .push(orch8_types::continuity::EffectId::new());
+        assert!(matches!(
+            validate_version(&payload, CapsuleSchemaVersion::V1),
+            Err(CapsuleServiceError::MissingEffectState)
+        ));
+        payload.execution_state = Some(CapsuleExecutionState::default());
+        assert!(matches!(
+            validate_version(&payload, CapsuleSchemaVersion::V1_1),
+            Err(CapsuleServiceError::MissingEffectState)
         ));
     }
 

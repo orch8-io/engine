@@ -1253,6 +1253,27 @@ CREATE INDEX IF NOT EXISTS idx_workflow_invariants_scope
     ON workflow_invariants(tenant_id, sequence_id, sequence_version)
     WHERE enabled = 1;
 
+
+CREATE TABLE IF NOT EXISTS capsule_effect_imports (
+ tenant_id TEXT NOT NULL,
+ capsule_id TEXT NOT NULL,
+ destination_runtime_id TEXT NOT NULL,
+ instance_id TEXT NOT NULL REFERENCES task_instances(id) ON DELETE CASCADE,
+ continuity_id TEXT NOT NULL,
+ manifest_sha256 TEXT NOT NULL,
+ PRIMARY KEY (tenant_id,capsule_id,destination_runtime_id),
+ FOREIGN KEY (tenant_id,continuity_id) REFERENCES continuity_executions(tenant_id,continuity_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_capsule_effect_imports_instance ON capsule_effect_imports(instance_id);
+CREATE TABLE IF NOT EXISTS continuity_effect_guards (
+ tenant_id TEXT NOT NULL,
+ continuity_id TEXT NOT NULL,
+ invariant_id TEXT NOT NULL REFERENCES workflow_invariants(id),
+ record TEXT NOT NULL,
+ PRIMARY KEY (tenant_id,continuity_id,invariant_id),
+ FOREIGN KEY (tenant_id,continuity_id) REFERENCES continuity_executions(tenant_id,continuity_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS invariant_results (
     id TEXT PRIMARY KEY,
     invariant_id TEXT NOT NULL REFERENCES workflow_invariants(id),
@@ -1673,4 +1694,4 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 57;
+pub(super) const SCHEMA_VERSION: i64 = 58;

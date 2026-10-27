@@ -52,7 +52,7 @@ impl EffectAdmission {
     ) -> Option<EffectId> {
         let receipt = &self.inner.receipt;
         (receipt.tenant_id == *tenant
-            && receipt.instance_id == instance
+            && self.inner.fence.instance_id == instance
             && receipt.block_id == *block
             && receipt.attempt == attempt)
             .then_some(receipt.id)
@@ -309,6 +309,10 @@ impl<'a> EffectGuard<'a> {
         match guard.receipt.state {
             EffectState::Planned => guard.advance(EffectState::Prepared).await?,
             EffectState::Prepared => {}
+            EffectState::Dispatched => {
+                guard.advance(EffectState::Unknown).await?;
+                return Err(blocked(&guard.receipt));
+            }
             _ => return Err(blocked(&guard.receipt)),
         }
         Ok(Some(guard))
@@ -344,7 +348,7 @@ impl<'a> EffectGuard<'a> {
         Ok(())
     }
 
-    /// Deterministic id of this attempt's receipt. External worker tasks
+    /// Durable provider id of this active attempt. External worker tasks
     /// store it so settlement never has to recompute it.
     pub(crate) fn effect_id(&self) -> EffectId {
         self.receipt.id
@@ -364,7 +368,8 @@ impl<'a> EffectGuard<'a> {
     }
 
     pub(crate) async fn dispatch(&mut self) -> Result<(), EngineError> {
-        let guards = load_effect_commit_guards(self.storage, &self.receipt).await?;
+        let guards =
+            load_effect_commit_guards(self.storage, &self.receipt, self.fence.instance_id).await?;
         let mut updated = self.receipt.clone();
         updated
             .transition(EffectState::Dispatched, Utc::now())
@@ -382,8 +387,14 @@ impl<'a> EffectGuard<'a> {
             EffectDispatchOutcome::Dispatched => {
                 self.receipt = updated;
                 if !guards.is_empty() {
-                    record_effect_guard_results(self.storage, &guards, &self.receipt, false)
-                        .await?;
+                    record_effect_guard_results(
+                        self.storage,
+                        &guards,
+                        &self.receipt,
+                        self.fence.epoch,
+                        false,
+                    )
+                    .await?;
                 }
                 Ok(())
             }
@@ -393,7 +404,14 @@ impl<'a> EffectGuard<'a> {
                         "unguarded effect dispatch returned a duplicate verdict".into(),
                     ));
                 };
-                record_effect_guard_results(self.storage, &guards, &updated, true).await?;
+                record_effect_guard_results(
+                    self.storage,
+                    &guards,
+                    &updated,
+                    self.fence.epoch,
+                    true,
+                )
+                .await?;
                 Err(EngineError::InvariantViolation {
                     invariant_id: invariant.id,
                     block_id: updated.block_id,
@@ -482,20 +500,21 @@ fn deterministic_scope_uuid(domain: &[u8], instance_id: InstanceId) -> Uuid {
 async fn load_effect_commit_guards(
     storage: &dyn StorageBackend,
     receipt: &EffectReceipt,
+    current_instance: InstanceId,
 ) -> Result<Vec<WorkflowInvariant>, EngineError> {
-    let Some(instance) = storage.get_instance(receipt.instance_id).await? else {
+    let Some(instance) = storage.get_instance(current_instance).await? else {
         return Ok(Vec::new());
     };
     let Some(sequence) = storage.get_sequence(instance.sequence_id).await? else {
         return Ok(Vec::new());
     };
     let invariants = storage
-        .list_effect_commit_guards(
+        .load_effect_guards(
             &receipt.tenant_id,
+            receipt.continuity_id,
             sequence.id,
             sequence.version,
-            receipt.kind,
-            10_000,
+            Some(receipt.kind),
         )
         .await?;
     Ok(invariants
@@ -514,6 +533,7 @@ async fn record_effect_guard_results(
     storage: &dyn StorageBackend,
     guards: &[WorkflowInvariant],
     candidate: &EffectReceipt,
+    current_epoch: ExecutionEpoch,
     include_candidate: bool,
 ) -> Result<(), EngineError> {
     let mut receipts = storage
@@ -535,7 +555,7 @@ async fn record_effect_guard_results(
         let result = crate::continuity_advanced::evaluate_invariant(
             invariant,
             candidate.continuity_id,
-            candidate.epoch,
+            current_epoch,
             &evidence,
             now,
         );
@@ -756,7 +776,7 @@ fn blocked(receipt: &EffectReceipt) -> EngineError {
     }
 }
 
-fn legacy_effect_id(
+pub(crate) fn legacy_effect_id(
     continuity_id: orch8_types::continuity::ContinuityId,
     epoch: orch8_types::continuity::ExecutionEpoch,
     instance_id: InstanceId,
@@ -834,8 +854,6 @@ fn same_effect_identity(left: &EffectReceipt, right: &EffectReceipt) -> bool {
     left.id == right.id
         && left.tenant_id == right.tenant_id
         && left.continuity_id == right.continuity_id
-        && left.epoch == right.epoch
-        && left.instance_id == right.instance_id
         && left.block_id == right.block_id
         && left.attempt == right.attempt
         && left.request_sha256 == right.request_sha256

@@ -82,6 +82,7 @@ fn grant(
 fn payload(now: chrono::DateTime<Utc>) -> CapsulePayload {
     let instance_id = InstanceId::new();
     CapsulePayload {
+        effect_state: None,
         instance: CapsuleInstanceState {
             sequence_id: SequenceId::new(),
             namespace: Namespace::new("production"),
@@ -548,7 +549,7 @@ fn capsule_11_requires_a_capable_reader_and_bounds_recovery_rows() {
     let tenant = TenantId::new("tenant-versions").unwrap();
     let runtime = RuntimeId::new();
     let mut manifest = manifest(now, tenant.clone(), Some(runtime));
-    manifest.schema = CapsuleSchemaVersion::CURRENT;
+    manifest.schema = CapsuleSchemaVersion::V1_1;
     assert!(matches!(
         manifest.validate_for_import(now, &tenant, runtime, CapsuleSchemaVersion::V1),
         Err(ContinuityError::UnsupportedSchema {
@@ -612,4 +613,75 @@ fn capsule_11_requires_a_capable_reader_and_bounds_recovery_rows() {
     assert!(payload.validate_bounds().is_ok());
     payload.execution_state.as_mut().unwrap().nodes.push(node);
     assert!(payload.validate_bounds().is_err());
+}
+
+#[test]
+fn capsule_effect_state_bounds_each_recovery_collection() {
+    use orch8_types::continuity::{CapsuleEffectBinding, CapsuleEffectState};
+    use orch8_types::continuity_advanced::{InvariantRule, WorkflowInvariant};
+    let now = Utc::now();
+    let mut value = payload(now);
+    let receipt = EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: TenantId::new("tenant-a").unwrap(),
+        continuity_id: ContinuityId::new(),
+        epoch: ExecutionEpoch::initial(),
+        instance_id: value.checkpoint.instance_id,
+        block_id: BlockId::new("charge"),
+        kind: EffectKind::Http,
+        state: EffectState::Prepared,
+        destination_fingerprint: "payments".into(),
+        idempotency_key: None,
+        request_sha256: "a".repeat(64),
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    let binding = CapsuleEffectBinding {
+        block_id: receipt.block_id.clone(),
+        attempt: 0,
+        effect_id: receipt.id,
+    };
+    let guard = WorkflowInvariant {
+        id: InvariantId::new(),
+        tenant_id: receipt.tenant_id.clone(),
+        sequence_id: value.instance.sequence_id,
+        sequence_version: Some(1),
+        name: "guard".into(),
+        rule: InvariantRule::EffectAtMostOnce {
+            kind: EffectKind::Http,
+        },
+        commit_guard: true,
+        enabled: true,
+        created_at: now,
+    };
+    for collection in 0..4 {
+        let mut state = CapsuleEffectState::default();
+        let max = CapsulePayload::MAX_PENDING_ITEMS;
+        match collection {
+            0 => state.receipts = vec![receipt.clone(); max],
+            1 => state.active_attempts = vec![binding.clone(); max],
+            2 => state.reset_blocks = vec![receipt.block_id.clone(); max],
+            _ => state.commit_guards = vec![guard.clone(); max],
+        }
+        value.effect_state = Some(state);
+        assert_eq!(
+            value.validate_bounds(),
+            Ok(()),
+            "collection {collection} at limit"
+        );
+        let state = value.effect_state.as_mut().unwrap();
+        match collection {
+            0 => state.receipts.push(receipt.clone()),
+            1 => state.active_attempts.push(binding.clone()),
+            2 => state.reset_blocks.push(receipt.block_id.clone()),
+            _ => state.commit_guards.push(guard.clone()),
+        }
+        assert_eq!(
+            value.validate_bounds(),
+            Err(ContinuityError::CapsulePayloadTooLarge),
+            "collection {collection} beyond limit"
+        );
+    }
 }
