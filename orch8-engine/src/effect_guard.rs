@@ -536,27 +536,22 @@ async fn record_effect_guard_results(
     current_epoch: ExecutionEpoch,
     include_candidate: bool,
 ) -> Result<(), EngineError> {
-    let mut receipts = storage
-        .list_effect_receipts(&candidate.tenant_id, candidate.continuity_id, 10_000)
+    let audit = storage
+        .audit_effect_at_most_once(
+            &candidate.tenant_id,
+            candidate.continuity_id,
+            candidate.kind,
+            include_candidate.then_some(candidate),
+        )
         .await?;
-    if include_candidate {
-        receipts.retain(|receipt| receipt.id != candidate.id);
-        receipts.push(candidate.clone());
-    }
-    let output_paths = std::collections::BTreeSet::new();
-    let evidence = crate::continuity_advanced::InvariantEvidence {
-        receipts: &receipts,
-        terminal_state: None,
-        budget_breached: None,
-        output_paths: &output_paths,
-    };
     let now = Utc::now();
     for invariant in guards {
-        let result = crate::continuity_advanced::evaluate_invariant(
+        let result = crate::continuity_advanced::evaluate_effect_audit(
             invariant,
-            candidate.continuity_id,
+            candidate,
             current_epoch,
-            &evidence,
+            &audit,
+            include_candidate,
             now,
         );
         let _ = storage
@@ -1312,6 +1307,110 @@ mod tests {
             .unwrap();
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].state, EffectState::Unknown);
+    }
+
+    #[tokio::test]
+    async fn refused_duplicate_of_an_earlier_prepared_attempt_is_a_failed_audit() {
+        let (storage, instance, execution) = continuity_storage().await;
+        add_sequence_and_effect_guard(&storage, &instance, EffectKind::Worker).await;
+        let params = serde_json::json!({"provider":"payments", "amount":100});
+        let earlier = EffectGuard::prepare_with_claim(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("earlier"),
+            "custom_charge",
+            &params,
+            0,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let duplicate = EffectGuard::begin(
+            &storage,
+            &instance.tenant_id,
+            instance.id,
+            &BlockId::new("later"),
+            "custom_charge",
+            &params,
+            0,
+        )
+        .await;
+        assert!(matches!(
+            duplicate,
+            Err(EngineError::InvariantViolation { .. })
+        ));
+        let results = storage
+            .list_invariant_results(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, EvidenceStatus::Fail);
+        assert!(results[0].summary.contains("atomic duplicate refusal=true"));
+        assert_eq!(
+            storage
+                .get_effect_receipt(&instance.tenant_id, earlier.effect_id())
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            EffectState::Prepared
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_audit_includes_duplicate_evidence_beyond_the_legacy_list_limit() {
+        let (storage, instance, execution) = continuity_storage().await;
+        add_sequence_and_effect_guard(&storage, &instance, EffectKind::Worker).await;
+        let mut receipt = EffectReceipt {
+            id: EffectId::new(),
+            tenant_id: instance.tenant_id.clone(),
+            continuity_id: execution.continuity_id,
+            epoch: execution.epoch,
+            instance_id: instance.id,
+            block_id: BlockId::new("charge"),
+            kind: EffectKind::Worker,
+            state: EffectState::Prepared,
+            destination_fingerprint: "provider".into(),
+            request_sha256: "padding".into(),
+            idempotency_key: None,
+            provider_receipt_id: None,
+            attempt: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut tx = storage.pool().begin().await.unwrap();
+        for ordinal in 0..10_002_u128 {
+            receipt.id = EffectId::from_uuid(Uuid::from_u128(ordinal + 1));
+            if ordinal >= 10_000 {
+                receipt.state = EffectState::Committed;
+                receipt.request_sha256 = "duplicate-after-prefix".into();
+            }
+            sqlx::query("INSERT INTO effect_receipts(id,tenant_id,continuity_id,instance_id,state,record,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?7)")
+                .bind(receipt.id.to_string()).bind(receipt.tenant_id.as_str())
+                .bind(receipt.continuity_id.to_string())
+                .bind(receipt.instance_id.to_string()).bind(if ordinal >= 10_000 { "committed" } else { "prepared" })
+                .bind(serde_json::to_string(&receipt).unwrap()).bind(receipt.created_at.to_rfc3339())
+                .execute(&mut *tx).await.unwrap();
+        }
+        tx.commit().await.unwrap();
+        let guards = load_effect_commit_guards(&storage, &receipt, instance.id)
+            .await
+            .unwrap();
+        record_effect_guard_results(&storage, &guards, &receipt, execution.epoch, false)
+            .await
+            .unwrap();
+        let results = storage
+            .list_invariant_results(&instance.tenant_id, execution.continuity_id, 10)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].status,
+            EvidenceStatus::Fail,
+            "a bounded prefix must never certify a complete ledger"
+        );
     }
 
     #[tokio::test]

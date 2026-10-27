@@ -7,7 +7,10 @@ mod effect_dispatch;
 mod effect_receipts;
 pub mod portable_effects;
 pub use effect_dispatch::EffectDispatchFence;
-pub use effect_receipts::{EffectReceiptCursor, EffectReceiptPage};
+pub use effect_receipts::{
+    EffectAtMostOnceAudit, EffectDuplicateWitness, EffectLedgerStatus, EffectReceiptCursor,
+    EffectReceiptPage,
+};
 mod mobile_access;
 pub use child_adoption::ChildAdoption;
 pub use mobile_access::MobileInstanceAccess;
@@ -4415,6 +4418,35 @@ pub trait ContinuityStore: Send + Sync + 'static {
         continuity_id: ContinuityId,
         limit: u32,
     ) -> Result<Vec<EffectReceipt>, StorageError>;
+
+    /// State counts over the complete ledger plus at most 16 unresolved and
+    /// unknown witnesses, all from one backend snapshot. No prefix verdicts.
+    async fn summarize_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<EffectLedgerStatus, StorageError> {
+        let _ = (tenant_id, continuity_id);
+        Err(StorageError::Unsupported(
+            "complete effect state summary".into(),
+        ))
+    }
+
+    /// Audit all dispatched/committed/unknown/verified receipts in one backend
+    /// snapshot. The result bounds witnesses, never the rows used for verdicts.
+    /// A proposed dispatch replaces its stored ID rather than counting it twice.
+    async fn audit_effect_at_most_once(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        kind: orch8_types::continuity::EffectKind,
+        candidate: Option<&EffectReceipt>,
+    ) -> Result<EffectAtMostOnceAudit, StorageError> {
+        let _ = (tenant_id, continuity_id, kind, candidate);
+        Err(StorageError::Unsupported(
+            "complete effect guard audit".into(),
+        ))
+    }
 
     /// Keyset page of at most 1,000 receipts, ordered by physical SQL
     /// (`created_at`, `id`). Use this for complete enumeration; the legacy list

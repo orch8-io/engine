@@ -38,6 +38,101 @@ pub struct InvariantEvidence<'a> {
 
 type InvariantOutcome = (EvidenceStatus, String, Vec<String>);
 
+/// Evaluate receipt-based rules over complete backend evidence, caching each
+/// kind within the batch. Other rules use the supplied non-receipt evidence.
+pub async fn evaluate_invariants_complete(
+    storage: &dyn orch8_storage::StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    continuity: orch8_types::continuity::ContinuityId,
+    epoch: orch8_types::continuity::ExecutionEpoch,
+    invariants: &[WorkflowInvariant],
+    evidence: &InvariantEvidence<'_>,
+    now: DateTime<Utc>,
+) -> Result<Vec<InvariantResult>, orch8_types::error::StorageError> {
+    use orch8_types::error::StorageError;
+    let mut audits = std::collections::HashMap::new();
+    let mut status = None;
+    let mut results = Vec::with_capacity(invariants.len());
+    for invariant in invariants {
+        if &invariant.tenant_id != tenant {
+            return Err(StorageError::Constraint(
+                "invariant evidence tenant mismatch".into(),
+            ));
+        }
+        let (failed, summary, material, witnesses) = match invariant.rule {
+            InvariantRule::EffectAtMostOnce { kind } => {
+                if let std::collections::hash_map::Entry::Vacant(entry) = audits.entry(kind) {
+                    entry.insert(
+                        storage
+                            .audit_effect_at_most_once(tenant, continuity, kind, None)
+                            .await?,
+                    );
+                }
+                let audit = &audits[&kind];
+                (
+                    audit.duplicate_groups > 0,
+                    format!(
+                        "complete effect ledger audit: {} dispatched/outcome receipts, {} duplicate groups; {} witness groups retained",
+                        audit.observed_receipts,
+                        audit.duplicate_groups,
+                        audit.witnesses.len()
+                    ),
+                    serde_json::to_vec(audit)?,
+                    audit
+                        .witnesses
+                        .iter()
+                        .map(|w| w.request_sha256.clone())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            InvariantRule::NoUnknownEffects => {
+                if status.is_none() {
+                    status = Some(
+                        storage
+                            .summarize_effect_receipts(tenant, continuity)
+                            .await?,
+                    );
+                }
+                let status = status.as_ref().expect("summary initialized above");
+                (
+                    status.unknown_count > 0,
+                    format!(
+                        "{} unresolved effect receipt(s); complete ledger count, {} witnesses retained",
+                        status.unknown_count,
+                        status.unknown_request_sha256.len()
+                    ),
+                    serde_json::to_vec(&(status.unknown_count, &status.unknown_request_sha256))?,
+                    status.unknown_request_sha256.clone(),
+                )
+            }
+            _ => {
+                results.push(evaluate_invariant(
+                    invariant, continuity, epoch, evidence, now,
+                ));
+                continue;
+            }
+        };
+        let mut hashes = vec![hex_sha256(&material)];
+        hashes.extend(witnesses);
+        results.push(InvariantResult {
+            id: InvariantResultId::new(),
+            invariant_id: invariant.id,
+            continuity_id: continuity,
+            epoch,
+            status: if failed {
+                EvidenceStatus::Fail
+            } else {
+                EvidenceStatus::Pass
+            },
+            summary,
+            dedupe_key: invariant_result_dedupe(invariant.id, continuity, epoch, &hashes),
+            evidence_sha256: hashes,
+            evaluated_at: now,
+        });
+    }
+    Ok(results)
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AdvancedContinuityError {
     #[error("scenario exceeds a bounded continuity limit")]
@@ -78,6 +173,74 @@ pub fn evaluate_invariant(
         dedupe_key: invariant_result_dedupe(invariant.id, continuity_id, epoch, &evidence_sha256),
         evidence_sha256,
         summary,
+        evaluated_at: now,
+    }
+}
+
+/// Audit the whole ledger while retaining only a bounded witness sample. An
+/// atomic duplicate refusal also fails even when it reserved an earlier prepared
+/// attempt that has not dispatched yet; the backend verdict is authoritative.
+pub(crate) fn evaluate_effect_audit(
+    invariant: &WorkflowInvariant,
+    candidate: &EffectReceipt,
+    epoch: orch8_types::continuity::ExecutionEpoch,
+    audit: &orch8_storage::EffectAtMostOnceAudit,
+    duplicate_refused: bool,
+    now: DateTime<Utc>,
+) -> InvariantResult {
+    let failed = duplicate_refused || audit.duplicate_groups > 0;
+    // Length-prefix every component to avoid ambiguous fingerprint boundaries.
+    let mut digest = Sha256::new();
+    digest.update(b"orch8-effect-audit-v1\0");
+    for part in [
+        format!("{:?}:{duplicate_refused}", candidate.kind),
+        candidate.destination_fingerprint.clone(),
+        candidate.request_sha256.clone(),
+        audit.observed_receipts.to_string(),
+        audit.duplicate_groups.to_string(),
+    ]
+    .into_iter()
+    .chain(
+        audit
+            .witnesses
+            .iter()
+            .flat_map(|w| [w.destination_fingerprint.clone(), w.request_sha256.clone()]),
+    ) {
+        digest.update((part.len() as u64).to_be_bytes());
+        digest.update(part.as_bytes());
+    }
+    let mut evidence_sha256 = vec![
+        hex_sha256(&digest.finalize()),
+        candidate.request_sha256.clone(),
+    ];
+    for witness in &audit.witnesses {
+        if !evidence_sha256.contains(&witness.request_sha256) {
+            evidence_sha256.push(witness.request_sha256.clone());
+        }
+    }
+    InvariantResult {
+        id: InvariantResultId::new(),
+        invariant_id: invariant.id,
+        continuity_id: candidate.continuity_id,
+        epoch,
+        status: if failed {
+            EvidenceStatus::Fail
+        } else {
+            EvidenceStatus::Pass
+        },
+        dedupe_key: invariant_result_dedupe(
+            invariant.id,
+            candidate.continuity_id,
+            epoch,
+            &evidence_sha256,
+        ),
+        evidence_sha256,
+        summary: format!(
+            "complete effect ledger audit: {} dispatched/outcome receipts, {} duplicate groups, atomic duplicate refusal={duplicate_refused}; {} witness groups retained",
+            audit.observed_receipts,
+            audit.duplicate_groups,
+            audit.witnesses.len()
+        ),
         evaluated_at: now,
     }
 }

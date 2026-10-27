@@ -765,6 +765,8 @@ struct HandoffPreviewResponse {
     compatible: bool,
     findings: Vec<CompatibilityFinding>,
     unresolved_effects: Vec<EffectReceipt>,
+    unresolved_effect_count: u64,
+    unresolved_effects_truncated: bool,
     placement_decision: PlacementDecision,
     preview_sha256: String,
 }
@@ -783,6 +785,7 @@ struct HandoffPreviewEvidence<'a> {
     compatible: bool,
     findings: &'a [CompatibilityFinding],
     unresolved_effects: &'a [EffectReceipt],
+    unresolved_effect_count: u64,
 }
 
 async fn build_handoff_preview(
@@ -834,14 +837,13 @@ async fn build_handoff_preview(
         Some(execution.owner_runtime_id),
         Utc::now(),
     );
-    let unresolved_effects: Vec<_> = state
+    let effect_status = state
         .storage
-        .list_effect_receipts(tenant_id, continuity_id, 10_000)
+        .summarize_effect_receipts(tenant_id, continuity_id)
         .await
-        .map_err(|error| ApiError::from_storage(error, "effect receipts"))?
-        .into_iter()
-        .filter(|receipt| !receipt.state.is_resolved())
-        .collect();
+        .map_err(|error| ApiError::from_storage(error, "effect ledger status"))?;
+    let unresolved_effect_count = effect_status.unresolved_count;
+    let unresolved_effects = effect_status.unresolved_sample;
     let destination_allowed = placement_decision.candidates.iter().any(|candidate| {
         candidate.runtime_id == destination_runtime_id && candidate.outcome == PolicyOutcome::Allow
     });
@@ -855,7 +857,7 @@ async fn build_handoff_preview(
         && findings
             .iter()
             .all(|finding| finding.status != orch8_engine::continuity::CompatibilityStatus::Fail)
-        && unresolved_effects.is_empty();
+        && unresolved_effect_count == 0;
     let evidence = HandoffPreviewEvidence {
         continuity_id,
         epoch: execution.epoch,
@@ -869,6 +871,7 @@ async fn build_handoff_preview(
         compatible,
         findings: &findings,
         unresolved_effects: &unresolved_effects,
+        unresolved_effect_count,
     };
     let encoded = serde_json::to_vec(&evidence)
         .map_err(|error| ApiError::Internal(format!("serialize handoff preview: {error}")))?;
@@ -884,7 +887,9 @@ async fn build_handoff_preview(
         destination_runtime_id,
         compatible,
         findings,
+        unresolved_effects_truncated: unresolved_effect_count > unresolved_effects.len() as u64,
         unresolved_effects,
+        unresolved_effect_count,
         placement_decision,
         preview_sha256,
     })
@@ -2791,11 +2796,10 @@ async fn evaluate_invariants(
         .await
         .map_err(|error| ApiError::from_storage(error, "sequence"))?
         .ok_or_else(|| ApiError::NotFound("sequence".into()))?;
-    let (invariants, receipts, outputs) = tokio::try_join!(
+    let (invariants, outputs) = tokio::try_join!(
         state
             .storage
             .list_workflow_invariants(&tenant_id, sequence.id, sequence.version, 10_000,),
-        state.storage.list_effect_receipts(&tenant_id, id, 10_000),
         state.storage.get_all_outputs(instance.id),
     )
     .map_err(|error| ApiError::from_storage(error, "invariant evidence"))?;
@@ -2805,27 +2809,28 @@ async fn evaluate_invariants(
         .is_terminal()
         .then(|| instance.state.to_string());
     let evidence = orch8_engine::continuity_advanced::InvariantEvidence {
-        receipts: &receipts,
+        receipts: &[],
         terminal_state: terminal.as_deref(),
         budget_breached: None,
         output_paths: &output_paths,
     };
-    let now = Utc::now();
-    let mut results = Vec::with_capacity(invariants.len());
-    for invariant in invariants {
-        let result = orch8_engine::continuity_advanced::evaluate_invariant(
-            &invariant,
-            id,
-            execution.epoch,
-            &evidence,
-            now,
-        );
+    let results = orch8_engine::continuity_advanced::evaluate_invariants_complete(
+        state.storage.as_ref(),
+        &tenant_id,
+        id,
+        execution.epoch,
+        &invariants,
+        &evidence,
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "complete invariant evidence"))?;
+    for result in &results {
         state
             .storage
-            .append_invariant_result(&tenant_id, &result)
+            .append_invariant_result(&tenant_id, result)
             .await
             .map_err(|error| ApiError::from_storage(error, "invariant result"))?;
-        results.push(result);
     }
     Ok(Json(results))
 }
