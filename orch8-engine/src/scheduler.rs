@@ -2926,6 +2926,19 @@ async fn process_instance(
             .await?;
             return Ok(());
         }
+        crate::ownership::LocalOwnership::Compensating => {
+            crate::lifecycle::transition_claimed_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&instance.tenant_id),
+                ctx.claim_token,
+                InstanceState::Running,
+                InstanceState::Paused,
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
         crate::ownership::LocalOwnership::Superseded => {
             warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
             crate::lifecycle::transition_claimed_instance(

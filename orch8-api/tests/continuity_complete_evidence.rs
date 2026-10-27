@@ -480,3 +480,59 @@ async fn unsettled_work_prevents_clean_completion_and_can_be_compensated_after_s
     assert_eq!(complete["state"], "completed");
     assert!(complete["residual_effects"].as_array().unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn compensation_start_durably_fences_forward_execution() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    storage
+        .update_instance_state(owner.current_instance_id, InstanceState::Waiting, None)
+        .await
+        .unwrap();
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let path = format!(
+        "/api/v1/continuity/executions/{}/compensations",
+        owner.continuity_id
+    );
+    let run = post_value(&server, &path, &json!({"tenant_id":owner.tenant_id})).await;
+    assert_eq!(run["state"], "planned");
+    let frozen = storage
+        .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(serde_json::to_value(frozen.state).unwrap(), "compensating");
+    let instance = storage
+        .get_instance(owner.current_instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(instance.state, InstanceState::Paused);
+    assert!(instance.claimed_at.is_none());
+    assert!(instance.next_fire_at.is_none());
+    assert!(
+        !storage
+            .cas_continuity_owner(
+                &owner.tenant_id,
+                owner.continuity_id,
+                owner.epoch,
+                owner.owner_runtime_id,
+                &owner
+            )
+            .await
+            .unwrap()
+    );
+    let completed = complete_single_rollback(&server, &owner, &run).await;
+    assert_eq!(completed["state"], "completed");
+    assert_eq!(
+        serde_json::to_value(
+            storage
+                .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state
+        )
+        .unwrap(),
+        "compensating"
+    );
+}

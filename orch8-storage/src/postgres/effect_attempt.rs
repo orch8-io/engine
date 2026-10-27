@@ -70,7 +70,7 @@ async fn on(
 ) -> Result<EffectReceipt, StorageError> {
     // Key-share locks protect both FK owners and keep ordering compatible with
     // dispatch's ownership/instance locks. Independent attempts can prepare concurrently.
-    let owner=sqlx::query("SELECT continuity_id FROM continuity_executions WHERE tenant_id=$1 AND continuity_id=$2 FOR KEY SHARE").bind(candidate.tenant_id.as_str()).bind(candidate.continuity_id.into_uuid()).fetch_optional(&mut *conn).await?;
+    let owner=sqlx::query("SELECT continuity_id FROM continuity_executions WHERE tenant_id=$1 AND continuity_id=$2 AND state <> 'compensating' FOR KEY SHARE").bind(candidate.tenant_id.as_str()).bind(candidate.continuity_id.into_uuid()).fetch_optional(&mut *conn).await?;
     let instance =
         sqlx::query("SELECT id FROM task_instances WHERE tenant_id=$1 AND id=$2 FOR KEY SHARE")
             .bind(candidate.tenant_id.as_str())

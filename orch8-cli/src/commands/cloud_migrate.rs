@@ -374,6 +374,11 @@ async fn fence(
                     "a continuity handoff is already in flight for this instance".into(),
                 ));
             }
+            OwnershipState::Compensating => {
+                return Ok(Err(
+                    "compensation permanently stopped forward execution".into()
+                ));
+            }
             OwnershipState::Owned | OwnershipState::Completed => {
                 if execution.current_instance_id != id {
                     return Ok(Err("instance is owned by another runtime".into()));

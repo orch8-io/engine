@@ -369,34 +369,20 @@ async fn grpc_send_signal_validates_instance_id_field() {
     assert_eq!(storage.get_pending_signals(id).await.unwrap().len(), 1);
 }
 
-fn worker_stream_frame(
-    payload: orch8_grpc::proto::worker_stream_client::Payload,
-) -> orch8_grpc::proto::WorkerStreamClient {
-    orch8_grpc::proto::WorkerStreamClient {
-        payload: Some(payload),
-    }
-}
-
-#[tokio::test]
-async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
-    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
-    use orch8_grpc::proto::worker_stream_server::Payload as ServerPayload;
-
-    let (addr, storage) = spawn_test_server().await;
-    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
-        .await
-        .unwrap();
-    let sequence_id = "00000000-0000-0000-0000-000000000011";
-    let instance_id = "00000000-0000-0000-0000-000000000012";
-    create_seq_and_instance(&mut client, sequence_id, instance_id).await;
-    let task = WorkerTask {
+fn pending_worker_task(
+    instance_id: InstanceId,
+    block_id: &str,
+    handler: &str,
+    params: serde_json::Value,
+) -> WorkerTask {
+    WorkerTask {
         id: uuid::Uuid::now_v7(),
-        instance_id: InstanceId::from_uuid(uuid::Uuid::parse_str(instance_id).unwrap()),
-        block_id: orch8_types::ids::BlockId::new("step"),
-        handler_name: "payments".into(),
+        instance_id,
+        block_id: orch8_types::ids::BlockId::new(block_id),
+        handler_name: handler.into(),
         queue_name: None,
         requirements: orch8_types::continuity::CapsuleRequirements::default(),
-        params: serde_json::json!({"amount": 42}),
+        params,
         context: serde_json::json!({}),
         attempt: 0,
         timeout_ms: None,
@@ -417,7 +403,75 @@ async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
+    }
+}
+
+fn dispatched_worker_effect(
+    instance: &orch8_types::instance::TaskInstance,
+) -> (
+    orch8_types::continuity::ContinuityExecution,
+    orch8_types::continuity::EffectReceipt,
+) {
+    use orch8_types::continuity::{
+        ContinuityExecution, ContinuityId, EffectId, EffectKind, EffectReceipt, EffectState,
+        ExecutionEpoch, OwnershipState, RuntimeId,
     };
+    let now = chrono::Utc::now();
+    let owner = ContinuityExecution {
+        continuity_id: ContinuityId::new(),
+        tenant_id: instance.tenant_id.clone(),
+        current_instance_id: instance.id,
+        owner_runtime_id: RuntimeId::new(),
+        epoch: ExecutionEpoch::initial(),
+        state: OwnershipState::Owned,
+        updated_at: now,
+    };
+    let effect = EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: owner.tenant_id.clone(),
+        continuity_id: owner.continuity_id,
+        epoch: owner.epoch,
+        instance_id: instance.id,
+        block_id: orch8_types::ids::BlockId::new("step_1"),
+        kind: EffectKind::Worker,
+        state: EffectState::Dispatched,
+        destination_fingerprint: "grpc-provider".into(),
+        idempotency_key: None,
+        request_sha256: "a".repeat(64),
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    (owner, effect)
+}
+
+fn worker_stream_frame(
+    payload: orch8_grpc::proto::worker_stream_client::Payload,
+) -> orch8_grpc::proto::WorkerStreamClient {
+    orch8_grpc::proto::WorkerStreamClient {
+        payload: Some(payload),
+    }
+}
+
+#[tokio::test]
+async fn grpc_worker_stream_negotiates_bounds_and_delivers_on_demand() {
+    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
+    use orch8_grpc::proto::worker_stream_server::Payload as ServerPayload;
+
+    let (addr, storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let sequence_id = "00000000-0000-0000-0000-000000000011";
+    let instance_id = "00000000-0000-0000-0000-000000000012";
+    create_seq_and_instance(&mut client, sequence_id, instance_id).await;
+    let task = pending_worker_task(
+        InstanceId::from_uuid(uuid::Uuid::parse_str(instance_id).unwrap()),
+        "step",
+        "payments",
+        serde_json::json!({"amount":42}),
+    );
     storage.create_worker_task(&task).await.unwrap();
     let outbound = tokio_stream::iter(vec![
         worker_stream_frame(ClientPayload::Open(orch8_grpc::proto::WorkerStreamOpen {
@@ -867,4 +921,101 @@ async fn grpc_empty_artifact_streams_exactly_one_final_chunk() {
         .await
         .unwrap();
     assert!(inbound.message().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn grpc_compensation_fence_accepts_worker_outcome_without_forward_propagation() {
+    use orch8_storage::OutputStore;
+    use orch8_types::continuity::{ContinuityExecution, EffectState, OwnershipState};
+    let (addr, storage) = spawn_test_server().await;
+    let mut client = Orch8ServiceClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let sequence_id = uuid::Uuid::new_v4().to_string();
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    create_seq_and_instance(&mut client, &sequence_id, &instance_id).await;
+    let id = InstanceId::from_uuid(uuid::Uuid::parse_str(&instance_id).unwrap());
+    storage
+        .update_instance_state(id, InstanceState::Waiting, None)
+        .await
+        .unwrap();
+    let instance = storage.get_instance(id).await.unwrap().unwrap();
+    let (owner, effect) = dispatched_worker_effect(&instance);
+    storage.create_continuity_execution(&owner).await.unwrap();
+    storage.create_effect_receipt(&effect).await.unwrap();
+    let mut task = pending_worker_task(
+        id,
+        effect.block_id.as_str(),
+        "payments",
+        serde_json::json!({}),
+    );
+    task.effect_id = Some(effect.id);
+    task.continuity_epoch = Some(owner.epoch.get());
+    task.created_at = effect.created_at;
+    storage.create_worker_task(&task).await.unwrap();
+    let claimed = storage
+        .claim_worker_tasks("payments", "already-running", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let fenced = ContinuityExecution {
+        state: OwnershipState::Compensating,
+        ..owner.clone()
+    };
+    assert!(
+        storage
+            .cas_continuity_owner(
+                &owner.tenant_id,
+                owner.continuity_id,
+                owner.epoch,
+                owner.owner_runtime_id,
+                &fenced
+            )
+            .await
+            .unwrap()
+    );
+    // Keep the ordinary state live to exercise the durable ownership gate,
+    // rather than relying on the existing paused/terminal short circuit.
+    client
+        .complete_task(orch8_grpc::proto::CompleteTaskRequest {
+            task_id: task.id.to_string(),
+            worker_id: "already-running".into(),
+            output_json:
+                serde_json::json!({"provider_receipt_id":"grpc-late","forward_mutation":true})
+                    .to_string(),
+            claim_epoch: claimed.claim_epoch,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        storage
+            .get_worker_task(task.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        WorkerTaskState::Completed
+    );
+    assert_eq!(
+        storage
+            .get_effect_receipt(&owner.tenant_id, effect.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        EffectState::Committed
+    );
+    let after = storage.get_instance(id).await.unwrap().unwrap();
+    assert_eq!(after.state, InstanceState::Waiting);
+    assert_eq!(after.context.data, instance.context.data);
+    assert!(storage.get_all_outputs(id).await.unwrap().is_empty());
+    assert_eq!(
+        storage
+            .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        fenced
+    );
 }

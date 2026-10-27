@@ -145,7 +145,7 @@ pub(super) async fn claim(
               SELECT id FROM worker_tasks
               WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
                 AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
-                AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))
+                AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
@@ -211,7 +211,7 @@ pub(super) async fn claim_for_tenant(
                 AND NOT wt.awaiting_dispatch
                 AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND ti.tenant_id = $4
-                AND ti.state NOT IN ('completed', 'failed', 'cancelled')
+                AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
@@ -314,7 +314,7 @@ pub(super) async fn claim_matching(
         // Never hand out work for an instance that already finished or was
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
-        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled'))");
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)");
         // Push the cheap hard requirements into SQL so unclaimable rows never
         // consume the bounded scan window and hide eligible ones behind them
         // (a phone advertises few labels, and every older task needing a
@@ -403,7 +403,7 @@ pub(super) async fn claim_matching(
              lease_secs=$4, claimed_runtime_kind=$5
            WHERE id IN (
              SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch
+             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
              ORDER BY created_at, id
              LIMIT $3
              FOR UPDATE SKIP LOCKED

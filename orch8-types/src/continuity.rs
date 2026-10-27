@@ -597,6 +597,8 @@ pub enum OwnershipState {
     Owned,
     Transferring,
     Completed,
+    /// Forward admission is permanently stopped; existing effects may settle.
+    Compensating,
 }
 
 /// Authoritative owner and epoch for one portable execution.

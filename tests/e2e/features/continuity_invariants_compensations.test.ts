@@ -943,6 +943,38 @@ describe("Continuity Compensation Runs", () => {
   // ------------------------------------------------------------------
 
   describe("compensation run creation", () => {
+    it("stops forward work durably while accepting an in-flight worker outcome", async () => {
+      const prefix = "comp-durable-fence";
+      const setup = await compensableExecution(prefix, {
+        secondStep: { id: "notify", compensation: { handler: "release_notify", verification: "handler_result" } },
+      });
+      await client.completeWorkerTask(setup.task.id, `${prefix}-worker`, { ok: true });
+      const second = (setup.createdSequence.blocks as any[]).find((block) => block.id === "notify");
+      const running = await waitForWorkerTask(String(second.handler), "in-flight-worker");
+      const run = await client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId });
+      assert.equal((await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId)).state, "compensating");
+      assert.equal((await client.getInstance(setup.instance.id)).state, "paused");
+      assert.equal(run.steps.length, 1);
+      assert.ok(run.hazards.some((hazard: string) => hazard.startsWith("IN_FLIGHT_EFFECT_MUST_BE_SETTLED:notify:")));
+      await client.heartbeatWorkerTask(running.id, "in-flight-worker");
+      await client.completeWorkerTask(running.id, "in-flight-worker", { delivered: true });
+      assert.equal((await client.getInstance(setup.instance.id)).state, "paused");
+      await client.updateState(setup.instance.id, "scheduled", new Date().toISOString());
+      await client.waitForState(setup.instance.id, "paused");
+      const effects = await client.listContinuityEffects(setup.execution.continuity_id, setup.tenantId);
+      assert.equal(effects.find((effect: any) => effect.block_id === "notify")?.state, "committed");
+      const claim = await client.claimContinuityCompensation(run.id, { tenant_id: setup.tenantId, worker_id: "rollback-worker" });
+      const finished = await client.completeContinuityCompensation(run.id, claim.plan.effect_id, { tenant_id: setup.tenantId, worker_id: "rollback-worker" });
+      assert.equal(finished.state, "completed_with_residuals");
+      const later = await client.createContinuityCompensation(setup.execution.continuity_id, { tenant_id: setup.tenantId });
+      assert.equal(later.steps.length, 1);
+      assert.equal(later.steps[0]!.plan.effect_block_id, "notify");
+      const laterClaim = await client.claimContinuityCompensation(later.id, { tenant_id: setup.tenantId, worker_id: "rollback-worker" });
+      const clean = await client.completeContinuityCompensation(later.id, laterClaim.plan.effect_id, { tenant_id: setup.tenantId, worker_id: "rollback-worker" });
+      assert.equal(clean.state, "completed");
+      assert.equal((await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId)).state, "compensating");
+    });
+
     it("creates a run in planned state with one pending step", async () => {
       const setup = await committedCompensableExecution("comp-create-basic");
       const run = await client.createContinuityCompensation(setup.execution.continuity_id, {

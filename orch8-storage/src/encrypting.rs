@@ -968,6 +968,10 @@ passthrough_impl! {
                 })
                 .await
         }
+        async fn begin_compensation_run(&self, start: crate::CompensationStart<'_>) -> Result<bool, StorageError> {
+            let encrypted = self.encrypt_compensation_run(start.run)?;
+            self.inner.begin_compensation_run(crate::CompensationStart { run: &encrypted, ..start }).await
+        }
         async fn create_compensation_run(&self, run: &orch8_types::continuity_advanced::CompensationRunRecord) -> Result<bool, StorageError> {
             let encrypted = self.encrypt_compensation_run(run)?;
             self.inner.create_compensation_run(&encrypted).await

@@ -71,7 +71,7 @@ async fn on(
 ) -> Result<EffectReceipt, StorageError> {
     // BEGIN IMMEDIATE serializes identity creation and iteration retirement.
     let owner = sqlx::query(
-        "SELECT continuity_id FROM continuity_executions WHERE tenant_id=?1 AND continuity_id=?2",
+        "SELECT continuity_id FROM continuity_executions WHERE tenant_id=?1 AND continuity_id=?2 AND state <> 'compensating'",
     )
     .bind(candidate.tenant_id.as_str())
     .bind(candidate.continuity_id.to_string())

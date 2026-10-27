@@ -537,6 +537,7 @@ fault_impl! {
         async fn get_live_migration(&self, tenant_id: &TenantId, id: orch8_types::continuity_advanced::MigrationPlanId) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError>;
         async fn cas_live_migration(&self, tenant_id: &TenantId, expected: &orch8_types::continuity_advanced::LiveMigrationRecord, next: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<bool, StorageError>;
         async fn commit_live_migration_transition(&self, transition: LiveMigrationTransition<'_>) -> Result<bool, StorageError>;
+        async fn begin_compensation_run(&self, start: crate::CompensationStart<'_>) -> Result<bool, StorageError>;
         async fn create_compensation_run(&self, run: &orch8_types::continuity_advanced::CompensationRunRecord) -> Result<bool, StorageError>;
         async fn get_compensation_run(&self, tenant_id: &TenantId, id: orch8_types::continuity_advanced::CompensationRunId) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError>;
         async fn cas_compensation_run(&self, tenant_id: &TenantId, expected_version: u64, next: &orch8_types::continuity_advanced::CompensationRunRecord) -> Result<bool, StorageError>;

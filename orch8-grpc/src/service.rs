@@ -2071,7 +2071,17 @@ impl Orch8Service for Orch8GrpcService {
         else {
             return Ok(Response::new(proto::Empty {}));
         };
-        if instance.state.is_terminal() || instance.state == InstanceState::Paused {
+        if instance.state.is_terminal()
+            || instance.state == InstanceState::Paused
+            || orch8_engine::ownership::local_ownership(
+                self.storage.as_ref(),
+                &instance.tenant_id,
+                instance.id,
+            )
+            .await
+            .map_err(engine_err)?
+                != orch8_engine::ownership::LocalOwnership::Owned
+        {
             tracing::info!(
                 instance_id = %task.instance_id,
                 state = %instance.state,

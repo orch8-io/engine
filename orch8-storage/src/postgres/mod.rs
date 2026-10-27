@@ -12,6 +12,7 @@ mod checkpoints;
 mod circuit_breakers;
 mod claimed_writes;
 mod cluster;
+mod compensation_start;
 mod continuity;
 mod credentials;
 mod cron;

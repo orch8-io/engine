@@ -26,6 +26,7 @@
     clippy::option_if_let_else
 )]
 
+mod compensation_start;
 mod mobile_access;
 pub use mobile_access::{CATALOG_NATIVE_IDENTITY_SQL, LEGACY_MOBILE_OWNER_SQL};
 

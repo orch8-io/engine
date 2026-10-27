@@ -5207,8 +5207,16 @@ async fn compensation_plan(
     state: &AppState,
     tenant_id: &TenantId,
     continuity_id: ContinuityId,
-) -> Result<(InstanceId, CompensationPlan), ApiError> {
-    let (_, instance) = continuity_instance(state, tenant_id, continuity_id).await?;
+) -> Result<
+    (
+        ContinuityExecution,
+        orch8_types::instance::TaskInstance,
+        Vec<orch8_storage::CompensationEffect>,
+        CompensationPlan,
+    ),
+    ApiError,
+> {
+    let (execution, instance) = continuity_instance(state, tenant_id, continuity_id).await?;
     let sequence = state
         .storage
         .get_sequence(instance.sequence_id)
@@ -5243,7 +5251,7 @@ async fn compensation_plan(
                     ))
                 })?;
     }
-    Ok((instance.id, plan))
+    Ok((execution, instance, effects, plan))
 }
 
 async fn preview_compensation(
@@ -5253,7 +5261,7 @@ async fn preview_compensation(
     Json(body): Json<CompensationScopeRequest>,
 ) -> Result<Json<CompensationPlan>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let (_, plan) = compensation_plan(&state, &tenant_id, id).await?;
+    let (_, _, _, plan) = compensation_plan(&state, &tenant_id, id).await?;
     Ok(Json(plan))
 }
 
@@ -5264,7 +5272,7 @@ async fn create_compensation_run(
     Json(body): Json<CompensationScopeRequest>,
 ) -> Result<(StatusCode, Json<CompensationRunRecord>), ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let (source_instance_id, plan) = compensation_plan(&state, &tenant_id, id).await?;
+    let (execution, instance, effects, plan) = compensation_plan(&state, &tenant_id, id).await?;
     if plan.steps.is_empty() {
         return Err(ApiError::Conflict(
             "no committed effects have executable compensation rules".into(),
@@ -5275,7 +5283,7 @@ async fn create_compensation_run(
         id: CompensationRunId::new(),
         tenant_id,
         continuity_id: id,
-        source_instance_id,
+        source_instance_id: instance.id,
         state: CompensationRunState::Planned,
         version: 0,
         steps: plan
@@ -5300,12 +5308,17 @@ async fn create_compensation_run(
     };
     let created = state
         .storage
-        .create_compensation_run(&run)
+        .begin_compensation_run(orch8_storage::CompensationStart {
+            run: &run,
+            execution: &execution,
+            instance: &instance,
+            effects: &effects,
+        })
         .await
         .map_err(|error| ApiError::from_storage(error, "compensation run"))?;
     if !created {
         return Err(ApiError::Conflict(
-            "this continuity execution already has an active compensation run".into(),
+            "compensation source changed or this continuity execution already has an active compensation run".into(),
         ));
     }
     Ok((StatusCode::CREATED, Json(run)))

@@ -289,6 +289,8 @@ async fn claim_from_queue_inner(
              WHERE wt.queue_name=?1 AND wt.handler_name=?2 AND wt.state='pending'
                AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?5 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER))))
                AND ti.tenant_id=?4
+               AND ti.state NOT IN ('completed','failed','cancelled')
+               AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)
              ORDER BY wt.created_at ASC
              LIMIT ?3",
         )
@@ -300,7 +302,7 @@ async fn claim_from_queue_inner(
         .fetch_all(&mut *conn)
         .await?
     } else {
-        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?4 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) ORDER BY created_at ASC LIMIT ?3")
+        sqlx::query("SELECT * FROM worker_tasks WHERE queue_name=?1 AND handler_name=?2 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?4 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND NOT EXISTS (SELECT 1 FROM task_instances ti WHERE ti.id=worker_tasks.instance_id AND ti.state IN ('completed','failed','cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND json_extract(ce.record,'$.current_instance_id')=worker_tasks.instance_id) ORDER BY created_at ASC LIMIT ?3")
             .bind(queue_name)
             .bind(handler_name)
             .bind(limit as i64)

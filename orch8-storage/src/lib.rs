@@ -1,8 +1,10 @@
 mod capsule_activation;
 mod child_adoption;
 mod child_lookup;
+mod compensation_start;
 mod current_outputs;
 mod effect_attempt;
+pub use compensation_start::CompensationStart;
 mod effect_dispatch;
 mod effect_receipts;
 pub mod portable_effects;
@@ -4770,6 +4772,20 @@ pub trait ContinuityStore: Send + Sync + 'static {
         &self,
         transition: LiveMigrationTransition<'_>,
     ) -> Result<bool, StorageError>;
+
+    /// Atomically bind a plan to its unchanged source/effect snapshot, persist
+    /// the run, stop forward admission and park the source. Existing worker
+    /// outcomes remain settleable at the same ownership epoch. Custom backends
+    /// must implement the transaction; the default refuses this operation.
+    async fn begin_compensation_run(
+        &self,
+        start: CompensationStart<'_>,
+    ) -> Result<bool, StorageError> {
+        let _ = start;
+        Err(StorageError::Unsupported(
+            "atomic compensation startup".into(),
+        ))
+    }
 
     async fn create_compensation_run(
         &self,

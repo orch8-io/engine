@@ -20,6 +20,8 @@ pub enum LocalOwnership {
     Owned,
     /// A handoff export is in flight: park and re-check later.
     Transferring,
+    /// Compensation has permanently stopped forward execution.
+    Compensating,
     /// Another instance/runtime owns the execution now: never advance.
     Superseded,
 }
@@ -40,6 +42,7 @@ pub async fn local_ownership(
     }
     Ok(match execution.state {
         OwnershipState::Transferring => LocalOwnership::Transferring,
+        OwnershipState::Compensating => LocalOwnership::Compensating,
         OwnershipState::Owned | OwnershipState::Completed => LocalOwnership::Owned,
     })
 }
