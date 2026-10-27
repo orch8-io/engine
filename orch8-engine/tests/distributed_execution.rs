@@ -303,42 +303,47 @@ async fn pure_task_lease_expiry_requeues() {
     let _reaper = ZERO_LEASE_REAPER.lock().await;
     for test_backend in backends().await {
         let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
-        let (_, inst) = start(&storage, vec![mk_step("noop", "noop")]).await;
-        let handler = unique_handler("pure");
-        let now = Utc::now();
-        let task = WorkerTask {
-            id: uuid::Uuid::now_v7(),
-            instance_id: inst.id,
-            block_id: orch8_types::ids::BlockId::new("pure-step"),
-            handler_name: handler.clone(),
-            queue_name: None,
-            requirements: orch8_types::continuity::CapsuleRequirements::default(),
-            params: json!({}),
-            context: json!({}),
-            attempt: 0,
-            timeout_ms: None,
-            state: WorkerTaskState::Pending,
-            worker_id: None,
-            claimed_at: None,
-            heartbeat_at: None,
-            claim_epoch: 0,
-            resume_checkpoint: None,
-            checkpoint_seq: 0,
-            completed_at: None,
-            output: None,
-            error_message: None,
-            error_retryable: None,
-            created_at: now,
-            effect_id: None,
-            continuity_epoch: None,
-            lease_secs: None,
-            carries_credentials: false,
-            claimed_runtime_kind: None,
-        };
-        storage.create_worker_task(&task).await.unwrap();
-        // `pure.*` is not a builtin, so it is side-effect classified; without a
-        // stored receipt and no effect scope for it, it is still pure here.
-        let claimed = claim(&storage, &task).await;
+        let (_, inst) = start(
+            &storage,
+            vec![common::mk_step_with_params(
+                "pure-step",
+                "noop",
+                json!({"$runtime":{"runtime_kinds":["mobile"]}}),
+            )],
+        )
+        .await;
+        let task = only_task(&storage, inst.id).await;
+        assert!(
+            task.effect_id.is_none(),
+            "pure built-in task must not have an effect receipt"
+        );
+        let phone = caps_of(RuntimeKind::Mobile, "noop");
+        let mut delivered = storage
+            .claim_worker_tasks_matching(
+                "noop",
+                &phone.runtime_id.to_string(),
+                None,
+                None,
+                &phone,
+                1,
+            )
+            .await
+            .unwrap();
+        let claimed = delivered.pop().expect("pure mobile task was delivered");
+        assert_eq!(claimed.id, task.id);
+        // Capability claims have a per-runtime lease that overrides the
+        // zero default used by this reaper test.
+        test_backend
+            .raw
+            .backdate(
+                "worker_tasks",
+                "heartbeat_at",
+                "id",
+                &claimed.id.to_string(),
+                Utc::now()
+                    - chrono::Duration::seconds(i64::from(claimed.lease_secs.unwrap_or(0)) + 1),
+            )
+            .await;
         reap_worker_tasks(storage.as_ref(), Duration::ZERO)
             .await
             .unwrap();
@@ -1614,5 +1619,280 @@ async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
         .await
         .unwrap();
         assert_eq!(receipt_state(&storage, &task).await, EffectState::Committed);
+    }
+}
+
+#[tokio::test]
+async fn direct_evaluator_persists_run_identity_before_remote_dispatch() {
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let (_, instance) = start(
+            &storage,
+            vec![mk_step("work", &unique_handler("ext.identity"))],
+        )
+        .await;
+        let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+        let task = only_task(&storage, instance.id).await;
+        let binding = storage
+            .get_worker_invocation(&current.tenant_id, task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            current.context.runtime.run_id.is_some(),
+            "{}: missing durable native run",
+            backend.name()
+        );
+        assert!(current.context.runtime.started_at.is_some());
+        assert_eq!(binding.run_id, current.context.runtime.run_id);
+        assert!(matches!(
+            binding.target,
+            orch8_storage::worker_invocation::WorkerInvocationTarget::Tree { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn failure_planning_is_read_only_and_counter_exhaustion_is_terminal() {
+    use orch8_engine::worker_lease::plan_failure_action;
+    use orch8_types::worker::WorkerTaskResolutionAction;
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let (_, instance) = start(
+            &storage,
+            vec![mk_step_with_retry(
+                "work",
+                &unique_handler("ext.plan"),
+                u32::MAX,
+            )],
+        )
+        .await;
+        let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+        let task = only_task(&storage, instance.id).await;
+        assert!(matches!(
+            plan_failure_action(storage.as_ref(), &current, &task, true, "retry")
+                .await
+                .unwrap(),
+            WorkerTaskResolutionAction::Retry {
+                retry_output: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            storage
+                .get_block_output(instance.id, &task.block_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "planning wrote a retry marker before resolution"
+        );
+        let mut exhausted = task.clone();
+        exhausted.attempt = u16::MAX;
+        assert!(
+            matches!(
+                plan_failure_action(storage.as_ref(), &current, &exhausted, true, "exhausted")
+                    .await
+                    .unwrap(),
+                WorkerTaskResolutionAction::FailNode { .. }
+            ),
+            "attempt counter saturation scheduled the same attempt again"
+        );
+    }
+}
+
+#[tokio::test]
+async fn stranded_recovery_matches_the_original_request_with_or_without_a_hot_effect_link() {
+    use orch8_engine::worker_lease::{fail_worker_task, finalize_stranded_dispatches};
+    use orch8_storage::testing::backends::RawPool;
+    use orch8_types::{continuity::EffectId, worker::WorkerClaim};
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        for scenario in 0..4 {
+            let mismatch = scenario % 2 == 1;
+            let (_, instance) = start(
+                &storage,
+                vec![mk_step_with_retry(
+                    "work",
+                    &unique_handler("ext.stranded"),
+                    3,
+                )],
+            )
+            .await;
+            let first = only_task(&storage, instance.id).await;
+            let claimed = claim(&storage, &first).await;
+            let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+            let lease = WorkerClaim::new(claimed.worker_id.clone().unwrap(), claimed.claim_epoch);
+            assert!(
+                fail_worker_task(storage.as_ref(), &current, &claimed, &lease, "retry", true)
+                    .await
+                    .unwrap()
+            );
+            let task = only_task(&storage, instance.id).await;
+            assert_eq!(task.params, first.params);
+            let binding = storage
+                .get_worker_invocation(&current.tenant_id, task.id)
+                .await
+                .unwrap()
+                .unwrap();
+            let orch8_storage::worker_invocation::WorkerInvocationTarget::Tree { node_id, .. } =
+                binding.target
+            else {
+                panic!("tree source")
+            };
+            storage
+                .update_node_state(node_id, NodeState::Waiting)
+                .await
+                .unwrap();
+            storage
+                .update_instance_state(instance.id, InstanceState::Waiting, None)
+                .await
+                .unwrap();
+            let mut receipt = storage
+                .get_effect_receipt(&current.tenant_id, first.effect_id.unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            receipt.id = EffectId::new();
+            receipt.attempt = u32::from(task.attempt);
+            receipt.state = EffectState::Dispatched;
+            receipt.provider_receipt_id = None;
+            if mismatch {
+                receipt.request_sha256 = "a".repeat(64);
+            }
+            storage.create_effect_receipt(&receipt).await.unwrap();
+            if scenario >= 2 {
+                match &backend.raw {
+                    RawPool::Sqlite(pool) => {
+                        sqlx::query("UPDATE worker_tasks SET effect_id=?1 WHERE id=?2")
+                            .bind(receipt.id.to_string())
+                            .bind(task.id.to_string())
+                            .execute(pool)
+                            .await
+                            .unwrap();
+                    }
+                    RawPool::Postgres(pool) => {
+                        sqlx::query("UPDATE worker_tasks SET effect_id=$1 WHERE id=$2")
+                            .bind(receipt.id.into_uuid())
+                            .bind(task.id)
+                            .execute(pool)
+                            .await
+                            .unwrap();
+                    }
+                }
+            }
+            backend
+                .raw
+                .backdate(
+                    "worker_tasks",
+                    "created_at",
+                    "id",
+                    &task.id.to_string(),
+                    Utc::now() - chrono::Duration::minutes(5),
+                )
+                .await;
+            let published = finalize_stranded_dispatches(storage.as_ref(), Duration::ZERO)
+                .await
+                .unwrap();
+            assert_eq!(
+                published,
+                u64::from(!mismatch),
+                "{} scenario {scenario}",
+                backend.name()
+            );
+            let delivered = storage
+                .claim_worker_tasks(&task.handler_name, "recovered", 1)
+                .await
+                .unwrap();
+            assert_eq!(delivered.len(), usize::from(!mismatch));
+            if let Some(delivered) = delivered.first() {
+                assert_eq!(delivered.id, task.id);
+                assert_eq!(delivered.effect_id, Some(receipt.id));
+                assert_eq!(delivered.continuity_epoch, binding.continuity_epoch);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn pure_remote_dispatch_survives_later_effect_scope_enrollment() {
+    use orch8_engine::{effect_guard::ensure_effect_scope, worker_lease::release_worker_task};
+    use orch8_types::worker::WorkerClaim;
+    for placed in [true, false] {
+        for backend in backends().await {
+            let storage = Arc::clone(&backend.storage);
+            let mut sequence = mk_sequence(vec![common::mk_step_with_params(
+                "pure",
+                "noop",
+                if placed {
+                    json!({"$runtime":{"runtime_kinds":["mobile"]}})
+                } else {
+                    json!({})
+                },
+            )]);
+            sequence.name = format!("pure-scope-{}", uuid::Uuid::now_v7());
+            storage.create_sequence(&sequence).await.unwrap();
+            let instance = mk_instance(sequence.id);
+            storage.create_instance(&instance).await.unwrap();
+            // An ordinary queue also runs a pure builtin when the coordinator
+            // has no local implementation registered.
+            common::drive_n(
+                &storage,
+                &orch8_engine::handlers::HandlerRegistry::new(),
+                instance.id,
+                &sequence,
+                5,
+            )
+            .await;
+            storage
+                .update_instance_state(instance.id, InstanceState::Waiting, None)
+                .await
+                .unwrap();
+            let task = only_task(&storage, instance.id).await;
+            let original = storage
+                .get_worker_invocation(&instance.tenant_id, task.id)
+                .await
+                .unwrap()
+                .unwrap();
+            // A sibling effect may initialize the shared namespace after a pure
+            // activity is queued. The queued activity must already have its scope.
+            let owner = ensure_effect_scope(storage.as_ref(), &instance.tenant_id, instance.id)
+                .await
+                .unwrap();
+            let phone = caps_of(RuntimeKind::Mobile, "noop");
+            let claimed = storage
+                .claim_worker_tasks_matching(
+                    "noop",
+                    &phone.runtime_id.to_string(),
+                    None,
+                    None,
+                    &phone,
+                    1,
+                )
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+            let lease = WorkerClaim::new(claimed.worker_id.clone().unwrap(), claimed.claim_epoch);
+            assert!(
+                release_worker_task(storage.as_ref(), &current, &claimed, &lease, false)
+                    .await
+                    .unwrap(),
+                "{}: pure task lost authority when a sibling enrolled effect scope",
+                backend.name()
+            );
+            assert_eq!(
+                original.continuity.as_ref().unwrap().continuity_id,
+                owner.continuity_id
+            );
+            assert_eq!(
+                storage
+                    .get_worker_invocation(&current.tenant_id, task.id)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                original
+            );
+        }
     }
 }

@@ -212,6 +212,14 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteDispatchRejected(pub String);
 
+/// Prepared dispatch values carried together into durable queue admission.
+pub(crate) struct PreparedWorkerDispatch {
+    pub resolved_params: serde_json::Value,
+    pub step_context: ExecutionContext,
+    pub attempt: u32,
+    pub carries_credentials: bool,
+}
+
 /// Build, persist, and announce the durable worker task for one step attempt.
 ///
 /// Shared by the tree evaluator and the fast path so placement, effect, and
@@ -221,18 +229,21 @@ pub(crate) struct RemoteDispatchRejected(pub String);
 /// claiming executor to resolve locally (hybrid mode; the task then requires
 /// those credential ids as runtime facts). `carries_credentials` says whether
 /// the unresolved params referenced `credentials://` material.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn enqueue_worker_task(
     storage: &dyn StorageBackend,
     instance: &TaskInstance,
     step_def: &StepDef,
-    resolved_params: serde_json::Value,
-    step_context: &ExecutionContext,
-    attempt: u32,
-    carries_credentials: bool,
+    prepared: PreparedWorkerDispatch,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
 ) -> Result<Result<orch8_types::worker::WorkerTask, RemoteDispatchRejected>, EngineError> {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
 
+    let PreparedWorkerDispatch {
+        resolved_params,
+        step_context,
+        attempt,
+        carries_credentials,
+    } = prepared;
     let (requirements, resolved_params) =
         match orch8_types::worker::take_runtime_requirements(resolved_params) {
             Ok(split) => split,
@@ -262,6 +273,8 @@ pub(crate) async fn enqueue_worker_task(
     )
     .await;
 
+    let continuity_epoch = fence.continuity.as_ref().map(|scope| scope.epoch);
+
     let effect_guard = crate::effect_guard::EffectGuard::begin_step(
         storage,
         instance,
@@ -274,13 +287,6 @@ pub(crate) async fn enqueue_worker_task(
     let effect_id = effect_guard
         .as_ref()
         .map(crate::effect_guard::EffectGuard::effect_id);
-
-    // Owner epoch at dispatch: completion is fenced on it so a task issued
-    // under an older owner can never advance the execution after a handoff.
-    let continuity_epoch = storage
-        .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
-        .await?
-        .map(|execution| execution.epoch.get());
 
     // W3C trace context for the worker: the dispatching span's context when
     // OpenTelemetry is active, else a deterministic per-instance context.
@@ -327,9 +333,31 @@ pub(crate) async fn enqueue_worker_task(
         claimed_runtime_kind: None,
     };
 
-    storage.create_worker_task(&task).await?;
+    let actual_id = storage
+        .create_worker_task_bound(&task, fence)
+        .await?
+        .ok_or(EngineError::ClaimLost {
+            instance_id: instance.id,
+        })?;
+    let task = storage
+        .get_worker_task(actual_id)
+        .await?
+        .ok_or(EngineError::ClaimLost {
+            instance_id: instance.id,
+        })?;
+    announce_worker_task(storage, instance, &task).await;
+
+    Ok(Ok(task))
+}
+
+/// Announce only the task retained by the successful queue transaction.
+async fn announce_worker_task(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    task: &orch8_types::worker::WorkerTask,
+) {
     Box::pin(crate::step_placement::record_placement_status(
-        storage, instance, &task,
+        storage, instance, task,
     ))
     .await;
 
@@ -338,12 +366,48 @@ pub(crate) async fn enqueue_worker_task(
     crate::push::maybe_push_task(
         storage,
         instance.tenant_id.as_str(),
-        &task,
+        task,
         &tokio_util::sync::CancellationToken::new(),
     )
     .await;
+}
 
-    Ok(Ok(task))
+/// Capture remote authority before conditions, templates or credentials await.
+/// A missing fence is usable only for a step that ultimately stays in-process.
+pub(crate) async fn prepare_dispatch_fence(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    step: &StepDef,
+    claim_token: chrono::DateTime<chrono::Utc>,
+    selection: &orch8_storage::worker_invocation::WorkerDispatchSelection,
+) -> Result<Option<orch8_storage::worker_invocation::WorkerDispatchFence>, EngineError> {
+    let owner =
+        crate::effect_guard::ensure_effect_scope(storage, &instance.tenant_id, instance.id).await?;
+    if owner.tenant_id != instance.tenant_id
+        || owner.current_instance_id != instance.id
+        || owner.state != orch8_types::continuity::OwnershipState::Owned
+    {
+        return Err(EngineError::ClaimLost {
+            instance_id: instance.id,
+        });
+    }
+    let mut source = instance.clone();
+    source.claimed_at = Some(claim_token);
+    let fence = storage
+        .prepare_worker_dispatch(&source, &step.id, selection)
+        .await?;
+    if fence.as_ref().is_some_and(|fence| {
+        fence.continuity.as_ref().is_none_or(|scope| {
+            scope.continuity_id != owner.continuity_id
+                || scope.epoch != owner.epoch.get()
+                || scope.owner_runtime_id != owner.owner_runtime_id
+        })
+    }) {
+        return Err(EngineError::ClaimLost {
+            instance_id: instance.id,
+        });
+    }
+    Ok(fence)
 }
 
 /// Validate a step's placement before anything is persisted: `$runtime`
@@ -505,15 +569,19 @@ pub(crate) async fn dispatch_step_to_external_worker(
     step_context: ExecutionContext,
     attempt: u32,
     carries_credentials: bool,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
 ) -> Result<bool, EngineError> {
     match enqueue_worker_task(
         storage,
         instance,
         step_def,
-        resolved_params,
-        &step_context,
-        attempt,
-        carries_credentials,
+        PreparedWorkerDispatch {
+            resolved_params,
+            step_context,
+            attempt,
+            carries_credentials,
+        },
+        fence,
     )
     .await?
     {
@@ -524,14 +592,6 @@ pub(crate) async fn dispatch_step_to_external_worker(
             return Ok(false);
         }
     }
-
-    // Mark the execution node as Waiting so the evaluator won't re-dispatch it.
-    // The instance state is NOT changed here — the evaluator may have other steps
-    // to execute within the same composite. The caller (evaluator / process_instance_tree)
-    // is responsible for transitioning the instance to Waiting when no more work remains.
-    storage
-        .update_node_state(node.id, orch8_types::execution::NodeState::Waiting)
-        .await?;
 
     tracing::info!(
         instance_id = %instance.id,
@@ -626,7 +686,7 @@ mod tests {
     fn mk_instance(id: InstanceId) -> TaskInstance {
         let now = Utc::now();
         TaskInstance {
-            claimed_at: None,
+            claimed_at: Some(now),
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),
@@ -637,7 +697,11 @@ mod tests {
             priority: Priority::Normal,
             timezone: "UTC".into(),
             metadata: json!({}),
-            context: ExecutionContext::default(),
+            context: {
+                let mut context = ExecutionContext::default();
+                context.runtime.run_id = Some(uuid::Uuid::now_v7().to_string());
+                context
+            },
             concurrency_key: None,
             max_concurrency: None,
             idempotency_key: None,
@@ -1016,6 +1080,18 @@ mod tests {
             ExecutionContext::default(),
             0,
             false,
+            &prepare_dispatch_fence(
+                &s,
+                &inst,
+                &step_def,
+                inst.claimed_at.unwrap(),
+                &orch8_storage::worker_invocation::WorkerDispatchSelection::Tree {
+                    node_id: node.id,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -1105,6 +1181,18 @@ mod tests {
             ExecutionContext::default(),
             0,
             false,
+            &prepare_dispatch_fence(
+                &s,
+                &inst,
+                &step_def,
+                inst.claimed_at.unwrap(),
+                &orch8_storage::worker_invocation::WorkerDispatchSelection::Tree {
+                    node_id: node.id,
+                },
+            )
+            .await
+            .unwrap()
+            .unwrap(),
         )
         .await
         .unwrap();

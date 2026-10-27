@@ -499,12 +499,22 @@ async fn scheduler_execute_step_block_resolves_params_for_external_worker() {
     let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
 
     let instance_id = InstanceId::new();
-    let ctx = ExecutionContext {
+    let mut ctx = ExecutionContext {
         data: serde_json::json!({"slug": "user.signed_up"}),
         ..ExecutionContext::default()
     };
+    ctx.runtime.run_id = Some(Uuid::now_v7().to_string());
     seed_instance_with_context(storage.as_ref(), instance_id, ctx).await;
-    let instance = storage.get_instance(instance_id).await.unwrap().unwrap();
+    storage
+        .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
+        .await
+        .unwrap();
+    let instance = storage
+        .claim_due_instances(Utc::now() + chrono::Duration::seconds(1), 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
 
     let mut step_def = mk_step_def(
         "external",

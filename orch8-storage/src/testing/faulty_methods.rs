@@ -186,6 +186,9 @@ fault_impl! {
 fault_impl! {
     [WORKER_STORE_METHODS] impl WorkerStore {
         async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
+        async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
+        async fn create_worker_task_bound(&self, task: &WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError>;
+        async fn get_worker_invocation(&self, tenant_id: &TenantId, task_id: Uuid) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError>;
         async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
         async fn claim_worker_tasks(&self, handler_name: &str, worker_id: &str, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn claim_worker_tasks_for_tenant(&self, handler_name: &str, worker_id: &str, tenant_id: &TenantId, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
@@ -203,7 +206,7 @@ fault_impl! {
         async fn list_expired_worker_leases(&self, default_lease: Duration, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn list_timed_out_worker_tasks(&self, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn list_stranded_worker_dispatches(&self, created_before: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
-        async fn finalize_stranded_worker_dispatch(&self, task_id: Uuid, attempt: u16, effect_id: Option<orch8_types::continuity::EffectId>, continuity_epoch: Option<u64>) -> Result<bool, StorageError>;
+        async fn finalize_stranded_worker_dispatch(&self, task_id: Uuid, attempt: u16, effect: Option<&crate::worker_invocation::WorkerDispatchEffect>, continuity_epoch: Option<u64>) -> Result<bool, StorageError>;
         async fn resolve_worker_task(&self, resolution: &orch8_types::worker::WorkerTaskResolution) -> Result<bool, StorageError>;
         async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;

@@ -273,6 +273,14 @@ impl crate::ContinuityStore for PostgresStorage {
             .begin()
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
+        // Serialize target namespace enrollment/relocation with dispatch and
+        // retry source validation, including the previously absent-owner case.
+        super::portable_effects::lock_instance_on(
+            &mut transaction,
+            tenant_id,
+            next.current_instance_id,
+        )
+        .await?;
         // Lock first, then read the cut in a fresh READ COMMITTED statement.
         // A single UPDATE's snapshot can miss a cut inserted while it waits
         // for capture to release this ownership row.

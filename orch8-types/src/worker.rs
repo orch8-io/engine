@@ -512,6 +512,8 @@ pub enum WorkerTaskResolutionAction {
     /// to `pending` (when present), and schedule the instance at `fire_at`.
     Retry {
         retry_task: Box<WorkerTask>,
+        /// Optional append-only retry marker, committed with the resolution.
+        retry_output: Option<Box<crate::output::BlockOutput>>,
         node_id: Option<crate::ids::ExecutionNodeId>,
         fire_at: DateTime<Utc>,
     },

@@ -706,21 +706,62 @@ pub(crate) async fn stranded_attempt_effect_id(
     tenant_id: &TenantId,
     task: &orch8_types::worker::WorkerTask,
 ) -> Result<Option<EffectId>, EngineError> {
-    if !crate::release_diff::handler_has_side_effects(&task.handler_name) {
+    if orch8_types::sequence::is_pure_remote_builtin(&task.handler_name)
+        || task
+            .context
+            .pointer("/runtime/dry_run")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
         return Ok(None);
     }
+    if orch8_types::sequence::is_engine_only_builtin(&task.handler_name) {
+        return Err(EngineError::InvalidConfig(
+            "engine-only handler cannot be recovered as remote work".into(),
+        ));
+    }
     let execution = ensure_effect_scope(storage, tenant_id, task.instance_id).await?;
-    if let Some(open) = storage
-        .find_unresolved_effect_receipt(
-            tenant_id,
-            execution.continuity_id,
-            task.instance_id,
-            &task.block_id,
-            u32::from(task.attempt),
-        )
-        .await?
+    if execution.current_instance_id != task.instance_id || execution.state != OwnershipState::Owned
     {
-        return Ok(Some(open.id));
+        return Err(EngineError::ClaimLost {
+            instance_id: task.instance_id,
+        });
+    }
+    let open = match task.effect_id {
+        Some(id) => storage.get_effect_receipt(tenant_id, id).await?,
+        None => {
+            storage
+                .find_unresolved_effect_receipt(
+                    tenant_id,
+                    execution.continuity_id,
+                    task.instance_id,
+                    &task.block_id,
+                    u32::from(task.attempt),
+                )
+                .await?
+        }
+    };
+    if let Some(receipt) = open {
+        if receipt.tenant_id != *tenant_id
+            || receipt.continuity_id != execution.continuity_id
+            || receipt.epoch != execution.epoch
+            || receipt.instance_id != task.instance_id
+            || receipt.block_id != task.block_id
+            || receipt.attempt != u32::from(task.attempt)
+            || receipt.kind != effect_kind(&task.handler_name)
+            || receipt.state != EffectState::Dispatched
+            || receipt.request_sha256 != request_hash(&task.handler_name, &task.params)?
+            || receipt.destination_fingerprint
+                != destination_fingerprint(&task.handler_name, &task.params)?
+        {
+            return Err(blocked(&receipt));
+        }
+        return Ok(Some(receipt.id));
+    }
+    if task.effect_id.is_some() {
+        return Err(EngineError::EffectTransition(
+            "bound worker effect receipt is missing".into(),
+        ));
     }
     Ok(EffectGuard::begin(
         storage,
@@ -734,6 +775,18 @@ pub(crate) async fn stranded_attempt_effect_id(
     .await?
     .as_ref()
     .map(EffectGuard::effect_id))
+}
+
+pub(crate) fn worker_dispatch_effect(
+    task: &orch8_types::worker::WorkerTask,
+    effect_id: EffectId,
+) -> Result<orch8_storage::worker_invocation::WorkerDispatchEffect, EngineError> {
+    Ok(orch8_storage::worker_invocation::WorkerDispatchEffect {
+        effect_id,
+        request_sha256: request_hash(&task.handler_name, &task.params)?,
+        destination_fingerprint: destination_fingerprint(&task.handler_name, &task.params)?,
+        kind: effect_kind(&task.handler_name),
+    })
 }
 
 /// Whether a worker task's effect may already have happened: it has a

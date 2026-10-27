@@ -7,6 +7,7 @@ mod compensation_update;
 mod current_outputs;
 mod effect_attempt;
 pub mod local_migration;
+pub mod worker_invocation;
 pub use compensation_start::CompensationStart;
 mod effect_dispatch;
 mod effect_receipts;
@@ -89,7 +90,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 131;
+pub const STORAGE_SCHEMA_VERSION: u32 = 132;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -1981,7 +1982,46 @@ pub trait SignalStore: Send + Sync + 'static {
 pub trait WorkerStore: Send + Sync + 'static {
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
 
+    /// Capture a consistent source claim, owner and activation before asynchronous
+    /// preparation. Enqueue must use the returned fence without refreshing it.
+    /// Returns `None` for a lost claim, invalid target or unavailable owner.
+    async fn prepare_worker_dispatch(
+        &self,
+        _instance: &TaskInstance,
+        _block_id: &orch8_types::ids::BlockId,
+        _selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
+        Err(StorageError::Unsupported(
+            "worker dispatch preparation".into(),
+        ))
+    }
+
+    /// Publish only under the original native claim, run, owner and invocation.
+    /// Returns the actual queued id when an idempotent upsert retains a retry row.
+    async fn create_worker_task_bound(
+        &self,
+        task: &WorkerTask,
+        fence: &worker_invocation::WorkerDispatchFence,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let _ = (task, fence);
+        Err(StorageError::Unsupported(
+            "claim-bound worker dispatch".into(),
+        ))
+    }
+
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
+
+    /// Immutable dispatch identity, independently scoped and retained after hot GC.
+    async fn get_worker_invocation(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<worker_invocation::WorkerInvocation>, StorageError> {
+        let _ = (tenant_id, task_id);
+        Err(StorageError::Unsupported(
+            "worker invocation binding".into(),
+        ))
+    }
 
     /// Atomically claim up to `limit` pending tasks for a handler.
     /// Uses `FOR UPDATE SKIP LOCKED` for safe concurrent polling.
@@ -2131,15 +2171,19 @@ pub trait WorkerStore: Send + Sync + 'static {
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
     /// Finalize one stranded retry row: fill `effect_id` / `continuity_epoch`
-    /// where still unset and clear `awaiting_dispatch`, fenced on the row
-    /// being the same pending attempt that is still awaiting dispatch.
+    /// where still unset and clear `awaiting_dispatch`, only under the retained
+    /// invocation's exact native run, node activation and owned continuity scope.
+    /// The parent and target must still be waiting. Effect-free publication needs
+    /// a known pure built-in or retained dry-run proof; other handlers need a
+    /// dispatched receipt for this scope and attempt. Missing legacy identity
+    /// never becomes certified by finding a current node with the same block.
     /// Returns `false` (nothing changed) when the row was bound, claimed,
     /// superseded, or deleted concurrently — the operation is idempotent.
     async fn finalize_stranded_worker_dispatch(
         &self,
         task_id: Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError>;
 

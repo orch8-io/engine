@@ -403,6 +403,20 @@ pub(crate) async fn execute_step_node_with_clock(
     claim_token: chrono::DateTime<chrono::Utc>,
     pending_deferrals: Option<&super::step_deferral::PendingStepDeferrals>,
 ) -> Result<bool, EngineError> {
+    let local_only = handlers.requires_local_dispatch(&instance.tenant_id);
+    let dispatch_fence = if local_only {
+        None
+    } else {
+        super::step_dispatch::prepare_dispatch_fence(
+            storage.as_ref(),
+            instance,
+            step_def,
+            claim_token,
+            &orch8_storage::worker_invocation::WorkerDispatchSelection::Tree { node_id: node.id },
+        )
+        .await?
+    };
+
     // Conditional guard: if `when` is set, evaluate the expression against
     // the current context + outputs. Skip the step entirely if falsy. Strict
     // evaluation: a guard that fails to *parse* is a malformed step
@@ -610,7 +624,6 @@ pub(crate) async fn execute_step_node_with_clock(
     // Resolve context snapshot + templates + credentials + cache key (shared
     // with the fast path). Template/credential failures fail this *node*;
     // infrastructural errors propagate.
-    let local_only = handlers.requires_local_dispatch(&instance.tenant_id);
     let defer_credentials = !local_only
         && crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
     let mut prepared = match prepare_step(
@@ -885,6 +898,9 @@ pub(crate) async fn execute_step_node_with_clock(
             step_context,
             attempt,
             carries_credentials,
+            dispatch_fence.as_ref().ok_or(EngineError::ClaimLost {
+                instance_id: instance.id,
+            })?,
         )
         .await;
     }
@@ -1338,11 +1354,12 @@ mod tests {
     async fn seed_instance_with_context(
         storage: &dyn StorageBackend,
         id: InstanceId,
-        context: ExecutionContext,
+        mut context: ExecutionContext,
     ) {
         let now = Utc::now();
+        context.runtime.run_id = Some(uuid::Uuid::now_v7().to_string());
         let inst = TaskInstance {
-            claimed_at: None,
+            claimed_at: Some(now),
             sub_tenant: None,
             id,
             sequence_id: SequenceId::new(),

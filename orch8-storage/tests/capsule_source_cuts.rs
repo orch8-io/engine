@@ -1555,21 +1555,47 @@ orch8_storage::backend_test!(async fn frozen_source_rejects_new_enqueue_but_unse
 });
 
 #[cfg(feature = "postgres")]
+async fn flat_retry_task_fixture(
+    b: &orch8_storage::testing::backends::TestBackend,
+) -> orch8_types::worker::WorkerTask {
+    let request = fixture(b.storage.as_ref()).await;
+    // Model a dispatched flat invocation: owner epoch and durable run/step
+    // must already exist before a retry can target the native parent.
+    b.storage
+        .delete_execution_tree(request.owner.current_instance_id)
+        .await
+        .unwrap();
+    let mut native = b
+        .storage
+        .get_instance(request.owner.current_instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    native.context.runtime.run_id = Some(uuid::Uuid::new_v4().to_string());
+    native.context.runtime.current_step = Some(BlockId::new("charge"));
+    native.context.runtime.current_step_started_at = Some(Utc::now());
+    b.storage
+        .update_instance_context(native.id, &native.context)
+        .await
+        .unwrap();
+    let task: orch8_types::worker::WorkerTask=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"instance_id":request.owner.current_instance_id,"block_id":"charge",
+        "handler_name":"retry-lock-order","params":{},"context":{},"attempt":0,"continuity_epoch":request.owner.epoch.get(),"state":"pending","created_at":Utc::now()})).unwrap();
+    b.storage.create_worker_task(&task).await.unwrap();
+    task
+}
+
+#[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_worker_retry_and_duplicate_enqueue_keep_parent_before_worker_lock_order() {
     use orch8_storage::testing::backends::TestBackend;
     use orch8_types::worker::{
-        WorkerAttemptEventKind, WorkerTask, WorkerTaskResolution, WorkerTaskResolutionAction,
-        WorkerTaskState,
+        WorkerAttemptEventKind, WorkerTaskResolution, WorkerTaskResolutionAction, WorkerTaskState,
     };
     use std::time::Duration as StdDuration;
     let Some(b) = TestBackend::postgres().await else {
         return;
     };
-    let request = fixture(b.storage.as_ref()).await;
-    let task: WorkerTask=serde_json::from_value(json!({"id":uuid::Uuid::new_v4(),"instance_id":request.owner.current_instance_id,"block_id":"retry-lock-order",
-        "handler_name":"retry-lock-order","params":{},"context":{},"attempt":0,"state":"pending","created_at":Utc::now()})).unwrap();
-    b.storage.create_worker_task(&task).await.unwrap();
+    let task = flat_retry_task_fixture(&b).await;
     let key = i64::from(uuid::Uuid::new_v4().as_fields().0 & 0x7fff_ffff);
     sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE FUNCTION pause_duplicate_enqueue() RETURNS trigger LANGUAGE plpgsql AS $$
         BEGIN IF NEW.id='{}'::uuid THEN PERFORM pg_advisory_xact_lock({key}); END IF; RETURN NEW; END $$;
@@ -1613,6 +1639,7 @@ async fn postgres_worker_retry_and_duplicate_enqueue_keep_parent_before_worker_l
         retryable: true,
         action: WorkerTaskResolutionAction::Retry {
             retry_task: Box::new(next),
+            retry_output: None,
             node_id: None,
             fire_at: Utc::now(),
         },
@@ -2259,6 +2286,38 @@ async fn sqlite_captured_guards_use_point_indexes() {
     assert!(
         queries >= 7,
         "guard query coverage unexpectedly shrank: {queries}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn rejected_acknowledgement_releases_owner_lock_before_returning() {
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let request = fixture(b.storage.as_ref()).await;
+    let cut = capture(b.storage.as_ref(), &request).await;
+    let second = b.connect_another_postgres().await.unwrap();
+    let mut observer = second.pool().acquire().await.unwrap();
+    let mut accepted = request.owner.clone();
+    accepted.epoch = accepted.epoch.checked_next().unwrap();
+    accepted.current_instance_id = InstanceId::new();
+    accepted.owner_runtime_id = request.destination_runtime_id.unwrap();
+    assert!(
+        b.storage
+            .acknowledge_capsule_cut(&accepted.tenant_id, cut.id, &accepted)
+            .await
+            .is_err(),
+        "unsealed cut was acknowledged"
+    );
+    let unlocked = sqlx::query("SELECT continuity_id FROM continuity_executions WHERE tenant_id=$1 AND continuity_id=$2 FOR UPDATE NOWAIT")
+        .bind(request.owner.tenant_id.as_str()).bind(request.owner.continuity_id.into_uuid())
+        .fetch_one(&mut *observer).await.is_ok();
+    drop(observer);
+    second.pool().close().await;
+    assert!(
+        unlocked,
+        "rejected acknowledgement returned with its owner row still locked"
     );
 }
 

@@ -19,7 +19,10 @@ async fn fixture(s: &dyn StorageBackend) -> (WorkerTask, ExecutionNode) {
         .step("step", "noop")
         .build();
     s.create_sequence(&sequence).await.unwrap();
-    let instance = InstanceBuilder::for_sequence(&sequence).build();
+    let mut instance = InstanceBuilder::for_sequence(&sequence).build();
+    instance.context.runtime.run_id = Some(uuid::Uuid::new_v4().to_string());
+    instance.context.runtime.current_step = Some(BlockId::new("step"));
+    instance.context.runtime.current_step_started_at = Some(Utc::now());
     s.create_instance(&instance).await.unwrap();
     let node = ExecutionNode {
         id: ExecutionNodeId::new(),
@@ -71,7 +74,7 @@ orch8_storage::backend_test!(async fn resolution_rejects_foreign_retry_without_d
     let (foreign,_) = fixture(b.storage.as_ref()).await;
     let mut retry=task.clone(); retry.id=uuid::Uuid::new_v4(); retry.instance_id=foreign.instance_id;
     retry.block_id=BlockId::new("injected"); retry.attempt=1;
-    let request=resolution(&task,WorkerTaskResolutionAction::Retry { retry_task:Box::new(retry.clone()),node_id:None,fire_at:Utc::now() });
+    let request=resolution(&task,WorkerTaskResolutionAction::Retry { retry_task:Box::new(retry.clone()), retry_output:None,node_id:None,fire_at:Utc::now() });
     assert!(!b.storage.resolve_worker_task(&request).await.unwrap());
     assert!(b.storage.get_worker_task(task.id).await.unwrap().is_some());
     assert!(b.storage.get_worker_task(retry.id).await.unwrap().is_none());
@@ -120,7 +123,7 @@ orch8_storage::backend_test!(async fn resolution_retry_preserves_block_identity_
     let (task,node)=fixture(b.storage.as_ref()).await;
     let mut retry=task.clone(); retry.id=uuid::Uuid::new_v4(); retry.attempt=1;
     let mut wrong=retry.clone(); wrong.block_id=BlockId::new("other");
-    let action=|task,node_id|WorkerTaskResolutionAction::Retry {retry_task:Box::new(task),node_id,fire_at:Utc::now()};
+    let action=|task,node_id|WorkerTaskResolutionAction::Retry {retry_task:Box::new(task), retry_output:None,node_id,fire_at:Utc::now()};
     assert!(!b.storage.resolve_worker_task(&resolution(&task,action(wrong,None))).await.unwrap());
     assert!(!b.storage.resolve_worker_task(&resolution(&task,action(retry.clone(),Some(ExecutionNodeId::new())))).await.unwrap());
     assert!(b.storage.resolve_worker_task(&resolution(&task,action(retry.clone(),Some(node.id)))).await.unwrap());

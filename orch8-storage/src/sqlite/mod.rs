@@ -87,6 +87,8 @@ mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_commands;
+mod worker_dispatch;
+mod worker_invocations;
 mod worker_version_pins;
 mod workers;
 
@@ -568,6 +570,19 @@ impl SqliteStorage {
             sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('scheduled','running','waiting','paused') AND (state!='paused' OR claimed_at IS NOT NULL OR next_fire_at IS NOT NULL) AND EXISTS(SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed') AND cut.state='captured')")
                 .execute(&mut *retirement).await?;
             sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(62)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("worker_invocations.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        let activations: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=63)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !activations {
+            sqlx::query("UPDATE execution_tree SET activation_id=lower(hex(randomblob(16))) WHERE activation_id IS NULL").execute(&mut *retirement).await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(63)")
                 .execute(&mut *retirement)
                 .await?;
         }
@@ -2054,6 +2069,31 @@ impl crate::WorkerStore for SqliteStorage {
         workers::create(self, task).await
     }
 
+    async fn prepare_worker_dispatch(
+        &self,
+        instance: &TaskInstance,
+        block_id: &BlockId,
+        selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
+        worker_dispatch::prepare(self, instance, block_id, selection).await
+    }
+
+    async fn create_worker_task_bound(
+        &self,
+        task: &WorkerTask,
+        fence: &crate::worker_invocation::WorkerDispatchFence,
+    ) -> Result<Option<Uuid>, StorageError> {
+        worker_dispatch::create(self, task, fence).await
+    }
+
+    async fn get_worker_invocation(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError> {
+        worker_invocations::get(self, tenant_id, task_id).await
+    }
+
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError> {
         workers::get(self, task_id).await
     }
@@ -2163,6 +2203,7 @@ impl crate::WorkerStore for SqliteStorage {
         fire_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
         let mut tx = helpers::begin_immediate(&self.pool).await?;
+        let result = async {
         let block: Option<String> =
             sqlx::query_scalar("SELECT block_id FROM worker_tasks WHERE id=?1 AND instance_id=?2")
                 .bind(old_task_id.to_string())
@@ -2187,19 +2228,25 @@ impl crate::WorkerStore for SqliteStorage {
             }
         }
 
+        let Some(source) = worker_invocations::source_on(&mut tx, &old_task_id.to_string()).await?
+        else {
+            return Err(StorageError::Conflict(
+                "retry source invocation changed or is unknown".into(),
+            ));
+        };
+        if !source.accepts_node(node_id) {
+            return Err(StorageError::Conflict(
+                "retry node differs from original invocation".into(),
+            ));
+        }
+        source.validate_retry_task(new_task)?;
+
         sqlx::query("DELETE FROM worker_tasks WHERE id = ?1")
             .bind(old_task_id.to_string())
             .execute(&mut *tx)
             .await?;
 
-        workers::insert_task(&mut tx, new_task, true).await?;
-
-        if let Some(nid) = node_id {
-            sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = ?1")
-                .bind(nid.to_string())
-                .execute(&mut *tx)
-                .await?;
-        }
+        worker_invocations::reserve_retry_on(&mut tx, &source, new_task, node_id).await?;
 
         sqlx::query("UPDATE task_instances SET state = 'scheduled', next_fire_at = ?2, updated_at = ?3 WHERE id = ?1")
             .bind(instance_id.into_uuid().to_string())
@@ -2207,9 +2254,9 @@ impl crate::WorkerStore for SqliteStorage {
             .bind(chrono::Utc::now().to_rfc3339())
             .execute(&mut *tx)
             .await?;
-
-        tx.commit().await?;
         Ok(())
+    }.await;
+        finish_transaction(tx, result).await
     }
 
     async fn reap_stale_worker_tasks(
@@ -2250,11 +2297,10 @@ impl crate::WorkerStore for SqliteStorage {
         &self,
         task_id: Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError> {
-        workers::finalize_stranded_dispatch(self, task_id, attempt, effect_id, continuity_epoch)
-            .await
+        workers::finalize_stranded_dispatch(self, task_id, attempt, effect, continuity_epoch).await
     }
 
     async fn resolve_worker_task(
@@ -4018,6 +4064,23 @@ impl crate::MobileSyncStore for SqliteStorage {
 
     async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError> {
         mobile_sync::cleanup_expired_commands(self, ttl_secs).await
+    }
+}
+
+/// Finish before returning: dropping a transaction only queues its rollback.
+async fn finish_transaction<T>(
+    tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    match result {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
     }
 }
 

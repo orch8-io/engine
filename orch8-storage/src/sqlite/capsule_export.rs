@@ -164,6 +164,7 @@ pub(super) async fn seal(
     sealed: &[u8],
 ) -> Result<CapsuleSourceCut, StorageError> {
     let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let result = async {
     let request = load_request(&mut tx, tenant, id).await?;
     let current = owner(&mut tx, &request.owner).await?.ok_or_else(invalid)?;
     if current.state != OwnershipState::Transferring {
@@ -178,7 +179,6 @@ pub(super) async fn seal(
         if &candidate != existing {
             return Err(invalid());
         }
-        tx.commit().await?;
         return Ok(stored);
     }
     if phase != "captured" {
@@ -194,11 +194,12 @@ pub(super) async fn seal(
         return Err(invalid());
     }
     sqlx::query("UPDATE capsule_source_cuts SET state='sealed',snapshot=NULL,manifest=?1,sealed_payload=?2 WHERE tenant_id=?3 AND capsule_id=?4 AND state='captured'").bind(encode(manifest)?).bind(sealed).bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
-    tx.commit().await?;
     stored.snapshot = None;
     stored.manifest = Some(saved);
     stored.sealed_payload = Some(sealed.to_vec());
     Ok(stored)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 pub(super) async fn abort(
@@ -207,6 +208,7 @@ pub(super) async fn abort(
     id: CapsuleId,
 ) -> Result<bool, StorageError> {
     let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let result = async {
     let request = load_request(&mut tx, tenant, id).await?;
     let Some(current) = owner(&mut tx, &request.owner).await? else {
         return Ok(false);
@@ -226,8 +228,9 @@ pub(super) async fn abort(
     sqlx::query("UPDATE capsule_source_cuts SET state='aborted',snapshot=NULL WHERE tenant_id=?1 AND capsule_id=?2 AND state='captured'").bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
     save_owner(&mut tx, &restored).await?;
     sqlx::query("UPDATE task_instances SET state=?1,next_fire_at=?2,updated_at=?3 WHERE id=?4 AND tenant_id=?5 AND state='paused' AND claimed_at IS NULL AND updated_at=?6").bind(snapshot.instance.state.to_string()).bind(snapshot.instance.next_fire_at.map(|t|t.to_rfc3339())).bind(restored.updated_at.to_rfc3339()).bind(restored.current_instance_id.to_string()).bind(tenant.as_str()).bind(stored.request.now.to_rfc3339()).execute(&mut *tx).await?;
-    tx.commit().await?;
     Ok(true)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 /// Compact a sealed cut without loading its (potentially 64 MiB) ciphertext.
@@ -239,6 +242,7 @@ pub(super) async fn acknowledge(
 ) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError> {
     use crate::capsule_export::{CapsuleCutReceipt, validate_acknowledgement};
     let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let result = async {
     let request = load_request(&mut tx, tenant, id).await?;
     let row = sqlx::query(
         "SELECT record,state,epoch,owner_runtime_id FROM continuity_executions WHERE tenant_id=?1 AND continuity_id=?2",
@@ -269,7 +273,6 @@ pub(super) async fn acknowledge(
             if !same_location(&recorded, accepted) {
                 return Err(invalid());
             }
-            tx.commit().await?;
             return Ok(CapsuleCutReceipt {
                 manifest,
                 accepted_owner: recorded,
@@ -302,11 +305,12 @@ pub(super) async fn acknowledge(
     sqlx::query("UPDATE capsule_source_cuts SET state='acknowledged',snapshot=NULL,sealed_payload=NULL,acknowledgement=?1 WHERE tenant_id=?2 AND capsule_id=?3 AND state IN ('sealed','retired')").bind(encode(accepted)?).bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO capsule_artifact_retirements(artifact_key,tenant_id,capsule_id,next_sweep_at) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING")
         .bind(&manifest.payload_artifact.key).bind(tenant.as_str()).bind(id.to_string()).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
-    tx.commit().await?;
     Ok(CapsuleCutReceipt {
         manifest,
         accepted_owner: accepted.clone(),
     })
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 pub(super) async fn publishable(

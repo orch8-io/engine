@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS execution_tree (
     state TEXT NOT NULL DEFAULT 'pending',
     started_at TEXT,
     completed_at TEXT,
+    activation_id TEXT,
     FOREIGN KEY (instance_id) REFERENCES task_instances(id) ON DELETE CASCADE
 );
 
@@ -124,6 +125,15 @@ CREATE TABLE IF NOT EXISTS cron_schedules (
     -- times advance; an expired lease makes the schedule claimable again.
     claimed_until TEXT
 );
+
+CREATE TABLE IF NOT EXISTS worker_task_invocations (
+    task_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    instance_id TEXT NOT NULL,
+    record TEXT NOT NULL CHECK(json_valid(record))
+);
+CREATE INDEX IF NOT EXISTS worker_invocation_native_node ON execution_tree(instance_id,block_id) WHERE state IN ('pending','running','waiting');
+CREATE INDEX IF NOT EXISTS worker_task_invocations_instance ON worker_task_invocations(tenant_id,instance_id);
 
 CREATE TABLE IF NOT EXISTS worker_tasks (
     id TEXT PRIMARY KEY,
@@ -1737,4 +1747,4 @@ CREATE INDEX IF NOT EXISTS idx_capsule_source_cut_instance
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 62;
+pub(super) const SCHEMA_VERSION: i64 = 63;

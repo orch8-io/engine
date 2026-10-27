@@ -2080,6 +2080,12 @@ passthrough_impl! {
         let encrypted = self.encrypt_worker_task(task)?;
         self.inner.create_worker_task(encrypted.as_ref()).await
     }
+    async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
+    async fn create_worker_task_bound(&self, task: &orch8_types::worker::WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError> {
+        let encrypted=self.encrypt_worker_task(task)?;
+        self.inner.create_worker_task_bound(encrypted.as_ref(),fence).await
+    }
+    async fn get_worker_invocation(&self, tenant_id: &TenantId, task_id: Uuid) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError>;
     async fn get_worker_task(
         &self,
         task_id: Uuid,
@@ -2239,11 +2245,11 @@ passthrough_impl! {
         &self,
         task_id: uuid::Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError> {
         self.inner
-            .finalize_stranded_worker_dispatch(task_id, attempt, effect_id, continuity_epoch)
+            .finalize_stranded_worker_dispatch(task_id, attempt, effect, continuity_epoch)
             .await
     }
 
@@ -2254,6 +2260,7 @@ passthrough_impl! {
         use orch8_types::worker::WorkerTaskResolutionAction as Action;
         if let Action::Retry {
             retry_task,
+            retry_output,
             node_id,
             fire_at,
         } = &resolution.action
@@ -2262,6 +2269,7 @@ passthrough_impl! {
             let mut sealed = resolution.clone();
             sealed.action = Action::Retry {
                 retry_task: Box::new(encrypted),
+                retry_output: retry_output.as_deref().map(|output|self.encrypt_block_output(output).map(|sealed|Box::new(sealed.into_owned()))).transpose()?,
                 node_id: *node_id,
                 fire_at: *fire_at,
             };

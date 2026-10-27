@@ -2013,6 +2013,23 @@ impl Orch8Service for Orch8GrpcService {
         ensure_worker_claim(&self.storage, &pre_task, &claim, "complete").await?;
         let output: serde_json::Value = from_json_str(&inner.output_json)?;
 
+        // Reject an oversized merge before settling the effect or consuming
+        // the claim. The worker can then correct the result using the same
+        // lease, as it can over HTTP. Recheck after reloading the parent below
+        // because another branch may have changed its context meanwhile.
+        if let Some(fields) = output.as_object() {
+            let mut projected = pre_instance.context.clone();
+            if !projected.data.is_object() {
+                projected.data = serde_json::json!({});
+            }
+            if let Some(data) = projected.data.as_object_mut() {
+                data.extend(fields.clone());
+            }
+            projected
+                .check_size(self.max_context_bytes)
+                .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        }
+
         // Settle the attempt's effect receipt (by its stored id) before the
         // task is marked complete — the same order as the HTTP path.
         orch8_engine::effect_guard::commit_external_worker_effect(

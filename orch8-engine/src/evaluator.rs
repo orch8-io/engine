@@ -640,6 +640,31 @@ pub async fn evaluate_with_claim_token(
     claim_token: chrono::DateTime<chrono::Utc>,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<EvalOutcome, EngineError> {
+    // Public/direct evaluators also dispatch remote work. Persist the same
+    // first-writer run identity as the scheduler before any callback can run;
+    // initial_instance below reloads the actual winner of concurrent starts.
+    if instance.context.runtime.run_id.is_none() || instance.context.runtime.started_at.is_none() {
+        let run_id = instance
+            .context
+            .runtime
+            .run_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let started_at = instance
+            .context
+            .runtime
+            .started_at
+            .unwrap_or_else(|| clock.now());
+        if !storage
+            .ensure_instance_run_started_claimed(instance.id, &run_id, started_at, claim_token)
+            .await?
+        {
+            return Err(EngineError::ClaimLost {
+                instance_id: instance.id,
+            });
+        }
+    }
+
     // Merge sequence blocks with any dynamically injected blocks.
     let blocks = merged_blocks(storage.as_ref(), instance.id, sequence).await?;
 

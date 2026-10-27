@@ -4465,6 +4465,14 @@ async fn retry_worker_task_atomically_replaces_task() {
     let inst_id = InstanceId::new();
     seed_instance(&s, inst_id).await;
 
+    let mut instance = s.get_instance(inst_id).await.unwrap().unwrap();
+    instance.context.runtime.run_id = Some(Uuid::new_v4().to_string());
+    instance.context.runtime.current_step = Some(BlockId::new("step1"));
+    instance.context.runtime.current_step_started_at = Some(Utc::now());
+    s.update_instance_context(inst_id, &instance.context)
+        .await
+        .unwrap();
+
     let node_id = ExecutionNodeId::new();
     let node = ExecutionNode {
         id: node_id,

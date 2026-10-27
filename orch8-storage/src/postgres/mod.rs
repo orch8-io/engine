@@ -57,6 +57,8 @@ mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_commands;
+mod worker_dispatch;
+mod worker_invocations;
 mod worker_version_pins;
 mod workers;
 
@@ -1687,6 +1689,31 @@ impl crate::WorkerStore for PostgresStorage {
         workers::create(self, task).await
     }
 
+    async fn prepare_worker_dispatch(
+        &self,
+        instance: &TaskInstance,
+        block_id: &BlockId,
+        selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
+        worker_dispatch::prepare(self, instance, block_id, selection).await
+    }
+
+    async fn create_worker_task_bound(
+        &self,
+        task: &WorkerTask,
+        fence: &crate::worker_invocation::WorkerDispatchFence,
+    ) -> Result<Option<Uuid>, StorageError> {
+        worker_dispatch::create(self, task, fence).await
+    }
+
+    async fn get_worker_invocation(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError> {
+        worker_invocations::get(self, tenant_id, task_id).await
+    }
+
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError> {
         workers::get(self, task_id).await
     }
@@ -1836,11 +1863,10 @@ impl crate::WorkerStore for PostgresStorage {
         &self,
         task_id: Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError> {
-        workers::finalize_stranded_dispatch(self, task_id, attempt, effect_id, continuity_epoch)
-            .await
+        workers::finalize_stranded_dispatch(self, task_id, attempt, effect, continuity_epoch).await
     }
 
     async fn resolve_worker_task(
@@ -3294,6 +3320,23 @@ impl crate::ResourceStore for PostgresStorage {
 }
 
 // MobileSyncStore is implemented in mobile_sync.rs
+
+/// Finish before returning: dropping a transaction only queues its rollback.
+async fn finish_transaction<T>(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    match result {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
 
 #[cfg(test)]
 mod migration_preflight_tests {

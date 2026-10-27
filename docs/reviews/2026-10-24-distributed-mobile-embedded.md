@@ -6023,3 +6023,95 @@ at durable dispatch, retain the accepted outcome/integration receipt independent
 of native/task GC, and do not infer a missing legacy invocation binding from a
 currently live node with the same block id. Scope/authentication for receipt
 replay must remain enforceable when hot native rows have been collected.
+
+
+#### DME198 implementation progress: invocation and preparation identity (incomplete)
+
+Local migration 132 and SQLite schema 63 add an activation token to each execution
+node. Resetting a non-Pending node to Pending rotates it; repeated Pending resets,
+activation and same-activity resume retain it. Existing started_at values survive
+resets and cannot serve as invocation nonces. Immutable tenant-scoped invocation
+bindings retain the actual queued task ID, physical instance/sequence/run, block,
+attempt, execution mode, node/activation and full continuity ID/epoch/runtime
+independently of hot task/native history. Missing or ambiguous legacy identity
+is retained as Unbound evidence.
+
+prepare_worker_dispatch reads the expected native claim, run, sequence, tenant,
+node activation and owner in one database statement. Both production dispatch
+paths now capture this fence before conditions, output loading, templates and
+credentials, then carry it unchanged to bound enqueue. Scope enrollment must
+agree with the full owner observed during capture. Pure and dry-run remote
+activities receive ownership too: an ordinary pure queue activity previously
+lost its authority when a sibling first enrolled effect scope. Catalog registries
+that require local dispatch retain their local execution path.
+
+Bound enqueue validates the exact source and atomically publishes the task and
+suspends a tree node. The separate unfenced node update is removed. Flat enqueue
+preserves its original timeout baseline; both paths use the task ID actually
+retained by a pending-row upsert for status, notification and return. A regression
+previously allowed a different flat block under the same run and timestamp; the
+fence now includes physical instance and block. Encrypted storage forwards typed
+authority and encrypts task bodies. New engine races pause template I/O, rotate a
+tree activation or change the flat step baseline under the same parent claim/run,
+and verify that old preparation cannot enqueue or overwrite the new activity.
+The tree race reproduced the defect on all four backend configurations.
+
+Retry resolution compares the retained invocation with the current run, node
+activation and full owner before resetting native state. Unknown or changed
+sources are refused. A replacement binding is reserved after resetting the exact
+original activation, and remains unclaimable until dispatch. Retry markers are
+part of the resolution and encrypted by the decorator; planning itself does not
+append history. Fault injection proves rollback of task deletion, node reset,
+binding, marker and attempt history. Direct evaluators persist the same durable
+run identity as the scheduler before callbacks. Counter exhaustion takes the
+terminal path instead of scheduling the same saturated attempt. PostgreSQL's
+SMALLINT attempt columns still need reconciliation with the public u16 range.
+
+Stranded dispatch finalization validates retained run, exact activation, mode and
+owner while holding namespace/native/task locks. A reserved retry recovers its
+epoch from its immutable binding, never from the caller or a later owner. Missing
+current ownership cannot establish standalone authority: raw location history
+makes moved or missing owners unbound. Engine preflight also follows historical
+locations before admitting effects. Four regressions reproduced accidental
+recertification after namespace relocation and now pass.
+
+Receipt recovery verifies actual request/destination hashes, kind, physical
+execution, tenant, continuity/epoch, block, attempt and dispatched state. Missing
+or uncertain evidence does not imply purity. The original dry-run mode is retained
+and checked before publication. Engine regressions cover recovery with and without
+a hot effect link, including mismatched request hashes. Current validation passes
+111 invocation plus 20 resolution storage cases and 2,145 engine unit plus 28
+distributed cases, with PostgreSQL required. Strict all-target lint passes for types, storage, engine and gRPC after the final
+notification helper extraction; formatting and diff whitespace checks pass.
+
+The gRPC context-size regression reproduced rejection after consuming a worker
+claim. The service now checks the projected merge before effect settlement or
+completion. Rejected oversized results retain their leases and accept corrected
+results; all 148 gRPC unit/protocol cases also pass after the producer wiring.
+The fresh-parent check remains; concurrent merges require atomic integration.
+
+A rejected PostgreSQL acknowledgement previously retained an idle transaction and
+owner lock until a queued rollback flushed; schema cleanup waited 60 seconds.
+Seal, abort, acknowledgement and worker create/retry transactions now await commit
+or rollback before returning. A pre-acquired independent connection can lock the
+owner immediately after rejection, preventing same-pool reuse from masking this.
+After the producer wiring, the full storage check passes 177 source-cut, 136
+integration, 111 invocation and 20 resolution cases. All 701 mobile library cases
+also pass; the latest combined validation covers 3,466 tests.
+
+Published CI repair 0466f9ee fixes downgrade dependency lookup falling through to
+another installation later on search_path. Guards compare dependency namespaces
+with the locked source-cut table. A shadow-object regression reproduces the fault
+and verifies that downgrade leaves the other installation untouched. The isolated
+published-baseline candidate passed 176 source-cut cases and strict test-target
+lint; all 25 exact-head CI checks subsequently passed. This three-file repair
+excludes the local worker changes.
+
+DME198 remains open. Effect admission still precedes the bound queue transaction,
+so a rejected producer can leave a conservative orphan receipt. The retained retry
+payload/handler can still differ from newly prepared effect intent. Actual task-ID
+and payload admission, atomic receipt/publication, rolling coordinator protocol
+enforcement and explicit unknown-legacy quarantine remain required. Durable
+accepted outcomes, atomic scoped native integration, shared transport/delegation
+recovery, pending-integration snapshots and acknowledged receipt retention also
+remain open. Passing published CI does not prove those gates or justify merging.

@@ -167,30 +167,62 @@ async fn finalize_stranded_dispatch(
     if instance.state != orch8_types::instance::InstanceState::Waiting {
         return Ok(false);
     }
+    let Some(source) = storage
+        .get_worker_invocation(&instance.tenant_id, task.id)
+        .await?
+    else {
+        return Ok(false);
+    };
+    let owner = storage
+        .get_continuity_execution_touching_instance(&instance.tenant_id, instance.id)
+        .await?;
+    if !source.matches_native_scope(&instance, owner.as_ref())
+        || source.block_id != task.block_id
+        || source.handler_name != task.handler_name
+        || source.attempt != task.attempt
+        || source.instance_id != task.instance_id
+        || task
+            .continuity_epoch
+            .is_some_and(|epoch| Some(epoch) != source.continuity_epoch)
+        || task
+            .context
+            .pointer("/runtime/dry_run")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+            != source.dry_run
+    {
+        return Ok(false);
+    }
+    let pure = orch8_types::sequence::is_pure_remote_builtin(&task.handler_name);
+    if !source.dry_run && !pure && source.continuity.is_none() {
+        return Ok(false);
+    }
     let tree = storage.get_execution_tree(task.instance_id).await?;
-    let redispatched = tree.is_empty()
-        || tree
-            .iter()
-            .any(|node| node.block_id == task.block_id && node.state == NodeState::Waiting);
+    let redispatched = match source.target {
+        orch8_storage::worker_invocation::WorkerInvocationTarget::Tree { node_id, .. } => {
+            tree.iter().any(|node| {
+                node.id == node_id
+                    && node.block_id == task.block_id
+                    && node.state == NodeState::Waiting
+            })
+        }
+        orch8_storage::worker_invocation::WorkerInvocationTarget::Flat { .. } => tree.is_empty(),
+        orch8_storage::worker_invocation::WorkerInvocationTarget::Unbound { .. } => false,
+    };
     if !redispatched {
         return Ok(false);
     }
-    let effect_id = match task.effect_id {
-        Some(id) => Some(id),
-        None => {
-            crate::effect_guard::stranded_attempt_effect_id(storage, &instance.tenant_id, task)
-                .await?
-        }
+    let effect_id = if source.dry_run {
+        None
+    } else {
+        crate::effect_guard::stranded_attempt_effect_id(storage, &instance.tenant_id, task).await?
     };
-    let continuity_epoch = match task.continuity_epoch {
-        Some(epoch) => Some(epoch),
-        None => storage
-            .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
-            .await?
-            .map(|execution| execution.epoch.get()),
-    };
+    let effect = effect_id
+        .map(|id| crate::effect_guard::worker_dispatch_effect(task, id))
+        .transpose()?;
+    let continuity_epoch = source.continuity_epoch;
     let applied = storage
-        .finalize_stranded_worker_dispatch(task.id, task.attempt, effect_id, continuity_epoch)
+        .finalize_stranded_worker_dispatch(task.id, task.attempt, effect.as_ref(), continuity_epoch)
         .await?;
     if applied {
         tracing::warn!(
@@ -499,25 +531,23 @@ pub async fn plan_failure_action(
             ),
             None => false,
         };
-    if can_retry {
+    if let Some(next_attempt) = task.attempt.checked_add(1).filter(|_| can_retry) {
         let marker_output = serde_json::json!({"_retry_marker": true, "error": message});
         let marker_size = serde_json::to_vec(&marker_output)
             .map_or(0, |bytes| u32::try_from(bytes.len()).unwrap_or(u32::MAX));
-        storage
-            .save_block_output(&orch8_types::output::BlockOutput {
-                id: uuid::Uuid::now_v7(),
-                instance_id: task.instance_id,
-                block_id: task.block_id.clone(),
-                output: marker_output,
-                output_ref: Some("__retry__".into()),
-                output_size: marker_size,
-                attempt: task.attempt,
-                created_at: now,
-            })
-            .await?;
+        let retry_output = orch8_types::output::BlockOutput {
+            id: uuid::Uuid::now_v7(),
+            instance_id: task.instance_id,
+            block_id: task.block_id.clone(),
+            output: marker_output,
+            output_ref: Some("__retry__".into()),
+            output_size: marker_size,
+            attempt: task.attempt,
+            created_at: now,
+        };
         let retry_task = WorkerTask {
             id: uuid::Uuid::now_v7(),
-            attempt: task.attempt.saturating_add(1),
+            attempt: next_attempt,
             state: WorkerTaskState::Pending,
             worker_id: None,
             claimed_at: None,
@@ -539,6 +569,7 @@ pub async fn plan_failure_action(
         };
         return Ok(WorkerTaskResolutionAction::Retry {
             retry_task: Box::new(retry_task),
+            retry_output: Some(Box::new(retry_output)),
             node_id: live_node,
             fire_at: now,
         });

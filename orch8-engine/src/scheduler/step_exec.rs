@@ -1128,6 +1128,31 @@ pub(super) async fn execute_step_block(
         return Ok(StepOutcome::Deferred);
     }
 
+    let local_only = handlers.requires_local_dispatch(&instance.tenant_id);
+    let dispatch_started = if instance.context.runtime.current_step.as_ref() == Some(&step_def.id) {
+        instance
+            .context
+            .runtime
+            .current_step_started_at
+            .unwrap_or_else(|| clock.now())
+    } else {
+        clock.now()
+    };
+    let dispatch_fence = if local_only {
+        None
+    } else {
+        crate::handlers::step_dispatch::prepare_dispatch_fence(
+            storage.as_ref(),
+            instance,
+            step_def,
+            claim_token,
+            &orch8_storage::worker_invocation::WorkerDispatchSelection::Flat {
+                step_started_at: dispatch_started,
+            },
+        )
+        .await?
+    };
+
     // One outputs snapshot for the whole invocation, shared by the `when`
     // guard below and `prepare_step` further down — previously each built
     // its own, doubling the `get_all_outputs` fetch per templated step.
@@ -1202,7 +1227,7 @@ pub(super) async fn execute_step_block(
     // instance woken by process_waiting_deadlines) must keep the original
     // baseline — re-stamping would reset the wait_for_input timeout on every
     // wake, so it could never expire.
-    let mut step_started = clock.now();
+    let mut step_started = dispatch_started;
     if let Some(mut inst) = storage.get_instance(instance_id).await? {
         if inst.context.runtime.current_step.as_ref() == Some(&step_def.id) {
             if let Some(t) = inst.context.runtime.current_step_started_at {
@@ -1325,7 +1350,6 @@ pub(super) async fn execute_step_block(
     // snapshot created above (see its comment for why sharing with the
     // `when` guard is safe). Template/credential failures fail the
     // *instance*; infra errors propagate.
-    let local_only = handlers.requires_local_dispatch(&instance.tenant_id);
     let defer_credentials = !local_only
         && crate::step_placement::defers_credentials(storage.as_ref(), instance, step_def).await?;
     let mut prepared = match crate::handlers::step_block::prepare_step(
@@ -1476,10 +1500,15 @@ pub(super) async fn execute_step_block(
             storage.as_ref(),
             instance,
             step_def,
-            attempt,
-            resolved_params,
-            step_context,
-            carries_credentials,
+            crate::handlers::step_dispatch::PreparedWorkerDispatch {
+                resolved_params,
+                step_context,
+                attempt,
+                carries_credentials,
+            },
+            dispatch_fence.as_ref().ok_or(EngineError::ClaimLost {
+                instance_id: instance.id,
+            })?,
         )
         .await?
         {
@@ -2070,20 +2099,12 @@ pub(super) async fn dispatch_to_external_worker(
     storage: &dyn StorageBackend,
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
-    attempt: u32,
-    resolved_params: serde_json::Value,
-    step_context: orch8_types::context::ExecutionContext,
-    carries_credentials: bool,
+    prepared: crate::handlers::step_dispatch::PreparedWorkerDispatch,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
 ) -> Result<Result<StepOutcome, String>, EngineError> {
     if let Err(crate::handlers::step_dispatch::RemoteDispatchRejected(message)) =
         crate::handlers::step_dispatch::enqueue_worker_task(
-            storage,
-            instance,
-            step_def,
-            resolved_params,
-            &step_context,
-            attempt,
-            carries_credentials,
+            storage, instance, step_def, prepared, fence,
         )
         .await?
     {
