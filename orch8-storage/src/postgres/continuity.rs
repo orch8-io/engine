@@ -687,6 +687,17 @@ impl crate::ContinuityStore for PostgresStorage {
         .await
     }
 
+    async fn activate_capsule_import(
+        &self,
+        tenant: &TenantId,
+        capsule: CapsuleId,
+        runtime: RuntimeId,
+        instance: InstanceId,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        super::capsule_activation::activate(self, tenant, capsule, runtime, instance, now).await
+    }
+
     async fn import_capsule_recovery(
         &self,
         capsule_id: CapsuleId,

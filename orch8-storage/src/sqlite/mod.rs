@@ -34,6 +34,7 @@ mod alert_rules;
 mod api_keys;
 mod approval_tokens;
 mod audit;
+mod capsule_activation;
 mod checkpoints;
 mod circuit_breakers;
 mod claimed_writes;

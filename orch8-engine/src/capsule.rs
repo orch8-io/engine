@@ -468,6 +468,30 @@ pub async fn verify_and_import_paused_capsule_bytes(
     Ok((imported, payload))
 }
 
+/// Activate only after the trusted host confirms exclusive ownership with its
+/// app/backend coordinator. Acceptance and first scheduling commit together;
+/// retries preserve the persisted state, including waits and completion.
+pub async fn activate_imported_capsule(
+    storage: &dyn StorageBackend,
+    tenant: &TenantId,
+    capsule: CapsuleId,
+    runtime: RuntimeId,
+    instance: InstanceId,
+    now: DateTime<Utc>,
+) -> Result<TaskInstance, CapsuleServiceError> {
+    storage
+        .activate_capsule_import(tenant, capsule, runtime, instance, now)
+        .await?;
+    let imported = storage
+        .get_instance(instance)
+        .await?
+        .ok_or(CapsuleServiceError::MissingImportedInstance)?;
+    if &imported.tenant_id != tenant {
+        return Err(CapsuleServiceError::OwnershipMismatch);
+    }
+    Ok(imported)
+}
+
 /// Validate signed source identity before remapping recovery evidence.
 fn remap_capsule_outputs(
     payload: &CapsulePayload,

@@ -30,9 +30,10 @@ struct Fixture {
     runtime: RuntimeId,
 }
 async fn fixture(storage: &dyn StorageBackend) -> Fixture {
-    let sequence = SequenceBuilder::new("portable-recovery")
-        .step("work", "charge")
-        .build();
+    fixture_for_tenant(storage, "portable-recovery").await
+}
+async fn fixture_for_tenant(storage: &dyn StorageBackend, tenant: &str) -> Fixture {
+    let sequence = SequenceBuilder::new(tenant).step("work", "charge").build();
     storage.create_sequence(&sequence).await.unwrap();
     let instance = InstanceBuilder::for_sequence(&sequence)
         .state(InstanceState::Paused)
@@ -422,5 +423,194 @@ async fn sqlite_reopen_preserves_import_proof_aliases_and_frozen_guards() {
     let mut changed = f.clone();
     changed.effects.manifest_sha256 = "b".repeat(64);
     assert!(import(&store, &changed).await.is_err());
+    activate(&store, &f).await.unwrap();
+    orch8_storage::InstanceStore::update_instance_state(
+        &store,
+        imported,
+        InstanceState::Waiting,
+        None,
+    )
+    .await
+    .unwrap();
+    let waiting = orch8_storage::InstanceStore::get_instance(&store, imported)
+        .await
+        .unwrap()
+        .unwrap();
+    store.close().await;
+    let store = orch8_storage::sqlite::SqliteStorage::file(path)
+        .await
+        .unwrap();
+    activate(&store, &f).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(waiting).unwrap(),
+        serde_json::to_value(
+            orch8_storage::InstanceStore::get_instance(&store, imported)
+                .await
+                .unwrap()
+                .unwrap()
+        )
+        .unwrap()
+    );
     store.close().await;
 }
+
+async fn activate(
+    storage: &dyn StorageBackend,
+    f: &Fixture,
+) -> Result<(), orch8_types::error::StorageError> {
+    storage
+        .activate_capsule_import(
+            &f.effects.source.tenant_id,
+            f.capsule,
+            f.runtime,
+            f.snapshot.instance.id,
+            Utc::now(),
+        )
+        .await
+}
+
+orch8_storage::backend_test!(async fn activation_retries_preserve_progress_claims_and_completed_ownership(b) {
+    let f=fixture(b.storage.as_ref()).await; import(b.storage.as_ref(),&f).await.unwrap();
+    activate(b.storage.as_ref(),&f).await.unwrap();
+    let tenant=&f.effects.source.tenant_id; let id=f.snapshot.instance.id;
+    let claimed=b.storage.claim_due_instances(Utc::now()+chrono::Duration::seconds(1),1,0).await.unwrap();
+    assert_eq!(claimed.len(),1);
+    let before=b.storage.get_instance(id).await.unwrap().unwrap();
+    assert!(before.claimed_at.is_some());
+    activate(b.storage.as_ref(),&f).await.unwrap();
+    assert_eq!(serde_json::to_value(&before).unwrap(),serde_json::to_value(b.storage.get_instance(id).await.unwrap().unwrap()).unwrap());
+    for state in [InstanceState::Scheduled,InstanceState::Running,InstanceState::Waiting,InstanceState::Paused,InstanceState::Completed,InstanceState::Failed,InstanceState::Cancelled] {
+        b.storage.update_instance_state(id,state,None).await.unwrap();
+        let before=b.storage.get_instance(id).await.unwrap().unwrap();
+        activate(b.storage.as_ref(),&f).await.unwrap();
+        assert_eq!(serde_json::to_value(&before).unwrap(),serde_json::to_value(b.storage.get_instance(id).await.unwrap().unwrap()).unwrap(),"retry changed {state}");
+    }
+    let owner=b.storage.get_continuity_execution(tenant,f.effects.source.continuity_id).await.unwrap().unwrap();
+    let mut completed=owner.clone();completed.state=OwnershipState::Completed;
+    assert!(b.storage.cas_continuity_owner(tenant,owner.continuity_id,owner.epoch,owner.owner_runtime_id,&completed).await.unwrap());
+    activate(b.storage.as_ref(),&f).await.unwrap();
+    assert_eq!(b.storage.get_continuity_execution(tenant,owner.continuity_id).await.unwrap().unwrap(),completed);
+    assert_eq!(b.storage.list_continuity_locations(tenant,owner.continuity_id,100).await.unwrap().len(),2);
+});
+
+orch8_storage::backend_test!(async fn activation_schedule_failure_rolls_back_ownership_and_location(b) {
+    let f=fixture(b.storage.as_ref()).await;import(b.storage.as_ref(),&f).await.unwrap();
+    let tenant=&f.effects.source.tenant_id;
+    let owner=b.storage.get_continuity_execution(tenant,f.effects.source.continuity_id).await.unwrap().unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::query("CREATE TRIGGER fail_capsule_schedule BEFORE UPDATE OF state ON task_instances WHEN NEW.state='scheduled' BEGIN SELECT RAISE(ABORT,'injected schedule failure'); END").execute(pool).await.unwrap();}
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("CREATE FUNCTION fail_capsule_schedule() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state::text='scheduled' THEN RAISE EXCEPTION 'injected schedule failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER fail_capsule_schedule BEFORE UPDATE OF state ON task_instances FOR EACH ROW EXECUTE FUNCTION fail_capsule_schedule();").execute(pool).await.unwrap();}
+    }
+    assert!(activate(b.storage.as_ref(),&f).await.is_err());
+    assert_eq!(b.storage.get_continuity_execution(tenant,owner.continuity_id).await.unwrap().unwrap(),owner);
+    assert_eq!(b.storage.get_instance(f.snapshot.instance.id).await.unwrap().unwrap().state,InstanceState::Paused);
+    assert_eq!(b.storage.list_continuity_locations(tenant,owner.continuity_id,100).await.unwrap().len(),1);
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::query("DROP TRIGGER fail_capsule_schedule").execute(pool).await.unwrap();}
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("DROP TRIGGER fail_capsule_schedule ON task_instances; DROP FUNCTION fail_capsule_schedule();").execute(pool).await.unwrap();}
+    }
+    activate(b.storage.as_ref(),&f).await.unwrap();
+});
+
+orch8_storage::backend_test!(async fn concurrent_capsule_activation_accepts_once_without_rescheduling(b) {
+    let f=fixture(b.storage.as_ref()).await;import(b.storage.as_ref(),&f).await.unwrap();
+    let tasks=(0..16).map(|n| {let storage=b.storage.clone();let f=f.clone();tokio::spawn(async move {
+        storage.activate_capsule_import(&f.effects.source.tenant_id,f.capsule,f.runtime,f.snapshot.instance.id,Utc::now()+chrono::Duration::seconds(n)).await.unwrap();
+    })}).collect::<Vec<_>>();
+    for task in tasks {task.await.unwrap();}
+    let owner=b.storage.get_continuity_execution(&f.effects.source.tenant_id,f.effects.source.continuity_id).await.unwrap().unwrap();
+    let instance=b.storage.get_instance(f.snapshot.instance.id).await.unwrap().unwrap();
+    assert_eq!(owner.epoch,f.effects.source.epoch.checked_next().unwrap());
+    assert_eq!(owner.owner_runtime_id,f.runtime);assert_eq!(owner.state,OwnershipState::Owned);
+    assert_eq!(instance.state,InstanceState::Scheduled);assert_eq!(instance.next_fire_at,Some(instance.updated_at));
+    // PostgreSQL stores microseconds in SQL while the JSON owner retains nanos.
+    assert_eq!(instance.updated_at.timestamp_micros(),owner.updated_at.timestamp_micros());
+    assert_eq!(b.storage.list_continuity_locations(&owner.tenant_id,owner.continuity_id,100).await.unwrap().len(),2);
+});
+
+orch8_storage::backend_test!(async fn activation_refuses_wrong_scope_missing_proof_and_pending_running_instance(b) {
+    let f=fixture(b.storage.as_ref()).await;import(b.storage.as_ref(),&f).await.unwrap();
+    let tenant=&f.effects.source.tenant_id;let id=f.snapshot.instance.id;
+    for (t,c,r,i) in [(TenantId::unchecked("foreign"),f.capsule,f.runtime,id),(tenant.clone(),CapsuleId::new(),f.runtime,id),(tenant.clone(),f.capsule,RuntimeId::new(),id),(tenant.clone(),f.capsule,f.runtime,InstanceId::new())] {
+        assert!(b.storage.activate_capsule_import(&t,c,r,i,Utc::now()).await.is_err());
+    }
+    b.storage.update_instance_state(id,InstanceState::Running,None).await.unwrap();
+    assert!(activate(b.storage.as_ref(),&f).await.is_err());
+    let owner=b.storage.get_continuity_execution(tenant,f.effects.source.continuity_id).await.unwrap().unwrap();
+    assert_eq!(owner.state,OwnershipState::Transferring);assert_eq!(owner.epoch,f.effects.source.epoch);
+    b.storage.update_instance_state(id,InstanceState::Paused,None).await.unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::query("DELETE FROM capsule_effect_imports").execute(pool).await.unwrap();}
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::query("DELETE FROM capsule_effect_imports").execute(pool).await.unwrap();}
+    }
+    assert!(activate(b.storage.as_ref(),&f).await.is_err());
+    assert_eq!(b.storage.get_instance(id).await.unwrap().unwrap().state,InstanceState::Paused);
+});
+
+orch8_storage::backend_test!(async fn old_activation_cannot_reverse_a_subsequent_ownership_transfer(b) {
+    let f=fixture(b.storage.as_ref()).await;import(b.storage.as_ref(),&f).await.unwrap();activate(b.storage.as_ref(),&f).await.unwrap();
+    let tenant=&f.effects.source.tenant_id;
+    let current=b.storage.get_continuity_execution(tenant,f.effects.source.continuity_id).await.unwrap().unwrap();
+    let mut transferring=current.clone();transferring.state=OwnershipState::Transferring;
+    assert!(b.storage.cas_continuity_owner(tenant,current.continuity_id,current.epoch,current.owner_runtime_id,&transferring).await.unwrap());
+    assert!(activate(b.storage.as_ref(),&f).await.is_err());
+    let next=ContinuityExecution {epoch:current.epoch.checked_next().unwrap(),owner_runtime_id:RuntimeId::new(),state:OwnershipState::Owned,..transferring.clone()};
+    assert!(b.storage.cas_continuity_owner(tenant,current.continuity_id,current.epoch,current.owner_runtime_id,&next).await.unwrap());
+    assert!(activate(b.storage.as_ref(),&f).await.is_err());
+    assert_eq!(b.storage.get_continuity_execution(tenant,current.continuity_id).await.unwrap().unwrap(),next);
+});
+
+#[tokio::test]
+async fn activation_never_schedules_a_registered_account_without_catalog_admission() {
+    let b = TestBackend::sqlite().await;
+    let f = fixture_for_tenant(b.storage.as_ref(), "mobile-account-activation-account").await;
+    import(b.storage.as_ref(), &f).await.unwrap();
+    let pool = b.sqlite_pool();
+    sqlx::query("INSERT INTO mobile_accounts(id,account_key,principal_issuer,principal_subject,epoch,active) VALUES('activation-account','account','issuer','subject',1,0)").execute(pool).await.unwrap();
+    for active in [0, 1] {
+        sqlx::query("UPDATE mobile_accounts SET active=?1")
+            .bind(active)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(activate(b.storage.as_ref(), &f).await.is_err());
+        let owner = b
+            .storage
+            .get_continuity_execution(&f.effects.source.tenant_id, f.effects.source.continuity_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.state, OwnershipState::Transferring);
+        assert_eq!(owner.epoch, f.effects.source.epoch);
+        assert_eq!(
+            b.storage
+                .get_instance(f.snapshot.instance.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Paused
+        );
+    }
+}
+
+orch8_storage::backend_test!(async fn lost_activation_acknowledgement_does_not_reschedule_a_live_claim(b) {
+    use orch8_storage::testing::faulty::FaultStorage;
+    use orch8_types::error::StorageError;
+    let f=fixture(b.storage.as_ref()).await;import(b.storage.as_ref(),&f).await.unwrap();
+    let (storage,faults)=FaultStorage::wrap(b.storage.clone());
+    faults.on("activate_capsule_import").times(1).fail_after_commit(StorageError::Connection("lost activation acknowledgement".into()));
+    assert!(matches!(activate(storage.as_ref(),&f).await,Err(StorageError::Connection(_))));
+    let claimed=b.storage.claim_due_instances(Utc::now()+chrono::Duration::seconds(1),1,0).await.unwrap();
+    assert_eq!(claimed.len(),1);assert!(claimed[0].claimed_at.is_some());
+    let before=b.storage.get_instance(f.snapshot.instance.id).await.unwrap().unwrap();
+    activate(storage.as_ref(),&f).await.unwrap();
+    assert_eq!(serde_json::to_value(&before).unwrap(),serde_json::to_value(b.storage.get_instance(before.id).await.unwrap().unwrap()).unwrap());
+    let owner=b.storage.get_continuity_execution(&f.effects.source.tenant_id,f.effects.source.continuity_id).await.unwrap().unwrap();
+    assert_eq!(owner.epoch,f.effects.source.epoch.checked_next().unwrap());
+    assert_eq!(owner.owner_runtime_id,f.runtime);
+    assert_eq!(b.storage.list_continuity_locations(&owner.tenant_id,owner.continuity_id,100).await.unwrap().len(),2);
+});

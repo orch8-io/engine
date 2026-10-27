@@ -4,10 +4,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::Utc;
 use orch8_publisher::capsule::SignedCapsuleManifest;
 use orch8_storage::StorageBackend;
-use orch8_types::continuity::{CapsuleId, ContinuityExecution, OwnershipState, RuntimeId};
+use orch8_types::continuity::{CapsuleId, OwnershipState, RuntimeId};
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::ids::InstanceId;
-use orch8_types::instance::InstanceState;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -248,7 +247,7 @@ pub async fn import_capsule(
         continuity_id: signed.manifest.continuity_id.to_string(),
         instance_id: instance.id.to_string(),
         source_epoch: signed.manifest.epoch.get(),
-        state: "paused".into(),
+        state: instance.state.to_string(),
     })
 }
 
@@ -276,71 +275,19 @@ pub async fn activate_capsule(
         destination_instance_id,
         "destination instance id",
     )?);
-    let instance = storage
-        .get_instance(instance_id)
-        .await?
-        .ok_or_else(|| invalid("imported destination instance does not exist"))?;
-    let manifest = storage
-        .get_capsule_manifest(&instance.tenant_id, capsule_id)
-        .await?
-        .ok_or_else(|| invalid("imported capsule manifest does not exist"))?;
-    if manifest.allowed_destination_runtime_id != Some(runtime_id)
-        || !storage
-            .is_capsule_import_instance(&instance.tenant_id, capsule_id, runtime_id, instance_id)
-            .await?
-    {
-        return Err(invalid(
-            "capsule is not bound to this runtime-local instance",
-        ));
-    }
-    let current = storage
-        .get_continuity_execution(&instance.tenant_id, manifest.continuity_id)
-        .await?
-        .ok_or_else(|| invalid("continuity import ownership record does not exist"))?;
-    let accepted_epoch = manifest
-        .epoch
-        .checked_next()
-        .map_err(|error| invalid(error.to_string()))?;
-    if current.state == OwnershipState::Owned
-        && current.owner_runtime_id == runtime_id
-        && current.epoch == accepted_epoch
-        && current.current_instance_id == instance_id
-    {
-        storage
-            .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
-            .await?;
-        return Ok(());
-    }
-    if current.state != OwnershipState::Transferring
-        || current.epoch != manifest.epoch
-        || current.owner_runtime_id != manifest.source_runtime_id
-    {
-        return Err(invalid("continuity ownership is not ready for activation"));
-    }
-    let accepted = ContinuityExecution {
-        continuity_id: current.continuity_id,
-        tenant_id: current.tenant_id.clone(),
-        current_instance_id: instance_id,
-        owner_runtime_id: runtime_id,
-        epoch: accepted_epoch,
-        state: OwnershipState::Owned,
-        updated_at: Utc::now(),
-    };
-    if !storage
-        .cas_continuity_owner(
-            &current.tenant_id,
-            current.continuity_id,
-            current.epoch,
-            current.owner_runtime_id,
-            &accepted,
-        )
-        .await?
-    {
-        return Err(invalid("continuity ownership changed concurrently"));
-    }
     storage
-        .update_instance_state(instance_id, InstanceState::Scheduled, Some(Utc::now()))
-        .await?;
+        .activate_capsule_import(
+            &crate::mobile_tenant_id(),
+            capsule_id,
+            runtime_id,
+            instance_id,
+            Utc::now(),
+        )
+        .await
+        .map_err(|error| match error {
+            orch8_types::error::StorageError::Constraint(detail) => invalid(detail),
+            error => error.into(),
+        })?;
     Ok(())
 }
 
@@ -360,10 +307,10 @@ mod tests {
     use orch8_types::checkpoint::Checkpoint;
     use orch8_types::context::ExecutionContext;
     use orch8_types::continuity::{
-        CapsuleRequirements, ContinuityId, ExecutionEpoch, OwnershipState,
+        CapsuleRequirements, ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState,
     };
     use orch8_types::ids::{Namespace, SequenceId};
-    use orch8_types::instance::{Priority, TaskInstance};
+    use orch8_types::instance::{InstanceState, Priority, TaskInstance};
     use orch8_types::sequence::SequenceDefinition;
     use serde_json::json;
 
@@ -378,6 +325,28 @@ mod tests {
     fn transport_size_accepts_exact_base64_bound_and_rejects_excess() {
         assert!(transport_size_is_valid(4, 8));
         assert!(!transport_size_is_valid(4, 9));
+    }
+
+    #[tokio::test]
+    async fn activation_keeps_storage_failures_retryable_and_identity_errors_invalid() {
+        use orch8_storage::testing::faulty::FaultStorage;
+        let store = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let (storage, faults) = FaultStorage::wrap(store);
+        let capsule = CapsuleId::new().to_string();
+        let runtime = RuntimeId::new().to_string();
+        let instance = InstanceId::new().to_string();
+        faults
+            .on("activate_capsule_import")
+            .times(1)
+            .fail_transient();
+        assert!(matches!(
+            activate_capsule(storage.as_ref(), &capsule, &runtime, &instance).await,
+            Err(MobileError::Storage { .. })
+        ));
+        assert!(matches!(
+            activate_capsule(storage.as_ref(), &capsule, &runtime, &instance).await,
+            Err(MobileError::InvalidInput { .. })
+        ));
     }
 
     struct TestSigner(SigningKey);
@@ -567,6 +536,40 @@ mod tests {
             .update_instance_state(destination_instance, InstanceState::Waiting, None)
             .await
             .unwrap();
+        // A delayed acknowledgement retry must not resume a legitimate wait.
+        let waiting = destination
+            .get_instance(destination_instance)
+            .await
+            .unwrap()
+            .unwrap();
+        activate_capsule(
+            &destination,
+            &first.capsule_id,
+            &destination_runtime.to_string(),
+            &destination_instance.to_string(),
+        )
+        .await
+        .unwrap();
+        let retried = destination
+            .get_instance(destination_instance)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retried.state, InstanceState::Waiting);
+        assert_eq!(retried.next_fire_at, waiting.next_fire_at);
+        assert_eq!(retried.updated_at, waiting.updated_at);
+        let redelivered = import_capsule(
+            &destination,
+            &signed.public_key,
+            &capsule_json,
+            &payload_base64,
+            &key_base64,
+            &destination_runtime.to_string(),
+            &destination_instance.to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(redelivered.state, "waiting");
         let return_key = [23; 32];
         let exported = export_capsule(
             &destination,

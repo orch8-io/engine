@@ -477,6 +477,7 @@ fault_impl! {
         async fn import_capsule_snapshot(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn import_capsule_recovery(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint, effects: Option<&crate::portable_effects::CapsuleEffectImport>) -> Result<InstanceId, StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId, imported_at: DateTime<Utc>) -> Result<InstanceId, StorageError>;
+        async fn activate_capsule_import(&self, tenant: &TenantId, capsule: CapsuleId, runtime: RuntimeId, instance: InstanceId, now: DateTime<Utc>) -> Result<(), StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &TenantId, capabilities: &RuntimeCapabilities) -> Result<(), StorageError>;
         async fn list_runtime_capabilities(&self, tenant_id: &TenantId, observed_after: DateTime<Utc>, limit: u32) -> Result<Vec<RuntimeCapabilities>, StorageError>;

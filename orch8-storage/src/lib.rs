@@ -1,3 +1,4 @@
+mod capsule_activation;
 mod child_adoption;
 mod child_lookup;
 mod current_outputs;
@@ -4459,6 +4460,23 @@ pub trait ContinuityStore: Send + Sync + 'static {
     ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
         let _ = (tenant, continuity, sequence, version, kind);
         Err(StorageError::Unsupported("portable effect guards".into()))
+    }
+
+    /// Atomically accept a proof-bound imported capsule and schedule its paused
+    /// instance. Exact accepted retries perform no writes. The trusted host
+    /// must obtain app/backend ownership acknowledgement before calling this.
+    async fn activate_capsule_import(
+        &self,
+        tenant: &TenantId,
+        capsule: CapsuleId,
+        runtime: RuntimeId,
+        instance: InstanceId,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let _ = (tenant, capsule, runtime, instance, now);
+        Err(StorageError::Unsupported(
+            "atomic capsule activation".into(),
+        ))
     }
 
     /// Atomic snapshot, immutable receipt evidence, current-location aliases,
