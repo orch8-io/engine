@@ -230,7 +230,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-struct TenantQuery {
+pub(crate) struct TenantQuery {
     tenant_id: String,
 }
 
@@ -5208,9 +5208,9 @@ struct CompensationScopeRequest {
 }
 
 /// A request UUID is a durable intent identifier, never an authorization token.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
-struct CreateCompensationRequest {
+pub(crate) struct CreateCompensationRequest {
     tenant_id: TenantId,
     request_id: Option<uuid::Uuid>,
 }
@@ -5345,7 +5345,27 @@ async fn preview_compensation(
     Ok(Json(plan))
 }
 
-async fn create_compensation_run(
+/// Create or recover a tenant-scoped compensation intent.
+///
+/// Persist an optional UUID `request_id` before sending creation. The same
+/// tenant/continuity/request identity returns its saved plan and current progress,
+/// including terminal outcomes while the run record is retained. Distinct intents
+/// retain active-run conflict behavior. Tenant authorization applies to every call.
+#[utoipa::path(
+    post, path = "/continuity/executions/{id}/compensations",
+    params(("id" = uuid::Uuid, Path, description = "Continuity execution ID")),
+    request_body = CreateCompensationRequest,
+    responses(
+        (status = 201, description = "New compensation run", body = CompensationRunRecord),
+        (status = 200, description = "Persisted intent replay or recovered commit acknowledgement", body = CompensationRunRecord),
+        (status = 403, description = "Tenant scope mismatch"),
+        (status = 404, description = "Continuity execution not found in this tenant"),
+        (status = 409, description = "Distinct active intent, no compensable effects, or unsettled admission race"),
+        (status = 422, description = "Malformed UUID or unknown creation fields")
+    ),
+    tag = "continuity"
+)]
+pub(crate) async fn create_compensation_run(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<ContinuityId>,
@@ -5465,7 +5485,26 @@ async fn admit_compensation_run(
     ))
 }
 
-async fn get_active_compensation_run(
+/// Recover the active compensation run after a lost creation response.
+///
+/// Active states are `planned`, `running` and `awaiting_verification`. Terminal records
+/// remain available by known run ID and keyed creation replay while retained.
+/// This tenant-authorized lookup does not create or resume execution.
+#[utoipa::path(
+    get, path = "/continuity/executions/{id}/compensations/active",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Continuity execution ID"),
+        ("tenant_id" = String, Query, description = "Tenant scope; must match caller authorization")
+    ),
+    responses(
+        (status = 200, description = "Current active compensation run", body = CompensationRunRecord),
+        (status = 400, description = "Invalid tenant identifier"),
+        (status = 403, description = "Tenant scope mismatch"),
+        (status = 404, description = "No active compensation run in this scope")
+    ),
+    tag = "continuity"
+)]
+pub(crate) async fn get_active_compensation_run(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<ContinuityId>,
