@@ -35,3 +35,19 @@ with all future effect writes. Remaining capped consumers (receipt display,
 compensation planning, extracted fixtures and policy definition enumeration) are
 separate follow-up work. This change does not include the pending source-cut,
 mobile scope/archive, or migration 129 implementation.
+
+
+CI contract follow-up: `evidence_sha256` remains a list of matching receipt request
+hashes, not aggregate fingerprints. A fresh NoUnknownEffects result has no entries;
+a single unknown effect has exactly its request hash. Aggregate counts/witness
+fingerprints bind the deduplication key separately, retaining complete-history
+safety and bounded public receipt evidence. Regression checks cover both shapes
+and the previously reproduced late-history false Pass.
+
+The repaired revision passed all 123 tests in the original TypeScript invariant/
+compensation/runtime-registration suite against its own server and isolated
+PostgreSQL, three real HTTP regressions, and strict all-target Clippy. Existing
+client assertions were preserved.
+
+Automatic guard journals follow the same receipt-only evidence contract; a guard
+regression asserts that every public evidence hash belongs to a stored receipt.

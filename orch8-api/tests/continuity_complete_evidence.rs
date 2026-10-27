@@ -183,6 +183,36 @@ async fn manual_invariants_cannot_certify_a_safe_prefix_of_a_larger_ledger() {
         .unwrap();
     assert_eq!(results.len(), 2);
     assert!(results.iter().all(|r| r["status"] == "pass"));
+    assert!(
+        results
+            .iter()
+            .all(|r| r["evidence_sha256"].as_array().unwrap().is_empty())
+    );
+    let mut unknown = duplicate;
+    unknown.id = EffectId::new();
+    unknown.state = EffectState::Unknown;
+    unknown.request_sha256 = "only-unknown-request".into();
+    storage.create_effect_receipt(&unknown).await.unwrap();
+    let results: Vec<Value> = reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/continuity/executions/{}/invariants/evaluate",
+            server.base_url, owner.continuity_id
+        ))
+        .json(&json!({"tenant_id":owner.tenant_id}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let failures: Vec<_> = results.iter().filter(|r| r["status"] == "fail").collect();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0]["evidence_sha256"],
+        json!(["only-unknown-request"])
+    );
 }
 
 #[tokio::test]

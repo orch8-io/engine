@@ -1475,6 +1475,14 @@ mod tests {
             .list_effect_receipts(&instance.tenant_id, execution.continuity_id, 10)
             .await
             .unwrap();
+        assert!(
+            results.iter().flat_map(|r| &r.evidence_sha256).all(|hash| {
+                receipts
+                    .iter()
+                    .any(|receipt| &receipt.request_sha256 == hash)
+            }),
+            "public guard evidence must contain receipt request hashes only"
+        );
         assert_eq!(
             receipts
                 .iter()

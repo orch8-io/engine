@@ -112,8 +112,9 @@ pub async fn evaluate_invariants_complete(
                 continue;
             }
         };
-        let mut hashes = vec![hex_sha256(&material)];
-        hashes.extend(witnesses);
+        // Public evidence contains receipt request hashes only. The aggregate
+        // fingerprint belongs in deduplication, not as a synthetic receipt.
+        let aggregate = [hex_sha256(&material)];
         results.push(InvariantResult {
             id: InvariantResultId::new(),
             invariant_id: invariant.id,
@@ -125,8 +126,8 @@ pub async fn evaluate_invariants_complete(
                 EvidenceStatus::Pass
             },
             summary,
-            dedupe_key: invariant_result_dedupe(invariant.id, continuity, epoch, &hashes),
-            evidence_sha256: hashes,
+            dedupe_key: invariant_result_dedupe(invariant.id, continuity, epoch, &aggregate),
+            evidence_sha256: witnesses,
             evaluated_at: now,
         });
     }
@@ -209,10 +210,8 @@ pub(crate) fn evaluate_effect_audit(
         digest.update((part.len() as u64).to_be_bytes());
         digest.update(part.as_bytes());
     }
-    let mut evidence_sha256 = vec![
-        hex_sha256(&digest.finalize()),
-        candidate.request_sha256.clone(),
-    ];
+    let aggregate = [hex_sha256(&digest.finalize())];
+    let mut evidence_sha256 = vec![candidate.request_sha256.clone()];
     for witness in &audit.witnesses {
         if !evidence_sha256.contains(&witness.request_sha256) {
             evidence_sha256.push(witness.request_sha256.clone());
@@ -232,7 +231,7 @@ pub(crate) fn evaluate_effect_audit(
             invariant.id,
             candidate.continuity_id,
             epoch,
-            &evidence_sha256,
+            &aggregate,
         ),
         evidence_sha256,
         summary: format!(
