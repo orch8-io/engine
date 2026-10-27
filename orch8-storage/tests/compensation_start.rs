@@ -322,3 +322,53 @@ orch8_storage::backend_test!(async fn compensation_lookups_reject_corrupt_scope_
         assert!(b.storage.get_compensation_run(&owner.tenant_id,run.id).await.is_err(),"known-ID lookup accepted inconsistent {field}");
     }
 });
+
+orch8_storage::backend_test!(async fn compensation_cas_rejects_identity_or_revision_changes(b) {
+    use orch8_types::continuity_advanced::{CompensationRunState,CompensationStepState};
+    for field in ["tenant","continuity","source","created","unchanged_version","skipped_version","regressed_version","overflowed_version","storage_version_exhausted"] {
+        let (owner,instance,_effect,mut run)=fixture(b.storage.as_ref()).await;
+        let effects=b.storage.collect_compensation_effects(&owner.tenant_id,owner.continuity_id).await.unwrap();
+        assert!(b.storage.begin_compensation_run(CompensationStart {run:&run,execution:&owner,instance:&instance,effects:&effects}).await.unwrap());
+        if field=="regressed_version" {
+            run.version=1;run.state=CompensationRunState::Running;run.steps[0].state=CompensationStepState::Claimed;
+            run.steps[0].attempt=1;run.steps[0].lease_owner=Some("mutation-control".into());run.steps[0].lease_expires_at=Some(Utc::now()+Duration::minutes(1));
+            assert!(b.storage.cas_compensation_run(&owner.tenant_id,0,&run).await.unwrap());
+        }
+        let mut next=run.clone();next.version=run.version+1;next.updated_at=Utc::now();
+        match field {
+            "tenant"=>next.tenant_id=orch8_types::ids::TenantId::new("foreign-mutation").unwrap(),
+            "continuity"=>next.continuity_id=ContinuityId::new(),
+            "source"=>next.source_instance_id=orch8_types::ids::InstanceId::new(),
+            "created"=>next.created_at+=Duration::seconds(1),
+            "unchanged_version"=>next.version=run.version,
+            "skipped_version"=>next.version=run.version+2,
+            "regressed_version"=>next.version=run.version-1,
+            "overflowed_version"=>next.version=0,
+            "storage_version_exhausted"=>next.version=(i64::MAX as u64)+1,
+            _=>unreachable!(),
+        }
+        let expected=match field {"overflowed_version"=>u64::MAX,"storage_version_exhausted"=>i64::MAX as u64,_=>run.version};
+        let result=b.storage.cas_compensation_run(&owner.tenant_id,expected,&next).await;
+        assert!(matches!(&result,Ok(false)|Err(orch8_types::error::StorageError::Constraint(_))),"accepted or mishandled {field}: {result:?}");
+        let unchanged=b.storage.get_compensation_run(&owner.tenant_id,run.id).await.unwrap().unwrap();
+        assert_eq!(serde_json::to_value(unchanged).unwrap(),serde_json::to_value(run).unwrap(),"rejected {field} mutated the stored run");
+    }
+});
+
+orch8_storage::backend_test!(async fn compensation_cas_has_one_claim_winner_and_rejects_stale_updates(b) {
+    use orch8_types::continuity_advanced::{CompensationRunState,CompensationStepState};
+    let (owner,instance,_effect,run)=fixture(b.storage.as_ref()).await;
+    let effects=b.storage.collect_compensation_effects(&owner.tenant_id,owner.continuity_id).await.unwrap();
+    assert!(b.storage.begin_compensation_run(CompensationStart {run:&run,execution:&owner,instance:&instance,effects:&effects}).await.unwrap());
+    let mut first=run.clone();first.version=1;first.state=CompensationRunState::Running;
+    first.steps[0].state=CompensationStepState::Claimed;first.steps[0].attempt=1;first.steps[0].lease_owner=Some("first".into());
+    first.steps[0].lease_expires_at=Some(Utc::now()+Duration::minutes(1));
+    let mut second=first.clone();second.steps[0].lease_owner=Some("second".into());
+    let (a,c)=tokio::join!(b.storage.cas_compensation_run(&owner.tenant_id,0,&first),b.storage.cas_compensation_run(&owner.tenant_id,0,&second));
+    let a=a.unwrap();let c=c.unwrap();assert_ne!(a,c);
+    let current=b.storage.get_compensation_run(&owner.tenant_id,run.id).await.unwrap().unwrap();
+    assert_eq!(current.version,1);assert_eq!(current.steps[0].lease_owner.as_deref(),Some(if a {"first"} else {"second"}));
+    assert_eq!(current.steps[0].plan.params,json!({"secret":"compensation-only"}));
+    assert!(!b.storage.cas_compensation_run(&owner.tenant_id,0,&first).await.unwrap());
+    assert_eq!(serde_json::to_value(b.storage.get_compensation_run(&owner.tenant_id,run.id).await.unwrap().unwrap()).unwrap(),serde_json::to_value(current).unwrap());
+});

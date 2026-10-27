@@ -953,3 +953,57 @@ async fn compensation_start_retries_source_completion_during_admission() {
         OwnershipState::Compensating
     );
 }
+
+#[tokio::test]
+async fn compensation_version_exhaustion_rejects_claim_without_writing() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/api/v1/continuity/executions/{}/compensations/preview",
+            server.base_url, owner.continuity_id
+        ))
+        .json(&json!({"tenant_id":owner.tenant_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let plan: Value = response.json().await.unwrap();
+    let now = Utc::now();
+    // Model a restored run at the last version supported by both SQL backends.
+    let run:orch8_types::continuity_advanced::CompensationRunRecord=serde_json::from_value(json!({
+        "id":uuid::Uuid::new_v4(),"tenant_id":owner.tenant_id,"continuity_id":owner.continuity_id,
+        "source_instance_id":owner.current_instance_id,"state":"planned","version":i64::MAX,
+        "steps":[{"plan":plan["steps"][0],"state":"pending","attempt":0,"lease_owner":null,
+          "lease_expires_at":null,"provider_receipt_id":null,"error":null,"updated_at":now}],
+        "hazards":[],"residual_effects":[],"created_at":now,"updated_at":now,"completed_at":null
+    })).unwrap();
+    assert!(storage.create_compensation_run(&run).await.unwrap());
+    let response = client
+        .post(format!(
+            "{}/api/v1/continuity/compensations/{}/claim",
+            server.base_url, run.id
+        ))
+        .json(&json!({"tenant_id":owner.tenant_id,"worker_id":"exhausted-version-worker"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 409);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("compensation version exhausted")
+    );
+    let unchanged = storage
+        .get_compensation_run(&owner.tenant_id, run.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(unchanged).unwrap(),
+        serde_json::to_value(run).unwrap()
+    );
+}

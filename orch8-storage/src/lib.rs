@@ -2,6 +2,7 @@ mod capsule_activation;
 mod child_adoption;
 mod child_lookup;
 mod compensation_start;
+mod compensation_update;
 mod current_outputs;
 mod effect_attempt;
 pub use compensation_start::CompensationStart;
@@ -4812,6 +4813,10 @@ pub trait ContinuityStore: Send + Sync + 'static {
         id: orch8_types::continuity_advanced::CompensationRunId,
     ) -> Result<Option<orch8_types::continuity_advanced::CompensationRunRecord>, StorageError>;
 
+    /// Advance progress by exactly one version while preserving tenant,
+    /// continuity, source instance and creation identity. Stale versions or
+    /// changed persisted identity return false; invalid tenant/version inputs
+    /// return `StorageError::Constraint` without writing.
     async fn cas_compensation_run(
         &self,
         tenant_id: &TenantId,
