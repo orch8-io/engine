@@ -94,3 +94,100 @@ orch8_storage::backend_test!(async fn receipt_pages_reject_json_that_disagrees_w
         assert!(b.storage.page_effect_receipts(&receipt.tenant_id,receipt.continuity_id,None,100).await.is_err());
     }
 });
+
+orch8_storage::backend_test!(async fn complete_audits_bound_witnesses_without_truncating_the_verdict(b) {
+    let mut r = fixture(b.storage.as_ref()).await;
+    let empty = b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, None).await.unwrap();
+    assert_eq!((empty.observed_receipts, empty.duplicate_groups, empty.witnesses.len()), (0, 0, 0));
+    for group in 0..40 {
+        r.request_sha256 = format!("request-{group:03}");
+        for state in [EffectState::Dispatched, EffectState::Committed, EffectState::Unknown, EffectState::Verified,
+                      EffectState::Planned, EffectState::Prepared, EffectState::Abandoned, EffectState::Compensated] {
+            r.id = EffectId::new(); r.state = state;
+            b.storage.create_effect_receipt(&r).await.unwrap();
+        }
+    }
+    // Same request in a different destination is not a duplicate group.
+    r.id = EffectId::new(); r.state = EffectState::Committed;
+    r.destination_fingerprint = "different-provider".into();
+    b.storage.create_effect_receipt(&r).await.unwrap();
+    // Another effect kind must not leak into this kind's complete verdict.
+    r.kind = EffectKind::Http;
+    for _ in 0..2 { r.id = EffectId::new(); b.storage.create_effect_receipt(&r).await.unwrap(); }
+    r.kind = EffectKind::Worker;
+    let report = b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, None).await.unwrap();
+    assert_eq!((report.observed_receipts, report.duplicate_groups, report.witnesses.len()), (161, 40, 16));
+    assert_eq!(report.witnesses[0].request_sha256, "request-000");
+    assert_eq!(report.witnesses[15].request_sha256, "request-015");
+    assert_eq!(b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, None).await.unwrap(), report);
+    for (tenant, continuity) in [(TenantId::unchecked("foreign"), r.continuity_id), (r.tenant_id.clone(), ContinuityId::new())] {
+        let report = b.storage.audit_effect_at_most_once(&tenant, continuity, r.kind, None).await.unwrap();
+        assert_eq!((report.observed_receipts, report.duplicate_groups), (0, 0));
+    }
+});
+
+orch8_storage::backend_test!(async fn audit_proposals_replace_their_stored_identity_and_reject_scope_changes(b) {
+    let mut r = fixture(b.storage.as_ref()).await;
+    r.state = EffectState::Committed;
+    b.storage.create_effect_receipt(&r).await.unwrap();
+    r.state = EffectState::Dispatched;
+    let report = b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, Some(&r)).await.unwrap();
+    assert_eq!((report.observed_receipts, report.duplicate_groups), (1, 0));
+    let mut other = r.clone(); other.id = EffectId::new();
+    let report = b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, Some(&other)).await.unwrap();
+    assert_eq!((report.observed_receipts, report.duplicate_groups), (2, 1));
+    for changed in [
+        EffectReceipt { tenant_id: TenantId::unchecked("foreign"), ..other.clone() },
+        EffectReceipt { continuity_id: ContinuityId::new(), ..other.clone() },
+        EffectReceipt { state: EffectState::Prepared, ..other.clone() },
+        EffectReceipt { kind: EffectKind::Http, ..other.clone() },
+    ] {
+        assert!(b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, Some(&changed)).await.is_err());
+    }
+    // An attempted duplicate remains hypothetical and never creates a receipt.
+    assert!(b.storage.get_effect_receipt(&other.tenant_id, other.id).await.unwrap().is_none());
+    let report = b.storage.audit_effect_at_most_once(&r.tenant_id, r.continuity_id, r.kind, None).await.unwrap();
+    assert_eq!((report.observed_receipts, report.duplicate_groups), (1, 0));
+});
+
+orch8_storage::backend_test!(async fn complete_state_summaries_classify_every_state_and_bound_evidence(b) {
+    let mut receipt = fixture(b.storage.as_ref()).await;
+    let empty = b.storage.summarize_effect_receipts(&receipt.tenant_id, receipt.continuity_id).await.unwrap();
+    assert_eq!((empty.receipt_count, empty.unresolved_count, empty.unknown_count), (0, 0, 0));
+    assert!(empty.unresolved_sample.is_empty() && empty.unknown_request_sha256.is_empty());
+    for _ in 0..21 {
+        for state in [EffectState::Planned, EffectState::Prepared, EffectState::Dispatched, EffectState::Unknown,
+                      EffectState::Committed, EffectState::Verified, EffectState::Compensated, EffectState::Abandoned] {
+            receipt.id = EffectId::new(); receipt.state = state;
+            b.storage.create_effect_receipt(&receipt).await.unwrap();
+        }
+    }
+    let status = b.storage.summarize_effect_receipts(&receipt.tenant_id, receipt.continuity_id).await.unwrap();
+    assert_eq!((status.receipt_count, status.unresolved_count, status.unknown_count), (168, 84, 21));
+    assert_eq!(status.unresolved_sample.len(), 16);
+    assert_eq!(status.unknown_request_sha256.len(), 16);
+    assert!(status.unresolved_sample.iter().all(|r| !r.state.is_resolved()));
+    assert_eq!(b.storage.summarize_effect_receipts(&receipt.tenant_id, receipt.continuity_id).await.unwrap(), status);
+    for (tenant, continuity) in [(TenantId::unchecked("foreign"), receipt.continuity_id), (receipt.tenant_id.clone(), ContinuityId::new())] {
+        let absent = b.storage.summarize_effect_receipts(&tenant, continuity).await.unwrap();
+        assert_eq!((absent.receipt_count, absent.unresolved_count, absent.unknown_count), (0, 0, 0));
+    }
+});
+
+orch8_storage::backend_test!(async fn complete_safety_queries_refuse_unclassifiable_receipt_states(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let mut receipt = fixture(b.storage.as_ref()).await;
+    receipt.state = EffectState::Committed;
+    b.storage.create_effect_receipt(&receipt).await.unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool) => { sqlx::query("UPDATE effect_receipts SET record=json_remove(record,'$.state') WHERE id=?1")
+            .bind(receipt.id.to_string()).execute(pool).await.unwrap(); }
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool) => { sqlx::query("UPDATE effect_receipts SET record=record-'state' WHERE id=$1")
+            .bind(receipt.id.into_uuid()).execute(pool).await.unwrap(); }
+    }
+    assert!(b.storage.summarize_effect_receipts(&receipt.tenant_id, receipt.continuity_id).await.is_err());
+    assert!(b.storage.audit_effect_at_most_once(&receipt.tenant_id, receipt.continuity_id, receipt.kind, None).await.is_err());
+    let unrelated = b.storage.summarize_effect_receipts(&TenantId::unchecked("foreign"), receipt.continuity_id).await.unwrap();
+    assert_eq!(unrelated.receipt_count, 0);
+});

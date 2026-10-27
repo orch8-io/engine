@@ -64,3 +64,78 @@ pub(super) async fn page(
         next: if full { last } else { None },
     })
 }
+
+pub(super) async fn audit(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    continuity: ContinuityId,
+    kind: orch8_types::continuity::EffectKind,
+    candidate: Option<&orch8_types::continuity::EffectReceipt>,
+) -> Result<crate::EffectAtMostOnceAudit, StorageError> {
+    crate::effect_receipts::validate_audit_candidate(tenant, continuity, kind, candidate)?;
+    let proposal = candidate
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(StorageError::Serialization)?;
+    // One statement: counts and witnesses describe the same SQLite snapshot.
+    let row = sqlx::query(
+        "WITH scoped AS (
+            SELECT json_extract(record,'$.destination_fingerprint') AS destination,
+                   json_extract(record,'$.request_sha256') AS request
+            FROM effect_receipts WHERE tenant_id=?1 AND continuity_id=?2
+              AND json_extract(record,'$.kind')=?3
+              AND json_extract(record,'$.state') IN ('dispatched','committed','unknown','verified')
+              AND (?5 IS NULL OR id<>?5)
+            UNION ALL SELECT json_extract(?4,'$.destination_fingerprint'),
+                             json_extract(?4,'$.request_sha256') WHERE ?4 IS NOT NULL
+         ), duplicates AS (
+            SELECT destination,request FROM scoped GROUP BY destination,request HAVING COUNT(*)>1
+         )
+         SELECT (SELECT COUNT(*) FROM scoped) AS observed,
+                (SELECT COUNT(*) FROM duplicates) AS duplicates,
+                (SELECT COUNT(*) FROM effect_receipts WHERE tenant_id=?1 AND continuity_id=?2
+                 AND (json_extract(record,'$.state') IS NULL OR json_extract(record,'$.state') NOT IN ('planned','prepared','dispatched','committed','unknown','verified','compensated','abandoned'))) AS invalid,
+                (SELECT json_group_array(json_object('destination_fingerprint',destination,'request_sha256',request))
+                 FROM (SELECT destination,request FROM duplicates ORDER BY destination,request LIMIT 16)) AS witnesses"
+    )
+    .bind(tenant.as_str()).bind(continuity.to_string())
+    .bind(super::continuity::state_name(kind)?).bind(proposal)
+    .bind(candidate.map(|r| r.id.to_string()))
+    .fetch_one(&store.pool).await?;
+    let witnesses = serde_json::from_str(&row.get::<String, _>("witnesses"))
+        .map_err(StorageError::Serialization)?;
+    crate::effect_receipts::validate_known_states(row.get("invalid"))?;
+    crate::effect_receipts::decode_audit(row.get("observed"), row.get("duplicates"), witnesses)
+}
+
+pub(super) async fn status(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    continuity: ContinuityId,
+) -> Result<crate::EffectLedgerStatus, StorageError> {
+    let row = sqlx::query(
+        "WITH scoped AS (
+            SELECT id,created_at,record,json_extract(record,'$.state') AS effect_state
+            FROM effect_receipts WHERE tenant_id=?1 AND continuity_id=?2
+         ), unresolved AS (
+            SELECT * FROM scoped WHERE effect_state NOT IN ('committed','verified','compensated','abandoned')
+         )
+         SELECT (SELECT COUNT(*) FROM scoped) AS total,
+                (SELECT COUNT(*) FROM unresolved) AS unresolved,
+                (SELECT COUNT(*) FROM scoped WHERE effect_state='unknown') AS unknown,
+                (SELECT COUNT(*) FROM scoped WHERE effect_state IS NULL OR effect_state NOT IN ('planned','prepared','dispatched','committed','unknown','verified','compensated','abandoned')) AS invalid,
+                (SELECT json_group_array(json(record)) FROM (
+                    SELECT record FROM unresolved ORDER BY created_at,id LIMIT 16)) AS sample,
+                (SELECT json_group_array(json_extract(record,'$.request_sha256')) FROM (
+                    SELECT record FROM scoped WHERE effect_state='unknown' ORDER BY created_at,id LIMIT 16)) AS unknown_sample"
+    )
+    .bind(tenant.as_str()).bind(continuity.to_string()).fetch_one(&store.pool).await?;
+    crate::effect_receipts::validate_known_states(row.get("invalid"))?;
+    crate::effect_receipts::decode_status(
+        tenant,
+        continuity,
+        (row.get("total"), row.get("unresolved"), row.get("unknown")),
+        serde_json::from_str(&row.get::<String, _>("sample"))?,
+        serde_json::from_str(&row.get::<String, _>("unknown_sample"))?,
+    )
+}

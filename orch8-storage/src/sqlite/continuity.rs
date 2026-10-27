@@ -1299,6 +1299,24 @@ impl crate::ContinuityStore for SqliteStorage {
             .collect()
     }
 
+    async fn summarize_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<crate::EffectLedgerStatus, StorageError> {
+        super::effect_receipts::status(self, tenant_id, continuity_id).await
+    }
+
+    async fn audit_effect_at_most_once(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        kind: orch8_types::continuity::EffectKind,
+        candidate: Option<&EffectReceipt>,
+    ) -> Result<crate::EffectAtMostOnceAudit, StorageError> {
+        super::effect_receipts::audit(self, tenant_id, continuity_id, kind, candidate).await
+    }
+
     async fn page_effect_receipts(
         &self,
         tenant_id: &TenantId,
