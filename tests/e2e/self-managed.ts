@@ -61,6 +61,7 @@ export const SELF_MANAGED_SUITES: readonly SelfManagedSuite[] = [
   { file: "security/encryption_key_rotation.test.ts", reason: "swaps ORCH8_ENCRYPTION_KEY mid-test" },
   { file: "features/ab_split_determinism_restart.test.ts", reason: "restarts the server mid-test" },
   // Need their own server started with a specific env the shared server lacks.
+  { file: "handlers/http_request_ssrf_block.test.ts", reason: "requires private-network access disabled; shared mocks enable it" },
   { file: "features/encryption_at_rest.test.ts", reason: "needs ORCH8_ENCRYPTION_KEY set at boot" },
   { file: "features/portable_continuity.test.ts", reason: "needs continuity encryption and local artifact storage" },
   { file: "features/continuity_fault_lab_dlq.test.ts", reason: "needs ORCH8_CONTINUITY_LAB_ENABLED=true at boot" },

@@ -149,13 +149,22 @@ pub(super) async fn compensation(
     tenant: &TenantId,
     continuity: ContinuityId,
 ) -> Result<Vec<crate::CompensationEffect>, StorageError> {
+    let mut connection = store.pool.acquire().await?;
+    compensation_on(&mut connection, tenant, continuity).await
+}
+
+pub(super) async fn compensation_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    continuity: ContinuityId,
+) -> Result<Vec<crate::CompensationEffect>, StorageError> {
     use futures::TryStreamExt;
     let mut rows = sqlx::query(
         "SELECT id,record FROM effect_receipts WHERE tenant_id=$1 AND continuity_id=$2",
     )
     .bind(tenant.as_str())
     .bind(continuity.into_uuid())
-    .fetch(&store.pool);
+    .fetch(&mut *conn);
     let mut effects = Vec::new();
     while let Some(row) = rows.try_next().await? {
         let id = EffectId::from_uuid(row.try_get::<uuid::Uuid, _>("id")?);

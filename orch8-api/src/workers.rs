@@ -1401,7 +1401,17 @@ pub(crate) async fn complete_task(
     else {
         return Ok(StatusCode::OK);
     };
-    if instance.state.is_terminal() || instance.state == InstanceState::Paused {
+    if instance.state.is_terminal()
+        || instance.state == InstanceState::Paused
+        || orch8_engine::ownership::local_ownership(
+            state.storage.as_ref(),
+            &instance.tenant_id,
+            instance.id,
+        )
+        .await
+        .map_err(|error| ApiError::Conflict(error.to_string()))?
+            != orch8_engine::ownership::LocalOwnership::Owned
+    {
         tracing::info!(
             instance_id = %task.instance_id,
             state = %instance.state,

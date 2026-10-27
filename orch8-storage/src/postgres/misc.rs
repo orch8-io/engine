@@ -251,6 +251,8 @@ pub(super) async fn claim_worker_tasks_from_queue(
             SELECT id FROM worker_tasks
             WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
               AND queue_name = $5
+              AND NOT EXISTS (SELECT 1 FROM task_instances ti WHERE ti.id=worker_tasks.instance_id AND ti.state IN ('completed','failed','cancelled'))
+              AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
               AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $4 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
             ORDER BY created_at ASC
             LIMIT $3
@@ -313,6 +315,8 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
               AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
               AND wt.queue_name = $3
               AND ti.tenant_id = $5
+              AND ti.state NOT IN ('completed','failed','cancelled')
+              AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)
             ORDER BY wt.created_at ASC
             LIMIT $4
             FOR UPDATE OF wt SKIP LOCKED

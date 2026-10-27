@@ -240,7 +240,7 @@ impl crate::ContinuityStore for PostgresStorage {
             "UPDATE continuity_executions
              SET epoch = $1, owner_runtime_id = $2, state = $3, record = $4, updated_at = $5
              WHERE tenant_id = $6 AND continuity_id = $7 AND epoch = $8
-               AND owner_runtime_id = $9",
+               AND owner_runtime_id = $9 AND state <> 'compensating'",
         )
         .bind(to_i64(next.epoch.get(), "next epoch")?)
         .bind(next.owner_runtime_id.into_uuid())
@@ -373,7 +373,7 @@ impl crate::ContinuityStore for PostgresStorage {
             "UPDATE continuity_executions
              SET epoch = $1, owner_runtime_id = $2, state = $3, record = $4, updated_at = $5
              WHERE tenant_id = $6 AND continuity_id = $7 AND epoch = $8
-               AND owner_runtime_id = $9 AND state = $10",
+               AND owner_runtime_id = $9 AND state = $10 AND state <> 'compensating'",
         )
         .bind(to_i64(accepted_execution.epoch.get(), "accepted epoch")?)
         .bind(accepted_execution.owner_runtime_id.into_uuid())
@@ -472,7 +472,7 @@ impl crate::ContinuityStore for PostgresStorage {
             "UPDATE continuity_executions
              SET state = $1, record = $2, updated_at = $3
              WHERE tenant_id = $4 AND continuity_id = $5 AND epoch = $6
-               AND owner_runtime_id = $7 AND state = $8",
+               AND owner_runtime_id = $7 AND state = $8 AND state <> 'compensating'",
         )
         .bind(state_name(transferring_execution.state)?)
         .bind(encode(transferring_execution)?)
@@ -1987,7 +1987,7 @@ impl crate::ContinuityStore for PostgresStorage {
         let continuity = sqlx::query(
             "UPDATE continuity_executions
              SET epoch=$1, owner_runtime_id=$2, state=$3, record=$4, updated_at=$5
-             WHERE tenant_id=$6 AND continuity_id=$7 AND epoch=$8 AND owner_runtime_id=$9",
+             WHERE tenant_id=$6 AND continuity_id=$7 AND epoch=$8 AND owner_runtime_id=$9 AND state <> 'compensating'",
         )
         .bind(to_i64(next_execution.epoch.get(), "next epoch")?)
         .bind(next_execution.owner_runtime_id.into_uuid())
@@ -2070,6 +2070,13 @@ impl crate::ContinuityStore for PostgresStorage {
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(true)
+    }
+
+    async fn begin_compensation_run(
+        &self,
+        start: crate::CompensationStart<'_>,
+    ) -> Result<bool, StorageError> {
+        super::compensation_start::begin(self, start).await
     }
 
     async fn create_compensation_run(

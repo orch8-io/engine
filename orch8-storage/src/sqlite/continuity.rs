@@ -232,7 +232,7 @@ impl crate::ContinuityStore for SqliteStorage {
             "UPDATE continuity_executions
              SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
              WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
-               AND owner_runtime_id = ?",
+               AND owner_runtime_id = ? AND state <> 'compensating'",
         )
         .bind(to_i64(next.epoch.get(), "next epoch")?)
         .bind(next.owner_runtime_id.to_string())
@@ -366,7 +366,7 @@ impl crate::ContinuityStore for SqliteStorage {
             "UPDATE continuity_executions
              SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
              WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
-               AND owner_runtime_id = ? AND state = ?",
+               AND owner_runtime_id = ? AND state = ? AND state <> 'compensating'",
         )
         .bind(to_i64(accepted_execution.epoch.get(), "accepted epoch")?)
         .bind(accepted_execution.owner_runtime_id.to_string())
@@ -465,7 +465,7 @@ impl crate::ContinuityStore for SqliteStorage {
             "UPDATE continuity_executions
              SET state = ?, record = ?, updated_at = ?
              WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
-               AND owner_runtime_id = ? AND state = ?",
+               AND owner_runtime_id = ? AND state = ? AND state <> 'compensating'",
         )
         .bind(state_name(transferring_execution.state)?)
         .bind(encode(transferring_execution)?)
@@ -2018,7 +2018,7 @@ impl crate::ContinuityStore for SqliteStorage {
         let continuity = sqlx::query(
             "UPDATE continuity_executions
              SET epoch=?, owner_runtime_id=?, state=?, record=?, updated_at=?
-             WHERE tenant_id=? AND continuity_id=? AND epoch=? AND owner_runtime_id=?",
+             WHERE tenant_id=? AND continuity_id=? AND epoch=? AND owner_runtime_id=? AND state <> 'compensating'",
         )
         .bind(to_i64(next_execution.epoch.get(), "next epoch")?)
         .bind(next_execution.owner_runtime_id.to_string())
@@ -2104,6 +2104,13 @@ impl crate::ContinuityStore for SqliteStorage {
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(true)
+    }
+
+    async fn begin_compensation_run(
+        &self,
+        start: crate::CompensationStart<'_>,
+    ) -> Result<bool, StorageError> {
+        super::compensation_start::begin(self, start).await
     }
 
     async fn create_compensation_run(
