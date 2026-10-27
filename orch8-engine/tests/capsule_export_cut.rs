@@ -147,11 +147,21 @@ async fn source_resume_during_publication_cannot_double_dispatch_a_prepared_effe
     tokio::time::timeout(std::time::Duration::from_secs(10), publication.entered())
         .await
         .unwrap();
-    // A real app resume races the publication of the already assembled capsule.
-    source
-        .update_instance_state(instance.id, InstanceState::Running, None)
-        .await
-        .unwrap();
+    // Sealing precedes transport publication. An app resume must fail while
+    // publication is held, and the original deferred callback stays fenced.
+    assert!(
+        source
+            .update_instance_state(instance.id, InstanceState::Running, None)
+            .await
+            .is_err(),
+        "sealed source accepted a forward resume"
+    );
+    assert!(
+        source
+            .is_physical_instance_retired(instance.id)
+            .await
+            .unwrap()
+    );
     release.notify_one();
     let source_outcome = tokio::time::timeout(std::time::Duration::from_secs(10), source_task)
         .await
@@ -168,31 +178,16 @@ async fn source_resume_during_publication_cannot_double_dispatch_a_prepared_effe
         .await
         .unwrap()
         .unwrap();
-    // Even a coordinator which fences the source immediately after export
-    // cannot repair an outcome admitted between snapshot and publication.
     let current = source
         .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
         .await
         .unwrap()
         .unwrap();
-    if current.state == OwnershipState::Owned {
-        let fenced = ContinuityExecution {
-            state: OwnershipState::Transferring,
-            ..current.clone()
-        };
-        assert!(
-            source
-                .cas_continuity_owner(
-                    &owner.tenant_id,
-                    owner.continuity_id,
-                    current.epoch,
-                    current.owner_runtime_id,
-                    &fenced
-                )
-                .await
-                .unwrap()
-        );
-    }
+    assert_eq!(
+        current.state,
+        OwnershipState::Transferring,
+        "export itself must freeze continuity authority"
+    );
     let (imported, payload) = verify_and_import_paused_capsule_bytes(
         destination.as_ref(),
         &signed,
@@ -349,7 +344,7 @@ async fn acknowledgement_cannot_reuse_the_sources_physical_instance_identity() {
         )
         .await
         .unwrap(),
-        LocalOwnership::Transferring
+        LocalOwnership::Superseded
     );
     accepted.current_instance_id = orch8_types::ids::InstanceId::new();
     storage
