@@ -892,3 +892,61 @@ pub fn semaphore(permits: usize) -> Arc<Semaphore> {
 pub fn cache() -> Arc<SequenceCache> {
     Arc::new(SequenceCache::new(1000, Duration::from_secs(300)))
 }
+
+/// The test coordinator accepts ownership before a quarantined import can run.
+pub async fn accept_capsule_import(
+    storage: &dyn orch8_storage::StorageBackend,
+    manifest: &orch8_types::continuity::CapsuleManifest,
+    instance: orch8_types::ids::InstanceId,
+    runtime: orch8_types::continuity::RuntimeId,
+) {
+    use orch8_types::continuity::{ContinuityExecution, OwnershipState};
+    let mut owner = storage
+        .get_continuity_execution(&manifest.tenant_id, manifest.continuity_id)
+        .await
+        .unwrap()
+        .unwrap();
+    if owner.state == OwnershipState::Owned {
+        assert_eq!(owner.current_instance_id, manifest.source_instance_id);
+        let fenced = ContinuityExecution {
+            state: OwnershipState::Transferring,
+            updated_at: chrono::Utc::now(),
+            ..owner.clone()
+        };
+        assert!(
+            storage
+                .cas_continuity_owner(
+                    &owner.tenant_id,
+                    owner.continuity_id,
+                    owner.epoch,
+                    owner.owner_runtime_id,
+                    &fenced
+                )
+                .await
+                .unwrap()
+        );
+        owner = fenced;
+    }
+    assert_eq!(owner.state, OwnershipState::Transferring);
+    assert_eq!(owner.epoch, manifest.epoch);
+    let accepted = ContinuityExecution {
+        current_instance_id: instance,
+        owner_runtime_id: runtime,
+        epoch: manifest.epoch.checked_next().unwrap(),
+        state: OwnershipState::Owned,
+        updated_at: chrono::Utc::now(),
+        ..owner.clone()
+    };
+    assert!(
+        storage
+            .cas_continuity_owner(
+                &owner.tenant_id,
+                owner.continuity_id,
+                owner.epoch,
+                owner.owner_runtime_id,
+                &accepted
+            )
+            .await
+            .unwrap()
+    );
+}

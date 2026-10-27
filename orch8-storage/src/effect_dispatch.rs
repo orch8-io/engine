@@ -33,8 +33,6 @@ pub(crate) fn owns(
         && execution.epoch == fence.epoch
         && execution.owner_runtime_id == fence.owner_runtime_id
         && execution.current_instance_id == fence.instance_id
-        && next.instance_id == fence.instance_id
-        && next.epoch == fence.epoch
 }
 
 pub(crate) fn live(state: &str, claim: Option<DateTime<Utc>>, fence: &EffectDispatchFence) -> bool {

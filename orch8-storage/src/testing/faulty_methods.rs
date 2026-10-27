@@ -475,6 +475,7 @@ fault_impl! {
         async fn import_capsule_instance(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance: &TaskInstance, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn import_capsule_instance_with_outputs(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance: &TaskInstance, checkpoint: &orch8_types::checkpoint::Checkpoint, outputs: &[orch8_types::output::BlockOutput]) -> Result<InstanceId, StorageError>;
         async fn import_capsule_snapshot(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
+        async fn import_capsule_recovery(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint, effects: Option<&crate::portable_effects::CapsuleEffectImport>) -> Result<InstanceId, StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId, imported_at: DateTime<Utc>) -> Result<InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &TenantId, capabilities: &RuntimeCapabilities) -> Result<(), StorageError>;
@@ -497,6 +498,8 @@ fault_impl! {
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &TenantId, next: &EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<EffectReceipt>, StorageError>;
         async fn page_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, after: Option<&crate::EffectReceiptCursor>, limit: u32) -> Result<crate::EffectReceiptPage, StorageError>;
+        async fn export_effect_attempts(&self, owner: &orch8_types::continuity::ContinuityExecution) -> Result<(Vec<orch8_types::continuity::CapsuleEffectBinding>, Vec<orch8_types::ids::BlockId>), StorageError>;
+        async fn load_effect_guards(&self, tenant: &orch8_types::ids::TenantId, continuity: orch8_types::continuity::ContinuityId, sequence: orch8_types::ids::SequenceId, version: i32, kind: Option<orch8_types::continuity::EffectKind>) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError>;
         async fn list_instance_effect_receipts(&self, tenant_id: &TenantId, instance_id: InstanceId, limit: u32) -> Result<Vec<EffectReceipt>, StorageError>;
         async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError>;
         async fn get_provenance_head(&self, tenant_id: &TenantId, continuity_id: ContinuityId) -> Result<Option<ProvenanceEntry>, StorageError>;

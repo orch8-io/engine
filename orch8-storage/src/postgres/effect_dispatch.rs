@@ -85,6 +85,20 @@ async fn on(
             .execute(&mut *conn)
             .await?;
     }
+    if next.instance_id != fence.instance_id || next.epoch != fence.epoch {
+        let epoch = i64::try_from(fence.epoch.get())
+            .map_err(|_| StorageError::Constraint("effect epoch exceeds SQL range".into()))?;
+        let alias=sqlx::query("SELECT 1 FROM effect_attempt_bindings WHERE tenant_id=$1 AND continuity_id=$2 AND epoch=$3 AND instance_id=$4 AND block_id=$5 AND attempt=$6 AND effect_id=$7")
+            .bind(tenant.as_str()).bind(next.continuity_id.into_uuid()).bind(epoch).bind(fence.instance_id.into_uuid()).bind(next.block_id.as_str()).bind(i64::from(next.attempt)).bind(next.id.into_uuid()).fetch_optional(&mut *conn).await?;
+        if alias.is_none() {
+            return Ok(EffectDispatchOutcome::Stale);
+        }
+    }
+    let wrong_namespace=sqlx::query("SELECT 1 FROM capsule_effect_imports WHERE tenant_id=$1 AND instance_id=$2 AND continuity_id<>$3 LIMIT 1")
+        .bind(tenant.as_str()).bind(fence.instance_id.into_uuid()).bind(next.continuity_id.into_uuid()).fetch_optional(&mut *conn).await?;
+    if wrong_namespace.is_some() {
+        return Ok(EffectDispatchOutcome::Stale);
+    }
     let rows = if guarded {
         sqlx::query("SELECT record FROM effect_receipts WHERE tenant_id=$1 AND continuity_id=$2 AND (id=$3 OR (record->>'kind'=$4 AND record->>'destination_fingerprint'=$5 AND record->>'request_sha256'=$6)) ORDER BY created_at,id FOR UPDATE").bind(tenant.as_str()).bind(next.continuity_id.into_uuid()).bind(next.id.into_uuid()).bind(state_name(next.kind)?).bind(&next.destination_fingerprint).bind(&next.request_sha256).fetch_all(&mut *conn).await?
     } else {

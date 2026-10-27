@@ -4,6 +4,7 @@ mod current_outputs;
 mod effect_attempt;
 mod effect_dispatch;
 mod effect_receipts;
+pub mod portable_effects;
 pub use effect_dispatch::EffectDispatchFence;
 pub use effect_receipts::{EffectReceiptCursor, EffectReceiptPage};
 mod mobile_access;
@@ -79,7 +80,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 127;
+pub const STORAGE_SCHEMA_VERSION: u32 = 128;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -4020,7 +4021,7 @@ pub trait ContinuityStore: Send + Sync + 'static {
         candidate: &ContinuityExecution,
     ) -> Result<ContinuityExecution, StorageError> {
         if let Some(existing) = self
-            .get_continuity_execution_by_instance(
+            .get_continuity_execution_touching_instance(
                 &candidate.tenant_id,
                 candidate.current_instance_id,
             )
@@ -4032,7 +4033,7 @@ pub trait ContinuityStore: Send + Sync + 'static {
         match self.create_continuity_execution(candidate).await {
             Ok(()) => Ok(candidate.clone()),
             Err(create_error) => self
-                .get_continuity_execution_by_instance(
+                .get_continuity_execution_touching_instance(
                     &candidate.tenant_id,
                     candidate.current_instance_id,
                 )
@@ -4428,6 +4429,51 @@ pub trait ContinuityStore: Send + Sync + 'static {
         let _ = (tenant_id, continuity_id, after, limit);
         Err(StorageError::Unsupported(
             "effect receipt pagination".into(),
+        ))
+    }
+
+    /// Active invocation aliases and reset boundaries for one source location.
+    async fn export_effect_attempts(
+        &self,
+        owner: &ContinuityExecution,
+    ) -> Result<
+        (
+            Vec<orch8_types::continuity::CapsuleEffectBinding>,
+            Vec<BlockId>,
+        ),
+        StorageError,
+    > {
+        let _ = owner;
+        Err(StorageError::Unsupported("portable effect attempts".into()))
+    }
+
+    /// Effective current plus execution-frozen commit guards. A kind filter is
+    /// applied before the bound; None is used for complete capsule export.
+    async fn load_effect_guards(
+        &self,
+        tenant: &TenantId,
+        continuity: ContinuityId,
+        sequence: SequenceId,
+        version: i32,
+        kind: Option<orch8_types::continuity::EffectKind>,
+    ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
+        let _ = (tenant, continuity, sequence, version, kind);
+        Err(StorageError::Unsupported("portable effect guards".into()))
+    }
+
+    /// Atomic snapshot, immutable receipt evidence, current-location aliases,
+    /// pending ownership and import digest. Replays never downgrade outcomes.
+    async fn import_capsule_recovery(
+        &self,
+        capsule_id: CapsuleId,
+        runtime: RuntimeId,
+        snapshot: &crate::restore::InstanceSnapshot,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+        effects: Option<&crate::portable_effects::CapsuleEffectImport>,
+    ) -> Result<InstanceId, StorageError> {
+        let _ = (capsule_id, runtime, snapshot, checkpoint, effects);
+        Err(StorageError::Unsupported(
+            "atomic portable effect recovery".into(),
         ))
     }
 

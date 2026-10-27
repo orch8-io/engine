@@ -530,17 +530,19 @@ async fn import_and_activate(
         destination_instance_id,
     )
     .await?;
-    let pending = ContinuityExecution {
-        continuity_id: signed.manifest.continuity_id,
-        tenant_id: signed.manifest.tenant_id.clone(),
-        current_instance_id: instance.id,
-        owner_runtime_id: signed.manifest.source_runtime_id,
-        epoch: signed.manifest.epoch,
-        state: OwnershipState::Transferring,
-        updated_at: Utc::now(),
-    };
-    storage.create_continuity_execution(&pending).await?;
-    storage.save_capsule_manifest(&signed.manifest).await?;
+    let pending = storage
+        .get_continuity_execution(&signed.manifest.tenant_id, signed.manifest.continuity_id)
+        .await?
+        .context("capsule import did not retain pending ownership")?;
+    if pending.tenant_id != signed.manifest.tenant_id
+        || pending.continuity_id != signed.manifest.continuity_id
+        || pending.current_instance_id != instance.id
+        || pending.owner_runtime_id != signed.manifest.source_runtime_id
+        || pending.epoch != signed.manifest.epoch
+        || pending.state != OwnershipState::Transferring
+    {
+        bail!("imported capsule ownership is not pending activation");
+    }
     let accepted = ContinuityExecution {
         continuity_id: pending.continuity_id,
         tenant_id: pending.tenant_id.clone(),

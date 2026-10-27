@@ -101,7 +101,7 @@ backend_test!(async fn tenant_mismatch_cannot_create_a_foreign_effect_scope(b) {
 backend_test!(async fn claim_loss_during_dispatch_wait_prevents_ordinary_handler_entry(b) {
     let params=running(&b.storage).await;let id=params.instance_id;
     let (storage,faults)=FaultStorage::wrap(b.storage.clone());
-    let pause=faults.on("list_effect_commit_guards").times(1).pause();
+    let pause=faults.on("load_effect_guards").times(1).pause();
     let calls=Arc::new(AtomicUsize::new(0));let registry=counted(calls.clone());
     let task=tokio::spawn(async move {execute_step_dry(&storage,&registry,params).await});
     tokio::time::timeout(std::time::Duration::from_secs(5),pause.entered()).await.unwrap();

@@ -4716,3 +4716,57 @@ with exact-ID roundtrip verification and unchanged artifact count on overflow.
 Strict all-target Clippy passes for types/storage/engine/facade/mobile. Format,
 diff and documentation checks pass. No migration is needed: both stores already
 have the covering index used by the new keyset query. Hosted gates remain pending.
+
+### DME178 — portable effect outcomes, invocation aliases, and frozen guards (in review)
+
+Capsule schema 1.2 carries complete receipt outcomes, current invocation aliases,
+retirement markers, and the effective commit guard policies for the execution.
+Receipt origin coordinates remain immutable. Destination aliases identify the
+accepted epoch and local instance, so a transferred prepared invocation keeps
+its provider identity while its next loop iteration obtains a fresh identity.
+Dispatched or unknown evidence prevents a second provider call. Frozen policies
+remain attached to the continuity execution without enabling global policies
+for unrelated runs.
+
+Import atomically persists the paused snapshot, pending ownership, receipts,
+aliases, reset markers, frozen policy context, immutable capsule manifest, and
+manifest digest proof. Conflicting tenant, continuity, origin identity, policy,
+or destination ownership rolls back the whole import. Frozen policies must also
+match the manifest's workflow version; a regression reproduced acceptance of a
+different-version guard on all four backends before this validation was added. Exact redelivery returns
+the persisted instance and preserves advanced outcomes, including when the host
+supplies its existing destination ID. A regression first reproduced a stale
+paused return value for a completed run; both explicit and allocated destination
+redeliveries now read the persisted state. A changed signed header
+under the same capsule ID fails, even when the encrypted payload is unchanged.
+Namespace lookup includes imported and superseded locations, preventing a fresh
+continuity identity from bypassing the transferred execution's authority.
+
+Pre-binding deterministic receipts receive an alias only when the historical ID
+matches their current source coordinates. Noncanonical unbound uncertain
+receipts prevent export. Legacy 1.0/1.1 capsules without effects remain readable;
+legacy capsules containing effect IDs without recovery evidence are refused.
+Pre-upgrade imports without the new proof cannot be silently adopted as 1.2
+redeliveries. Deployment still requires draining and upgrading writers together.
+
+PostgreSQL migration 128 and SQLite schema 58 persist recovery proofs and frozen
+policy context. Downgrade refuses proofs, frozen guards, and origin-divergent
+aliases rather than discarding evidence. Real PostgreSQL tests separately prove
+each refusal, then execute an empty downgrade/reapply and a fresh import.
+SQLite reopen tests verify aliases, retirement markers, policy context, and
+immutable redelivery proof survive restart.
+
+Current validation: all 2,127 engine unit tests pass, alongside 40 actual
+capsule effect transfers, 34 storage recovery cases, and 13 protocol boundary
+cases. The effect transfer matrix includes isolated and shared stores,
+PostgreSQL/SQLite/encrypted destinations, legacy prepared and uncertain evidence,
+provider identity preservation, loop retirement, and frozen guard enforcement.
+Collection tests cover each recovery vector at 10,000 and 10,001 entries.
+Affected facade/mobile tests and strict all-target linting pass. Native binding
+verification and hosted platform gates remain required before merge.
+
+This does not establish an atomic source export cut or atomic activation.
+Mobile activation still needs one transaction for accepting ownership and
+scheduling, with repeated activation preserving already progressed states.
+Pending event/wait/family portability, bounded source materialization, and the
+full principal/platform acceptance matrix remain required review work.

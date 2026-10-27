@@ -226,6 +226,13 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
     );
     assert_eq!(restored[0].instance_id, portable_import.id);
     assert_ne!(restored[0].id, completed.id);
+    common::accept_capsule_import(
+        isolated.as_ref(),
+        &signed.manifest,
+        portable_import.id,
+        destination_runtime,
+    )
+    .await;
     isolated
         .update_instance_state(
             portable_import.id,
@@ -367,12 +374,12 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         payload.instance.sequence_id
     );
 
-    let mut transferring = continuity.clone();
-    transferring.state = OwnershipState::Transferring;
-    destination
-        .create_continuity_execution(&transferring)
+    let transferring = destination
+        .get_continuity_execution(&instance.tenant_id, continuity.continuity_id)
         .await
-        .unwrap();
+        .unwrap()
+        .expect("capsule import atomically creates pending ownership");
+    assert_eq!(transferring.state, OwnershipState::Transferring);
     let exported = ExecutionHandoff {
         id: HandoffId::new(),
         continuity_id: continuity.continuity_id,

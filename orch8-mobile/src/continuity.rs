@@ -201,9 +201,27 @@ pub async fn import_capsule(
         .await?
     {
         Some(existing) if signed.manifest.epoch.get() < existing.epoch.get() => {
-            return Err(invalid(
-                "capsule epoch is older than the local ownership epoch",
-            ));
+            let accepted = signed.manifest.epoch.checked_next().ok() == Some(existing.epoch)
+                && existing.owner_runtime_id == runtime_id
+                && existing.current_instance_id == instance_id
+                && matches!(
+                    existing.state,
+                    OwnershipState::Owned | OwnershipState::Completed
+                )
+                && storage
+                    .is_capsule_import_instance(
+                        &tenant_id,
+                        signed.manifest.capsule_id,
+                        runtime_id,
+                        instance_id,
+                    )
+                    .await?;
+            if !accepted {
+                return Err(invalid(
+                    "capsule epoch is older than the local ownership epoch",
+                ));
+            }
+            signed.manifest.epoch
         }
         Some(existing) if signed.manifest.epoch.get() == existing.epoch.get() => existing.epoch,
         _ => signed.manifest.epoch,
@@ -224,34 +242,6 @@ pub async fn import_capsule(
     )
     .await
     .map_err(|error| invalid(format!("capsule verification failed: {error}")))?;
-
-    let pending = ContinuityExecution {
-        continuity_id: signed.manifest.continuity_id,
-        tenant_id: tenant_id.clone(),
-        current_instance_id: instance.id,
-        owner_runtime_id: signed.manifest.source_runtime_id,
-        epoch: signed.manifest.epoch,
-        state: OwnershipState::Transferring,
-        updated_at: Utc::now(),
-    };
-    if let Err(error) = storage.create_continuity_execution(&pending).await {
-        let existing = storage
-            .get_continuity_execution(&tenant_id, pending.continuity_id)
-            .await?;
-        if !existing.is_some_and(|existing| {
-            existing.continuity_id == pending.continuity_id
-                && existing.tenant_id == pending.tenant_id
-                && existing.current_instance_id == pending.current_instance_id
-                && existing.owner_runtime_id == pending.owner_runtime_id
-                && existing.epoch == pending.epoch
-                && existing.state == pending.state
-        }) {
-            return Err(MobileError::Storage {
-                detail: format!("cannot claim imported continuity identity: {error}"),
-            });
-        }
-    }
-    storage.save_capsule_manifest(&signed.manifest).await?;
 
     Ok(ContinuityImportResult {
         capsule_id: signed.manifest.capsule_id.to_string(),

@@ -273,6 +273,8 @@ async fn assert_foreach_transfer(destination: Option<Arc<dyn StorageBackend>>) {
             Ok(item)
         })
     });
+    common::accept_capsule_import(destination.as_ref(), &signed.manifest, imported.id, runtime)
+        .await;
     destination
         .update_instance_state(imported.id, InstanceState::Scheduled, Some(Utc::now()))
         .await
