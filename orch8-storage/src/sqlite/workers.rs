@@ -803,6 +803,47 @@ pub(super) async fn resolve(
     let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
     let fence = " WHERE id=?1 AND state=?2 AND claim_epoch=?3 AND (?4 IS NULL OR worker_id=?4)";
     let mut conn = begin_immediate(&storage.pool).await?;
+    // Validate the complete dispatch identity before mutating any task, node,
+    // instance or attempt evidence. The writer lock keeps these reads stable.
+    let block: Option<String> = sqlx::query_scalar(
+        "SELECT block_id FROM worker_tasks WHERE id=?1 AND instance_id=?2 AND state=?3 AND claim_epoch=?4 AND (?5 IS NULL OR worker_id=?5)",
+    )
+    .bind(resolution.task_id.to_string())
+    .bind(resolution.instance_id.to_string())
+    .bind(resolution.expected_state.to_string())
+    .bind(expected_epoch)
+    .bind(resolution.expected_worker_id.as_deref())
+    .fetch_optional(&mut *conn).await?;
+    let Some(block) = block else {
+        conn.rollback().await?;
+        return Ok(false);
+    };
+    let node_id = match &resolution.action {
+        Action::Retry {
+            retry_task,
+            node_id,
+            ..
+        } => {
+            if retry_task.instance_id != resolution.instance_id
+                || retry_task.block_id.as_str() != block
+            {
+                conn.rollback().await?;
+                return Ok(false);
+            }
+            *node_id
+        }
+        Action::FailNode { node_id, .. } => *node_id,
+        _ => None,
+    };
+    if let Some(node_id) = node_id {
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_tree WHERE id=?1 AND instance_id=?2 AND block_id=?3)")
+            .bind(node_id.to_string()).bind(resolution.instance_id.to_string()).bind(&block)
+            .fetch_one(&mut *conn).await?;
+        if !valid {
+            conn.rollback().await?;
+            return Ok(false);
+        }
+    }
     let affected = match &resolution.action {
         Action::Requeue => sqlx::query(AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, \

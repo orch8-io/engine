@@ -22,6 +22,16 @@ a common identity rule; protecting one CAS operation is insufficient.
 
 ## Required invariants
 
+Worker compound mutations also bind the original dispatch's physical instance
+and block to every replacement and optional execution-tree node. A valid lease
+for one task grants no authority to fail another instance, reset another block,
+or enqueue a replacement under another instance. Validate these targets in the
+same transaction before deleting the original task or appending attempt evidence.
+PostgreSQL preserves parent-before-worker locking; SQLite reserves its writer
+before reading the identity. This applies to legacy retry as well as fenced
+lease resolution. This identity rule complements source retirement and does not
+settle the remaining transfer or archive contracts.
+
 - A sealed or retired physical source never gains forward execution authority
   again. Its ID cannot be reassigned to another continuity, account, catalog or
   tenant, including after native/context/history GC.

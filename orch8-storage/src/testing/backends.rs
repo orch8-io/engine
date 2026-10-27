@@ -365,6 +365,38 @@ impl TestBackend {
         Self::all(&[BackendKind::Sqlite, BackendKind::Postgres]).await
     }
 
+    /// Two-backend matrix with a usable, isolated in-memory artifact store.
+    /// Use this for export tests so configuration rejection cannot mask the
+    /// authority or worker-admission condition the scenario intends to test.
+    #[cfg(feature = "artifacts-local")]
+    pub async fn sqlite_and_postgres_with_artifacts() -> Vec<Self> {
+        let sqlite = SqliteStorage::in_memory()
+            .await
+            .expect("in-memory SQLite storage")
+            .with_artifact_store(Arc::new(crate::artifacts::ObjectArtifactStore::memory()));
+        let out = vec![Self {
+            kind: BackendKind::Sqlite,
+            raw: RawPool::Sqlite(sqlite.pool().clone()),
+            storage: Arc::new(sqlite),
+            #[cfg(feature = "postgres")]
+            schema: None,
+        }];
+        #[cfg(feature = "postgres")]
+        let mut out = out;
+        #[cfg(feature = "postgres")]
+        if let Some(TestPostgres { storage, schema }) = TestPostgres::fresh().await {
+            let storage = storage
+                .with_artifact_store(Arc::new(crate::artifacts::ObjectArtifactStore::memory()));
+            out.push(Self {
+                kind: BackendKind::Postgres,
+                raw: RawPool::Postgres(storage.pool().clone()),
+                storage: Arc::new(storage),
+                schema: Some(schema),
+            });
+        }
+        out
+    }
+
     /// `"sqlite"`, `"postgres"`, ... for assertion messages.
     #[must_use]
     pub const fn name(&self) -> &'static str {

@@ -752,7 +752,7 @@ async fn handed_off_source_resolves_its_execution_through_location_history() {
 #[tokio::test]
 async fn export_is_refused_while_a_worker_task_is_in_flight() {
     use orch8_engine::capsule::{CapsuleExportRequest, CapsuleServiceError};
-    for test_backend in backends().await {
+    for test_backend in TestBackend::sqlite_and_postgres_with_artifacts().await {
         let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.charge");
         let (_, inst) = start(&storage, vec![mk_step("charge", &handler)]).await;

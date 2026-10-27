@@ -5749,3 +5749,51 @@ DME190 repair verification: combined six-package all-target strict Clippy passes
 after the feature split, as do production-only mobile check/build/lint, the actual
 no-cloud artifact feature trace, 13 artifact tests and all four locked graph gates.
 The repaired revision will remain a draft with its existing behavioral gates.
+
+#### DME191 compound worker resolution target identity
+
+Reproduced ten unsafe transitions across the four-backend matrix: SQLite
+accepted a valid task fence with another instance ID; both databases accepted
+a replacement task under another instance or a node belonging to another
+instance. The legacy retry API reproduced the mixed-parent mutation on all
+four backends. These are storage API authorization-boundary failures even
+when current engine callers normally construct matching targets.
+
+Fenced resolution now validates the original task's instance and block, the
+replacement task's instance and block, and the optional node's instance and
+block before any mutation or attempt event. Missing/mismatched targets return
+false. Legacy retry applies the same checks and returns a conflict. SQLite
+uses BEGIN IMMEDIATE; PostgreSQL keeps native parent before worker and node
+locks. Plain and encrypted tests include valid retries/node failure alongside
+foreign-instance, foreign-node, wrong-block and missing-node refusals.
+
+All 280 storage regressions pass: 20 identity cases, 124 source-cut cases
+(including the controlled PostgreSQL enqueue/retry lock-order race), and 136
+existing storage integration cases. Strict all-target storage Clippy also
+passes. All 24 engine-level distributed scenarios and 23 HTTP continuity /
+export-retry scenarios also pass. The identity fixtures additionally use
+distinct tenants for foreign-target rejection; the final 20-case matrix and
+24 distributed scenarios pass together.
+This does not close the captured-owner, suspension-transport, durable transfer
+receipt or immutable-invocation gates.
+
+#### DME192 export regression fixtures must satisfy the new lifetime contract
+
+The full engine run exposed an export-admission fixture with no artifact backend;
+configuration rejection masked its intended worker-in-flight assertion. The
+fixture now uses isolated in-memory artifacts on both SQLite and PostgreSQL,
+while artifact-free fixtures remain available for configuration tests. The
+24-case distributed suite passes.
+
+Exact-head PR365 CI then failed all three HTTP retry scenarios because their
+last step advanced ownership while pointing at the permanently retired source
+ID. They now assert this revival is refused, create a fresh destination physical
+instance, advance ownership there, and still assert stale export replay is
+refused. All three scenarios pass alongside the 20 HTTP safety cases. No
+production retirement guard was relaxed.
+
+DME191/DME192 final validation: strict all-target Clippy passes across storage,
+engine, API, gRPC, CLI and mobile. A separate SQLite-only storage library lint
+with artifacts-local/test-util and no default features also passes, covering
+the artifact-enabled test helper without PostgreSQL. Formatting, documentation
+and whitespace checks pass. The broader transfer/archival gates remain open.

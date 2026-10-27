@@ -824,6 +824,42 @@ pub(super) async fn resolve(
         tx.rollback().await?;
         return Ok(false);
     }
+    // Parent-before-worker ordering matches enqueue. Lock the dispatch before
+    // validating its optional node so concurrent resolution cannot retarget it.
+    let block: Option<String> = sqlx::query_scalar("SELECT block_id FROM worker_tasks WHERE id=$1 AND instance_id=$2 AND state=$3 AND claim_epoch=$4 AND ($5::text IS NULL OR worker_id=$5) FOR UPDATE")
+        .bind(resolution.task_id).bind(resolution.instance_id.into_uuid())
+        .bind(resolution.expected_state.to_string()).bind(expected_epoch)
+        .bind(resolution.expected_worker_id.as_deref()).fetch_optional(&mut *tx).await?;
+    let Some(block) = block else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let node_id = match &resolution.action {
+        Action::Retry {
+            retry_task,
+            node_id,
+            ..
+        } => {
+            if retry_task.instance_id != resolution.instance_id
+                || retry_task.block_id.as_str() != block
+            {
+                tx.rollback().await?;
+                return Ok(false);
+            }
+            *node_id
+        }
+        Action::FailNode { node_id, .. } => *node_id,
+        _ => None,
+    };
+    if let Some(node_id) = node_id {
+        let valid: Option<Uuid> = sqlx::query_scalar("SELECT id FROM execution_tree WHERE id=$1 AND instance_id=$2 AND block_id=$3 FOR UPDATE")
+            .bind(node_id.into_uuid()).bind(resolution.instance_id.into_uuid()).bind(&block)
+            .fetch_optional(&mut *tx).await?;
+        if valid.is_none() {
+            tx.rollback().await?;
+            return Ok(false);
+        }
+    }
     let fence = " WHERE id = $1 AND state = $2 AND claim_epoch = $3 \
                   AND ($4::text IS NULL OR worker_id = $4)";
     let affected = match &resolution.action {
@@ -960,6 +996,29 @@ pub(super) async fn retry(
         .bind(instance_id.into_uuid())
         .fetch_optional(&mut *tx)
         .await?;
+
+    let block: Option<String> = sqlx::query_scalar(
+        "SELECT block_id FROM worker_tasks WHERE id=$1 AND instance_id=$2 FOR UPDATE",
+    )
+    .bind(old_task_id)
+    .bind(instance_id.into_uuid())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if new_task.instance_id != instance_id || block.as_deref() != Some(new_task.block_id.as_str()) {
+        return Err(StorageError::Conflict(
+            "retry targets do not match the original worker dispatch".into(),
+        ));
+    }
+    if let Some(nid) = node_id {
+        let valid: Option<Uuid> = sqlx::query_scalar("SELECT id FROM execution_tree WHERE id=$1 AND instance_id=$2 AND block_id=$3 FOR UPDATE")
+            .bind(nid.into_uuid()).bind(instance_id.into_uuid()).bind(new_task.block_id.as_str())
+            .fetch_optional(&mut *tx).await?;
+        if valid.is_none() {
+            return Err(StorageError::Conflict(
+                "retry node does not match the original worker dispatch".into(),
+            ));
+        }
+    }
 
     sqlx::query("DELETE FROM worker_tasks WHERE id = $1")
         .bind(old_task_id)

@@ -2147,7 +2147,30 @@ impl crate::WorkerStore for SqliteStorage {
         instance_id: InstanceId,
         fire_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = helpers::begin_immediate(&self.pool).await?;
+        let block: Option<String> =
+            sqlx::query_scalar("SELECT block_id FROM worker_tasks WHERE id=?1 AND instance_id=?2")
+                .bind(old_task_id.to_string())
+                .bind(instance_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        if new_task.instance_id != instance_id
+            || block.as_deref() != Some(new_task.block_id.as_str())
+        {
+            return Err(StorageError::Conflict(
+                "retry targets do not match the original worker dispatch".into(),
+            ));
+        }
+        if let Some(nid) = node_id {
+            let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_tree WHERE id=?1 AND instance_id=?2 AND block_id=?3)")
+                .bind(nid.to_string()).bind(instance_id.to_string()).bind(new_task.block_id.as_str())
+                .fetch_one(&mut *tx).await?;
+            if !valid {
+                return Err(StorageError::Conflict(
+                    "retry node does not match the original worker dispatch".into(),
+                ));
+            }
+        }
 
         sqlx::query("DELETE FROM worker_tasks WHERE id = ?1")
             .bind(old_task_id.to_string())

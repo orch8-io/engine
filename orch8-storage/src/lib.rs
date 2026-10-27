@@ -2079,8 +2079,9 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// task, insert the new one, reset the execution node to Pending, and
     /// reschedule the instance -- all in a single transaction.
     ///
-    /// Default impl is non-atomic (sequential calls); production backends
-    /// should override with a real transaction.
+    /// The original task, replacement task, instance and optional execution
+    /// node must identify the same instance and block. Mismatched or missing
+    /// targets return a conflict without modifying any row.
     async fn retry_worker_task(
         &self,
         old_task_id: Uuid,
@@ -2144,7 +2145,8 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// Atomically apply a fenced resolution (requeue / retry / fail node /
     /// fail instance) to a worker task and its instance. Returns `false`
     /// without side effects when the task moved on (completed, reclaimed,
-    /// released, or deleted) since it was read.
+    /// released, or deleted) since it was read, or when the supplied instance,
+    /// replacement task or node does not belong to the original dispatch.
     async fn resolve_worker_task(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,

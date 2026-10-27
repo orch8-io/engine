@@ -221,6 +221,27 @@ async fn interrupted_export_retries(method: &'static str, ambiguous: bool) {
     advanced.epoch = owner.epoch.checked_next().unwrap();
     advanced.owner_runtime_id = destination;
     advanced.state = OwnershipState::Owned;
+    // A transferred run continues under a fresh physical ID. Even a newer
+    // coordinator epoch cannot revive the sealed source's physical identity.
+    assert!(
+        !storage
+            .cas_continuity_owner(
+                &instance.tenant_id,
+                owner.continuity_id,
+                owner.epoch,
+                owner.owner_runtime_id,
+                &advanced
+            )
+            .await
+            .unwrap()
+    );
+    let mut destination_instance = instance.clone();
+    destination_instance.id = orch8_types::ids::InstanceId::new();
+    storage
+        .create_instance(&destination_instance)
+        .await
+        .unwrap();
+    advanced.current_instance_id = destination_instance.id;
     assert!(
         storage
             .cas_continuity_owner(
