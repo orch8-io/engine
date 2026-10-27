@@ -72,7 +72,12 @@ describe("Cancellation Scope Nesting", () => {
       "cs-nested",
       [
         cancellationScope("outer", [
-          cancellationScope("inner", [step("deep", "sleep", { duration_ms: 800 })]),
+          cancellationScope("inner", [step("deep", "human_review", {}, {
+            wait_for_input: {
+              prompt: "Release the nested cancellation scope?",
+              choices: [{ label: "Continue", value: "continue" }],
+            },
+          })]),
         ]),
       ],
       { tenantId },
@@ -85,8 +90,14 @@ describe("Cancellation Scope Nesting", () => {
       namespace: "default",
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await client.waitForState(id, "waiting", { timeoutMs: 10_000 });
+    const deadline = Date.now() + 10_000;
+    while (!(await client.getInstanceTree(id)).some((node) => node.block_id === "deep" && node.state === "waiting")) {
+      assert.ok(Date.now() < deadline, "nested scopes never reached their input barrier");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     await client.sendSignal(id, "cancel");
+    await client.sendSignal(id, { custom: "human_input:deep" } as unknown as string, { value: "continue" });
 
     const final = await client.waitForState(id, ["completed", "cancelled"], {
       timeoutMs: 10_000,

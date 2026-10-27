@@ -536,3 +536,57 @@ async fn compensation_start_durably_fences_forward_execution() {
         "compensating"
     );
 }
+
+#[tokio::test]
+async fn compensation_start_retries_source_completion_during_admission() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let (wrapped, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(storage.clone());
+    let gate = faults.on("begin_compensation_run").nth(1).pause();
+    let server = spawn_test_server_on(wrapped, None).await;
+    let url = format!(
+        "{}/api/v1/continuity/executions/{}/compensations",
+        server.base_url, owner.continuity_id
+    );
+    let body = json!({"tenant_id":owner.tenant_id});
+    let request = tokio::spawn(async move {
+        reqwest::Client::new()
+            .post(url)
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), gate.entered())
+        .await
+        .unwrap();
+    storage
+        .update_instance_state(owner.current_instance_id, InstanceState::Completed, None)
+        .await
+        .unwrap();
+    gate.release();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let run: Value = response.json().await.unwrap();
+    assert_eq!(run["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        storage
+            .get_instance(owner.current_instance_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Completed
+    );
+    assert_eq!(
+        storage
+            .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        OwnershipState::Compensating
+    );
+}

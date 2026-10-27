@@ -19,6 +19,7 @@
  */
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { Orch8Client, testSequence, step, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
@@ -29,7 +30,7 @@ describe("http_request Handler — SSRF Blocking", () => {
   let server: ServerHandle | undefined;
 
   before(async () => {
-    server = await startServer();
+    server = await startServer({ env: { ORCH8_ALLOW_INTERNAL_URLS: "0" } });
   });
 
   after(async () => {
@@ -77,6 +78,27 @@ describe("http_request Handler — SSRF Blocking", () => {
 
     return id;
   }
+
+  it("blocks reachable loopback before any request reaches the server", async () => {
+    let requests = 0;
+    const target = createServer((_request, response) => {
+      requests += 1;
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end('{"reachable":true}');
+    });
+    await new Promise<void>((resolve) => target.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = target.address();
+      assert.ok(address && typeof address === "object");
+      const url = `http://127.0.0.1:${address.port}/`;
+      assert.equal((await fetch(url)).status, 200, "positive control must be reachable");
+      assert.equal(requests, 1);
+      await runAgainst(url);
+      assert.equal(requests, 1, "blocked workflow must send no HTTP request");
+    } finally {
+      await new Promise<void>((resolve, reject) => target.close((error) => error ? reject(error) : resolve()));
+    }
+  });
 
   it("blocks RFC1918 private IP (192.168.1.1)", async () => {
     await runAgainst("http://192.168.1.1/");

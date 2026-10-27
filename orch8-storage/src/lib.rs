@@ -4775,7 +4775,8 @@ pub trait ContinuityStore: Send + Sync + 'static {
 
     /// Atomically bind a plan to its unchanged source/effect snapshot, persist
     /// the run, stop forward admission and park the source. Existing worker
-    /// outcomes remain settleable at the same ownership epoch. Custom backends
+    /// outcomes remain settleable at the same ownership epoch. A stale source
+    /// returns false; an existing run returns `StorageError::Conflict`. Custom backends
     /// must implement the transaction; the default refuses this operation.
     async fn begin_compensation_run(
         &self,

@@ -1,5 +1,5 @@
 //! Compensation freezes forward authority without destroying worker outcomes.
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use orch8_storage::{
     CompensationStart, StorageBackend,
     testing::fixtures::{InstanceBuilder, SequenceBuilder},
@@ -28,9 +28,11 @@ async fn fixture(
         .step("charge", "noop")
         .build();
     storage.create_sequence(&sequence).await.unwrap();
-    let instance = InstanceBuilder::for_sequence(&sequence)
+    let mut instance = InstanceBuilder::for_sequence(&sequence)
         .state(InstanceState::Waiting)
         .build();
+    // Exercise PostgreSQL timestamp precision even on clocks aligned to microseconds.
+    instance.updated_at = instance.updated_at.with_nanosecond(123_456_789).unwrap();
     storage.create_instance(&instance).await.unwrap();
     let now = Utc::now();
     let owner = ContinuityExecution {
@@ -201,7 +203,7 @@ orch8_storage::backend_test!(async fn stale_live_migration_cannot_reopen_compens
     let (owner,instance,_effect,run)=fixture(b.storage.as_ref()).await;
     let now=Utc::now();
     let checkpoint=orch8_types::checkpoint::Checkpoint {id:uuid::Uuid::now_v7(),instance_id:instance.id,checkpoint_data:json!({}),created_at:now};
-    let target=SequenceBuilder::new("compensation-target").step("charge","noop").build();
+    let target=SequenceBuilder::new(owner.tenant_id.as_str()).step("charge","noop").build();
     b.storage.create_sequence(&target).await.unwrap();
     let record:orch8_types::continuity_advanced::LiveMigrationRecord=serde_json::from_value(json!({
         "plan":{"id":uuid::Uuid::new_v4(),"tenant_id":owner.tenant_id,"continuity_id":owner.continuity_id,"from_sequence_id":instance.sequence_id,
@@ -225,14 +227,21 @@ orch8_storage::backend_test!(async fn stale_live_migration_cannot_reopen_compens
 });
 
 orch8_storage::backend_test!(async fn compensation_start_rejects_changed_owner_or_instance(b) {
-    for change_owner in [false,true] {
+    for change in 0..3 {
         let (owner,instance,_effect,run)=fixture(b.storage.as_ref()).await;
         let effects=b.storage.collect_compensation_effects(&owner.tenant_id,owner.continuity_id).await.unwrap();
-        if change_owner {
+        if change == 0 {
             let other=ContinuityExecution {owner_runtime_id:RuntimeId::new(),..owner.clone()};
             assert!(b.storage.cas_continuity_owner(&owner.tenant_id,owner.continuity_id,owner.epoch,owner.owner_runtime_id,&other).await.unwrap());
-        } else {
+        } else if change == 1 {
             b.storage.update_instance_state(instance.id,InstanceState::Paused,None).await.unwrap();
+        } else {
+            // A context write changes only the revision; state and sequence stay unchanged.
+            b.storage.update_instance_context(instance.id,&instance.context).await.unwrap();
+            let current=b.storage.get_instance(instance.id).await.unwrap().unwrap();
+            assert_eq!(current.state,instance.state);
+            assert_eq!(current.sequence_id,instance.sequence_id);
+            assert_ne!(current.updated_at,instance.updated_at);
         }
         assert!(!b.storage.begin_compensation_run(CompensationStart {run:&run,execution:&owner,instance:&instance,effects:&effects}).await.unwrap());
         assert!(b.storage.get_compensation_run(&owner.tenant_id,run.id).await.unwrap().is_none());

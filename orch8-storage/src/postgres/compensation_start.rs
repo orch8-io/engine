@@ -39,13 +39,15 @@ async fn on(
     if owner != *start.execution {
         return Ok(false);
     }
-    let row = sqlx::query("SELECT state::text AS state,updated_at,sequence_id FROM task_instances WHERE tenant_id=$1 AND id=$2 FOR UPDATE")
-        .bind(run.tenant_id.as_str()).bind(run.source_instance_id.into_uuid()).fetch_optional(&mut *conn).await?;
+    // Bind the snapshot timestamp so PostgreSQL applies the same microsecond
+    // precision as it did on insert; comparing decoded values in Rust rejects
+    // unchanged snapshots that originally carried nanoseconds.
+    let row = sqlx::query("SELECT state::text AS state,sequence_id FROM task_instances WHERE tenant_id=$1 AND id=$2 AND updated_at=$3 FOR UPDATE")
+        .bind(run.tenant_id.as_str()).bind(run.source_instance_id.into_uuid()).bind(start.instance.updated_at).fetch_optional(&mut *conn).await?;
     let Some(row) = row else {
         return Ok(false);
     };
-    if row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at") != start.instance.updated_at
-        || row.get::<uuid::Uuid, _>("sequence_id") != start.instance.sequence_id.into_uuid()
+    if row.get::<uuid::Uuid, _>("sequence_id") != start.instance.sequence_id.into_uuid()
         || row.get::<String, _>("state") != super::continuity::state_name(start.instance.state)?
     {
         return Ok(false);
@@ -59,7 +61,9 @@ async fn on(
         .bind(run.id.into_uuid()).bind(run.tenant_id.as_str()).bind(run.continuity_id.into_uuid())
         .bind(encode(run)?).bind(run.created_at).bind(run.updated_at).execute(&mut *conn).await?.rows_affected()==1;
     if !inserted {
-        return Ok(false);
+        return Err(StorageError::Conflict(
+            "compensation run already exists or another run is active".into(),
+        ));
     }
     let fenced = ContinuityExecution {
         state: OwnershipState::Compensating,

@@ -243,7 +243,7 @@ export class Orch8Client {
     });
   }
 
-  async getInstanceTree(id: string): Promise<ApiResponse> {
+  async getInstanceTree(id: string): Promise<ApiResponse[]> {
     return this.#get(`/instances/${id}/tree`);
   }
 

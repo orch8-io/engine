@@ -72,7 +72,9 @@ async fn on(
         .bind(run.id.to_string()).bind(run.tenant_id.as_str()).bind(run.continuity_id.to_string())
         .bind(encode(run)?).bind(run.created_at.to_rfc3339()).bind(run.updated_at.to_rfc3339()).execute(&mut *conn).await?.rows_affected()==1;
     if !inserted {
-        return Ok(false);
+        return Err(StorageError::Conflict(
+            "compensation run already exists or another run is active".into(),
+        ));
     }
     let fenced = ContinuityExecution {
         state: OwnershipState::Compensating,

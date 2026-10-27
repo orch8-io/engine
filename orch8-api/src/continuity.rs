@@ -5272,56 +5272,72 @@ async fn create_compensation_run(
     Json(body): Json<CompensationScopeRequest>,
 ) -> Result<(StatusCode, Json<CompensationRunRecord>), ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let (execution, instance, effects, plan) = compensation_plan(&state, &tenant_id, id).await?;
-    if plan.steps.is_empty() {
-        return Err(ApiError::Conflict(
-            "no committed effects have executable compensation rules".into(),
-        ));
-    }
-    let now = Utc::now();
-    let run = CompensationRunRecord {
-        id: CompensationRunId::new(),
-        tenant_id,
-        continuity_id: id,
-        source_instance_id: instance.id,
-        state: CompensationRunState::Planned,
-        version: 0,
-        steps: plan
-            .steps
-            .into_iter()
-            .map(|plan| CompensationExecutionStep {
-                plan,
-                state: CompensationStepState::Pending,
-                attempt: 0,
-                lease_owner: None,
-                lease_expires_at: None,
-                provider_receipt_id: None,
-                error: None,
-                updated_at: now,
+    let run_id = CompensationRunId::new();
+    for _ in 0..8 {
+        let (execution, instance, effects, plan) =
+            compensation_plan(&state, &tenant_id, id).await?;
+        if !matches!(
+            execution.state,
+            OwnershipState::Owned | OwnershipState::Completed | OwnershipState::Compensating
+        ) {
+            return Err(ApiError::Conflict(
+                "compensation source is not available for admission".into(),
+            ));
+        }
+
+        if plan.steps.is_empty() {
+            return Err(ApiError::Conflict(
+                "no committed effects have executable compensation rules".into(),
+            ));
+        }
+        let now = Utc::now();
+        let run = CompensationRunRecord {
+            id: run_id,
+            tenant_id: tenant_id.clone(),
+            continuity_id: id,
+            source_instance_id: instance.id,
+            state: CompensationRunState::Planned,
+            version: 0,
+            steps: plan
+                .steps
+                .into_iter()
+                .map(|plan| CompensationExecutionStep {
+                    plan,
+                    state: CompensationStepState::Pending,
+                    attempt: 0,
+                    lease_owner: None,
+                    lease_expires_at: None,
+                    provider_receipt_id: None,
+                    error: None,
+                    updated_at: now,
+                })
+                .collect(),
+            hazards: plan.hazards.clone(),
+            residual_effects: plan.hazards,
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        let created = state
+            .storage
+            .begin_compensation_run(orch8_storage::CompensationStart {
+                run: &run,
+                execution: &execution,
+                instance: &instance,
+                effects: &effects,
             })
-            .collect(),
-        hazards: plan.hazards.clone(),
-        residual_effects: plan.hazards,
-        created_at: now,
-        updated_at: now,
-        completed_at: None,
-    };
-    let created = state
-        .storage
-        .begin_compensation_run(orch8_storage::CompensationStart {
-            run: &run,
-            execution: &execution,
-            instance: &instance,
-            effects: &effects,
-        })
-        .await
-        .map_err(|error| ApiError::from_storage(error, "compensation run"))?;
-    if !created {
-        return Err(ApiError::Conflict(
-            "compensation source changed or this continuity execution already has an active compensation run".into(),
-        ));
+            .await
+            .map_err(|error| match error {
+                orch8_types::error::StorageError::Conflict(message) => ApiError::Conflict(message),
+                error => ApiError::from_storage(error, "compensation run"),
+            })?;
+        if created {
+            return Ok((StatusCode::CREATED, Json(run)));
+        }
     }
-    Ok((StatusCode::CREATED, Json(run)))
+    Err(ApiError::Conflict(
+        "compensation source kept changing; retry after it settles".into(),
+    ))
 }
 
 async fn get_compensation_run(

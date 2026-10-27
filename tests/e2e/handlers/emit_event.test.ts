@@ -6,7 +6,8 @@ import type { ServerHandle } from "../harness.ts";
 import type { BlockOutput } from "../client.ts";
 
 const client = new Orch8Client();
-const BASE = "http://localhost:18080";
+const BASE = process.env.ORCH8_E2E_BASE_URL ??
+  `http://localhost:${process.env.ORCH8_E2E_PORT ?? "18080"}`;
 
 /**
  * Create an event trigger via the API. Not part of the shared client yet.
