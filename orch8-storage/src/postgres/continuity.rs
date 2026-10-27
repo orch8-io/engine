@@ -42,6 +42,25 @@ fn to_i64(value: u64, field: &str) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::Query(format!("{field} exceeds PostgreSQL BIGINT range")))
 }
 
+// Both lookup paths must agree on scope and indexed progress before returning
+// a durable outcome, including when recovering a lost creation response.
+fn compensation_run_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<CompensationRunRecord, StorageError> {
+    let record: CompensationRunRecord = decode(row.try_get("record")?)?;
+    if record.tenant_id.as_str() != row.try_get::<&str, _>("tenant_id")?
+        || record.continuity_id.into_uuid() != row.try_get::<uuid::Uuid, _>("continuity_id")?
+        || record.id.into_uuid() != row.try_get::<uuid::Uuid, _>("id")?
+        || state_name(record.state)? != row.try_get::<String, _>("state")?
+        || to_i64(record.version, "compensation version")? != row.try_get::<i64, _>("version")?
+    {
+        return Err(StorageError::Constraint(
+            "compensation record scope or index mismatch".into(),
+        ));
+    }
+    Ok(record)
+}
+
 pub(super) async fn delete_receipts_for_blocks_on(
     conn: &mut sqlx::PgConnection,
     tenant_id: &TenantId,
@@ -2103,18 +2122,24 @@ impl crate::ContinuityStore for PostgresStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn get_active_compensation_run(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+    ) -> Result<Option<CompensationRunRecord>, StorageError> {
+        let row = sqlx::query("SELECT id,tenant_id,continuity_id,state,version,record FROM compensation_runs WHERE tenant_id=$1 AND continuity_id=$2 AND state IN ('planned','running','awaiting_verification')")
+            .bind(tenant_id.as_str()).bind(continuity_id.into_uuid()).fetch_optional(&self.pool).await?;
+        row.as_ref().map(compensation_run_from_row).transpose()
+    }
+
     async fn get_compensation_run(
         &self,
         tenant_id: &TenantId,
         id: CompensationRunId,
     ) -> Result<Option<CompensationRunRecord>, StorageError> {
-        let row = sqlx::query("SELECT record FROM compensation_runs WHERE tenant_id=$1 AND id=$2")
-            .bind(tenant_id.as_str())
-            .bind(id.into_uuid())
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
-        row.map(|row| decode(row.get("record"))).transpose()
+        let row = sqlx::query("SELECT id,tenant_id,continuity_id,state,version,record FROM compensation_runs WHERE tenant_id=$1 AND id=$2")
+            .bind(tenant_id.as_str()).bind(id.into_uuid()).fetch_optional(&self.pool).await?;
+        row.as_ref().map(compensation_run_from_row).transpose()
     }
 
     async fn cas_compensation_run(

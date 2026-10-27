@@ -225,11 +225,43 @@ step that creates the original effect:
 }
 ```
 
-Preview first. The planner considers only `committed` and `verified` effect
-receipts and reverses the declared forward dependencies; a block observed in
-the execution tree without a committed receipt is never compensated. Missing
-rules and unknown original effects appear as stable hazards. Starting a run
-does not erase those hazards.
+Preview first. The planner builds rollback steps from `committed` and `verified`
+effect receipts and reverses declared forward dependencies. Planned, prepared,
+dispatched and unknown effects remain visible as hazards alongside missing rules.
+Starting a run preserves those hazards and durably fences forward execution under
+`compensating` ownership. Already-dispatched workers can report outcomes while
+the source remains stopped.
+
+Persist a request UUID with each compensation intent before sending creation:
+
+```json
+{
+  "tenant_id": "tenant-a",
+  "request_id": "43a862d2-cb64-466b-824f-ea8af4682ee7"
+}
+```
+
+```bash
+orch8 execution compensation-create "$CONTINUITY_ID" compensation-request.json
+```
+
+Reuse the same request file after a lost response or process restart. Creation
+returns HTTP 201 for a new run and 200 for a replay: the same run ID and saved plan
+with its current progress, including a completed outcome. A fresh compensation
+intent needs a fresh UUID. Invalid UUIDs and unknown creation fields return 422
+before writing. Normal tenant authorization applies to every request.
+
+Legacy callers can omit `request_id`; another active run still returns 409. Recover
+its ID with `GET /api/v1/continuity/executions/{id}/compensations/active` and the
+`tenant_id` query parameter, or use:
+
+```bash
+orch8 execution compensation-active "$CONTINUITY_ID" --tenant-id "$TENANT_ID"
+```
+
+The lookup returns 404 when no run is active. A known run remains readable through
+its normal run-ID endpoint after completion. Durable request replay uses the
+retained run record and does not rebuild its plan from newer effects.
 
 Workers claim exactly one ordered compensation step under a bounded lease.
 Every step carries `compensate:<original-effect-id>` as its immutable

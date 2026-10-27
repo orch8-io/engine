@@ -538,6 +538,369 @@ async fn compensation_start_durably_fences_forward_execution() {
 }
 
 #[tokio::test]
+async fn compensation_request_replays_after_lost_response_and_completion() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let server = spawn_test_server_on(storage, None).await;
+    let path = format!(
+        "/api/v1/continuity/executions/{}/compensations",
+        owner.continuity_id
+    );
+    let body = json!({"tenant_id":owner.tenant_id,"request_id":uuid::Uuid::new_v4()});
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!("{}{path}", server.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 201);
+    drop(first); // The caller never obtains the committed run's ID.
+    let retry = client
+        .post(format!("{}{path}", server.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), 200);
+    let recovered: Value = retry.json().await.unwrap();
+    let finished = complete_single_rollback(&server, &owner, &recovered).await;
+    assert_eq!(finished["state"], "completed");
+    let retry = client
+        .post(format!("{}{path}", server.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retry.status(), 200);
+    let replay: Value = retry.json().await.unwrap();
+    assert_eq!(replay["id"], recovered["id"]);
+    assert_eq!(replay["steps"], finished["steps"]);
+    assert_eq!(replay["state"], "completed");
+}
+
+#[tokio::test]
+async fn compensation_request_concurrent_retries_share_one_run() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let server = spawn_test_server_on(storage, None).await;
+    let path = format!(
+        "{}/api/v1/continuity/executions/{}/compensations",
+        server.base_url, owner.continuity_id
+    );
+    let body = json!({"tenant_id":owner.tenant_id,"request_id":uuid::Uuid::new_v4()});
+    let client = reqwest::Client::new();
+    let (first, second) = tokio::join!(
+        client.post(&path).json(&body).send(),
+        client.post(&path).json(&body).send()
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let mut statuses = [first.status().as_u16(), second.status().as_u16()];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [200, 201]);
+    let first: Value = first.json().await.unwrap();
+    let second: Value = second.json().await.unwrap();
+    assert_eq!(first["id"], second["id"]);
+    assert_eq!(first["steps"], second["steps"]);
+    let distinct = client
+        .post(&path)
+        .json(&json!({"tenant_id":owner.tenant_id,"request_id":uuid::Uuid::new_v4()}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(distinct.status(), 409);
+}
+
+#[tokio::test]
+async fn compensation_request_recovers_after_committed_storage_error() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let (wrapped, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(storage);
+    faults
+        .on("begin_compensation_run")
+        .nth(1)
+        .fail_after_commit(orch8_types::error::StorageError::Connection(
+            "creation acknowledgement lost".into(),
+        ));
+    let server = spawn_test_server_on(wrapped, None).await;
+    let path = format!(
+        "{}/api/v1/continuity/executions/{}/compensations",
+        server.base_url, owner.continuity_id
+    );
+    let body = json!({"tenant_id":owner.tenant_id,"request_id":uuid::Uuid::new_v4()});
+    let client = reqwest::Client::new();
+    let response = client.post(&path).json(&body).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let recovered: Value = response.json().await.unwrap();
+    let replay: Value = client
+        .post(&path)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recovered["id"], replay["id"]);
+    assert_eq!(faults.calls("begin_compensation_run"), 1);
+}
+
+#[tokio::test]
+async fn compensation_active_lookup_recovers_legacy_creation_and_hides_terminal_runs() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let server = spawn_test_server_on(storage, None).await;
+    let path = format!(
+        "{}/api/v1/continuity/executions/{}/compensations",
+        server.base_url, owner.continuity_id
+    );
+    let client = reqwest::Client::new();
+    let scope = json!({"tenant_id":owner.tenant_id});
+    let response = client.post(&path).json(&scope).send().await.unwrap();
+    assert_eq!(response.status(), 201);
+    drop(response);
+    assert_eq!(
+        client
+            .post(&path)
+            .json(&scope)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        409
+    );
+    let active: Value = client
+        .get(format!("{path}/active"))
+        .query(&[("tenant_id", owner.tenant_id.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(active["state"], "planned");
+    assert_eq!(
+        client
+            .get(format!("{path}/active"))
+            .query(&[("tenant_id", "foreign-tenant")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+    let completed = complete_single_rollback(&server, &owner, &active).await;
+    assert_eq!(completed["state"], "completed");
+    assert_eq!(
+        client
+            .get(format!("{path}/active"))
+            .query(&[("tenant_id", owner.tenant_id.as_str())])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn compensation_legacy_creation_recovers_a_committed_storage_error() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let (wrapped, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(storage);
+    faults
+        .on("begin_compensation_run")
+        .nth(1)
+        .fail_after_commit(orch8_types::error::StorageError::Connection(
+            "legacy acknowledgement lost".into(),
+        ));
+    let server = spawn_test_server_on(wrapped, None).await;
+    let path = format!(
+        "{}/api/v1/continuity/executions/{}/compensations",
+        server.base_url, owner.continuity_id
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&path)
+        .json(&json!({"tenant_id":owner.tenant_id}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let recovered: Value = response.json().await.unwrap();
+    let active: Value = client
+        .get(format!("{path}/active"))
+        .query(&[("tenant_id", owner.tenant_id.as_str())])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(recovered["id"], active["id"]);
+    assert_eq!(faults.calls("begin_compensation_run"), 1);
+}
+
+#[tokio::test]
+async fn compensation_request_rejects_invalid_or_misspelled_intent_keys_without_writing() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let path = format!(
+        "{}/api/v1/continuity/executions/{}/compensations",
+        server.base_url, owner.continuity_id
+    );
+    for body in [
+        json!({"tenant_id":owner.tenant_id,"request_id":"not-a-uuid"}),
+        json!({"tenant_id":owner.tenant_id,"requestId":uuid::Uuid::new_v4()}),
+    ] {
+        assert_eq!(
+            reqwest::Client::new()
+                .post(&path)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            422
+        );
+    }
+    assert!(
+        storage
+            .get_active_compensation_run(&owner.tenant_id, owner.continuity_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        storage
+            .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        owner
+    );
+}
+
+#[tokio::test]
+async fn compensation_request_scope_and_authorization_precede_replay() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let original = storage
+        .get_instance(owner.current_instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let sequence = storage
+        .get_sequence(original.sequence_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let other_instance = InstanceBuilder::for_sequence(&sequence)
+        .state(InstanceState::Paused)
+        .build();
+    storage.create_instance(&other_instance).await.unwrap();
+    let other = ContinuityExecution {
+        continuity_id: ContinuityId::new(),
+        current_instance_id: other_instance.id,
+        ..owner.clone()
+    };
+    storage.create_continuity_execution(&other).await.unwrap();
+    let mut effect = storage
+        .get_effect_receipt(
+            &owner.tenant_id,
+            EffectId::from_uuid(uuid::Uuid::from_u128(1)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    effect.id = EffectId::new();
+    effect.continuity_id = other.continuity_id;
+    effect.instance_id = other_instance.id;
+    storage.create_effect_receipt(&effect).await.unwrap();
+    let server = spawn_test_server_on(storage, None).await;
+    let path = |id: ContinuityId| {
+        format!(
+            "{}/api/v1/continuity/executions/{id}/compensations",
+            server.base_url
+        )
+    };
+    let body = json!({"tenant_id":owner.tenant_id,"request_id":uuid::Uuid::new_v4()});
+    let client = reqwest::Client::new();
+    let first: Value = client
+        .post(path(owner.continuity_id))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second: Value = client
+        .post(path(other.continuity_id))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(first["id"], second["id"]);
+    assert_eq!(
+        client
+            .post(path(owner.continuity_id))
+            .header("X-Tenant-Id", "foreign-tenant")
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert_eq!(
+        client
+            .post(path(owner.continuity_id))
+            .json(&json!({"tenant_id":"foreign-tenant","request_id":body["request_id"]}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn compensation_request_replays_its_saved_plan_after_evidence_changes() {
+    let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let path = format!(
+        "/api/v1/continuity/executions/{}/compensations",
+        owner.continuity_id
+    );
+    let body = json!({"tenant_id":owner.tenant_id,"request_id":uuid::Uuid::new_v4()});
+    let created = post_value(&server, &path, &body).await;
+    let mut late = storage
+        .get_effect_receipt(
+            &owner.tenant_id,
+            EffectId::from_uuid(uuid::Uuid::from_u128(1)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    late.id = EffectId::new();
+    late.state = EffectState::Unknown;
+    storage.create_effect_receipt(&late).await.unwrap();
+    let replay = post_value(&server, &path, &body).await;
+    assert_eq!(replay["id"], created["id"]);
+    assert_eq!(replay["steps"], created["steps"]);
+    assert_eq!(replay["hazards"], created["hazards"]);
+}
+
+#[tokio::test]
 async fn compensation_start_retries_source_completion_during_admission() {
     let (storage, owner, _) = fixture_with_states(true, &[EffectState::Committed]).await;
     let (wrapped, faults) = orch8_storage::testing::faulty::FaultStorage::wrap(storage.clone());
