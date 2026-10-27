@@ -167,10 +167,18 @@ async fn finalize_stranded_dispatch(
     if instance.state != orch8_types::instance::InstanceState::Waiting {
         return Ok(false);
     }
-    let Some(source) = storage
-        .get_worker_invocation(&instance.tenant_id, task.id)
+    let source = match storage
+        .get_worker_dispatch_admission(&instance.tenant_id, task.id)
         .await?
-    else {
+    {
+        Some(admission) => Some(admission.invocation),
+        None => {
+            storage
+                .get_worker_invocation(&instance.tenant_id, task.id)
+                .await?
+        }
+    };
+    let Some(source) = source else {
         return Ok(false);
     };
     let owner = storage

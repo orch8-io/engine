@@ -131,10 +131,22 @@ async fn postgres_invocation_downgrade_refuses_retained_evidence_but_empty_round
     };
     let down = include_str!("../../migrations/down/132_worker_invocation_bindings.sql");
     let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/133_worker_dispatch_admissions.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
     tx.commit().await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/132_worker_invocation_bindings.sql"
+    ))
+    .execute(b.pg_pool())
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/133_worker_dispatch_admissions.sql"
     ))
     .execute(b.pg_pool())
     .await

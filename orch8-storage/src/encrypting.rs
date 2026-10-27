@@ -2081,6 +2081,12 @@ passthrough_impl! {
         self.inner.create_worker_task(encrypted.as_ref()).await
     }
     async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
+    async fn admit_worker_dispatch(&self,intent:&crate::worker_admission::WorkerDispatchIntent)->Result<crate::worker_admission::WorkerDispatchPublication,StorageError>{
+        let task=self.encrypt_worker_task(&intent.task)?;
+        let sealed=intent.encrypted(task.into_owned())?;
+        self.inner.admit_worker_dispatch(&sealed).await
+    }
+    async fn get_worker_dispatch_admission(&self,tenant_id:&TenantId,task_id:Uuid)->Result<Option<crate::worker_admission::WorkerDispatchAdmission>,StorageError>;
     async fn create_worker_task_bound(&self, task: &orch8_types::worker::WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError> {
         let encrypted=self.encrypt_worker_task(task)?;
         self.inner.create_worker_task_bound(encrypted.as_ref(),fence).await

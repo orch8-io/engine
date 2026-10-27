@@ -7,6 +7,7 @@ mod compensation_update;
 mod current_outputs;
 mod effect_attempt;
 pub mod local_migration;
+pub mod worker_admission;
 pub mod worker_invocation;
 pub use compensation_start::CompensationStart;
 mod effect_dispatch;
@@ -1996,7 +1997,18 @@ pub trait WorkerStore: Send + Sync + 'static {
         ))
     }
 
-    /// Publish only under the original native claim, run, owner and invocation.
+    /// Atomically admit the logical effect and publish its exact prepared task.
+    async fn admit_worker_dispatch(
+        &self,
+        intent: &crate::worker_admission::WorkerDispatchIntent,
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
+        let _ = intent;
+        Err(StorageError::Unsupported(
+            "atomic worker dispatch admission".into(),
+        ))
+    }
+
+    /// Identity-only primitive. Remote activity producers must use atomic admission.
     /// Returns the actual queued id when an idempotent upsert retains a retry row.
     async fn create_worker_task_bound(
         &self,
@@ -2012,6 +2024,17 @@ pub trait WorkerStore: Send + Sync + 'static {
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
 
     /// Immutable dispatch identity, independently scoped and retained after hot GC.
+    async fn get_worker_dispatch_admission(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_admission::WorkerDispatchAdmission>, StorageError> {
+        let _ = (tenant_id, task_id);
+        Err(StorageError::Unsupported(
+            "worker dispatch admission".into(),
+        ))
+    }
+
     async fn get_worker_invocation(
         &self,
         tenant_id: &TenantId,

@@ -275,23 +275,10 @@ pub(crate) async fn enqueue_worker_task(
 
     let continuity_epoch = fence.continuity.as_ref().map(|scope| scope.epoch);
 
-    let effect_guard = crate::effect_guard::EffectGuard::begin_step(
-        storage,
-        instance,
-        step_def,
-        &resolved_params,
-        attempt,
-        step_context.runtime.dry_run,
-    )
-    .await?;
-    let effect_id = effect_guard
-        .as_ref()
-        .map(crate::effect_guard::EffectGuard::effect_id);
-
     // W3C trace context for the worker: the dispatching span's context when
     // OpenTelemetry is active, else a deterministic per-instance context.
     let task_id = uuid::Uuid::now_v7();
-    let mut worker_context = step_context.clone();
+    let mut worker_context = step_context;
     worker_context.runtime.traceparent = Some(crate::trace_context::dispatch_traceparent(
         instance.id.into_uuid(),
         task_id,
@@ -326,19 +313,14 @@ pub(crate) async fn enqueue_worker_task(
         error_message: None,
         error_retryable: None,
         created_at: chrono::Utc::now(),
-        effect_id,
+        effect_id: None,
         continuity_epoch,
         lease_secs: None,
         carries_credentials,
         claimed_runtime_kind: None,
     };
 
-    let actual_id = storage
-        .create_worker_task_bound(&task, fence)
-        .await?
-        .ok_or(EngineError::ClaimLost {
-            instance_id: instance.id,
-        })?;
+    let actual_id = crate::effect_guard::publish_worker_dispatch(storage, task, fence).await?;
     let task = storage
         .get_worker_task(actual_id)
         .await?
@@ -381,33 +363,11 @@ pub(crate) async fn prepare_dispatch_fence(
     claim_token: chrono::DateTime<chrono::Utc>,
     selection: &orch8_storage::worker_invocation::WorkerDispatchSelection,
 ) -> Result<Option<orch8_storage::worker_invocation::WorkerDispatchFence>, EngineError> {
-    let owner =
-        crate::effect_guard::ensure_effect_scope(storage, &instance.tenant_id, instance.id).await?;
-    if owner.tenant_id != instance.tenant_id
-        || owner.current_instance_id != instance.id
-        || owner.state != orch8_types::continuity::OwnershipState::Owned
-    {
-        return Err(EngineError::ClaimLost {
-            instance_id: instance.id,
-        });
-    }
     let mut source = instance.clone();
     source.claimed_at = Some(claim_token);
-    let fence = storage
+    Ok(storage
         .prepare_worker_dispatch(&source, &step.id, selection)
-        .await?;
-    if fence.as_ref().is_some_and(|fence| {
-        fence.continuity.as_ref().is_none_or(|scope| {
-            scope.continuity_id != owner.continuity_id
-                || scope.epoch != owner.epoch.get()
-                || scope.owner_runtime_id != owner.owner_runtime_id
-        })
-    }) {
-        return Err(EngineError::ClaimLost {
-            instance_id: instance.id,
-        });
-    }
-    Ok(fence)
+        .await?)
 }
 
 /// Validate a step's placement before anything is persisted: `$runtime`
@@ -1077,7 +1037,7 @@ mod tests {
             &node,
             &step_def,
             json!({"url": "https://example.com"}),
-            ExecutionContext::default(),
+            inst.context.clone(),
             0,
             false,
             &prepare_dispatch_fence(
@@ -1178,7 +1138,7 @@ mod tests {
                 },
                 "report_id": "q3"
             }),
-            ExecutionContext::default(),
+            inst.context.clone(),
             0,
             false,
             &prepare_dispatch_fence(

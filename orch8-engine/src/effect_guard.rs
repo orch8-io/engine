@@ -777,6 +777,110 @@ pub(crate) async fn stranded_attempt_effect_id(
     .map(EffectGuard::effect_id))
 }
 
+/// Construct receipt intent without making it visible before queue admission.
+fn worker_effect_plan(
+    task: &orch8_types::worker::WorkerTask,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
+) -> Result<Option<orch8_storage::worker_admission::WorkerEffectPlan>, EngineError> {
+    if fence.dry_run || orch8_types::sequence::is_pure_remote_builtin(&task.handler_name) {
+        return Ok(None);
+    }
+    let scope = orch8_storage::worker_admission::dispatch_scope(fence);
+    let id = EffectId::new();
+    let proof = worker_dispatch_effect(task, id)?;
+    let now = Utc::now();
+    let epoch = ExecutionEpoch::from_u64(scope.epoch);
+    Ok(Some(
+        orch8_storage::worker_admission::WorkerEffectPlan::new(
+            EffectReceipt {
+                id,
+                tenant_id: fence.tenant_id.clone(),
+                continuity_id: scope.continuity_id,
+                epoch,
+                instance_id: fence.instance_id,
+                block_id: fence.block_id.clone(),
+                kind: proof.kind,
+                state: EffectState::Planned,
+                request_sha256: proof.request_sha256,
+                destination_fingerprint: proof.destination_fingerprint,
+                idempotency_key: task
+                    .params
+                    .get("idempotency_key")
+                    .and_then(Value::as_str)
+                    .filter(|key| key.len() <= 256)
+                    .map(ToOwned::to_owned),
+                provider_receipt_id: None,
+                attempt: u32::from(task.attempt),
+                created_at: now,
+                updated_at: now,
+            },
+            false,
+        ),
+    ))
+}
+
+pub(crate) async fn publish_worker_dispatch(
+    storage: &dyn StorageBackend,
+    task: orch8_types::worker::WorkerTask,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
+) -> Result<Uuid, EngineError> {
+    use orch8_storage::worker_admission::{WorkerDispatchIntent, WorkerDispatchPublication};
+    let mut plan = worker_effect_plan(&task, fence)?;
+    let guards = if let Some(plan) = &plan {
+        load_effect_commit_guards(storage, &plan.receipt, fence.instance_id).await?
+    } else {
+        Vec::new()
+    };
+    if let Some(plan) = &mut plan {
+        plan.guarded = !guards.is_empty();
+    }
+    let intent = WorkerDispatchIntent::new(task, fence.clone(), plan)?;
+    match storage.admit_worker_dispatch(&intent).await? {
+        WorkerDispatchPublication::Published { task_id, receipt } => {
+            if let Some(receipt) = receipt
+                && !guards.is_empty()
+            {
+                record_effect_guard_results(
+                    storage,
+                    &guards,
+                    &receipt,
+                    ExecutionEpoch::from_u64(
+                        orch8_storage::worker_admission::dispatch_scope(fence).epoch,
+                    ),
+                    false,
+                )
+                .await?;
+            }
+            Ok(task_id)
+        }
+        WorkerDispatchPublication::Duplicate(receipt) => {
+            let Some(guard) = guards.first() else {
+                return Err(EngineError::InvalidConfig(
+                    "unguarded worker admission returned duplicate".into(),
+                ));
+            };
+            record_effect_guard_results(
+                storage,
+                &guards,
+                &receipt,
+                ExecutionEpoch::from_u64(
+                    orch8_storage::worker_admission::dispatch_scope(fence).epoch,
+                ),
+                true,
+            )
+            .await?;
+            Err(EngineError::InvariantViolation {
+                invariant_id: guard.id,
+                block_id: receipt.block_id.clone(),
+            })
+        }
+        WorkerDispatchPublication::EffectBlocked(receipt) => Err(blocked(&receipt)),
+        WorkerDispatchPublication::Stale => Err(EngineError::ClaimLost {
+            instance_id: fence.instance_id,
+        }),
+    }
+}
+
 pub(crate) fn worker_dispatch_effect(
     task: &orch8_types::worker::WorkerTask,
     effect_id: EffectId,

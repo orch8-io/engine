@@ -56,6 +56,7 @@ mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
+mod worker_admission;
 mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
@@ -1698,6 +1699,19 @@ impl crate::WorkerStore for PostgresStorage {
         worker_dispatch::prepare(self, instance, block_id, selection).await
     }
 
+    async fn admit_worker_dispatch(
+        &self,
+        intent: &crate::worker_admission::WorkerDispatchIntent,
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
+        worker_admission::create(self, intent).await
+    }
+    async fn get_worker_dispatch_admission(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_admission::WorkerDispatchAdmission>, StorageError> {
+        worker_admission::get(self, tenant_id, task_id).await
+    }
     async fn create_worker_task_bound(
         &self,
         task: &WorkerTask,

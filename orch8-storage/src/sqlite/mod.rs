@@ -86,6 +86,7 @@ mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
+mod worker_admission;
 mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
@@ -573,6 +574,12 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
         }
+        sqlx::raw_sql(include_str!("worker_admissions.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(64)")
+            .execute(&mut *retirement)
+            .await?;
         sqlx::raw_sql(include_str!("worker_invocations.sql"))
             .execute(&mut *retirement)
             .await?;
@@ -2078,6 +2085,19 @@ impl crate::WorkerStore for SqliteStorage {
         worker_dispatch::prepare(self, instance, block_id, selection).await
     }
 
+    async fn admit_worker_dispatch(
+        &self,
+        intent: &crate::worker_admission::WorkerDispatchIntent,
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
+        worker_admission::create(self, intent).await
+    }
+    async fn get_worker_dispatch_admission(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_admission::WorkerDispatchAdmission>, StorageError> {
+        worker_admission::get(self, tenant_id, task_id).await
+    }
     async fn create_worker_task_bound(
         &self,
         task: &WorkerTask,

@@ -1896,3 +1896,77 @@ async fn pure_remote_dispatch_survives_later_effect_scope_enrollment() {
         }
     }
 }
+
+#[tokio::test]
+async fn retry_admission_uses_the_rendered_payload_for_the_actual_reserved_task() {
+    use orch8_engine::worker_lease::fail_worker_task;
+    use orch8_types::worker::WorkerClaim;
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let handler = unique_handler("ext.retry-payload");
+        let mut block = mk_step_with_retry("work", &handler, 3);
+        if let BlockDefinition::Step(step) = &mut block {
+            step.params = json!({"url":"{{context.data.url}}"});
+        }
+        let mut sequence = mk_sequence(vec![block]);
+        sequence.name = format!("retry-payload-{}", uuid::Uuid::now_v7());
+        storage.create_sequence(&sequence).await.unwrap();
+        let mut instance = mk_instance(sequence.id);
+        instance.context.data = json!({"url":"https://example.invalid/first"});
+        storage.create_instance(&instance).await.unwrap();
+        dispatch(&storage, instance.id, &sequence).await;
+        let first = only_task(&storage, instance.id).await;
+        let held = claim(&storage, &first).await;
+        let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+        let lease = WorkerClaim::new(held.worker_id.clone().unwrap(), held.claim_epoch);
+        assert!(
+            fail_worker_task(storage.as_ref(), &current, &held, &lease, "retry", true)
+                .await
+                .unwrap()
+        );
+        let reserved = only_task(&storage, instance.id).await;
+        let mut context = storage
+            .get_instance(instance.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context;
+        context.data["url"] = json!("https://example.invalid/retry");
+        storage
+            .update_instance_context(instance.id, &context)
+            .await
+            .unwrap();
+        dispatch(&storage, instance.id, &sequence).await;
+        let retry = only_task(&storage, instance.id).await;
+        assert_eq!(
+            retry.id, reserved.id,
+            "admission must retain the reserved task identity"
+        );
+        assert_eq!(
+            retry.params,
+            json!({"url":"https://example.invalid/retry"}),
+            "{}: receipt admission must not leave the old placeholder payload on the actual task",
+            backend.name()
+        );
+        let receipt = storage
+            .get_effect_receipt(&instance.tenant_id, retry.effect_id.unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        let canonical = orch8_publisher::manifest::canonical_json(
+            &json!({"handler":handler,"params":retry.params}),
+        )
+        .unwrap();
+        let mut expected = String::with_capacity(64);
+        for byte in Sha256::digest(canonical.as_bytes()) {
+            write!(&mut expected, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        assert_eq!(
+            receipt.request_sha256, expected,
+            "queued payload and receipt disagree"
+        );
+        assert_eq!(claim(&storage, &retry).await.params, retry.params);
+    }
+}

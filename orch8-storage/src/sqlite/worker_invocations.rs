@@ -145,9 +145,22 @@ pub(super) async fn source_on(
     task_id: &str,
 ) -> Result<Option<WorkerInvocation>, StorageError> {
     let current = read_on(conn, task_id, None).await?;
-    Ok(get_on(conn, &current.tenant_id, uuid(task_id)?)
-        .await?
-        .filter(|original| original.matches_source(&current)))
+    let Some(original) = get_on(conn, &current.tenant_id, uuid(task_id)?).await? else {
+        return Ok(None);
+    };
+    let expected = if let Some(admission) =
+        super::worker_admission::get_on(conn, &current.tenant_id, uuid(task_id)?).await?
+    {
+        if !original.same_invocation_scope(&admission.invocation)
+            || !super::worker_admission::matches_hot_on(conn, &admission).await?
+        {
+            return Ok(None);
+        }
+        admission.invocation
+    } else {
+        original
+    };
+    Ok(expected.matches_source(&current).then_some(expected))
 }
 
 pub(super) async fn reserve_retry_on(

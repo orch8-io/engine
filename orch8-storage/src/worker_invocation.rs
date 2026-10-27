@@ -279,6 +279,20 @@ pub(crate) fn preparation_fence(
 
 impl WorkerInvocation {
     /// A current node with the same block is insufficient after loop/run reuse.
+    pub(crate) fn same_invocation_scope(&self, other: &Self) -> bool {
+        self.task_id == other.task_id
+            && self.tenant_id == other.tenant_id
+            && self.instance_id == other.instance_id
+            && self.sequence_id == other.sequence_id
+            && self.block_id == other.block_id
+            && self.attempt == other.attempt
+            && self.run_id == other.run_id
+            && self.dry_run == other.dry_run
+            && self.continuity == other.continuity
+            && self.continuity_epoch == other.continuity_epoch
+            && self.target == other.target
+    }
+
     pub(crate) fn matches_source(&self, current: &Self) -> bool {
         !matches!(self.target, WorkerInvocationTarget::Unbound { .. })
             && self.task_id == current.task_id
@@ -455,7 +469,7 @@ impl WorkerInvocation {
 }
 
 /// Logical request evidence computed from the stored, decrypted worker payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerDispatchEffect {
     pub effect_id: EffectId,
     pub request_sha256: String,

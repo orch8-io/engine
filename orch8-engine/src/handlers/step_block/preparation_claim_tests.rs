@@ -367,7 +367,7 @@ orch8_storage::backend_test!(async fn old_flat_preparation_cannot_dispatch_after
     storage.update_instance_context(id, &context).await.unwrap();
     pause.release();
     task.await.unwrap();
-    assert!(faults.calls("create_worker_task_bound") > 0);
+    assert!(faults.calls("admit_worker_dispatch") > 0);
     assert!(storage.get_execution_tree(id).await.unwrap().is_empty(), "scenario must exercise the flat scheduler");
     assert!(storage.list_worker_tasks(&WorkerTaskFilter { instance_id: Some(id), ..WorkerTaskFilter::default() }, &Pagination::default()).await.unwrap().is_empty());
     assert_eq!(storage.get_instance(id).await.unwrap().unwrap().context.runtime.current_step_started_at, Some(changed));

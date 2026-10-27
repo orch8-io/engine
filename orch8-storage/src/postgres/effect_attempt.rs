@@ -62,7 +62,7 @@ async fn load(
     row.map(|row| decode(row.get("record"))).transpose()
 }
 
-async fn on(
+pub(super) async fn on(
     conn: &mut sqlx::PgConnection,
     candidate: &EffectReceipt,
     legacy: EffectId,

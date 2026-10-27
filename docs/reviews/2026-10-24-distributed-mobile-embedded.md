@@ -6025,93 +6025,100 @@ currently live node with the same block id. Scope/authentication for receipt
 replay must remain enforceable when hot native rows have been collected.
 
 
-#### DME198 implementation progress: invocation and preparation identity (incomplete)
+#### DME198 implementation progress: dispatch admission (incomplete)
 
-Local migration 132 and SQLite schema 63 add an activation token to each execution
-node. Resetting a non-Pending node to Pending rotates it; repeated Pending resets,
-activation and same-activity resume retain it. Existing started_at values survive
-resets and cannot serve as invocation nonces. Immutable tenant-scoped invocation
-bindings retain the actual queued task ID, physical instance/sequence/run, block,
-attempt, execution mode, node/activation and full continuity ID/epoch/runtime
-independently of hot task/native history. Missing or ambiguous legacy identity
-is retained as Unbound evidence.
+Local migrations 132–133 and SQLite schemas 63–64 separate invocation reservation
+from actual dispatch admission. An execution node receives an activation token;
+resetting a non-Pending node to Pending rotates it, while repeated Pending resets,
+activation and same-activity resume retain it. started_at survives resets and
+cannot serve as an invocation nonce. Immutable tenant-scoped bindings retain the
+actual task ID, physical instance/sequence/run, block, attempt, mode, target
+node/activation and full continuity ID/epoch/runtime independently of hot history.
+Missing or ambiguous legacy identity remains Unbound evidence.
 
-prepare_worker_dispatch reads the expected native claim, run, sequence, tenant,
-node activation and owner in one database statement. Both production dispatch
-paths now capture this fence before conditions, output loading, templates and
-credentials, then carry it unchanged to bound enqueue. Scope enrollment must
-agree with the full owner observed during capture. Pure and dry-run remote
-activities receive ownership too: an ordinary pure queue activity previously
-lost its authority when a sibling first enrolled effect scope. Catalog registries
-that require local dispatch retain their local execution path.
+Both production dispatch paths capture their source fence before conditions,
+output loading, templates and credentials, then carry it unchanged through
+publication. Capture itself does not enroll ownership: doing so for in-process
+pure work caused four embedded SDK capsule-export failures on a9477c51, because
+an automatic owner displaced the caller's explicit initial runtime. For actual
+remote work, a captured unowned source can enroll only its deterministic canonical
+epoch-zero namespace inside the publication transaction. The transaction rechecks
+the original claim/run/activation/mode and refuses foreign, advanced, transferring,
+moved or historically orphaned ownership. Existing owners retain exact full-scope
+fencing. Pure and dry-run remote tasks also receive stable durable authority.
 
-Bound enqueue validates the exact source and atomically publishes the task and
-suspends a tree node. The separate unfenced node update is removed. Flat enqueue
-preserves its original timeout baseline; both paths use the task ID actually
-retained by a pending-row upsert for status, notification and return. A regression
-previously allowed a different flat block under the same run and timestamp; the
-fence now includes physical instance and block. Encrypted storage forwards typed
-authority and encrypts task bodies. New engine races pause template I/O, rotate a
-tree activation or change the flat step baseline under the same parent claim/run,
-and verify that old preparation cannot enqueue or overwrite the new activity.
-The tree race reproduced the defect on all four backend configurations.
+An opaque validated dispatch intent binds the prepared logical payload to its
+planned receipt, mode and run, and rejects stale lease/checkpoint/outcome fields.
+Its debug output omits task inputs. Encryption decorators alone reseal transformed
+storage payloads, retaining the logical fingerprint. The admission transaction
+composes existing effect identity selection and at-most-once dispatch guards with
+the exact queue payload, invocation binding, immutable admission and tree-node
+suspension. Any refusal or insert failure rolls back the new receipt, active
+attempt binding, initial owner/location, queue row and node changes. The separate
+unfenced node update is removed; flat dispatch preserves the original timeout
+baseline. Ownership, native parent, worker and node locks retain their ordering.
 
-Retry resolution compares the retained invocation with the current run, node
-activation and full owner before resetting native state. Unknown or changed
-sources are refused. A replacement binding is reserved after resetting the exact
-original activation, and remains unclaimable until dispatch. Retry markers are
-part of the resolution and encrypted by the decorator; planning itself does not
-append history. Fault injection proves rollback of task deletion, node reset,
-binding, marker and attempt history. Direct evaluators persist the same durable
-run identity as the scheduler before callbacks. Counter exhaustion takes the
-terminal path instead of scheduling the same saturated attempt. PostgreSQL's
-SMALLINT attempt columns still need reconciliation with the public u16 range.
+An unclaimable retry reservation receives the actual prepared handler, params,
+context, requirements, routing, timeout and credential flag only during admission.
+Its original scope binding is never rewritten. A separate immutable admission
+pins the actual handler, logical/stored payload fingerprints, effect proof and
+source. A unique key over physical/run/activation/attempt/mode/full-owner identity
+makes a concurrent or repeated publication retain the first admitted payload and
+receipt. Notifications and returns use the task ID actually retained by storage.
+Cold admission lookup prevents recreation after hot task collection. Database
+guards reject admitted specification changes, tenant-mirror changes and reuse of
+an admitted task ID; lease/checkpoint/output mutations remain supported. Storage
+source checks use admitted handler/effect identity and verify the stored payload
+fingerprint, so a legitimate fallback can resolve under its original reservation.
 
-Stranded dispatch finalization validates retained run, exact activation, mode and
-owner while holding namespace/native/task locks. A reserved retry recovers its
-epoch from its immutable binding, never from the caller or a later owner. Missing
-current ownership cannot establish standalone authority: raw location history
-makes moved or missing owners unbound. Engine preflight also follows historical
-locations before admitting effects. Four regressions reproduced accidental
-recertification after namespace relocation and now pass.
+Retry resolution checks the retained run, activation and full owner before
+resetting native state. A replacement is reserved only after resetting the exact
+original activation and remains unclaimable until admission. Retry markers are
+transactional and encrypted; planning does not append history. Direct evaluators
+persist run identity before callbacks. u16 counter exhaustion takes the terminal
+path. PostgreSQL's SMALLINT attempt columns still require reconciliation with the
+public u16 range; atomic admission explicitly rejects overflow instead of saturating.
 
-Receipt recovery verifies actual request/destination hashes, kind, physical
-execution, tenant, continuity/epoch, block, attempt and dispatched state. Missing
-or uncertain evidence does not imply purity. The original dry-run mode is retained
-and checked before publication. Engine regressions cover recovery with and without
-a hot effect link, including mismatched request hashes. Current validation passes
-111 invocation plus 20 resolution storage cases and 2,145 engine unit plus 28
-distributed cases, with PostgreSQL required. Strict all-target lint passes for types, storage, engine and gRPC after the final
-notification helper extraction; formatting and diff whitespace checks pass.
+Stranded recovery checks exact retained scope and waiting activation under locks,
+recovers the epoch from immutable evidence, and follows historical locations.
+Receipt recovery verifies request/destination hashes, kind, tenant, physical
+execution, continuity/epoch, block, attempt and dispatched state. Missing or
+uncertain effect evidence does not imply purity, and dry-run mode cannot become
+live work. Unknown legacy recovery/quarantine policy remains a separate gate.
 
-The gRPC context-size regression reproduced rejection after consuming a worker
-claim. The service now checks the projected merge before effect settlement or
-completion. Rejected oversized results retain their leases and accept corrected
-results; all 148 gRPC unit/protocol cases also pass after the producer wiring.
-The fresh-parent check remains; concurrent merges require atomic integration.
+The gRPC context-size fix checks the projected merge before effect settlement or
+consuming a worker claim. Rejected oversized outcomes retain their lease and
+accept a corrected result. Concurrent acceptance/integration still needs the
+atomic outcome contract below. Transaction finalizers await commit or rollback;
+a rejected PostgreSQL acknowledgement no longer leaves an idle transaction holding
+its owner lock. An independent pre-acquired connection verifies immediate release.
 
-A rejected PostgreSQL acknowledgement previously retained an idle transaction and
-owner lock until a queued rollback flushed; schema cleanup waited 60 seconds.
-Seal, abort, acknowledgement and worker create/retry transactions now await commit
-or rollback before returning. A pre-acquired independent connection can lock the
-owner immediately after rejection, preventing same-pool reuse from masking this.
-After the producer wiring, the full storage check passes 177 source-cut, 136
-integration, 111 invocation and 20 resolution cases. All 701 mobile library cases
-also pass; the latest combined validation covers 3,466 tests.
+Current validation covers 38 new admission cases, 111 invocation cases, 20
+resolution cases, 177 source-cut cases and 136 storage integration cases with
+PostgreSQL required. Admission tests cover concurrent differing payloads, fallback
+handlers, guarded duplicate rollback, later foreign ownership, stale generation,
+context/mode/lease mismatch, injected insertion failure, encrypted privacy, cold
+GC retention, immutable payloads/tenant routing, overflow refusal, downgrade
+retention and SQLite reopen. The full engine suite passes 2,145 unit plus 29
+distributed cases; the embedded public facade passes all 20 engine cases, including
+the four failing CI exports. gRPC passes 148 cases and mobile passes 701, for 3,525
+tests across these suites. Strict all-target lint passes for types, storage, engine,
+gRPC and the embedded facade. Final tenant-mirror guard checks also pass.
 
-Published CI repair 0466f9ee fixes downgrade dependency lookup falling through to
-another installation later on search_path. Guards compare dependency namespaces
-with the locked source-cut table. A shadow-object regression reproduces the fault
-and verifies that downgrade leaves the other installation untouched. The isolated
+The preceding three-file CI repair 0466f9ee fixes downgrade dependency lookup
+falling through to an independent installation later on search_path. Its isolated
 published-baseline candidate passed 176 source-cut cases and strict test-target
-lint; all 25 exact-head CI checks subsequently passed. This three-file repair
-excludes the local worker changes.
+lint; all 25 exact-head checks passed. The later a9477c51 checkpoint's Unit job
+failed the embedded export ownership cases described above. Exact-head CI must
+be rerun for this atomic admission/lazy-enrollment checkpoint.
 
-DME198 remains open. Effect admission still precedes the bound queue transaction,
-so a rejected producer can leave a conservative orphan receipt. The retained retry
-payload/handler can still differ from newly prepared effect intent. Actual task-ID
-and payload admission, atomic receipt/publication, rolling coordinator protocol
-enforcement and explicit unknown-legacy quarantine remain required. Durable
-accepted outcomes, atomic scoped native integration, shared transport/delegation
-recovery, pending-integration snapshots and acknowledged receipt retention also
-remain open. Passing published CI does not prove those gates or justify merging.
+DME198 remains open. Durable accepted outcomes and atomic scoped native
+integration, HTTP/gRPC/delegation/background parity, pending-integration snapshots,
+cold claim/reporter authorization, acknowledged receipt retention/hot-quota release,
+rolling coordinator protocol enforcement and explicit unknown-legacy quarantine
+remain required. Identity-only legacy queue APIs are still present; blocking
+mutation of already admitted tasks does not establish a complete protocol floor.
+Invariant audit results still follow publication and need durable reconciliation.
+Legacy backup/key rotation compatibility, compensation invocation identity and
+independent offline-owner/outcome handling remain broader review gates. Passing
+these tests does not prove those contracts or justify merging the draft.
