@@ -457,6 +457,7 @@ fault_impl! {
 
 fault_impl! {
     [CONTINUITY_STORE_METHODS] impl ContinuityStore {
+        async fn is_physical_instance_retired(&self, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn create_continuity_execution(&self, execution: &ContinuityExecution) -> Result<(), StorageError>;
         async fn ensure_continuity_execution(&self, candidate: &ContinuityExecution) -> Result<ContinuityExecution, StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &TenantId, id: ContinuityId) -> Result<Option<ContinuityExecution>, StorageError>;
@@ -469,6 +470,7 @@ fault_impl! {
         async fn cas_handoff(&self, tenant_id: &TenantId, id: HandoffId, expected_state: HandoffState, expected_version: u64, next: &ExecutionHandoff) -> Result<bool, StorageError>;
         async fn accept_handoff(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, accepted_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, accepted_execution: &ContinuityExecution) -> Result<bool, StorageError>;
         async fn commit_handoff_export(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, exported_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, transferring_execution: &ContinuityExecution) -> Result<bool, StorageError>;
+        async fn commit_handoff_export_with_provenance(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, exported_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, transferring_execution: &ContinuityExecution, provenance: &ProvenanceEntry) -> Result<bool, StorageError>;
         async fn resume_handoff(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, resumed_handoff: &ExecutionHandoff, destination_instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn save_capsule_manifest(&self, manifest: &CapsuleManifest) -> Result<(), StorageError>;
         async fn get_capsule_manifest(&self, tenant_id: &TenantId, id: CapsuleId) -> Result<Option<CapsuleManifest>, StorageError>;
@@ -477,6 +479,12 @@ fault_impl! {
         async fn import_capsule_snapshot(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn import_capsule_recovery(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint, effects: Option<&crate::portable_effects::CapsuleEffectImport>) -> Result<InstanceId, StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId, imported_at: DateTime<Utc>) -> Result<InstanceId, StorageError>;
+        async fn capture_capsule_cut(&self, request: &crate::capsule_export::CapsuleCutRequest) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError>;
+        async fn seal_capsule_cut(&self, tenant: &TenantId, id: CapsuleId, manifest: &CapsuleManifest, sealed: &[u8]) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError>;
+        async fn abort_preparing_capsule_cut(&self, tenant: &TenantId, id: CapsuleId) -> Result<bool, StorageError>;
+        async fn acknowledge_capsule_cut(&self, tenant: &TenantId, id: CapsuleId, accepted: &ContinuityExecution) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError>;
+        async fn capsule_cut_publishable(&self, tenant: &TenantId, id: CapsuleId) -> Result<bool, StorageError>;
+        async fn claim_retired_capsule_artifacts(&self, now: DateTime<Utc>, retry_at: DateTime<Utc>, limit: u32) -> Result<Vec<String>, StorageError>;
         async fn activate_capsule_import(&self, tenant: &TenantId, capsule: CapsuleId, runtime: RuntimeId, instance: InstanceId, now: DateTime<Utc>) -> Result<(), StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &TenantId, capabilities: &RuntimeCapabilities) -> Result<(), StorageError>;

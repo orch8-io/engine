@@ -51,9 +51,17 @@ pub(super) async fn attempts(
     store: &PostgresStorage,
     owner: &ContinuityExecution,
 ) -> Result<(Vec<CapsuleEffectBinding>, Vec<BlockId>), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    attempts_on(&mut conn, owner).await
+}
+
+pub(super) async fn attempts_on(
+    conn: &mut sqlx::PgConnection,
+    owner: &ContinuityExecution,
+) -> Result<(Vec<CapsuleEffectBinding>, Vec<BlockId>), StorageError> {
     let epoch = i64::try_from(owner.epoch.get()).map_err(|_| invalid())?;
     let rows=sqlx::query("SELECT block_id,attempt,effect_id FROM effect_attempt_bindings WHERE tenant_id=$1 AND continuity_id=$2 AND epoch=$3 AND instance_id=$4 ORDER BY block_id,attempt LIMIT 10001")
-  .bind(owner.tenant_id.as_str()).bind(owner.continuity_id.into_uuid()).bind(epoch).bind(owner.current_instance_id.into_uuid()).fetch_all(&store.pool).await?;
+  .bind(owner.tenant_id.as_str()).bind(owner.continuity_id.into_uuid()).bind(epoch).bind(owner.current_instance_id.into_uuid()).fetch_all(&mut *conn).await?;
     if rows.len() > CapsulePayload::MAX_PENDING_ITEMS {
         return Err(invalid());
     }
@@ -65,7 +73,7 @@ pub(super) async fn attempts(
             effect_id: EffectId::from_uuid(row.get::<uuid::Uuid, _>("effect_id")),
         });
     }
-    let rows=sqlx::query("SELECT block_id FROM effect_block_resets WHERE tenant_id=$1 AND instance_id=$2 ORDER BY block_id LIMIT 10001").bind(owner.tenant_id.as_str()).bind(owner.current_instance_id.into_uuid()).fetch_all(&store.pool).await?;
+    let rows=sqlx::query("SELECT block_id FROM effect_block_resets WHERE tenant_id=$1 AND instance_id=$2 ORDER BY block_id LIMIT 10001").bind(owner.tenant_id.as_str()).bind(owner.current_instance_id.into_uuid()).fetch_all(&mut *conn).await?;
     if rows.len() > CapsulePayload::MAX_PENDING_ITEMS {
         return Err(invalid());
     }
@@ -85,6 +93,18 @@ pub(super) async fn guards(
     version: i32,
     selected: Option<EffectKind>,
 ) -> Result<Vec<WorkflowInvariant>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    guards_on(&mut conn, tenant, continuity, sequence, version, selected).await
+}
+
+pub(super) async fn guards_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    continuity: ContinuityId,
+    sequence: SequenceId,
+    version: i32,
+    selected: Option<EffectKind>,
+) -> Result<Vec<WorkflowInvariant>, StorageError> {
     let mut query =
         sqlx::QueryBuilder::new("SELECT record FROM workflow_invariants WHERE tenant_id=");
     query.push_bind(tenant.as_str()).push(" AND sequence_id=").push_bind(sequence.into_uuid()).push(" AND enabled=TRUE AND (sequence_version IS NULL OR sequence_version=").push_bind(version).push(") AND record->>'commit_guard'='true' AND record->'rule'->>'type'='effect_at_most_once'");
@@ -94,7 +114,7 @@ pub(super) async fn guards(
             .push_bind(state_name(k)?);
     }
     query.push(" ORDER BY created_at,id LIMIT 10001");
-    let rows = query.build().fetch_all(&store.pool).await?;
+    let rows = query.build().fetch_all(&mut *conn).await?;
     let mut global = Vec::with_capacity(rows.len());
     for row in rows {
         global.push(decode(row.get("record"))?);
@@ -111,7 +131,7 @@ pub(super) async fn guards(
             .push_bind(state_name(k)?);
     }
     query.push(" LIMIT 10001");
-    let rows = query.build().fetch_all(&store.pool).await?;
+    let rows = query.build().fetch_all(&mut *conn).await?;
     let mut frozen = Vec::with_capacity(rows.len());
     for row in rows {
         let guard: WorkflowInvariant = decode(row.get("record"))?;

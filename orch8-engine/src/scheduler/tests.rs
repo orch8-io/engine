@@ -3330,3 +3330,87 @@ async fn hook_pool_drain_waits_for_running_hooks() {
 
 #[path = "deferred_wake_tests.rs"]
 mod deferred_wake_tests;
+
+#[tokio::test]
+async fn scheduler_parks_permanently_retired_instance_without_forward_transition() {
+    use orch8_storage::testing::backends::RawPool;
+    for backend in fencing_backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let (id, _) = seed_fenced_instance(
+            &storage,
+            orch8_types::continuity::OwnershipState::Owned,
+            false,
+        )
+        .await;
+        let original = storage.get_instance(id).await.unwrap().unwrap();
+        match &backend.raw {
+            RawPool::Sqlite(pool) => {
+                sqlx::query("INSERT INTO physical_instance_retirements VALUES(?1,?2,?3,?4,?5)")
+                    .bind(id.to_string())
+                    .bind(original.tenant_id.as_str())
+                    .bind(Uuid::new_v4().to_string())
+                    .bind(Uuid::new_v4().to_string())
+                    .bind(Utc::now().to_rfc3339())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                // Model an inconsistent pre-guard running row, preserving the
+                // marker and reinstalling the guard before scheduler admission.
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::query("DROP TRIGGER physical_retirement_native_update")
+                    .execute(&mut *tx)
+                    .await
+                    .unwrap();
+                sqlx::query("UPDATE task_instances SET state='running',claimed_at=?2,updated_at=?2 WHERE id=?1")
+                    .bind(id.to_string()).bind(original.updated_at.to_rfc3339()).execute(&mut *tx).await.unwrap();
+                sqlx::raw_sql(include_str!(
+                    "../../../orch8-storage/src/sqlite/physical_retirement.sql"
+                ))
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+                tx.commit().await.unwrap();
+            }
+            RawPool::Postgres(pool) => {
+                sqlx::query("INSERT INTO physical_instance_retirements VALUES($1,$2,$3,$4,$5)")
+                    .bind(id.into_uuid())
+                    .bind(original.tenant_id.as_str())
+                    .bind(Uuid::new_v4())
+                    .bind(Uuid::new_v4())
+                    .bind(Utc::now())
+                    .execute(pool)
+                    .await
+                    .unwrap();
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::query(
+                    "ALTER TABLE task_instances DISABLE TRIGGER physical_retirement_native_update",
+                )
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+                sqlx::query("UPDATE task_instances SET state='running',claimed_at=$2,updated_at=$2 WHERE id=$1")
+                    .bind(id.into_uuid()).bind(original.updated_at).execute(&mut *tx).await.unwrap();
+                sqlx::query(
+                    "ALTER TABLE task_instances ENABLE TRIGGER physical_retirement_native_update",
+                )
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+                tx.commit().await.unwrap();
+            }
+        }
+        let legacy = storage.get_instance(id).await.unwrap().unwrap();
+        Box::pin(run_process_instance(&storage, legacy)).await;
+        let stopped = storage.get_instance(id).await.unwrap().unwrap();
+        assert_eq!(stopped.state, InstanceState::Paused);
+        assert!(stopped.next_fire_at.is_none());
+        assert_eq!(stopped.context.data, original.context.data);
+        assert!(
+            storage
+                .get_block_output(id, &BlockId::new("s1"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}

@@ -161,7 +161,7 @@ pub(super) async fn claim(
 
     let select_res = sqlx::query(
         "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
-         AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND json_extract(ce.record,'$.current_instance_id')=worker_tasks.instance_id) \
+         AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND json_extract(ce.record,'$.current_instance_id')=worker_tasks.instance_id) \
          ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
@@ -243,7 +243,7 @@ pub(super) async fn claim_for_tenant(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
          WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?4 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND ti.tenant_id=?3
-           AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)
+           AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)
          ORDER BY wt.created_at ASC
          LIMIT ?2",
     )
@@ -342,7 +342,7 @@ pub(super) async fn claim_matching(
         // Retry rows wait for their re-dispatch to bind the effect id.
         query.push(" AND wt.state='pending' AND wt.awaiting_dispatch=0");
         // See the Postgres twin: no work for terminal/cancelled instances.
-        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)");
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)");
         // Same SQL pushdown as the Postgres twin (strict supersets of
         // `claim_allowed`; the Rust check stays authoritative) so rows this
         // claimant can never take do not fill the scan window.

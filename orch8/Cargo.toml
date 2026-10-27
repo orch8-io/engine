@@ -39,6 +39,7 @@ file-watch = ["orch8-engine/file-watch"]
 wasm = ["orch8-engine/wasm"]
 
 [dev-dependencies]
+tempfile = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 orch8-storage = { path = "../orch8-storage", features = ["test-util"] }

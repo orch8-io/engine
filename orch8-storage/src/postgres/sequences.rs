@@ -57,11 +57,19 @@ pub(super) async fn get(
     store: &PostgresStorage,
     id: SequenceId,
 ) -> Result<Option<SequenceDefinition>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    get_on(&mut conn, id).await
+}
+
+pub(super) async fn get_on(
+    conn: &mut sqlx::PgConnection,
+    id: SequenceId,
+) -> Result<Option<SequenceDefinition>, StorageError> {
     let row = sqlx::query_as::<_, SequenceRow>(
         "SELECT id, tenant_id, namespace, name, definition, version, deprecated, status, created_at FROM sequences WHERE id = $1",
     )
     .bind(id.into_uuid())
-    .fetch_optional(&store.pool)
+    .fetch_optional(&mut *conn)
     .await?;
     row.map(SequenceRow::into_definition).transpose()
 }

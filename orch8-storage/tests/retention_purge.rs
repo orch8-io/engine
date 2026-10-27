@@ -753,6 +753,7 @@ async fn purge_knows_every_continuity_child_table() {
         "continuity_locations",
         "continuity_stream_frames",
         "continuity_streams",
+        "capsule_source_cuts",
         "capsule_effect_imports",
         "continuity_effect_guards",
         "effect_attempt_bindings",

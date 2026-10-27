@@ -1015,6 +1015,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_event_waits_block
 CREATE INDEX IF NOT EXISTS idx_event_waits_correlation
     ON event_waits(tenant_id, correlation_key, status);
 
+-- Independent of native and continuity history: physical IDs are never reusable.
+CREATE TABLE IF NOT EXISTS physical_instance_retirements (
+    instance_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    continuity_id TEXT NOT NULL,
+    capsule_id TEXT NOT NULL,
+    retired_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS continuity_executions (
     continuity_id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1689,9 +1698,43 @@ CREATE INDEX IF NOT EXISTS idx_mobile_commands_acked_at
     ON mobile_commands(acked_at) WHERE acked_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_mobile_commands_unacked_created
     ON mobile_commands(created_at) WHERE acked_at IS NULL;
+-- Freeze a consistent source snapshot before transport publication. Retain a
+-- stable identity and encrypted payload for retries after an ambiguous upload.
+
+-- No parent FK: a late upload must remain collectible after source-history purge.
+CREATE TABLE IF NOT EXISTS capsule_artifact_retirements (
+ artifact_key TEXT PRIMARY KEY,
+ tenant_id TEXT NOT NULL,
+ capsule_id TEXT NOT NULL,
+ next_sweep_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_capsule_artifact_retirement_due
+ ON capsule_artifact_retirements(next_sweep_at,artifact_key);
+
+CREATE TABLE IF NOT EXISTS capsule_source_cuts (
+ capsule_id TEXT PRIMARY KEY,
+ tenant_id TEXT NOT NULL,
+ continuity_id TEXT NOT NULL,
+ epoch INTEGER NOT NULL,
+ source_instance_id TEXT NOT NULL,
+ source_runtime_id TEXT NOT NULL,
+ state TEXT NOT NULL CHECK(state IN ('captured','sealed','aborted','acknowledged','retired')),
+ request TEXT NOT NULL,
+ snapshot TEXT,
+ manifest TEXT,
+ sealed_payload BLOB,
+ acknowledgement TEXT,
+ created_at TEXT NOT NULL,
+ FOREIGN KEY(tenant_id,continuity_id) REFERENCES continuity_executions(tenant_id,continuity_id)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_capsule_source_cut_active
+ ON capsule_source_cuts(tenant_id,continuity_id,epoch) WHERE state IN ('captured','sealed');
+CREATE INDEX IF NOT EXISTS idx_capsule_source_cut_instance
+ ON capsule_source_cuts(source_instance_id) WHERE state IN ('captured','sealed');
+
 "#;
 
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 58;
+pub(super) const SCHEMA_VERSION: i64 = 61;

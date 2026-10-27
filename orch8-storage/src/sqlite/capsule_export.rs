@@ -1,0 +1,378 @@
+//! Durable source capture and immutable transport sealing transactions.
+use super::{
+    SqliteStorage,
+    continuity::{decode, encode, state_name},
+};
+use crate::capsule_export::{
+    CapsuleCutCapture, CapsuleCutRefusal, CapsuleCutRequest, CapsuleSourceCut,
+    CapsuleSourceSnapshot, invalid, same_location, transferring, validate_seal,
+};
+use orch8_types::{
+    continuity::{CapsuleId, CapsuleManifest, ContinuityExecution, OwnershipState},
+    error::StorageError,
+    ids::TenantId,
+};
+use sqlx::Row;
+
+type DbRow = sqlx::sqlite::SqliteRow;
+fn cut(row: &DbRow) -> Result<CapsuleSourceCut, StorageError> {
+    Ok(CapsuleSourceCut {
+        id: CapsuleId::from_uuid(
+            row.get::<String, _>("capsule_id")
+                .parse::<uuid::Uuid>()
+                .map_err(|_| invalid())?,
+        ),
+        request: decode(&row.get::<String, _>("request"))?,
+        snapshot: row
+            .try_get::<Option<String>, _>("snapshot")?
+            .map(|v| decode(&v))
+            .transpose()?,
+        manifest: row
+            .try_get::<Option<String>, _>("manifest")?
+            .map(|v| decode(&v))
+            .transpose()?,
+        sealed_payload: row.try_get("sealed_payload")?,
+    })
+}
+async fn owner(
+    conn: &mut sqlx::SqliteConnection,
+    expected: &ContinuityExecution,
+) -> Result<Option<ContinuityExecution>, StorageError> {
+    let row=sqlx::query("SELECT record,state FROM continuity_executions WHERE tenant_id=?1 AND continuity_id=?2 AND epoch=?3 AND owner_runtime_id=?4").bind(expected.tenant_id.as_str()).bind(expected.continuity_id.to_string()).bind(i64::try_from(expected.epoch.get()).map_err(|_|invalid())?).bind(expected.owner_runtime_id.to_string()).fetch_optional(&mut *conn).await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let current: ContinuityExecution = decode(&row.get::<String, _>("record"))?;
+    if !same_location(&current, expected)
+        || state_name(current.state)? != row.get::<String, _>("state")
+    {
+        return Ok(None);
+    }
+    Ok(Some(current))
+}
+// Read only ownership metadata before taking the owner lock. Loading the full
+// frozen snapshot here would keep a second, potentially 128 MiB copy alive.
+async fn load_request(
+    conn: &mut sqlx::SqliteConnection,
+    tenant: &TenantId,
+    id: CapsuleId,
+) -> Result<CapsuleCutRequest, StorageError> {
+    let row = sqlx::query("SELECT request FROM capsule_source_cuts WHERE tenant_id=?1 AND capsule_id=?2 AND length(CAST(request AS BLOB))<=1048576")
+        .bind(tenant.as_str()).bind(id.to_string())
+        .fetch_optional(&mut *conn).await?.ok_or_else(invalid)?;
+    decode(&row.get::<String, _>("request"))
+}
+async fn load(
+    conn: &mut sqlx::SqliteConnection,
+    tenant: &TenantId,
+    id: CapsuleId,
+) -> Result<(CapsuleSourceCut, String), StorageError> {
+    let row=sqlx::query("SELECT * FROM capsule_source_cuts WHERE tenant_id=?1 AND capsule_id=?2 AND (snapshot IS NULL OR length(CAST(snapshot AS BLOB))<=134217728) AND (sealed_payload IS NULL OR length(sealed_payload)<=67108928) AND length(CAST(request AS BLOB))<=1048576").bind(tenant.as_str()).bind(id.to_string()).fetch_optional(&mut *conn).await?.ok_or_else(invalid)?;
+    Ok((cut(&row)?, row.get("state")))
+}
+async fn save_owner(
+    conn: &mut sqlx::SqliteConnection,
+    value: &ContinuityExecution,
+) -> Result<(), StorageError> {
+    sqlx::query("UPDATE continuity_executions SET state=?1,record=?2,updated_at=?3,epoch=?4,owner_runtime_id=?5 WHERE tenant_id=?6 AND continuity_id=?7")
+        .bind(state_name(value.state)?).bind(encode(value)?).bind(value.updated_at.to_rfc3339())
+        .bind(i64::try_from(value.epoch.get()).map_err(|_|invalid())?).bind(value.owner_runtime_id.to_string())
+        .bind(value.tenant_id.as_str()).bind(value.continuity_id.to_string()).execute(&mut *conn).await?;
+    Ok(())
+}
+
+pub(super) async fn capture(
+    store: &SqliteStorage,
+    request: &CapsuleCutRequest,
+) -> Result<CapsuleCutCapture, StorageError> {
+    request.validate()?;
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+
+    let outcome = capture_on(&mut tx, request).await?;
+    if matches!(outcome, CapsuleCutCapture::Ready(_)) {
+        tx.commit().await?;
+    } else {
+        tx.rollback().await?;
+    }
+    Ok(outcome)
+}
+async fn capture_on(
+    conn: &mut sqlx::SqliteConnection,
+    request: &CapsuleCutRequest,
+) -> Result<CapsuleCutCapture, StorageError> {
+    if !super::mobile_access::permits_capsule(
+        conn,
+        request.mobile_access.as_ref(),
+        request.owner.current_instance_id,
+        &request.owner.tenant_id,
+    )
+    .await?
+    {
+        return Ok(CapsuleCutCapture::Refused(CapsuleCutRefusal::Ownership));
+    }
+    let Some(current) = owner(conn, &request.owner).await? else {
+        return Ok(CapsuleCutCapture::Refused(CapsuleCutRefusal::Ownership));
+    };
+    let row=sqlx::query("SELECT * FROM capsule_source_cuts WHERE tenant_id=?1 AND continuity_id=?2 AND epoch=?3 AND state IN ('captured','sealed') AND (snapshot IS NULL OR length(CAST(snapshot AS BLOB))<=134217728) AND (sealed_payload IS NULL OR length(sealed_payload)<=67108928) AND length(CAST(request AS BLOB))<=1048576").bind(current.tenant_id.as_str()).bind(current.continuity_id.to_string()).bind(i64::try_from(current.epoch.get()).map_err(|_|invalid())?).fetch_optional(&mut *conn).await?;
+    if let Some(row) = row {
+        let existing = cut(&row)?;
+        if current.state != OwnershipState::Transferring || !existing.request.matches(request) {
+            return Ok(CapsuleCutCapture::Refused(CapsuleCutRefusal::Ownership));
+        }
+        return Ok(CapsuleCutCapture::Ready(Box::new(existing)));
+    }
+    if current.state != OwnershipState::Owned || request.owner.state != OwnershipState::Owned {
+        return Ok(CapsuleCutCapture::Refused(CapsuleCutRefusal::Ownership));
+    }
+    let exists = sqlx::query("SELECT 1 FROM task_instances WHERE tenant_id=?1 AND id=?2")
+        .bind(current.tenant_id.as_str())
+        .bind(current.current_instance_id.to_string())
+        .fetch_optional(&mut *conn)
+        .await?;
+    if exists.is_none() {
+        return Ok(CapsuleCutCapture::Refused(CapsuleCutRefusal::Ownership));
+    }
+    let snapshot = match super::capsule_source_snapshot::read(conn, &current).await? {
+        super::capsule_source_snapshot::Read::Ready(snapshot) => snapshot,
+        super::capsule_source_snapshot::Read::Refused(reason) => {
+            return Ok(CapsuleCutCapture::Refused(reason));
+        }
+    };
+    let id = CapsuleId::new();
+    let frozen = transferring(&current, request.now);
+    save_owner(conn, &frozen).await?;
+    sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=?1 WHERE id=?2 AND tenant_id=?3").bind(request.now.to_rfc3339()).bind(current.current_instance_id.to_string()).bind(current.tenant_id.as_str()).execute(&mut *conn).await?;
+    let json = encode(snapshot.as_ref())?;
+    if json.len() > CapsuleSourceSnapshot::MAX_CAPTURE_BYTES {
+        return Err(crate::capsule_export::too_large());
+    }
+    sqlx::query("INSERT INTO capsule_source_cuts(capsule_id,tenant_id,continuity_id,epoch,source_instance_id,source_runtime_id,state,request,snapshot,created_at) VALUES(?1,?2,?3,?4,?5,?6,'captured',?7,?8,?9)").bind(id.to_string()).bind(current.tenant_id.as_str()).bind(current.continuity_id.to_string()).bind(i64::try_from(current.epoch.get()).map_err(|_|invalid())?).bind(current.current_instance_id.to_string()).bind(current.owner_runtime_id.to_string()).bind(encode(request)?).bind(json).bind(request.now.to_rfc3339()).execute(&mut *conn).await?;
+    Ok(CapsuleCutCapture::Ready(Box::new(CapsuleSourceCut {
+        id,
+        request: request.clone(),
+        snapshot: Some(*snapshot),
+        manifest: None,
+        sealed_payload: None,
+    })))
+}
+
+pub(super) async fn seal(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    id: CapsuleId,
+    manifest: &CapsuleManifest,
+    sealed: &[u8],
+) -> Result<CapsuleSourceCut, StorageError> {
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let request = load_request(&mut tx, tenant, id).await?;
+    let current = owner(&mut tx, &request.owner).await?.ok_or_else(invalid)?;
+    if current.state != OwnershipState::Transferring {
+        return Err(invalid());
+    }
+    let (mut stored, phase) = load(&mut tx, tenant, id).await?;
+    validate_seal(&stored, manifest, sealed)?;
+    if phase == "sealed" {
+        let existing = stored.manifest.as_ref().ok_or_else(invalid)?;
+        let mut candidate = manifest.clone();
+        candidate.payload_artifact = existing.payload_artifact.clone();
+        if &candidate != existing {
+            return Err(invalid());
+        }
+        tx.commit().await?;
+        return Ok(stored);
+    }
+    if phase != "captured" {
+        return Err(invalid());
+    }
+    sqlx::query("INSERT INTO execution_capsules(id,continuity_id,tenant_id,expires_at,manifest) VALUES(?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING").bind(manifest.capsule_id.to_string()).bind(manifest.continuity_id.to_string()).bind(manifest.tenant_id.as_str()).bind(manifest.expires_at.to_rfc3339()).bind(encode(manifest)?).execute(&mut *tx).await?;
+    let row = sqlx::query("SELECT manifest FROM execution_capsules WHERE id=?1")
+        .bind(id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
+    let saved: CapsuleManifest = decode(&row.get::<String, _>("manifest"))?;
+    if &saved != manifest {
+        return Err(invalid());
+    }
+    sqlx::query("UPDATE capsule_source_cuts SET state='sealed',snapshot=NULL,manifest=?1,sealed_payload=?2 WHERE tenant_id=?3 AND capsule_id=?4 AND state='captured'").bind(encode(manifest)?).bind(sealed).bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
+    tx.commit().await?;
+    stored.snapshot = None;
+    stored.manifest = Some(saved);
+    stored.sealed_payload = Some(sealed.to_vec());
+    Ok(stored)
+}
+
+pub(super) async fn abort(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    id: CapsuleId,
+) -> Result<bool, StorageError> {
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let request = load_request(&mut tx, tenant, id).await?;
+    let Some(current) = owner(&mut tx, &request.owner).await? else {
+        return Ok(false);
+    };
+    let (stored, phase) = load(&mut tx, tenant, id).await?;
+    if phase != "captured" || current.state != OwnershipState::Transferring {
+        return Ok(false);
+    }
+    let snapshot = stored.snapshot.as_ref().ok_or_else(invalid)?;
+    let restored = ContinuityExecution {
+        state: OwnershipState::Owned,
+        updated_at: chrono::Utc::now(),
+        ..current
+    };
+    save_owner(&mut tx, &restored).await?;
+    sqlx::query("UPDATE task_instances SET state=?1,next_fire_at=?2,updated_at=?3 WHERE id=?4 AND tenant_id=?5 AND state='paused' AND claimed_at IS NULL AND updated_at=?6").bind(snapshot.instance.state.to_string()).bind(snapshot.instance.next_fire_at.map(|t|t.to_rfc3339())).bind(restored.updated_at.to_rfc3339()).bind(restored.current_instance_id.to_string()).bind(tenant.as_str()).bind(stored.request.now.to_rfc3339()).execute(&mut *tx).await?;
+    sqlx::query("UPDATE capsule_source_cuts SET state='aborted',snapshot=NULL WHERE tenant_id=?1 AND capsule_id=?2 AND state='captured'").bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Compact a sealed cut without loading its (potentially 64 MiB) ciphertext.
+pub(super) async fn acknowledge(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    id: CapsuleId,
+    accepted: &ContinuityExecution,
+) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError> {
+    use crate::capsule_export::{CapsuleCutReceipt, validate_acknowledgement};
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let request = load_request(&mut tx, tenant, id).await?;
+    let row = sqlx::query(
+        "SELECT record,state,epoch,owner_runtime_id FROM continuity_executions WHERE tenant_id=?1 AND continuity_id=?2",
+    )
+    .bind(tenant.as_str())
+    .bind(request.owner.continuity_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(invalid)?;
+    let current: ContinuityExecution = decode(&row.get::<String, _>("record"))?;
+    if i64::try_from(current.epoch.get()).map_err(|_| invalid())? != row.get::<i64, _>("epoch")
+        || current.owner_runtime_id.to_string() != row.get::<String, _>("owner_runtime_id")
+    {
+        return Err(invalid());
+    }
+    if current.tenant_id != *tenant
+        || current.continuity_id != request.owner.continuity_id
+        || state_name(current.state)? != row.get::<String, _>("state")
+    {
+        return Err(invalid());
+    }
+    let row = sqlx::query("SELECT state,manifest,acknowledgement FROM capsule_source_cuts WHERE tenant_id=?1 AND capsule_id=?2 AND length(CAST(manifest AS BLOB))<=1048576 AND (acknowledgement IS NULL OR length(CAST(acknowledgement AS BLOB))<=1048576)").bind(tenant.as_str()).bind(id.to_string()).fetch_optional(&mut *tx).await?.ok_or_else(invalid)?;
+    let manifest: CapsuleManifest = decode(&row.get::<String, _>("manifest"))?;
+    validate_acknowledgement(&request, id, &manifest, accepted)?;
+    match row.get::<String, _>("state").as_str() {
+        "acknowledged" => {
+            let recorded: ContinuityExecution = decode(&row.get::<String, _>("acknowledgement"))?;
+            if !same_location(&recorded, accepted) {
+                return Err(invalid());
+            }
+            tx.commit().await?;
+            return Ok(CapsuleCutReceipt {
+                manifest,
+                accepted_owner: recorded,
+            });
+        }
+        "sealed" | "retired" => {}
+        _ => return Err(invalid()),
+    }
+    if same_location(&current, &request.owner) && current.state == OwnershipState::Transferring {
+        save_owner(&mut tx, accepted).await?;
+        let location = orch8_types::continuity::ContinuityLocation {
+            continuity_id: accepted.continuity_id,
+            tenant_id: accepted.tenant_id.clone(),
+            epoch: accepted.epoch,
+            runtime_id: accepted.owner_runtime_id,
+            instance_id: accepted.current_instance_id,
+            handoff_id: None,
+            entered_at: accepted.updated_at,
+        };
+        sqlx::query("INSERT INTO continuity_locations(tenant_id,continuity_id,epoch,runtime_id,instance_id,handoff_id,record,entered_at) VALUES(?1,?2,?3,?4,?5,NULL,?6,?7)")
+            .bind(tenant.as_str()).bind(accepted.continuity_id.to_string())
+            .bind(i64::try_from(accepted.epoch.get()).map_err(|_|invalid())?).bind(accepted.owner_runtime_id.to_string())
+            .bind(accepted.current_instance_id.to_string()).bind(encode(&location)?).bind(accepted.updated_at.to_rfc3339())
+            .execute(&mut *tx).await?;
+    } else if current.epoch < accepted.epoch
+        || (current.epoch == accepted.epoch && !same_location(&current, accepted))
+    {
+        return Err(invalid());
+    }
+    sqlx::query("UPDATE capsule_source_cuts SET state='acknowledged',snapshot=NULL,sealed_payload=NULL,acknowledgement=?1 WHERE tenant_id=?2 AND capsule_id=?3 AND state IN ('sealed','retired')").bind(encode(accepted)?).bind(tenant.as_str()).bind(id.to_string()).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO capsule_artifact_retirements(artifact_key,tenant_id,capsule_id,next_sweep_at) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING")
+        .bind(&manifest.payload_artifact.key).bind(tenant.as_str()).bind(id.to_string()).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(CapsuleCutReceipt {
+        manifest,
+        accepted_owner: accepted.clone(),
+    })
+}
+
+pub(super) async fn publishable(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    id: CapsuleId,
+) -> Result<bool, StorageError> {
+    let mut conn = store.pool.begin().await?;
+    // One read-transaction snapshot for authority and ownership; capture holds the
+    // writer reservation. Publication is rechecked again after external I/O.
+    let request = load_request(&mut conn, tenant, id).await;
+    let request = match request {
+        Ok(request) => request,
+        Err(StorageError::Constraint(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !super::mobile_access::permits_capsule(
+        &mut conn,
+        request.mobile_access.as_ref(),
+        request.owner.current_instance_id,
+        tenant,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM capsule_source_cuts c JOIN continuity_executions e ON e.tenant_id=c.tenant_id AND e.continuity_id=c.continuity_id WHERE c.tenant_id=?1 AND c.capsule_id=?2 AND c.state='sealed' AND e.state='transferring' AND e.epoch=c.epoch AND e.owner_runtime_id=c.source_runtime_id AND json_extract(e.record,'$.current_instance_id')=c.source_instance_id AND EXISTS(SELECT 1 FROM task_instances i WHERE i.id=c.source_instance_id AND i.state NOT IN ('completed','failed','cancelled')))").bind(tenant.as_str()).bind(id.to_string()).fetch_one(&mut *conn).await?)
+}
+
+pub(super) async fn claim_retired_artifacts(
+    store: &SqliteStorage,
+    now: chrono::DateTime<chrono::Utc>,
+    retry_at: chrono::DateTime<chrono::Utc>,
+    limit: u32,
+) -> Result<Vec<String>, StorageError> {
+    if retry_at <= now {
+        return Err(invalid());
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let keys: Vec<String> = sqlx::query_scalar("SELECT artifact_key FROM capsule_artifact_retirements WHERE next_sweep_at<=?1 ORDER BY next_sweep_at,artifact_key LIMIT ?2")
+        .bind(now.to_rfc3339()).bind(i64::from(limit.min(1000))).fetch_all(&mut *tx).await?;
+    for key in &keys {
+        sqlx::query(
+            "UPDATE capsule_artifact_retirements SET next_sweep_at=?1 WHERE artifact_key=?2",
+        )
+        .bind(retry_at.to_rfc3339())
+        .bind(key)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(keys)
+}
+
+/// Retire retry bytes without guessing a remote provider outcome or restoring
+/// source ownership. The adapter proves account retirement/cancellation first.
+pub(super) async fn retire(
+    conn: &mut sqlx::SqliteConnection,
+    tenant: &TenantId,
+    instance: Option<orch8_types::ids::InstanceId>,
+) -> Result<(), StorageError> {
+    let instance = instance.map(|id| id.to_string());
+    sqlx::query("INSERT INTO capsule_artifact_retirements(artifact_key,tenant_id,capsule_id,next_sweep_at) SELECT source_instance_id || '/' || capsule_id,tenant_id,capsule_id,?1 FROM capsule_source_cuts WHERE tenant_id=?2 AND (?3 IS NULL OR source_instance_id=?3) AND state IN ('captured','sealed') AND manifest IS NOT NULL ON CONFLICT DO NOTHING")
+        .bind(chrono::Utc::now().to_rfc3339()).bind(tenant.as_str()).bind(&instance).execute(&mut *conn).await?;
+    sqlx::query("UPDATE capsule_source_cuts SET state='retired',snapshot=NULL,sealed_payload=NULL WHERE tenant_id=?1 AND (?2 IS NULL OR source_instance_id=?2) AND state IN ('captured','sealed')")
+        .bind(tenant.as_str()).bind(instance).execute(&mut *conn).await?;
+    Ok(())
+}

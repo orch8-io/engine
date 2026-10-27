@@ -19,7 +19,6 @@ pub struct CapsuleEffectImport {
 }
 impl CapsuleEffectImport {
     pub fn validate(&self, sequence: SequenceId) -> Result<(), StorageError> {
-        let state = &self.state;
         let manifest = &self.manifest;
         if manifest.tenant_id != self.source.tenant_id
             || manifest.continuity_id != self.source.continuity_id
@@ -32,56 +31,17 @@ impl CapsuleEffectImport {
             return Err(invalid());
         }
 
-        if self.source.state != OwnershipState::Owned
-            || self.manifest_sha256.len() != 64
+        if self.manifest_sha256.len() != 64
             || !self.manifest_sha256.bytes().all(|b| b.is_ascii_hexdigit())
-            || state.receipts.len() > CapsulePayload::MAX_PENDING_ITEMS
-            || state.active_attempts.len() > CapsulePayload::MAX_PENDING_ITEMS
-            || state.reset_blocks.len() > CapsulePayload::MAX_PENDING_ITEMS
-            || state.commit_guards.len() > CapsulePayload::MAX_PENDING_ITEMS
         {
             return Err(invalid());
         }
-        let receipts: HashMap<_, _> = state.receipts.iter().map(|r| (r.id, r)).collect();
-        if receipts.len() != state.receipts.len()
-            || state.receipts.iter().any(|r| {
-                r.tenant_id != self.source.tenant_id
-                    || r.continuity_id != self.source.continuity_id
-                    || r.epoch.get() > self.source.epoch.get()
-            })
-        {
-            return Err(invalid());
-        }
-        let mut keys = HashSet::new();
-        for binding in &state.active_attempts {
-            let Some(receipt) = receipts.get(&binding.effect_id) else {
-                return Err(invalid());
-            };
-            if receipt.block_id != binding.block_id
-                || receipt.attempt != binding.attempt
-                || !keys.insert((&binding.block_id, binding.attempt))
-            {
-                return Err(invalid());
-            }
-        }
-        let resets: HashSet<_> = state.reset_blocks.iter().collect();
-        let guards: HashSet<_> = state.commit_guards.iter().map(|g| g.id).collect();
-        if resets.len() != state.reset_blocks.len()
-            || guards.len() != state.commit_guards.len()
-            || state.commit_guards.iter().any(|g| {
-                g.tenant_id != self.source.tenant_id
-                    || g.sequence_id != sequence
-                    || g.sequence_version
-                        .is_some_and(|version| version != manifest.sequence.version)
-                    || !g.enabled
-                    || !g.commit_guard
-                    || !matches!(g.rule, InvariantRule::EffectAtMostOnce { .. })
-            })
-        {
-            return Err(invalid());
-        }
-        self.source.epoch.checked_next().map_err(|_| invalid())?;
-        Ok(())
+        validate_effect_state(
+            &self.source,
+            &self.state,
+            sequence,
+            manifest.sequence.version,
+        )
     }
     pub(crate) fn accepts_owner(
         &self,
@@ -100,6 +60,62 @@ impl CapsuleEffectImport {
                 || (owner.state == OwnershipState::Transferring
                     && owner.current_instance_id == destination))
     }
+}
+/// Shared structural validation for imported and source-frozen effect evidence.
+pub(crate) fn validate_effect_state(
+    source: &ContinuityExecution,
+    state: &CapsuleEffectState,
+    sequence: SequenceId,
+    sequence_version: i32,
+) -> Result<(), StorageError> {
+    if source.state != OwnershipState::Owned
+        || state.receipts.len() > CapsulePayload::MAX_PENDING_ITEMS
+        || state.active_attempts.len() > CapsulePayload::MAX_PENDING_ITEMS
+        || state.reset_blocks.len() > CapsulePayload::MAX_PENDING_ITEMS
+        || state.commit_guards.len() > CapsulePayload::MAX_PENDING_ITEMS
+    {
+        return Err(invalid());
+    }
+    let receipts: HashMap<_, _> = state.receipts.iter().map(|r| (r.id, r)).collect();
+    if receipts.len() != state.receipts.len()
+        || state.receipts.iter().any(|r| {
+            r.tenant_id != source.tenant_id
+                || r.continuity_id != source.continuity_id
+                || r.epoch.get() > source.epoch.get()
+        })
+    {
+        return Err(invalid());
+    }
+    let mut keys = HashSet::new();
+    for binding in &state.active_attempts {
+        let Some(receipt) = receipts.get(&binding.effect_id) else {
+            return Err(invalid());
+        };
+        if receipt.block_id != binding.block_id
+            || receipt.attempt != binding.attempt
+            || !keys.insert((&binding.block_id, binding.attempt))
+        {
+            return Err(invalid());
+        }
+    }
+    let resets: HashSet<_> = state.reset_blocks.iter().collect();
+    let guards: HashSet<_> = state.commit_guards.iter().map(|g| g.id).collect();
+    if resets.len() != state.reset_blocks.len()
+        || guards.len() != state.commit_guards.len()
+        || state.commit_guards.iter().any(|g| {
+            g.tenant_id != source.tenant_id
+                || g.sequence_id != sequence
+                || g.sequence_version
+                    .is_some_and(|version| version != sequence_version)
+                || !g.enabled
+                || !g.commit_guard
+                || !matches!(g.rule, InvariantRule::EffectAtMostOnce { .. })
+        })
+    {
+        return Err(invalid());
+    }
+    source.epoch.checked_next().map_err(|_| invalid())?;
+    Ok(())
 }
 fn invalid() -> StorageError {
     StorageError::Constraint("invalid portable effect evidence".into())

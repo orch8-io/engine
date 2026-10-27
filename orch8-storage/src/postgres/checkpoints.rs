@@ -26,11 +26,19 @@ pub(super) async fn get_latest(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    get_latest_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn get_latest_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError> {
     let row: Option<(Uuid, Uuid, serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(instance_id.into_uuid())
-    .fetch_optional(&store.pool)
+    .fetch_optional(&mut *conn)
     .await?;
     Ok(row.map(
         |(id, inst_id, data, created_at)| orch8_types::checkpoint::Checkpoint {

@@ -1007,3 +1007,51 @@ async fn compensation_version_exhaustion_rejects_claim_without_writing() {
         serde_json::to_value(run).unwrap()
     );
 }
+
+// A legacy task can outlive collected continuity history. Retirement must stop
+// propagation without throwing away a valid result from its original lease.
+orch8_storage::backend_test!(async fn retired_legacy_completion_keeps_outcome_without_forward_propagation(b) {
+    let sequence = SequenceBuilder::new("retired-completion").step("charge", "noop").build();
+    b.storage.create_sequence(&sequence).await.unwrap();
+    let source = InstanceBuilder::for_sequence(&sequence).state(InstanceState::Waiting)
+        .data(json!({"private":"source-context-must-stay-frozen"})).build();
+    b.storage.create_instance(&source).await.unwrap();
+    let now = Utc::now();
+    let task: orch8_types::worker::WorkerTask = serde_json::from_value(json!({
+        "id":uuid::Uuid::new_v4(), "instance_id":source.id, "block_id":"charge", "handler_name":"noop",
+        "params":{}, "context":{}, "attempt":0, "state":"pending", "created_at":now
+    })).unwrap();
+    b.storage.create_worker_task(&task).await.unwrap();
+    let mut claimed = b.storage.claim_worker_tasks("noop", "legacy-worker", 1).await.unwrap();
+    assert_eq!(claimed.len(), 1);
+    let task = claimed.pop().unwrap();
+    // Only compact identity evidence remains, as after destination-history GC.
+    if b.kind.is_postgres() {
+        sqlx::query("INSERT INTO physical_instance_retirements VALUES($1,$2,$3,$4,$5)")
+            .bind(source.id.into_uuid()).bind(source.tenant_id.as_str()).bind(uuid::Uuid::new_v4())
+            .bind(uuid::Uuid::new_v4()).bind(now).execute(b.pg_pool()).await.unwrap();
+    } else {
+        sqlx::query("INSERT INTO physical_instance_retirements VALUES(?1,?2,?3,?4,?5)")
+            .bind(source.id.to_string()).bind(source.tenant_id.as_str()).bind(uuid::Uuid::new_v4().to_string())
+            .bind(uuid::Uuid::new_v4().to_string()).bind(now.to_rfc3339()).execute(b.sqlite_pool()).await.unwrap();
+    }
+    let quarantined = b.storage.get_instance(source.id).await.unwrap().unwrap();
+    assert_eq!(quarantined.state,InstanceState::Paused);
+    assert!(quarantined.claimed_at.is_none());
+    assert!(b.storage.get_continuity_execution_touching_instance(&source.tenant_id,source.id).await.unwrap().is_none());
+    let server = spawn_test_server_on(b.storage.clone(), None).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/v1/workers/tasks/{}/complete", server.base_url, task.id);
+    for output in [json!({"settled":"durable-original"}),json!({"settled":"retry-must-not-replace"})] {
+        let response = client.post(&url).header("X-Tenant-Id",source.tenant_id.as_str())
+            .json(&json!({"worker_id":"legacy-worker","claim_epoch":task.claim_epoch,"output":output})).send().await.unwrap();
+        assert_eq!(response.status(),reqwest::StatusCode::OK,"{}",response.text().await.unwrap());
+        let recorded = b.storage.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(recorded.state,orch8_types::worker::WorkerTaskState::Completed);
+        assert_eq!(recorded.output,Some(json!({"settled":"durable-original"})));
+        let frozen = b.storage.get_instance(source.id).await.unwrap().unwrap();
+        assert_eq!(frozen.state,quarantined.state);
+        assert_eq!(frozen.context.data,source.context.data);
+        assert!(b.storage.get_block_output(source.id,&BlockId::new("charge")).await.unwrap().is_none());
+    }
+});

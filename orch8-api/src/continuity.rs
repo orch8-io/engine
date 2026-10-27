@@ -1161,9 +1161,12 @@ async fn export_handoff(
         .await
         .map_err(|error| ApiError::from_storage(error, "handoff"))?
         .ok_or_else(|| ApiError::NotFound(format!("handoff {id}")))?;
-    if handoff.state != HandoffState::Requested {
+    if !matches!(
+        handoff.state,
+        HandoffState::Requested | HandoffState::Quiescing | HandoffState::Exported
+    ) {
         return Err(ApiError::Conflict(
-            "only a requested handoff can begin export".into(),
+            "handoff cannot export in its current state".into(),
         ));
     }
     let execution = state
@@ -1172,6 +1175,17 @@ async fn export_handoff(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if execution.owner_runtime_id != handoff.source_runtime_id
+        || execution.epoch != handoff.expected_epoch
+        || !matches!(
+            execution.state,
+            OwnershipState::Owned | OwnershipState::Transferring
+        )
+    {
+        return Err(ApiError::Conflict(
+            "handoff source ownership has changed".into(),
+        ));
+    }
     let placement_id = handoff.placement_decision_id.ok_or_else(|| {
         ApiError::Conflict("handoff is missing dispatch placement evidence".into())
     })?;
@@ -1247,22 +1261,27 @@ async fn export_handoff(
     }
     let now = Utc::now();
     let mut quiescing = handoff.clone();
-    quiescing.state = HandoffState::Quiescing;
-    quiescing.version = handoff.version.saturating_add(1);
-    quiescing.updated_at = now;
-    if !state
-        .storage
-        .cas_handoff(
-            &tenant_id,
-            id,
-            HandoffState::Requested,
-            handoff.version,
-            &quiescing,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "handoff"))?
-    {
-        return Err(ApiError::Conflict("handoff changed concurrently".into()));
+    if handoff.state == HandoffState::Requested {
+        quiescing.state = HandoffState::Quiescing;
+        quiescing.version = handoff
+            .version
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Conflict("handoff version exhausted".into()))?;
+        quiescing.updated_at = now;
+        if !state
+            .storage
+            .cas_handoff(
+                &tenant_id,
+                id,
+                HandoffState::Requested,
+                handoff.version,
+                &quiescing,
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "handoff"))?
+        {
+            return Err(ApiError::Conflict("handoff changed concurrently".into()));
+        }
     }
     let capsule_result = orch8_engine::capsule::export_paused_capsule(
         state.storage.as_ref(),
@@ -1278,79 +1297,54 @@ async fn export_handoff(
         payload_encryptor,
     )
     .await;
-    let capsule = match capsule_result {
-        Ok(capsule) => capsule,
-        Err(error) => {
-            return Err(mark_capsule_export_failed(
-                &state,
-                &tenant_id,
-                &quiescing,
-                error.to_string(),
-            )
-            .await);
-        }
-    };
-    let payload_result = state
+    // Publication and read errors may follow a committed source fence. Keep the
+    // handoff retryable; only the durable cut decides whether ownership can move.
+    let capsule = capsule_result.map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let payload = state
         .storage
         .get_artifact(&capsule.manifest.payload_artifact.key)
-        .await;
-    let payload = match payload_result {
-        Ok(Some(payload)) => payload,
-        Ok(None) => {
-            return Err(mark_capsule_export_failed(
-                &state,
-                &tenant_id,
-                &quiescing,
-                "exported capsule payload is unavailable".into(),
-            )
-            .await);
-        }
-        Err(error) => {
-            return Err(mark_capsule_export_failed(
-                &state,
-                &tenant_id,
-                &quiescing,
-                format!("cannot read exported capsule payload: {error}"),
-            )
-            .await);
-        }
-    };
+        .await
+        .map_err(|error| ApiError::from_storage(error, "capsule payload"))?
+        .ok_or_else(|| ApiError::Conflict("exported capsule payload is unavailable".into()))?;
     if payload.len() as u64 != capsule.manifest.payload_artifact.bytes
         || hex_sha256(&payload) != capsule.manifest.payload_artifact.sha256
     {
-        return Err(mark_capsule_export_failed(
-            &state,
-            &tenant_id,
-            &quiescing,
+        return Err(ApiError::Conflict(
             "exported capsule payload does not match its signed manifest".into(),
-        )
-        .await);
+        ));
+    }
+    if handoff.state == HandoffState::Exported {
+        if handoff.capsule_id != Some(capsule.manifest.capsule_id) {
+            return Err(ApiError::Conflict("handoff capsule has changed".into()));
+        }
+        return Ok(Json(ExportHandoffResponse {
+            handoff,
+            capsule,
+            payload_base64: BASE64.encode(payload),
+        }));
     }
     let mut exported = quiescing.clone();
     exported.state = HandoffState::Exported;
     exported.capsule_id = Some(capsule.manifest.capsule_id);
-    exported.version = quiescing.version.saturating_add(1);
+    exported.version = quiescing
+        .version
+        .checked_add(1)
+        .ok_or_else(|| ApiError::Conflict("handoff version exhausted".into()))?;
     exported.updated_at = Utc::now();
     let mut transferring = execution.clone();
     transferring.state = OwnershipState::Transferring;
     transferring.updated_at = exported.updated_at;
-    orch8_engine::continuity::commit_handoff_export(
+    orch8_engine::continuity::commit_handoff_export_with_provenance(
         state.storage.as_ref(),
         &quiescing,
         &exported,
         &execution,
         &transferring,
+        &capsule.manifest,
+        state.provenance_signer(),
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    append_provenance_boundary(
-        &state,
-        &transferring,
-        "capsule_exported",
-        "signed capsule exported",
-        &capsule.manifest,
-    )
-    .await?;
     Ok(Json(ExportHandoffResponse {
         handoff: exported,
         capsule,
@@ -1605,12 +1599,14 @@ async fn attach_device_capsule(
     let mut transferring = execution.clone();
     transferring.state = OwnershipState::Transferring;
     transferring.updated_at = exported.updated_at;
-    orch8_engine::continuity::commit_handoff_export(
+    orch8_engine::continuity::commit_handoff_export_with_provenance(
         state.storage.as_ref(),
         &quiescing,
         &exported,
         &execution,
         &transferring,
+        &body.capsule.manifest,
+        state.provenance_signer(),
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;

@@ -1,0 +1,22 @@
+-- An empty installation can roll back; never remove live security evidence.
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM physical_instance_retirements LIMIT 1) THEN
+  RAISE EXCEPTION 'Cannot remove permanent physical instance retirement evidence';
+ END IF;
+END $$;
+DROP TRIGGER physical_source_worker_enqueue ON worker_tasks;
+DROP FUNCTION enforce_source_worker_enqueue();
+DROP TRIGGER physical_source_worker_claim ON worker_tasks;
+DROP TRIGGER physical_retirement_native_update ON task_instances;
+DROP TRIGGER physical_retirement_freeze_native ON physical_instance_retirements;
+DROP FUNCTION enforce_source_worker_admission();
+DROP FUNCTION enforce_retired_native_state();
+DROP FUNCTION freeze_retired_native_instance();
+DROP TRIGGER physical_retirement_native_insert ON task_instances;
+DROP TRIGGER physical_retirement_owner_write ON continuity_executions;
+DROP TRIGGER physical_retirement_from_cut ON capsule_source_cuts;
+DROP TRIGGER physical_retirement_immutable ON physical_instance_retirements;
+DROP FUNCTION enforce_physical_instance_retirement();
+DROP FUNCTION preserve_physical_instance_retirement();
+DROP FUNCTION record_physical_instance_retirement();
+DROP TABLE physical_instance_retirements;

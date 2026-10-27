@@ -1,4 +1,5 @@
 mod capsule_activation;
+pub mod capsule_export;
 mod child_adoption;
 mod child_lookup;
 mod compensation_start;
@@ -87,7 +88,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 128;
+pub const STORAGE_SCHEMA_VERSION: u32 = 129;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -686,6 +687,8 @@ pub trait InstanceStore: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Frozen capsule sources and permanently retired physical IDs are skipped
+    /// without failing unrelated entries in this internal scheduling batch.
     async fn batch_reschedule_instances(
         &self,
         ids: &[InstanceId],
@@ -4011,6 +4014,15 @@ pub trait MobileSyncStore: Send + Sync + 'static {
 /// supported way to advance ownership, handoff, and effect state.
 #[async_trait]
 pub trait ContinuityStore: Send + Sync + 'static {
+    /// Permanent, globally unique physical identity fence, independent of tenant
+    /// and continuity history GC. This does not authorize resource reads or
+    /// establish that an offline owner has stopped. Use it before admitting
+    /// forward execution when missing continuity history would mean legacy work.
+    async fn is_physical_instance_retired(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError>;
+
     async fn create_continuity_execution(
         &self,
         execution: &ContinuityExecution,
@@ -4081,6 +4093,10 @@ pub trait ContinuityStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
 
+    /// Replace an owner only while the epoch/runtime compare token is current.
+    /// A captured, sealed or retired source cut forbids reviving its physical
+    /// source through this generic operation; abort and acknowledgement use
+    /// their own atomic protocols. The next record must keep tenant/continuity.
     async fn cas_continuity_owner(
         &self,
         tenant_id: &TenantId,
@@ -4128,6 +4144,28 @@ pub trait ContinuityStore: Send + Sync + 'static {
         expected_execution: &ContinuityExecution,
         transferring_execution: &ContinuityExecution,
     ) -> Result<bool, StorageError>;
+
+    /// Commit source ownership, exported handoff, and its provenance boundary
+    /// together. A conflicting chain predecessor rolls back all three writes.
+    async fn commit_handoff_export_with_provenance(
+        &self,
+        tenant_id: &TenantId,
+        expected_handoff: &ExecutionHandoff,
+        exported_handoff: &ExecutionHandoff,
+        expected_execution: &ContinuityExecution,
+        transferring_execution: &ContinuityExecution,
+        provenance: &ProvenanceEntry,
+    ) -> Result<bool, StorageError> {
+        let _ = (
+            tenant_id,
+            expected_handoff,
+            exported_handoff,
+            expected_execution,
+            transferring_execution,
+            provenance,
+        );
+        Err(StorageError::Unsupported("atomic export provenance".into()))
+    }
 
     /// Atomically schedule the paused destination and record the handoff as
     /// resumed. Returns false when either compare-and-swap token is stale.
@@ -4509,6 +4547,87 @@ pub trait ContinuityStore: Send + Sync + 'static {
     ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
         let _ = (tenant, continuity, sequence, version, kind);
         Err(StorageError::Unsupported("portable effect guards".into()))
+    }
+
+    /// Capture one consistent source state and revoke source admission before
+    /// any artifact publication. Retries return the durable original cut.
+    async fn capture_capsule_cut(
+        &self,
+        request: &crate::capsule_export::CapsuleCutRequest,
+    ) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError> {
+        let _ = request;
+        Err(StorageError::Unsupported(
+            "durable capsule source cut".into(),
+        ))
+    }
+    /// Persist the immutable transport header and ciphertext before upload.
+    async fn seal_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+        manifest: &CapsuleManifest,
+        sealed: &[u8],
+    ) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError> {
+        let _ = (tenant, id, manifest, sealed);
+        Err(StorageError::Unsupported(
+            "durable capsule source cut".into(),
+        ))
+    }
+    /// A pre-seal validation failure may safely restore local ownership. Once
+    /// sealed, only explicit coordinator reconciliation can retire the cut.
+    async fn abort_preparing_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+    ) -> Result<bool, StorageError> {
+        let _ = (tenant, id);
+        Err(StorageError::Unsupported(
+            "durable capsule source cut".into(),
+        ))
+    }
+
+    /// Record explicit trusted-host acknowledgement of destination acceptance.
+    /// The caller must obtain backend/app ownership confirmation first. Only a
+    /// sealed cut and its exact next epoch/destination are accepted. This drops
+    /// the database retry ciphertext, retaining an immutable compact receipt;
+    /// it does not itself delete the external artifact or resume the source.
+    async fn acknowledge_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+        accepted: &ContinuityExecution,
+    ) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError> {
+        let _ = (tenant, id, accepted);
+        Err(StorageError::Unsupported(
+            "capsule source acknowledgement".into(),
+        ))
+    }
+
+    /// Whether a frozen source cut still permits publication. Exporters check
+    /// before and after external I/O; missing/retired cuts return false.
+    async fn capsule_cut_publishable(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+    ) -> Result<bool, StorageError> {
+        let _ = (tenant, id);
+        Err(StorageError::Unsupported(
+            "capsule publication fence".into(),
+        ))
+    }
+
+    /// Claim a bounded fair batch of durable artifact-deletion tombstones.
+    /// Move their next sweep to `retry_at` before external I/O. Tombstones remain
+    /// eligible for future sweeps even after deletion, catching late uploads and
+    /// surviving source-history purge. `retry_at` must be later than `now`.
+    async fn claim_retired_capsule_artifacts(
+        &self,
+        now: DateTime<Utc>,
+        retry_at: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        let _ = (now, retry_at, limit);
+        Ok(Vec::new())
     }
 
     /// Atomically accept a proof-bound imported capsule and schedule its paused

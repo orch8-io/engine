@@ -18,7 +18,7 @@ pub(super) async fn has_due_higher_priority(
     sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM task_instances
-            WHERE state = 'scheduled'
+            WHERE state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
               AND (next_fire_at IS NULL OR next_fire_at <= $1)
               AND priority > $2
         )",
@@ -343,7 +343,7 @@ pub(super) async fn claim_due(
                 SELECT id, tenant_id, priority, next_fire_at
                 FROM task_instances
                 WHERE (next_fire_at IS NULL OR next_fire_at <= $1)
-                  AND state = 'scheduled'
+                  AND state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
                 ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
                 LIMIT $4
                 FOR UPDATE SKIP LOCKED
@@ -379,7 +379,7 @@ pub(super) async fn claim_due(
             r"
             SELECT * FROM task_instances
             WHERE (next_fire_at IS NULL OR next_fire_at <= $1)
-              AND state = 'scheduled'
+              AND state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
             ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
             LIMIT $2
             FOR UPDATE SKIP LOCKED
@@ -592,7 +592,7 @@ pub(super) async fn batch_reschedule(
     }
     let uuids: Vec<uuid::Uuid> = ids.iter().map(|id| id.into_uuid()).collect();
     sqlx::query(
-        "UPDATE task_instances SET state = 'scheduled', next_fire_at = $1, updated_at = NOW() WHERE id = ANY($2)",
+        "UPDATE task_instances SET state = 'scheduled', next_fire_at = $1, updated_at = NOW() WHERE id = ANY($2) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))",
     )
     .bind(fire_at)
     .bind(&uuids)
@@ -1461,6 +1461,8 @@ pub(super) async fn list_artifact_gc_candidates(
          WHERE state::text IN ('completed','failed','cancelled') \
            AND updated_at < $1 \
            AND (metadata->>'_artifacts_gced') IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=task_instances.tenant_id AND cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed')) \
+           AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=task_instances.tenant_id AND ce.record->>'current_instance_id'=task_instances.id::text AND cut.state IN ('captured','sealed')) \
          ORDER BY updated_at ASC LIMIT $2",
     )
     .bind(cutoff)
@@ -1497,6 +1499,8 @@ pub(super) async fn list_instance_gc_candidates(
            AND NOT EXISTS ( \
                SELECT 1 FROM task_instances c \
                WHERE c.parent_instance_id = t.id) \
+           AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=t.tenant_id AND cut.source_instance_id=t.id AND cut.state IN ('captured','sealed')) \
+           AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=t.tenant_id AND ce.record->>'current_instance_id' = t.id::text AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS ( \
                SELECT 1 FROM effect_receipts r \
                WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \
@@ -1521,6 +1525,7 @@ pub(super) async fn list_instance_gc_candidates(
 const CONTINUITY_CHILD_TABLES: &[&str] = &[
     "continuity_stream_frames",
     "continuity_streams",
+    "capsule_source_cuts",
     "capsule_effect_imports",
     "continuity_effect_guards",
     "effect_attempt_bindings",
@@ -1582,6 +1587,8 @@ async fn lock_gc_effects_and_filter_candidates(
     .await?;
     let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT t.id, t.tenant_id FROM task_instances t WHERE t.id = ANY($1) \
+           AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=t.tenant_id AND cut.source_instance_id=t.id AND cut.state IN ('captured','sealed')) \
+           AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=t.tenant_id AND ce.record->>'current_instance_id' = t.id::text AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS ( \
                SELECT 1 FROM effect_receipts r \
                WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \

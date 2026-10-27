@@ -145,7 +145,7 @@ pub(super) async fn claim(
               SELECT id FROM worker_tasks
               WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
                 AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
-                AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
+                AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
               ORDER BY created_at
               LIMIT $3
               FOR UPDATE SKIP LOCKED
@@ -211,7 +211,7 @@ pub(super) async fn claim_for_tenant(
                 AND NOT wt.awaiting_dispatch
                 AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND ti.tenant_id = $4
-                AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)
+                AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)
               ORDER BY wt.created_at
               LIMIT $3
               FOR UPDATE OF wt SKIP LOCKED
@@ -314,7 +314,7 @@ pub(super) async fn claim_matching(
         // Never hand out work for an instance that already finished or was
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
-        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)");
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND ce.record->>'current_instance_id'=wt.instance_id::text)");
         // Push the cheap hard requirements into SQL so unclaimable rows never
         // consume the bounded scan window and hide eligible ones behind them
         // (a phone advertises few labels, and every older task needing a
@@ -403,7 +403,7 @@ pub(super) async fn claim_matching(
              lease_secs=$4, claimed_runtime_kind=$5
            WHERE id IN (
              SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
+             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
              ORDER BY created_at, id
              LIMIT $3
              FOR UPDATE SKIP LOCKED
@@ -816,6 +816,14 @@ pub(super) async fn resolve(
 
     let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
     let mut tx = store.pool.begin().await?;
+    let parent: Option<Uuid> = sqlx::query_scalar("SELECT ti.id FROM task_instances ti WHERE ti.id=$1 AND EXISTS(SELECT 1 FROM worker_tasks wt WHERE wt.id=$2 AND wt.instance_id=ti.id AND wt.state=$3 AND wt.claim_epoch=$4 AND ($5::text IS NULL OR wt.worker_id=$5)) FOR UPDATE OF ti")
+        .bind(resolution.instance_id.into_uuid()).bind(resolution.task_id)
+        .bind(resolution.expected_state.to_string()).bind(expected_epoch)
+        .bind(resolution.expected_worker_id.as_deref()).fetch_optional(&mut *tx).await?;
+    if parent.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
     let fence = " WHERE id = $1 AND state = $2 AND claim_epoch = $3 \
                   AND ($4::text IS NULL OR worker_id = $4)";
     let affected = match &resolution.action {
@@ -947,6 +955,11 @@ pub(super) async fn retry(
     fire_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), StorageError> {
     let mut tx = store.pool.begin().await?;
+    // Match enqueue/resolution ordering: native parent before worker row/index.
+    sqlx::query("SELECT id FROM task_instances WHERE id=$1 FOR UPDATE")
+        .bind(instance_id.into_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
 
     sqlx::query("DELETE FROM worker_tasks WHERE id = $1")
         .bind(old_task_id)

@@ -150,6 +150,14 @@ pub(super) async fn get_all(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockOutput>, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    get_all_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn get_all_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+) -> Result<Vec<BlockOutput>, StorageError> {
     // `id` tiebreaker: rows written in the same millisecond share a
     // `created_at`, and without a second key their relative order (hence
     // which attempt "wins" in last-wins consumers like
@@ -159,7 +167,7 @@ pub(super) async fn get_all(
     let rows =
         sqlx::query("SELECT * FROM block_outputs WHERE instance_id=?1 ORDER BY created_at, id")
             .bind(instance_id.into_uuid().to_string())
-            .fetch_all(&storage.pool)
+            .fetch_all(&mut *conn)
             .await?;
     rows.iter().map(row_to_output).collect()
 }

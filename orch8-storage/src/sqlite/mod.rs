@@ -36,6 +36,8 @@ mod api_keys;
 mod approval_tokens;
 mod audit;
 mod capsule_activation;
+mod capsule_export;
+mod capsule_source_snapshot;
 mod checkpoints;
 mod circuit_breakers;
 mod claimed_writes;
@@ -196,6 +198,18 @@ impl SqliteStorage {
     /// Access the underlying `SqlitePool`.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Called by the mobile adapter after it serializes account retirement in
+    /// this transaction. Clears only that account's source retry payloads and
+    /// retains ownership fences plus durable artifact cleanup tombstones.
+    pub async fn retire_mobile_capsule_cuts_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        account_id: &str,
+    ) -> Result<(), StorageError> {
+        let tenant = TenantId::new(format!("mobile-account-{account_id}"))
+            .map_err(StorageError::Constraint)?;
+        capsule_export::retire(tx, &tenant, None).await
     }
 
     /// Insert using an adapter-owned transaction, so ownership records and the
@@ -512,6 +526,37 @@ impl SqliteStorage {
                 return Err(e.into());
             }
         }
+        // Complete trigger bodies must bypass SCHEMA's semicolon splitter.
+        // Install/backfill atomically before exposing this storage to callers.
+        let mut retirement = helpers::begin_immediate(&self.pool).await?;
+        sqlx::raw_sql(include_str!("physical_retirement.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        let complete: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=60)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !complete {
+            sqlx::query("INSERT OR IGNORE INTO physical_instance_retirements SELECT source_instance_id,tenant_id,continuity_id,capsule_id,created_at FROM capsule_source_cuts WHERE state IN ('sealed','retired','acknowledged')")
+                .execute(&mut *retirement).await?;
+            // Publish completion in the same transaction as evidence/guards.
+            // Subsequent boots install guards without scanning transfer history.
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(60)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let quarantined: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=61)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !quarantined {
+            sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('scheduled','running','waiting','paused') AND (state!='paused' OR claimed_at IS NOT NULL OR next_fire_at IS NOT NULL) AND EXISTS(SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id)")
+                .execute(&mut *retirement).await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(61)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        retirement.commit().await?;
         self.backfill_legacy_api_key_capabilities().await?;
         self.record_schema_version().await?;
         Ok(())

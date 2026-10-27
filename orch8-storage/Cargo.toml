@@ -32,7 +32,7 @@ zstd = { version = "0.14", optional = true }
 # already in the workspace graph; no new crates.
 aes-gcm = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+sha2.workspace = true
 base64 = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
@@ -51,7 +51,7 @@ artifacts = ["dep:object_store"]
 # Test infrastructure (`orch8_storage::testing`): fault-injecting storage,
 # fixtures, backend matrix. Enabled only by dev-dependencies.
 test-util = []
-byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:sha2", "dep:base64", "dep:zeroize", "dep:reqwest"]
+byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:base64", "dep:zeroize", "dep:reqwest"]
 
 [dev-dependencies]
 # Integration tests in `tests/` use `orch8_storage::testing`.

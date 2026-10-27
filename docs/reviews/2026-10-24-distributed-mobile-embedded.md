@@ -4818,3 +4818,910 @@ acknowledgement of exclusive ownership. A local database cannot independently
 prove current ownership in another offline database. The atomic source export
 cut, complete wait/event/family portability, and scoped mobile import admission
 remain required follow-up work for the overall transfer contract.
+
+### DME180 — durable source export cut (work in progress)
+
+A source could resume after capsule snapshot reads but before publication and
+ownership transfer. A deferred native provider admission reproduced two physical
+provider calls: one on the resumed source and one after destination activation.
+The new regression in `orch8-engine/tests/capsule_export_cut.rs` fails with two
+calls before the source-cut change and passes with one afterward.
+
+Migration 129 and SQLite schema 59 introduce a durable source cut. Snapshot
+capture, source claim revocation, pause, and ownership fencing share a database
+transaction. Preparing retries reuse the captured state; sealing retains an
+immutable manifest and encrypted transport payload. Publication uses a stable
+artifact identity so an ambiguous upload can be retried. Only a pre-seal abort
+can restore local ownership. Sealed transport may already have reached another
+runtime, so upload errors cannot authorize resuming the source.
+
+The coordinator export commit must recognize an already fenced local source.
+The implementation accepts that state only with a sealed source cut matching the
+capsule, tenant, continuity, epoch, source runtime and instance, and destination.
+The existing owned-source path remains necessary when the coordinator attaches
+a capsule prepared in a remote device's database. Both paths now compare the
+source instance as well as owner and epoch. The service also binds the execution
+to the handoff's source runtime, tenant, continuity, and expected epoch.
+
+Validation: all 36 source-cut tests and 14 existing continuity storage tests
+passed after the coordinator change. These cover captured-only refusal, wrong
+capsule, wrong destination, wrong source instance, successful sealed commit, and
+stale handoff retry across plain and encrypted SQLite and PostgreSQL.
+Sealing and abort now read only bounded request metadata before taking the owner
+lock, avoiding a redundant full snapshot allocation. After that change, all
+36 source-cut tests, 14 continuity storage tests, and seven retention tests passed
+again (57 total). Strict storage Clippy passed for all targets with warnings
+denied. Documentation checks and whitespace validation also passed.
+
+Remaining work before publication includes acknowledgement and sealed-cut
+compaction, public API reopen/fault tests, immutable
+export overflow tests, migration rollback/reopen checks, and broader engine and
+mobile verification. Full wait/event/family and referenced-artifact portability
+remain separate unresolved parts of the original review scope.
+
+#### DME180 HTTP recovery follow-up
+
+Real loopback HTTP tests in `orch8-api/tests/continuity_export_retry.rs`
+reproduced three failures before the fix: upload acknowledgement loss and payload
+read failure terminally failed the handoff while leaving the source fenced; a
+lost coordinator commit acknowledgement made the next export request fail because
+the handoff was already exported. All three passed after the retry change.
+
+Export now permits Requested, Quiescing, and Exported phases, revalidates source
+runtime and epoch, and reuses the immutable source cut. Publication/read errors
+leave the operation retryable. Exported retries require the exact capsule ID and
+return the same transport. The service accepts a Transferring expectation, while
+the storage commit always requires matching sealed-cut proof for a Transferring
+row; presenting the current state must not bypass the proof. Failed, cancelled,
+and later accepted phases remain ineligible for export.
+
+The HTTP tests also reject replacement transfer keys and advanced ownership
+coordinates. An additional assertion checks that a larger requested TTL cannot
+extend the original sealed expiry. Final verification passed all 57 backend
+source-cut/continuity/retention tests and all seven HTTP retry/product tests.
+Strict Clippy passed for the API library and retry integration test with warnings
+denied; documentation and whitespace checks passed. These results cover retry
+recovery, not the remaining complete portability and history-lifecycle scope.
+
+The HTTP recovery tests exposed an audit gap: export provenance was appended after the coordinator commit.
+A lost commit acknowledgement or crash can leave an Exported handoff without its
+export boundary. The atomic-provenance follow-up below addresses newly committed exports;
+successful HTTP retries alone did not prove that audit invariant.
+
+
+#### DME180 atomic export provenance follow-up
+
+Extending the real HTTP commit-acknowledgement-loss test to require an export
+boundary reproduced a persisted Exported handoff with zero provenance entries.
+The new audited storage primitive commits the ownership transition, handoff CAS,
+and provenance insert in one transaction. A chain-predecessor conflict rolls
+back the transaction. The engine binds the signed manifest to the handoff/source
+coordinates, signs the boundary with the coordinator key, and retries bounded
+head races. Existing storage implementations without the primitive fail closed.
+The original unaudited primitive remains available for existing low-level callers.
+
+Both HTTP source export and device-capsule attachment now use the audited
+primitive. The encrypted wrapper and fault-injection wrapper forward it. HTTP
+lost-acknowledgement tests passed with exactly one export boundary and validated
+the resulting chain against the trusted coordinator signing key. Backend tests
+exercise predecessor conflict rollback, cross-tenant refusal, successful commit,
+and stale retry without a second entry. All 65 backend source-cut/continuity/retention tests passed, covering locally
+fenced and remotely owned modes across SQLite/PostgreSQL and encrypted wrappers.
+All seven HTTP retry/product tests passed with trusted-key signature checks.
+Strict storage Clippy passed for all targets and strict API library/retry-test
+Clippy passed, both with warnings denied. Documentation checks passed.
+
+This establishes atomicity for new audited commits. It does not reconstruct
+historically missing boundaries from older unaudited commits. Full device HTTP
+principal/platform coverage and acknowledged source-cut compaction remain open.
+
+#### DME180 source acknowledgement compaction (in progress)
+
+Sealed cuts retained their transport ciphertext indefinitely. A new storage
+acknowledgement primitive binds explicit trusted-host confirmation to the exact
+capsule, tenant, continuity, next epoch, and permitted destination. In one
+transaction it records a compact accepted-owner receipt, clears snapshot and
+ciphertext, and advances source-side ownership indexes/JSON and location history
+when needed. The local source stays paused. An acknowledgement retry returns the
+immutable receipt without overwriting subsequent ownership or completion.
+
+The storage test matrix exercises unsealed refusal, wrong tenant/continuity,
+wrong destination/epoch/state, lost acknowledgement after commit, compacted SQL
+columns, blocked resealing/source recapture, and preservation of later ownership.
+The first run caught an index/JSON mismatch that prevented the next owner CAS;
+ownership epoch/runtime indexes and destination location are now part of the
+same acknowledgement transaction. Follow-up verification passed all 81
+source-cut, handoff, and retention cases across plain/encrypted SQLite and
+PostgreSQL. Delayed first acknowledgement during the next transfer and after a
+later epoch preserves the current owner/state. Strict storage Clippy passed for
+all targets with warnings denied.
+
+This primitive is internal groundwork. External artifact deletion, publication
+races with deletion, source archive/admission behavior, public host/mobile scope
+authorization, and durable reopen/migration verification remain required before
+exposing the complete acknowledgement lifecycle. Clearing a database payload
+alone does not prove bounded total storage or external artifact cleanup.
+
+#### DME180 external transport retirement (in progress)
+
+Acknowledgement now atomically creates an artifact-deletion tombstone alongside
+the compact receipt. Tombstones have no parent FK and survive cut/history purge.
+The bounded GC pass claims due keys and reschedules them before external I/O;
+it revisits successful deletions too, because an already started upload can
+complete after deletion. This cleanup runs even when general artifact retention
+is disabled: acknowledgement explicitly requests transport retirement. Tombstones
+remain compact retained metadata; this is not a claim of constant total storage.
+
+Export checks publication eligibility before and after upload, including an
+upload that reports an error after writing. If retirement won, export removes
+the transport and refuses to return a capsule. The tombstone covers crashes and
+delete failures. Only the transport's canonical instance/capsule key is retired;
+other instance artifacts remain intact. Eligibility also requires the original
+source owner, epoch, instance, and Transferring fence.
+
+Final verification passed 64 source-cut backend cases, seven retention tests,
+and 15 rollback-file checks, plus four engine scenarios: double-provider
+prevention, deletion failure followed by GC/late-upload cleanup, upload finishing
+after acknowledgement, and SQLite/local-file artifact reopen after source-cut
+purge. Ownership-bound publication eligibility is included in these results.
+Strict storage Clippy passed for all targets and engine library/integration-test
+Clippy passed with warnings denied. Documentation checks passed. Mobile
+uses its own maintenance path rather than server GC, so mobile cleanup wiring,
+SDK acknowledgement scope/API coverage, and source archive/admission lifecycle
+remain open.
+
+#### DME180 mobile production storage and maintenance follow-up
+
+The real `MobileEngine::new` constructor configured no artifact backend, making
+public continuity export fail with “artifact storage is not configured.” Earlier
+continuity tests supplied a memory artifact store directly and missed this.
+A real constructor regression reproduced the failure. Mobile now attaches a
+local artifact store beside the opened database's canonical filename, so symlink
+aliases and restart use the same companion directory. Explicit `:memory:` engines
+use an ephemeral memory store. Hosts must keep the companion artifacts with the
+database when moving/backing up engine data.
+
+Mobile transfer-key identity was also constant across all provided AES keys.
+It now fingerprints the actual decoded 32-byte transfer key, so an immutable
+export retry cannot silently accept another key and return old ciphertext.
+Legacy export refuses non-mobile/account-scoped tenants before source capture;
+scoped export still needs its own explicit owner-authorized surface.
+
+Transport retirement runs outside scheduler locks and host callbacks, including
+manual ticks/OS background batches, foreground startup and quiescent deadlines,
+and memory-budget scheduler skips. A mobile pass is limited to 32 keys and
+250 ms, at most once per five minutes. It claims one tombstone at a time so a
+cancelled pass does not reschedule a large unattempted batch. Server GC uses the
+same shared bounded collector. Tombstones remain eligible after successful
+object deletion to catch late uploads.
+
+The real constructor regression passed through export, alias-path reopen,
+unchanged retry/expiry, changed-key refusal, OS-background cleanup, and a second
+restart into foreground cleanup of a recreated transport. The account-isolation
+regression leaves ownership unchanged and creates no source cut. All 695 mobile
+unit tests, eight integration tests, four shared engine export/cleanup
+regressions, and 18 engine GC unit tests passed (725 total). Strict mobile Clippy
+passed for all targets, and shared engine library/integration-test Clippy
+passed, both with warnings denied. Documentation and whitespace checks passed.
+SDK acknowledgement APIs, scoped mobile
+import/export admission and authorization, source archive/quota semantics, and
+complete wait/event/family/artifact portability remain open.
+
+#### DME180 Rust source acknowledgement and effect-bound contract
+
+The public embeddable facade now accepts explicit trusted app/backend acceptance
+coordinates through `Engine::acknowledge_portable_capsule`: capsule ID, accepted
+epoch, destination runtime, and destination instance. It derives tenant and
+continuity from the engine's tenant-filtered stored manifest, then invokes the
+durable receipt/cleanup path. An external artifact error may follow the receipt
+commit; the host can retry the same coordinates. Source execution stays paused.
+This does not replace the remaining scoped mobile acknowledgement/archive APIs.
+
+Public facade tests passed for full import/activation/wait/acknowledgement,
+wrong destination/epoch refusal, repeated acknowledgement, and a foreign tenant
+sharing the same physical database. The foreign tenant cannot delete the source
+transport; valid acknowledgement deletes it and blocks source re-export.
+Strict facade Clippy passed with warnings denied. The standard `tempfile` test
+dependency owns isolated database/artifact directories; the lockfile change is
+limited to that existing workspace dependency.
+
+The existing effect-bound test expected a retry to recapture a newly appended
+receipt. Its failure was an obsolete expectation after immutable capture, not
+permission to truncate history. Two tests now pass: exactly 10,000 receipts are
+transported and a retry preserves the original set/header/artifact; a separate
+fresh 10,001-receipt source refuses before retaining a cut, fencing ownership,
+or publishing an artifact.
+
+CI follow-up: PR357 failed in the CLI demo because it attempted to create
+continuity ownership after atomic capsule import had already persisted it,
+violating the current-instance uniqueness index. The exact PR357 checkout passed
+all 320 CLI tests and strict CLI Clippy after reusing and validating imported
+pending ownership. PR358 was rebased and also passed all 320 CLI tests and strict CLI Clippy,
+using atomic activation instead of the demo's separate ownership/scheduling
+writes. Both repaired heads were atomically pushed with exact old-head leases.
+All 49 uncommitted working files were preserved byte-for-byte; the clean isolated
+checkout was removed. CI merge gates are running on repaired heads 79d6bba3
+(PR357) and 88482c6a (PR358). No source-cut WIP is included in that CI repair.
+
+
+The complete embeddable Engine integration suite passed all 20 tests. Its old
+conflict test assumed export left the source Owned; immutable source capture now
+makes it Transferring, which legitimately permits another runtime to import into
+the same database. The rejection case now uses acknowledged Owned coordinates
+without a local import proof, and a separate positive test proves same-database
+import/atomic activation/acknowledgement while the original source stays paused.
+Neither change relaxes the production import predicate. Final facade and
+effect-bound Clippy checks passed with warnings denied; documentation and
+whitespace checks also passed.
+
+#### DME180 transactional scoped source authority (in progress)
+
+Scoped capsule capture now carries an explicit trusted mobile access descriptor.
+SQLite checks account activity/session epoch, catalog membership, immutable native
+identity, and current materialization/request eligibility inside the source-cut
+writer transaction. A missing descriptor cannot downgrade a registered account
+run into generic export. The descriptor is pinned in the durable cut and retry
+identity. PostgreSQL refuses mobile descriptors because scoped mobile storage is
+SQLite-specific. Generic non-mobile exports retain their existing path.
+
+Publication rechecks the stored authority and source ownership in one read
+transaction before and after artifact I/O. Account retirement and owned run
+cancellation retire captured/sealed transport copies in their own writer
+transaction: clear retry bytes, retain source ownership fencing, and enqueue
+canonical artifact-deletion tombstones. This retires internal transport copies;
+it does not archive the logical run or invent a remote outcome. A later verified
+acceptance can still reconcile a sealed retired cut into a compact receipt.
+
+Four initial scope race tests passed, then all 699 mobile unit tests passed.
+The final focused set has six passing cases, adding shared-database proof that
+retiring Alice leaves Bob's transport and publication authority intact, and that
+a later verified acceptance reconciles a retired sealed cut without reviving the
+cancelled source. The set
+covers wrong account/catalog/session, generic/legacy bypass refusal, retirement
+before capture, and retirement/cancellation while upload is held. All 85 backend
+source-cut, continuity, and retention tests passed, as did strict mobile and
+storage Clippy. The six engine export/effect-bound regressions also passed.
+This is storage authority groundwork; public
+scoped export/acknowledgement APIs, frozen catalog-policy validation, scoped
+import admission, and archive/quota semantics remain open.
+
+The physical-instance identity regression reproduced an unsafe acknowledgement:
+an isolated destination could reuse the source UUID, and storage accepted those
+coordinates even though local scheduling identifies ownership by instance ID.
+Continuity IDs identify logical runs; destination instance IDs identify a fresh
+physical execution. Public import, direct recovery admission in both backends,
+atomic activation, and source acknowledgement now independently refuse immediate
+source UUID reuse. Nine engine capsule tests pass, including rejection before
+remote persistence, preservation of the source transfer fence, a successful fresh
+ID retry, and superseded source ownership after valid acknowledgement. All 131
+source-cut and portable recovery tests passed across SQLite, encrypted SQLite,
+PostgreSQL, and encrypted PostgreSQL, including rollback and persisted legacy-state
+refusal. Strict storage and engine Clippy passed for all targets with warnings
+denied. Documentation and whitespace checks passed. This does not
+prove arbitrary historical instance ID reuse safe; callers must choose fresh IDs.
+Public mobile-origin enrollment/checkpoint ergonomics also need review; current
+constructor coverage explicitly prepares those durable records in its fixture.
+
+#### DME180 migration round-trip and complete guard audit follow-up
+
+A real PostgreSQL migration 129 down/up regression passed. Empty installations
+can roll back and reapply, including repeated application. Captured and sealed
+cuts prevent rollback; refused DDL preserves exact sealed retry bytes. Compact
+acknowledgement receipts also prevent rollback. After source-cut history is
+explicitly purged, independent artifact-retirement tombstones still prevent
+rollback and remain claimable. Only explicit reconciliation/removal of every
+retained row permits down; reapplying preserves independent continuity ownership.
+
+A separate regression reproduced a false Pass in the effect guard journal:
+10,000 prepared receipts preceded two committed duplicates, and the capped list
+omitted both duplicates. Atomic dispatch admission remained protected, but its
+audit report did not describe the complete ledger. Both backends now aggregate
+all dispatched/committed/unknown/verified receipts in one SQL statement/snapshot.
+The verdict and counts cover every matching row; only the sorted duplicate
+witness sample is capped (16 groups). Proposed dispatches replace their stored
+identity rather than counting the same receipt twice. Wrappers forward this
+primitive; unsupported custom backends fail explicitly rather than certify a
+partial ledger. No migration or unbounded engine-side receipt collection is used.
+
+Twenty receipt paging/audit tests passed on SQLite, encrypted SQLite, PostgreSQL,
+and encrypted PostgreSQL. Cases cover empty history, state/kind filtering,
+destination grouping, cross-tenant/continuity isolation, stable bounded witnesses,
+proposal replacement and refusal of changed scope/kind/state. All 19 engine
+effect-guard tests and strict storage/engine Clippy (all targets, warnings denied)
+passed. Atomic duplicate refusals also fail the audit when
+they reserve an earlier Prepared attempt; they cannot be relabeled Pass merely
+because the earlier attempt has not dispatched yet. Audit fingerprints bind the
+verdict, counts, candidate request/destination and bounded witnesses; they are
+aggregate fingerprints rather than a cryptographic digest of every raw receipt.
+
+Scope remains open: manual API invariant evaluation, compensation planning,
+handoff compatibility and extracted fixtures still consume capped receipt lists
+at `orch8-api/src/continuity.rs`; they need complete evidence semantics as well.
+Mobile-origin enrollment needs a durable runtime identity established before
+universal effect enrollment (which currently derives a per-instance runtime
+namespace). Adding a facade method alone would not solve that ownership model.
+The public scoped portability/archive and wait/event/family/artifact transport
+requirements listed above remain outstanding.
+
+PR357 merged as d3097076955bcea148771617f0b9203c812f1f1e and PR358 merged as
+80e45155807001dd093910cc88d82ee425419950, each after all 25 checks passed. The
+existing merge watchers verified exact heads, tested trees and ancestry before
+removing the remote branches. The uncommitted source-cut/audit work was preserved.
+
+#### DME180 API safety decisions beyond the receipt prefix
+
+Two real HTTP regressions reproduced unsafe API decisions after 10,000 receipts:
+manual NoUnknownEffects and EffectAtMostOnce evaluation returned Pass despite late
+unknown/duplicate effects, and handoff preview returned compatible despite 21
+late unresolved effects. Both paths have now stopped using the capped legacy list.
+
+SQLite and PostgreSQL expose complete ledger state counts under a single SQL
+statement/snapshot, retaining at most 16 unresolved receipts and 16 unknown request
+witnesses. Empty and foreign-tenant/continuity scopes remain empty. Missing or
+unrecognized receipt states make complete safety queries fail rather than silently
+classify unparseable history as safe. The existing complete duplicate audit now
+shares that state classification refusal. Plain/encrypted adapters forward the
+summary operation; unsupported custom adapters fail explicitly.
+
+Manual evaluation uses a shared engine batch evaluator. Receipt-based rules use
+complete duplicate audits or complete unknown counts, caching each kind and state
+summary within the batch; other rules keep their existing non-receipt evidence.
+Public evidence vectors remain bounded samples of matching receipt request hashes.
+Aggregate fingerprints bind deduplication separately. Results are computed before journal appends, so evidence-fetch
+failure cannot first append a partial set of verdicts from that batch.
+
+Handoff preview compatibility uses the full unresolved count. Its response adds
+`unresolved_effect_count` and `unresolved_effects_truncated`; `unresolved_effects`
+is now an explicit bounded sample. Preview digests bind the complete unresolved
+count and sample. Handoff creation already rebuilds the preview, so it uses the
+same complete safety predicate before accepting a placement decision/preview hash.
+Clients must use the count/truncation fields rather than infer complete history
+from the sample. This is a point-in-time decision; it does not claim to serialize
+all later effect writes with handoff creation.
+
+All 28 receipt paging/audit/state-summary backend tests passed across SQLite,
+encrypted SQLite, PostgreSQL and encrypted PostgreSQL. All ten final HTTP tests
+passed, including resolution/compensation restoring a Pass and refusal when a late
+unknown receipt appears after a valid preview. Strict all-target Clippy passed
+for storage, engine and API with warnings denied. Remaining capped API paths include receipt display, extracted
+fixtures and compensation planning. Selection of workflow invariant definitions
+itself still uses its existing 10,000-row limit; this receipt-evidence fix does not
+claim complete enumeration of an arbitrarily large policy set. Full scoped/mobile
+portability, source enrollment, archive/quota and transport dependencies remain
+open as recorded above.
+
+
+The complete receipt-evidence fixes were isolated onto current main
+(80e45155807001dd093910cc88d82ee425419950) and published as
+[PR359](https://github.com/orch8-io/engine/pull/359), head
+ed969d6105844195d40f5cbcdda7b5468fb2539e. That exact independent patch passed
+54 targeted tests (28 backend, 19 engine, 7 HTTP), strict all-target Clippy,
+formatting, documentation and whitespace checks. It excludes pending source-cut,
+scoped portability and migration 129 changes. A digest proved the active source
+state stayed unchanged during isolation/publication. The clean temporary checkout
+was removed after the verified commit was pushed; only the primary worktree
+remains. Its exact-head/all-check merge watcher is running; no merge is claimed.
+
+#### DME180 complete compensation evidence and bounded dependency traversal
+
+The compensation HTTP regression reproduced omission after the 10,000-row prefix:
+a history with 10,001 committed effects and 21 late unknown effects produced only
+10,000 compensation steps and omitted the later uncertainty. Both backends now
+stream a single complete SELECT snapshot, validate each raw receipt's indexed
+identity and scope, and retain only compact committed/verified/unknown planning
+fields. Unrelated raw history is not accumulated. Plan/output memory remains
+linear in actionable steps and hazards; this does not claim constant-size plans.
+
+The planner groups receipts by block once rather than scanning every receipt for
+every block. It sorts each group newest-first with UUID tie-breaking and preserves
+reverse dependency order. An explicit DFS frame stack replaces recursive graph
+traversal. A 5,000-block dependency chain passes on a 256 KiB thread stack.
+
+All 33 storage tests passed, including plain/encrypted SQLite/PostgreSQL and a
+PostgreSQL advisory-lock barrier test: settlement changes while collection is
+paused cannot alter the original SELECT snapshot, and a fresh collection observes
+the update. Eight planner tests and eleven real HTTP tests passed. The HTTP case
+also creates and reloads a durable 10,001-step plan with all 21 uncertainty hazards.
+Strict all-target Clippy passed for storage, engine and API with warnings denied.
+
+The broader compensation lifecycle still needs work. Run creation currently
+inserts a record without atomically fencing forward execution; completion checks
+run steps/residuals rather than reconciling the final effect ledger. Dispatched
+receipts are not currently represented as uncertainty hazards. Template parameters
+are resolved against current instance context/outputs rather than immutable
+per-invocation compensation inputs. These existing gaps require source fencing,
+late-outcome reconciliation and durable invocation-specific bindings before the
+full compensation protocol is considered reviewed. The complete-history fix does
+not certify those lifecycle contracts.
+
+
+The compensation-history fix was published as
+[PR360](https://github.com/orch8-io/engine/pull/360) after 49 targeted tests on its
+isolated parent-based checkout (33 storage, 8 planner, 8 HTTP), strict all-target
+Clippy, formatting, documentation and whitespace checks. It is gated behind PR359.
+
+CI caught a response-contract regression in PR359: adding an aggregate fingerprint
+to `evidence_sha256` made fresh NoUnknownEffects evidence nonempty and added an
+extra entry for one unknown effect. The production code was corrected rather
+than weakening the existing client assertions. Manual and automatic guard reports
+now expose matching receipt request hashes only; aggregate fingerprints bind the
+deduplication key separately. A guard regression checks every exposed evidence
+hash against stored receipt requests.
+
+The repaired stack passed all 123 original TypeScript invariant/compensation/
+runtime-registration tests against its own real server and isolated PostgreSQL,
+19 guard tests, eight HTTP tests, strict all-target Clippy, formatting and docs.
+PR359 is now head 210da6ff9353832b4debf010339381c404befbf3; PR360 is rebased onto
+it at head 696a49a48124d53f97e8b102f798a9bd52806aa0. Both heads were atomically
+pushed with exact prior-head leases. Source digests verified preservation of the
+active work, and both clean repair worktrees were removed. Exact-head merge
+watchers have restarted; PR360 waits for PR359's tested merge proof. Neither PR
+is claimed merged while CI remains in progress.
+
+#### DME180 unsettled work remains visible during compensation
+
+A new planner regression reproduced omission of three unsettled states: a history
+containing Planned, Prepared, Dispatched and Unknown effects retained only one
+hazard. Complete compensation evidence now retains all unsettled states alongside
+committed/verified outcomes, while compensated/abandoned history remains excluded.
+Plans expose `PENDING_EFFECT_MUST_BE_SETTLED` for planned/prepared receipts and
+`IN_FLIGHT_EFFECT_MUST_BE_SETTLED` for dispatched receipts. Existing unknown-outcome
+hazards retain their original representation.
+
+The full HTTP recovery flow passed: one known committed effect is rolled back,
+while three unsettled effects preserve CompletedWithResiduals. After the backend
+confirms the in-flight commit and abandons never-dispatched work through the
+normal resolution API, the next plan contains only that late committed effect.
+Completing it produces a clean Completed result without compensating the prior
+already-compensated receipt again.
+
+The isolated stack passed all 55 Rust cases (37 backend, nine planner and
+nine HTTP evidence tests), 124 TypeScript E2E cases, strict storage/engine/API
+Clippy, formatting, documentation and whitespace checks. The real-worker case
+verifies a dispatched effect remains an in-flight hazard. Published as
+[PR361](https://github.com/orch8-io/engine/pull/361), initially at head
+45796a72800a7214469f67c78b4bcdbecded6799, gated behind PR360. This addresses the missing unsettled-state hazards, not the remaining
+source-forward fencing, final-ledger reconciliation or per-invocation binding
+requirements described above. A receipt created after the plan's read snapshot
+still requires those broader lifecycle contracts.
+
+
+CI then exposed a second compatibility regression in PR359 and PR360: the
+portable-continuity client expects the duplicate-guard summary to retain
+`duplicate effect dispatch or commit evidence`. The refusal and durable failure
+were correct; the complete-ledger summary had dropped that established phrase.
+The repair restores the existing wording while retaining complete counts and
+bounded witness details for both automatic and manual evaluations. The original
+portable-continuity assertion remains unchanged. Both merge watchers stopped
+on the failed jobs; no failed revision was merged.
+
+
+The summary-contract repair passed the unchanged real-server portable duplicate
+guard case, all 124 invariant/compensation/runtime E2E cases and 19 guard tests.
+Strict all-target engine Clippy, formatting, documentation and whitespace checks
+passed. The three PRs were updated atomically with exact prior-head leases:
+PR359 `c455b10fb66380de64665d92e989eb6c58ba5981`, PR360 `c1b2aeb562a6be3dca967d86c6064502f92fd99d`,
+PR361 `27aa80318c0c47259c5ccc0522cbfb8b7f451d92`. Source digests verified preservation of
+the broader active changes. All completed temporary worktrees were removed;
+only the active source-cut worktree remains. CI and tested-tree merge proofs
+are still required before any of these revisions is claimed merged.
+
+
+#### DME181 generic ownership CAS must preserve frozen source authority
+
+A new backend-matrix regression reproduced a source-fence bypass on plain and
+encrypted SQLite/PostgreSQL: after capture, the generic ownership CAS accepted a
+stale same-epoch, same-runtime `Owned` record and revived the frozen physical
+source. Its compare token did not include the source-cut phase. That undermines
+both transfer exclusion and any later compensation protocol built on the fence.
+
+Generic CAS now refuses to point ownership back to the physical source of a
+captured, sealed or retired cut. Retired transport payloads do not authorize
+source revival. A legitimate destination with a different physical instance can
+still become owner; explicit abort may restore a merely captured source through
+its existing transaction. CAS also rejects a record whose tenant/continuity
+identity differs from the row named by its arguments.
+
+PostgreSQL locks the ownership row before issuing the update and cut check as a
+fresh statement. Adding only a subquery to the original UPDATE is insufficient:
+its READ COMMITTED snapshot can miss a cut committed while the UPDATE waits for
+capture's row lock. SQLite takes its immediate writer transaction before the
+check. Validation is in progress, including a controlled PostgreSQL lock race.
+
+Compensation startup remains an open protocol item. Its eventual durable barrier
+must stop new forward admissions, preserve settlement of already-dispatched
+workers, bind the plan to the frozen owner/instance and include effects arriving
+between plan construction and the freeze. The existing transfer fence rejects
+worker lease mutations, so reusing it as a compensation fence would discard valid
+outcome reporting. A plain pause can be undone and is not a durable substitute.
+
+
+The controlled PostgreSQL race pauses actual capsule capture at its cut INSERT,
+then proves generic CAS is blocked on that capture's ownership row. Once capture
+commits, the repaired CAS refuses the stale update. A mutation run removing only
+the explicit pre-lock reproduced source revival despite retaining the UPDATE's
+cut predicate. The original production fix was restored after the failed run.
+The initial 69-case source-cut matrix and the repaired race passed; expanded
+continuity/recovery coverage and strict lint are being verified on the restored
+source. This source-cut repair remains part of the broader unmerged transfer work.
+
+
+Final restored-source verification passed 155 tests: 74 source-cut cases,
+14 general continuity cases and 67 portable-effect recovery cases. This includes
+all plain/encrypted SQLite/PostgreSQL legs, the controlled capture/CAS race,
+identity-mismatch refusal and valid post-abort/post-transfer operations. Strict
+all-target storage Clippy with warnings denied, formatting, documentation and
+whitespace checks passed. No local Rust compiler remains active from these runs.
+
+
+#### DME182 atomic compensation startup separates admission from settlement
+
+A real HTTP regression reproduced that rollback creation left the source owner
+`owned` and did not durably stop forward execution. The new `compensating`
+ownership state permanently closes forward effect admission at the same epoch.
+Atomic startup locks ownership and the source instance, compares the owner,
+instance metadata and complete compact effect set used by the plan, inserts the
+run, updates ownership and parks nonterminal source execution in one transaction.
+A changed snapshot or a concurrent active run refuses admission without a partial
+freeze. This includes effects that appeared while the preview was being built.
+
+Scheduler advancement, native effect admission, worker polling and generic owner
+CAS cannot resume a compensating source. HTTP and gRPC workers can still
+heartbeat and settle already-dispatched outcomes; completion records those
+outcomes without advancing forward execution. A subsequent explicitly requested
+run can compensate newly confirmed outcomes while the durable source fence
+remains. No new owner epoch is invented, and ordinary instance state changes do
+not authorize new effects.
+
+All 24 new storage cases passed across plain/encrypted SQLite/PostgreSQL. They
+cover concurrent starts, injected failure between run insertion and owner freeze,
+stale effect evidence, prepared forward admission, all worker poll variants and
+preserved in-flight heartbeat/completion authority. The initial six HTTP evidence
+cases passed, including the startup regression. Real-worker E2E and cross-crate
+verification are in progress. The new ownership value requires readers that
+understand `compensating`; old readers fail to decode rather than reopening the
+source. This feature is not published as a release.
+
+Remaining work includes immutable per-invocation compensation parameters/rules,
+explicit outcomes/archival for a compensation-fenced paused source, remote/mobile
+owner acknowledgement where authority is held in a separate database, and deeper
+final-ledger reconciliation against administrative/manual effect resolution.
+The existing raw compensation-record insert remains a storage primitive; public
+HTTP startup uses the new atomic admission method.
+
+
+Further startup review reproduced two bypasses on all four backends: a cached live
+migration could rewrite compensating ownership, and attempt identity preparation
+could append a new planned receipt after the fence. Compound migration/handoff
+updates now exclude `compensating`, and attempt preparation checks the state under
+its ownership lock. All named queue paths also check the durable fence, with
+positive controls proving that other eligible executions still dispatch.
+The expanded isolated matrix passed 150 cases (40 compensation/startup, 14 general
+continuity, 37 complete ledger and 59 portable recovery). HTTP/gRPC and E2E checks
+remain in progress on the exact isolated patch.
+
+The full distributed proof remains incomplete for independent offline owner
+stores and legacy worker rows without effect bindings. Existing legacy completion
+is intentionally ledger-free in `commit_external_worker_effect`; a local source
+freeze cannot by itself account for such an unrecorded outcome. Those require
+explicit owner stop/outcome acknowledgement and durable worker receipt adoption,
+not an assumption that the local ledger already contains every remote effect.
+
+
+Final isolated compensation-fence verification passed 189 Rust tests (150 storage/
+continuity/ledger/recovery, six HTTP, 14 gRPC and 19 engine guard), all 125 TypeScript
+E2E cases, strict all-target storage/engine/API/gRPC/CLI/mobile Clippy, formatting,
+typecheck and docs checks. The final real-worker case records an in-flight commit,
+refuses forward propagation after ordinary rescheduling and explicitly compensates
+that newly known outcome in the next run. Complete ledger checks and tenant-indexed
+poll fences were tested on the final isolated source.
+
+PR359 merged at `0f95e86e309b73b140a7fb8b1a0a9940c86e21cc`, PR360 at
+`4c9f2ee830342db852df64707a22098f5b321d23`, and PR361 at
+`6c84d6c00441caa569dba54ddf8566fc23c04494`. Each had 25 successful checks,
+exact tested/merged tree equality and head ancestry proof. Their merged local and
+remote branches were removed. The compensation-fence patch is being published
+separately from the remaining transfer work.
+
+
+The isolated compensation fence was published as [PR362](https://github.com/orch8-io/engine/pull/362)
+at head `973888ff9d61f5d4ffdf17a7190d45437410d82a` on merged main
+`6c84d6c00441caa569dba54ddf8566fc23c04494`. Its completed clean temporary worktree was removed
+after verifying the pushed head. The active review branch now uses that main
+base; a file manifest proved preservation of every working source file through
+the index/base change. The three merged review documents were materialized from
+their exact committed blobs. Transfer/mobile work remains uncommitted; PR362
+requires its own complete CI and tested-tree merge proof.
+
+
+#### DME183 compensation creation needs lost-response recovery
+
+The next confirmed lifecycle gap is a lost creation response. Startup allocates a
+random run ID, persists the run and returns it only in the POST response. The
+public API can fetch a run only by its known ID; the storage trait has no active
+lookup by continuity. A retry receives the active-run conflict without learning
+the committed ID. With a durable source fence, recovery must not depend on the
+client having received that first acknowledgement.
+
+Add an optional durable request UUID to creation, scope its deterministic run
+identity to tenant and continuity, and return the original persisted run for a
+retry of the same intent, including after completion. Preserve the existing
+conflict behavior for distinct/legacy requests. Verify lost acknowledgement,
+same-key concurrent starts, immutable plan replay after evidence changes,
+completed-run replay and tenant/continuity isolation. This gap is still open;
+PR362 provides the local source fence and does not claim to resolve it.
+
+
+PR362 CI repair: deterministic sub-microsecond instance timestamps reproduced
+the PostgreSQL admission failures. Comparing the bound expected timestamp in
+the locking SQL predicate fixes native precision without weakening rejection of
+changed state, sequence or revision. All 40 storage cases pass across plain and
+encrypted PostgreSQL/SQLite. HTTP admission retries up to eight fresh complete
+snapshots when normal completion races planning; the seven isolated HTTP tests
+include a forced completion barrier. Nested cancellation now uses a durable
+input barrier rather than a 200ms assumption.
+
+Full shared verification exposed hard-coded event-test ports and SSRF tests
+attached to a server configured to allow private networks. Event tests now honor
+the configured URL/port. SSRF tests moved into the common self-managed registry
+and explicitly disable private access. A reachable local HTTP positive control
+proves the blocked workflow sends no request; it fails with protection disabled.
+All 1,586 shared tests and five standalone SSRF cases pass, plus strict all-target
+Clippy across storage/engine/API/gRPC/CLI/mobile, fmt, typecheck and docs.
+
+DME183 now has an uncommitted recovery implementation with all 15 HTTP safety
+tests passing on the active source: same-intent concurrent retries, saved-plan
+replay, completed replay, committed-acknowledgement loss, legacy active lookup
+and scope/auth validation. Backend/CLI/E2E verification and isolated publication
+remain necessary. Switching checkouts with a shared Cargo target can reuse a
+newer test executable from the other checkout; workspace input mtimes were
+refreshed before this run, the root crates rebuilt, and the expected 15-test
+count was checked rather than accepting an obsolete seven-test executable.
+
+The CI repair is published at `f2c1fd9b1b274865ffe02c7ebe8ac3d5747ee027`
+(tree `25e84b239ac5e3b31e7fa37b9168653cf1a71bcb`). The completed repair
+worktree was removed after checking clean status and the exact pushed head; a
+content digest proved preservation of the active source. Only the primary
+checkout remains. The exact-head watcher is gating PR362 on all 25 successful
+checks and requires tested/merged tree equality and ancestry before branch
+cleanup. The PR is not yet merged.
+
+DME183 refreshed-source verification also passed all 48 compensation storage
+cases across both backends and encryption wrappers, including active-state
+lookup, scope isolation, terminal hiding, decrypted parameters and fail-closed
+record/index mismatch checks. Formatting, TypeScript and documentation checks
+passed; isolated follow-up publication remains pending.
+
+DME183 strict all-target Clippy also passed for storage, API and CLI (including
+their engine dependencies) on the refreshed root source.
+
+
+DME183 is implemented in [PR363](https://github.com/orch8-io/engine/pull/363),
+head `f92626a10330bd32aeaca09e5e71a59c5d1ba2d2`, tested tree
+`460f8ce4e5d77ec5eef1fdcfccf32cf4cf904786`, based on the exact repaired
+PR362 head. Isolation copied only the compensation API region, active lookup
+methods/forwarders, recovery CLI, tests and operations docs; the broader source-cut
+work remained outside the PR. The final isolated stack passed 64 Rust cases
+(48 storage, 15 HTTP, one identity unit), 129 real-server PostgreSQL E2E cases,
+strict all-target storage/engine/API/gRPC/CLI/mobile Clippy, fmt, typecheck and
+docs. The completed clean worktree was removed after verifying its exact pushed
+head; root source content was preserved. CI and merge remain pending.
+
+The isolation review additionally reproduced inconsistent known-ID reads on all
+four storage variants. Active and known-ID lookups now share validated decoding
+against indexed tenant, continuity, ID, state and version. The corruption matrix
+checks all five fields on both paths. The prerequisite-aware PR363 watcher waits
+for PR362's completed tested-tree/ancestry merge proof before considering the
+follow-up's own 25 CI checks and exact-head merge proof.
+
+#### DME184 compensation mutation identity needs adversarial review
+
+Both backend `cas_compensation_run` implementations currently predicate writes
+on the caller's tenant, run ID and expected version while serializing the whole
+next record. Reader consistency checks now detect mismatched scope and progress,
+but mutation should also prevent introducing inconsistent identity or regressing
+revision data. The next review should reproduce tenant/continuity/source identity
+changes and invalid revision increments through the storage API, then enforce
+only the invariants supported by the actual compensation lifecycle. This is a
+review candidate, not yet a verified fix. Immutable invocation-specific rules
+and parameters, offline owner acknowledgement and explicit archival outcomes
+remain separate required work.
+
+
+PR362's repaired head `f2c1fd9b` passed the shared suite but its standalone
+lifecycle suite still expected a completed compensation to return to `waiting`.
+The source correctly remained paused. The correction is published at
+`a7490e7f44ecb70dc54ff4140407f3f471eb439f`, tree
+`b7f52dfd4430ba7b32ed165477a658b97d4c32e6`. Only the integration test and
+source-fence review document changed; production Rust is unchanged. All 221
+lifecycle/isolation cases passed with assertions that migration planning and
+rejected apply preserve paused/compensating authority and compensated evidence.
+The fixture uses its own OS-temporary artifact directory and removes it after
+server shutdown; verification found no new directory left behind.
+
+The recovery PR363 was refreshed onto that correction at
+`bfa7d369024b82455ef015a819082f94778a2aeb`, tree
+`06d7183baea8aea21f52332bd9eca44c1e272c81`. Its Rust code matches the earlier
+verified recovery source. The exact refreshed server passed 221 lifecycle/
+isolation and 129 invariant/compensation/runtime cases; typecheck, formatting
+and docs checks pass. The old stopped watchers were archived and restarted for
+the exact new heads.
+
+DME184 is now reproduced and fixed in [PR364](https://github.com/orch8-io/engine/pull/364),
+head `f1fceaa67a3891db6ce46f0c5dd2e62a4a4b4cdb`, tested tree
+`a20a3c72d0b397da7a23651a38cce08268c5b006`, based on refreshed PR363. The
+old CAS accepted a foreign tenant on all four storage variants. Both backends
+now validate tenant and consecutive, SQL-storable revision inputs, and bind
+continuity, source instance and original JSON creation time in their atomic
+UPDATE. Rejected identity/revision changes preserve the stored run. Concurrent
+valid claims still have one winner, and fresh parameter ciphertext remains
+supported. A restored run at the final storable revision previously returned
+500 on claim; version advancement now returns 409 without changing progress.
+
+The final isolated guard stack passed 86 Rust cases (56 compensation storage,
+14 continuity, 16 HTTP), 350 real-server PostgreSQL E2E cases (221 lifecycle/
+isolation and 129 invariant/compensation/runtime), strict all-target Clippy for
+storage/engine/API/gRPC/CLI/mobile, formatting, typecheck and docs. Completed
+source-fence repair, recovery sync and mutation checkouts were removed only
+after clean/pushed-head verification. A root content digest proved preservation
+of every active working source through publication and final cleanup; only the
+primary worktree remains.
+
+CI and merges remain pending: PR362 has its own 25-check exact-head gate; PR363
+waits for PR362's complete tested-tree/ancestry merge proof; PR364 then waits for
+PR363's equivalent proof before evaluating its own 25 checks. No release is
+published. Immutable invocation-specific compensation rules/parameters, offline
+owner acknowledgement, explicit archive outcomes and the broader source-cut/
+mobile work remain required; this closes the demonstrated mutation gap only.
+
+
+#### DME185 acknowledged source cuts must keep their ownership fence
+
+Fresh root compilation and the complete mobile library suite passed 701 tests
+with the compensation guards and scoped source-cut changes. The next review
+then reproduced a source authority regression on all four storage variants:
+`cas_continuity_owner` excluded acknowledged cuts from its refusal, allowing the
+accepted destination owner to point back to the old physical source at the same
+epoch or a newer one. Both backends now retain that acknowledged-cut fence.
+
+The final targeted matrix passed 159 cases (78 source-cut, 14 continuity,
+67 portable recovery), plus strict all-target storage Clippy and docs checks.
+The new test preserves the accepted owner after each refused source revival,
+allows a genuinely fresh later destination and refuses the old source again
+after that later move. Existing delayed-acknowledgement and portable proof/
+recovery cases remain green. Logs: `/private/tmp/orch8-mobile-source-cut-final.log`,
+`/private/tmp/orch8-acknowledged-source-before.log`,
+`/private/tmp/orch8-source-cut-ack-final.log`,
+`/private/tmp/orch8-source-cut-ack-lint.log`. This fix remains in the broader
+unpublished source-cut work.
+
+#### DME186 physical identity must survive history GC and archival
+
+Retained-cut protection alone is insufficient. Source cuts are continuity
+children removed by history purge, new continuity creation currently checks
+import bindings rather than all retired sources, and compound import/activation
+paths write ownership directly. A physical UUID must not gain fresh authority
+through another continuity/account/catalog/tenant or through restore after GC.
+The archive API also currently treats only terminal native states as outcomes;
+a transferred source remains paused, and account retirement can locally cancel
+it even though a verified destination owns the continuing logical execution.
+
+The required identity lifetime, concurrency, downgrade and explicit-archive
+verification gates are recorded in
+[Physical instance lifetime and acknowledged archival](2026-10-27-physical-instance-lifetime.md).
+The next implementation must use compact independent retirement evidence, cover
+all admission/restore/ownership paths, preserve valid late outcomes and callback
+quarantine, and represent transferred ownership in archival/history without
+inventing completion. Source-cut publication remains pending these safety and
+lifecycle contracts; immutable invocation-specific compensation inputs and
+independent offline-owner acknowledgement remain required review work too.
+
+#### DME187 permanent physical identity after history collection
+
+A four-backend regression used real terminal-instance purge after acknowledged
+transfer, then recreated the source physical ID as scheduled work. Every plain
+and encrypted SQLite/PostgreSQL leg reproduced the authority-loss boundary.
+The current work adds independent compact retirement evidence (PostgreSQL 130,
+SQLite 60), backfills retained sealed/retired/acknowledged cuts and installs
+database guards for native insertion and new/revived continuity ownership.
+Markers contain IDs and retirement time, no payload/context, and survive native,
+continuity and artifact history GC. Marker mutation/deletion is refused;
+PostgreSQL rollback cannot remove nonempty security evidence. SQLite trigger
+bodies are installed atomically outside its schema statement splitter.
+
+The expanded run passes all 83 source-cut and 67 portable-recovery tests. Direct
+coverage includes admitted writes, snapshot restore, mixed fresh/retired batch
+atomicity, foreign tenants/new continuities, valid fresh IDs and a controlled
+PostgreSQL insertion that resumes after waiting for the retiring transaction's
+uniqueness lock. Strict all-target storage Clippy and documentation checks pass.
+The full mobile suite is being rerun against this schema/trigger change.
+
+This does not yet complete the lifetime contract. All existing-row forward
+mutation/claim paths, inconsistent legacy ownership, upgrade/reopen/downgrade
+writer cases, compound recovery/activation races and transfer-aware acknowledged
+archive/native payload GC still require explicit tests and implementation.
+Detailed evidence and remaining gates are in
+[the lifetime plan](2026-10-27-physical-instance-lifetime.md).
+
+DME187 validation update: the full mobile library suite passes all 701 tests
+against the first retirement implementation, with no failures or skips. The
+remaining lifetime gates and bounded SQLite backfill work remain open.
+
+#### DME188 existing source rows, bounded upgrade and late outcomes
+
+Retirement evidence now gates native claiming and every global/tenant/capability
+worker polling path, including PostgreSQL's second capability-claim phase. An
+eight-case four-backend baseline demonstrated that collecting destination
+continuity history revived an existing source row and pending legacy task;
+those regressions now pass alongside healthy native/worker controls. Native
+per-tenant and uncapped modes refuse the source without modifying its original
+claim; pending legacy evidence is retained. The engine checks permanent physical
+retirement before treating missing continuity as legacy ownership, and propagates
+retirement-read errors. Encryption/fault decorators preserve that contract.
+
+SQLite schema-60 evidence/guard installation and its completion marker commit in
+one immediate transaction. A failed-backfill injection proves failed open and no
+partial completion; retry backfills old cuts, and subsequent reopen skips the
+completed history scan. Rollback dependency order now preserves the permanent
+source-recording trigger. Combined storage tests pass 215 cases; the engine
+missing-history/foreign-scope/read-failure test passes on SQLite and PostgreSQL.
+
+A real HTTP worker completion and changed-payload retry now verify all four
+backends retain the original outcome without rescheduling the retired source,
+restoring context or publishing a forward block output. All 20 HTTP safety cases
+pass. Older-writer forward state changes, captured-cut admission and compound
+races still require explicit enforcement/verification; transferred archive
+receipts, native payload GC and immutable invocation-specific compensation
+parameters remain open. The full objective is not complete.
+
+DME188 validation update: strict all-target Clippy passes for all six affected
+packages; both SQLite point-index tests and the complete 701-test mobile library
+suite pass after the new admission/one-time-backfill changes. The 215 storage,
+20 HTTP and engine authority checks remain green. One completed build executable
+from an already removed repair worktree was removed (277,535,344 bytes); only the
+active root worktree remains. The broader lifetime/portability objective remains
+open with its remaining gates in the lifetime plan.
+
+#### DME189 persistent source freeze and PostgreSQL worker snapshot freshness
+
+Captured sources are excluded from native/worker claiming and mixed scheduling
+batches; permanent native forward writes and legacy worker claims are also
+refused by database triggers. Recording retirement atomically quarantines native
+state without deleting context or existing worker outcome evidence. SQLite 61
+backfills quarantine once and commits its completion atomically; interrupted
+completion rolls back, retry repairs and reopen skips the completed scan.
+
+A controlled PostgreSQL test demonstrated a repeatable-read capture returning a
+snapshot that missed a worker committed while capture waited on its foreign-key
+parent lock. New enqueue now touches the parent's MVCC version before its worker
+row/index and refuses enqueue after capture. Stale capture aborts, and fresh
+capture sees the pending task. Matching parent-before-worker resolution/retry
+ordering passes a deterministic duplicate-enqueue/retry barrier without deadlock.
+This worker-specific proof does not complete the other child-evidence race audit.
+
+Expanded validation passes 123 full-matrix source-cut cases plus one schema-61
+atomic/reopen case, 56 compensation, 67 portable-recovery, 136 storage integration
+and 20 HTTP safety cases. Strict lint passes across storage, engine, API, gRPC,
+CLI and mobile. Further scheduler/mobile checks and the remaining portability,
+archive, invocation-binding and ingress gates remain active.
+
+PR363 and PR364 merged after all 25 checks each, with exact tested-tree equality
+and ancestry proved; their exact merged branches were deleted. The active review
+branch advanced from 19c74d41 to main 21cb1454, preserving hashes/modes for all
+2,195 existing working files and adding only the two merged review documents.
+Only the active root worktree remains. No release was published.
+
+DME189 scheduler update: a retirement stop must bypass a forward claim predicate
+that deliberately rejects retired rows. It now relies on permanent retirement
+plus a Running-to-Paused state CAS, preserving concurrent terminal outcomes and
+the original claim fence for non-retired superseded work. All 11 selected engine
+scheduler/driver tests pass, including the new inconsistent-retired-running-row
+case on SQLite and PostgreSQL. The immutable retirement evidence never certifies
+an independent/offline callback has stopped.
+
+DME189 final local validation: all 701 mobile library cases pass after the final
+source-freeze/enqueue/scheduler changes; both point-index checks and strict
+six-package all-target Clippy pass. Main and origin/main are 21cb1454 after the
+verified PR363/364 merges, with merged branches cleaned. The newer foundation is
+being preserved in a draft PR while its named source/transfer/archive gates are
+still under review; the full objective remains active.

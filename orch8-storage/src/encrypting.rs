@@ -796,6 +796,7 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::ContinuityStore for EncryptingStorage {
+        async fn is_physical_instance_retired(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn create_continuity_execution(&self, execution: &orch8_types::continuity::ContinuityExecution) -> Result<(), StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
         async fn get_continuity_execution_by_instance(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
@@ -807,6 +808,7 @@ passthrough_impl! {
         async fn cas_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId, expected_state: orch8_types::continuity::HandoffState, expected_version: u64, next: &orch8_types::continuity::ExecutionHandoff) -> Result<bool, StorageError>;
         async fn accept_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, accepted_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, accepted_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
         async fn commit_handoff_export(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, exported_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, transferring_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn commit_handoff_export_with_provenance(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, exported_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, transferring_execution: &orch8_types::continuity::ContinuityExecution, provenance: &orch8_types::continuity::ProvenanceEntry) -> Result<bool, StorageError>;
         async fn resume_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, resumed_handoff: &orch8_types::continuity::ExecutionHandoff, destination_instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn save_capsule_manifest(&self, manifest: &orch8_types::continuity::CapsuleManifest) -> Result<(), StorageError>;
         async fn get_capsule_manifest(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::CapsuleId) -> Result<Option<orch8_types::continuity::CapsuleManifest>, StorageError>;
@@ -848,6 +850,35 @@ passthrough_impl! {
             }
             self.inner.import_capsule_recovery(capsule_id, destination_runtime_id, &sealed, &checkpoint, effects).await
         }
+        async fn capture_capsule_cut(&self, request: &crate::capsule_export::CapsuleCutRequest) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError> {
+            let mut captured = self.inner.capture_capsule_cut(request).await?;
+            if let crate::capsule_export::CapsuleCutCapture::Ready(cut) = &mut captured
+                && let Some(snapshot) = &mut cut.snapshot {
+                    let opened = async {
+                        self.decrypt_instance(&mut snapshot.instance)?;
+                        snapshot.checkpoint.checkpoint_data = self.decrypt_json_value(&snapshot.checkpoint.checkpoint_data)?;
+                        for output in &mut snapshot.outputs { self.decrypt_block_output(output)?; }
+                        let mut budget = crate::capsule_export::CaptureBudget::new();
+                        budget.add(&snapshot.instance)?;
+                        budget.add(&snapshot.outputs)?;
+                        for entry in &mut snapshot.execution_state.payloads {
+                            entry.payload = self.open_externalized(entry.instance_id, &entry.ref_key, &entry.payload).await?;
+                            budget.add(&entry.payload)?;
+                        }
+                        Ok::<(),StorageError>(())
+                    }.await;
+                    if let Err(error) = opened {
+                        self.inner.abort_preparing_capsule_cut(&request.owner.tenant_id, cut.id).await?;
+                        return Err(error);
+                    }
+            }
+            Ok(captured)
+        }
+        async fn seal_capsule_cut(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId, manifest: &orch8_types::continuity::CapsuleManifest, sealed: &[u8]) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError>;
+        async fn abort_preparing_capsule_cut(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId) -> Result<bool, StorageError>;
+        async fn acknowledge_capsule_cut(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId, accepted: &orch8_types::continuity::ContinuityExecution) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError>;
+        async fn capsule_cut_publishable(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId) -> Result<bool, StorageError>;
+        async fn claim_retired_capsule_artifacts(&self, now: DateTime<Utc>, retry_at: DateTime<Utc>, limit: u32) -> Result<Vec<String>, StorageError>;
         async fn activate_capsule_import(&self, tenant: &TenantId, capsule: orch8_types::continuity::CapsuleId, runtime: orch8_types::continuity::RuntimeId, instance: InstanceId, now: DateTime<Utc>) -> Result<(), StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId, imported_at: chrono::DateTime<chrono::Utc>) -> Result<orch8_types::ids::InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;

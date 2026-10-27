@@ -70,6 +70,29 @@ fn selection(
     query
 }
 
+/// Run inside the source-cut writer transaction. A missing descriptor cannot
+/// downgrade a registered catalog run/account tenant into generic work.
+pub(super) async fn permits_capsule(
+    conn: &mut sqlx::SqliteConnection,
+    access: Option<&MobileInstanceAccess>,
+    id: InstanceId,
+    tenant: &orch8_types::ids::TenantId,
+) -> Result<bool, StorageError> {
+    let mut query = if let Some(access) = access {
+        selection(access, id, "i.id", true)
+    } else {
+        let mut query = sqlx::QueryBuilder::new("SELECT i.id FROM task_instances i WHERE i.id=");
+        query.push_bind(id.to_string()).push(" AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_materializations m WHERE m.request_id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_accounts a WHERE a.id=substr(i.tenant_id,16) AND i.tenant_id='mobile-account-' || a.id)");
+        query
+    };
+    query.push(" AND i.tenant_id=").push_bind(tenant.as_str());
+    let found: Option<String> = query
+        .build_query_scalar()
+        .fetch_optional(&mut *conn)
+        .await?;
+    Ok(found.is_some())
+}
+
 pub(super) async fn get(
     storage: &SqliteStorage,
     access: &MobileInstanceAccess,
@@ -110,6 +133,12 @@ pub(super) async fn cancel(
     }
     sqlx::query("UPDATE task_instances SET state='cancelled',claimed_at=NULL,next_fire_at=NULL,updated_at=?2 WHERE id=?1")
         .bind(id.to_string()).bind(ts(chrono::Utc::now())).execute(&mut *transaction).await?;
+    let tenant: String = sqlx::query_scalar("SELECT tenant_id FROM task_instances WHERE id=?1")
+        .bind(id.to_string())
+        .fetch_one(&mut *transaction)
+        .await?;
+    let tenant = orch8_types::ids::TenantId::new(tenant).map_err(StorageError::Constraint)?;
+    super::capsule_export::retire(&mut transaction, &tenant, Some(id)).await?;
     transaction.commit().await?;
     Ok(Some(InstanceState::Cancelled))
 }

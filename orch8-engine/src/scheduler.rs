@@ -2941,16 +2941,32 @@ async fn process_instance(
         }
         crate::ownership::LocalOwnership::Superseded => {
             warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
-            crate::lifecycle::transition_claimed_instance(
-                storage.as_ref(),
-                instance_id,
-                Some(&instance.tenant_id),
-                ctx.claim_token,
-                InstanceState::Running,
-                InstanceState::Waiting,
-                None,
-            )
-            .await?;
+            if storage.is_physical_instance_retired(instance_id).await? {
+                // Permanent retirement authorizes halting this physical ID
+                // regardless of an inconsistent legacy claim. Forward claim
+                // predicates deliberately refuse retired rows. The state CAS
+                // still lets a concurrent terminal outcome win without overwrite.
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    InstanceState::Running,
+                    InstanceState::Paused,
+                    None,
+                )
+                .await?;
+            } else {
+                crate::lifecycle::transition_claimed_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    ctx.claim_token,
+                    InstanceState::Running,
+                    InstanceState::Waiting,
+                    None,
+                )
+                .await?;
+            }
             return Ok(());
         }
     }

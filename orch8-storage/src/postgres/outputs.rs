@@ -185,6 +185,14 @@ pub(super) async fn get_all(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<BlockOutput>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    get_all_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn get_all_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+) -> Result<Vec<BlockOutput>, StorageError> {
     // `id` tiebreaker: rows written in the same millisecond share a
     // `created_at`, and without a second key their relative order (hence
     // which attempt "wins" in last-wins consumers like
@@ -195,7 +203,7 @@ pub(super) async fn get_all(
            FROM block_outputs WHERE instance_id = $1 ORDER BY created_at, id",
     )
     .bind(instance_id.into_uuid())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *conn)
     .await?;
     rows.into_iter().map(BlockOutputRow::into_output).collect()
 }

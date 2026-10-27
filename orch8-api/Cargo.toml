@@ -38,6 +38,8 @@ base64.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Direct database fixtures verify transport behavior after continuity history GC.
+sqlx.workspace = true
 tokio = { workspace = true, features = ["full"] }
 # `orch8_storage::testing` (backend matrix, fault injection, fixtures).
 orch8-storage = { path = "../orch8-storage", features = ["test-util"] }
