@@ -5576,6 +5576,7 @@ fn advance_compensation_version(run: &mut CompensationRunRecord) -> Result<u64, 
     run.version = run
         .version
         .checked_add(1)
+        .filter(|version| i64::try_from(*version).is_ok())
         .ok_or_else(|| ApiError::Conflict("compensation version exhausted".into()))?;
     Ok(expected)
 }

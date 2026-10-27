@@ -2181,9 +2181,12 @@ impl crate::ContinuityStore for SqliteStorage {
         expected_version: u64,
         next: &CompensationRunRecord,
     ) -> Result<bool, StorageError> {
+        crate::compensation_update::validate(tenant_id, expected_version, next)?;
         let result = sqlx::query(
-            "UPDATE compensation_runs SET state=?,version=?,record=?,updated_at=?
-             WHERE tenant_id=? AND id=? AND version=?",
+            "UPDATE compensation_runs SET state=?1,version=?2,record=?3,updated_at=?4
+             WHERE tenant_id=?5 AND id=?6 AND version=?7 AND continuity_id=?8
+               AND json_extract(record,'$.source_instance_id')=?9
+               AND json_extract(record,'$.created_at')=json_extract(?3,'$.created_at')",
         )
         .bind(state_name(next.state)?)
         .bind(to_i64(next.version, "compensation version")?)
@@ -2192,6 +2195,8 @@ impl crate::ContinuityStore for SqliteStorage {
         .bind(tenant_id.as_str())
         .bind(next.id.to_string())
         .bind(to_i64(expected_version, "expected compensation version")?)
+        .bind(next.continuity_id.to_string())
+        .bind(next.source_instance_id.to_string())
         .execute(&self.pool)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
