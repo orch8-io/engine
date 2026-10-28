@@ -21,6 +21,7 @@ mod cron;
 mod effect_attempt;
 mod effect_dispatch;
 mod effect_receipts;
+mod effect_resolution;
 mod events;
 mod evidence;
 mod execution_tree;

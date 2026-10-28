@@ -1055,3 +1055,118 @@ orch8_storage::backend_test!(async fn retired_legacy_completion_keeps_outcome_wi
         assert!(b.storage.get_block_output(source.id,&BlockId::new("charge")).await.unwrap().is_none());
     }
 });
+
+#[tokio::test]
+async fn effect_resolution_rolls_back_when_provenance_cannot_commit() {
+    let (storage, owner, _) = fixture_with_states(false, &[EffectState::Unknown]).await;
+    let id = EffectId::from_uuid(uuid::Uuid::from_u128(1));
+    let original = storage
+        .get_effect_receipt(&owner.tenant_id, id)
+        .await
+        .unwrap()
+        .unwrap();
+    sqlx::raw_sql("CREATE TRIGGER reject_resolution_provenance BEFORE INSERT ON provenance_entries BEGIN SELECT RAISE(ABORT,'injected provenance failure'); END;")
+        .execute(storage.pool()).await.unwrap();
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let path = format!("/api/v1/continuity/effects/{id}/resolve");
+    let body = json!({"tenant_id":owner.tenant_id,"state":"committed","provider_receipt_id":"provider-confirmed"});
+    let response = reqwest::Client::new()
+        .post(format!("{}{path}", server.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(!response.status().is_success());
+    assert_eq!(
+        storage
+            .get_effect_receipt(&owner.tenant_id, id)
+            .await
+            .unwrap(),
+        Some(original),
+        "failed provenance must not commit an unaudited operator resolution"
+    );
+    sqlx::raw_sql("DROP TRIGGER reject_resolution_provenance")
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}{path}", server.base_url))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
+    let receipt = storage
+        .get_effect_receipt(&owner.tenant_id, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.state, EffectState::Committed);
+    assert_eq!(
+        receipt.provider_receipt_id.as_deref(),
+        Some("provider-confirmed")
+    );
+    let entries = storage
+        .list_provenance(&owner.tenant_id, owner.continuity_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, "effect_resolved");
+    assert!(
+        orch8_engine::continuity::verify_provenance_chain(&entries, Some(&entries[0].entry_sha256))
+            .valid
+    );
+}
+
+#[tokio::test]
+async fn effect_resolution_handles_a_receipt_timestamp_from_an_ahead_replica() {
+    let (storage, owner, _) = fixture_with_states(false, &[EffectState::Unknown]).await;
+    let id = EffectId::from_uuid(uuid::Uuid::from_u128(1));
+    let mut receipt = storage
+        .get_effect_receipt(&owner.tenant_id, id)
+        .await
+        .unwrap()
+        .unwrap();
+    receipt.updated_at = Utc::now() + Duration::hours(1);
+    assert!(
+        storage
+            .cas_effect_receipt(&owner.tenant_id, id, EffectState::Unknown, &receipt)
+            .await
+            .unwrap()
+    );
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{}/api/v1/continuity/effects/{id}/resolve",
+            server.base_url
+        ))
+        .json(&json!({"tenant_id":owner.tenant_id,"state":"committed"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        response.status().is_success(),
+        "{}",
+        response.text().await.unwrap()
+    );
+    let settled = storage
+        .get_effect_receipt(&owner.tenant_id, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(settled.state, EffectState::Committed);
+    assert!(settled.updated_at >= receipt.updated_at);
+    let chain = storage
+        .list_provenance(&owner.tenant_id, owner.continuity_id, 10)
+        .await
+        .unwrap();
+    assert_eq!(chain.len(), 1);
+    assert!(
+        orch8_engine::continuity::verify_provenance_chain(&chain, Some(&chain[0].entry_sha256))
+            .valid
+    );
+}

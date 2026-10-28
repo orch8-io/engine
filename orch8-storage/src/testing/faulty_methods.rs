@@ -525,6 +525,7 @@ fault_impl! {
         async fn retire_effect_attempts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &TenantId, id: EffectId) -> Result<Option<EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &TenantId, id: EffectId, expected_state: EffectState, next: &EffectReceipt) -> Result<bool, StorageError>;
+        async fn resolve_effect_with_provenance(&self, expected: &EffectReceipt, next: &EffectReceipt, entry: &ProvenanceEntry) -> Result<crate::effect_resolution::EffectResolutionCommit, StorageError>;
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &TenantId, next: &EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &TenantId, next: &EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<EffectReceipt>, StorageError>;

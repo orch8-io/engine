@@ -6,6 +6,7 @@ mod compensation_start;
 mod compensation_update;
 mod current_outputs;
 mod effect_attempt;
+pub mod effect_resolution;
 pub mod local_migration;
 pub mod worker_admission;
 pub mod worker_claim;
@@ -4594,6 +4595,17 @@ pub trait ContinuityStore: Send + Sync + 'static {
         expected_state: EffectState,
         next: &EffectReceipt,
     ) -> Result<bool, StorageError>;
+
+    /// Commit an explicit effect settlement and its provenance together.
+    /// Compares the entire expected receipt, preserves its immutable identity,
+    /// and refuses stale continuity epochs or consumed chain predecessors.
+    /// This is evidence settlement, never worker ownership or runtime admission.
+    async fn resolve_effect_with_provenance(
+        &self,
+        expected: &EffectReceipt,
+        next: &EffectReceipt,
+        entry: &ProvenanceEntry,
+    ) -> Result<effect_resolution::EffectResolutionCommit, StorageError>;
 
     /// Atomically transition a prepared receipt to dispatched only when it is
     /// the first active effect with the same kind, destination, and request

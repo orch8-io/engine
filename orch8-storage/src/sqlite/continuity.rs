@@ -1236,6 +1236,15 @@ impl crate::ContinuityStore for SqliteStorage {
         Ok(result.rows_affected() == 1)
     }
 
+    async fn resolve_effect_with_provenance(
+        &self,
+        expected: &EffectReceipt,
+        next: &EffectReceipt,
+        entry: &ProvenanceEntry,
+    ) -> Result<crate::effect_resolution::EffectResolutionCommit, StorageError> {
+        super::effect_resolution::resolve(self, expected, next, entry).await
+    }
+
     async fn dispatch_effect_receipt_owned(
         &self,
         tenant_id: &TenantId,

@@ -1,5 +1,6 @@
 //! Portable-continuity control-plane endpoints.
 
+mod effect_resolution;
 mod local_recovery;
 
 use std::fmt::Write as _;
@@ -89,7 +90,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/continuity/executions/{id}/effects", get(list_effects))
         .route("/instances/{id}/effects", get(list_instance_effects))
-        .route("/continuity/effects/{id}/resolve", post(resolve_effect))
+        .route(
+            "/continuity/effects/{id}/resolve",
+            post(effect_resolution::resolve),
+        )
         .route(
             "/continuity/executions/{id}/provenance",
             get(list_provenance).post(record_provenance_boundary),
@@ -2199,58 +2203,6 @@ async fn list_instance_effects(
         .await
         .map_err(|error| ApiError::from_storage(error, "effect receipts"))?;
     Ok(Json(receipts))
-}
-
-#[derive(Debug, Deserialize)]
-struct ResolveEffectRequest {
-    tenant_id: TenantId,
-    state: EffectState,
-    provider_receipt_id: Option<String>,
-}
-
-async fn resolve_effect(
-    State(state): State<AppState>,
-    tenant_ctx: crate::auth::OptionalTenant,
-    Path(id): Path<orch8_types::continuity::EffectId>,
-    Json(body): Json<ResolveEffectRequest>,
-) -> Result<Json<EffectReceipt>, ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let mut receipt = state
-        .storage
-        .get_effect_receipt(&tenant_id, id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "effect receipt"))?
-        .ok_or_else(|| ApiError::NotFound(format!("effect receipt {id}")))?;
-    let expected = receipt.state;
-    receipt.provider_receipt_id = body.provider_receipt_id;
-    receipt
-        .transition(body.state, Utc::now())
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    if !state
-        .storage
-        .cas_effect_receipt(&tenant_id, id, expected, &receipt)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "effect receipt"))?
-    {
-        return Err(ApiError::Conflict(
-            "effect receipt changed concurrently; reload before resolving".into(),
-        ));
-    }
-    let execution = state
-        .storage
-        .get_continuity_execution(&tenant_id, receipt.continuity_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
-        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
-    append_provenance_boundary(
-        &state,
-        &execution,
-        "effect_resolved",
-        "effect receipt resolved",
-        &receipt,
-    )
-    .await?;
-    Ok(Json(receipt))
 }
 
 async fn list_provenance(

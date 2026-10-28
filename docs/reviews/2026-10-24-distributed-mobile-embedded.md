@@ -6462,3 +6462,25 @@ gates.
 Verification passes 368 API unit cases, nine browser-session transport cases and
 four device-session transport cases with PostgreSQL required. The regression
 failed before the verifier repair and passes after it.
+
+## Operator effect-resolution atomicity prerequisite
+
+An injected provenance append failure proved that the existing effect-resolution
+endpoint returned an error after committing an operator's receipt transition.
+The endpoint now commits receipt evidence and its signed provenance boundary in
+one backend transaction. Full expected-receipt comparison prevents same-state
+provider evidence from being overwritten; a changed continuity epoch requires
+reload. Chain-head races retry only the provenance proposal, preserving the
+original receipt snapshot. All 22 API evidence cases, 14 continuity storage cases and 16 four-backend
+matrix cases pass. The matrix includes suppressed receipt updates; the API
+regression covers receipts written by an ahead-clock replica. See `2026-10-28-atomic-effect-resolution.md`.
+
+This repairs the existing effect settlement path, not legacy reporter attribution.
+A retained explicit backend/operator reconciliation decision, approved handoff
+and revocation, the complete database/coordinator floor and all remaining
+original gates stay open. Resolving a provider effect cannot certify a previously
+unknown worker identity or reconstruct missing worker output.
+
+Final validation also passes strict all-target checks across eight affected
+packages, standalone mobile-library compilation, generated Rust/JavaScript
+client contracts, the unchanged OpenAPI fingerprint and formatting checks.
