@@ -92,7 +92,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 134;
+pub const STORAGE_SCHEMA_VERSION: u32 = 135;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -2103,6 +2103,21 @@ pub trait WorkerStore: Send + Sync + 'static {
         task_id: Uuid,
         claim: &WorkerClaim,
         output: &serde_json::Value,
+    ) -> Result<bool, StorageError> {
+        self.accept_worker_completion(
+            task_id,
+            claim,
+            &crate::worker_outcome::WorkerCompletion::new(output.clone()),
+        )
+        .await
+    }
+
+    /// Atomically accept the result, settle its admitted effect and append attempt evidence.
+    async fn accept_worker_completion(
+        &self,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+        completion: &crate::worker_outcome::WorkerCompletion,
     ) -> Result<bool, StorageError>;
 
     /// Mark a claimed task as failed. Verifies `worker_id` ownership.

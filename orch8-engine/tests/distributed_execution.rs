@@ -1277,9 +1277,6 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
             .expect("destination claims its mailbox task");
 
         let output = json!({"labels": ["cat"]});
-        commit_external_worker_effect(storage.as_ref(), &parent.tenant_id, &claimed, &output)
-            .await
-            .unwrap();
         assert!(
             storage
                 .complete_worker_task(
@@ -1378,9 +1375,6 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             .find(|t| t.id == task.id)
             .expect("destination claims the proxy's mailbox task");
         let output = json!({"labels": ["cat"]});
-        commit_external_worker_effect(storage.as_ref(), &proxy.tenant_id, &claimed, &output)
-            .await
-            .unwrap();
         assert!(
             storage
                 .complete_worker_task(
@@ -1610,14 +1604,27 @@ async fn checkpointed_activity_resumes_on_lease_expiry_with_unknown_receipt() {
 
         // The replacement attempt reports success: unknown -> committed.
         let resumed = claim(&storage, &after).await;
-        commit_external_worker_effect(
-            storage.as_ref(),
-            &inst.tenant_id,
-            &resumed,
-            &json!({"ok": 1}),
-        )
-        .await
-        .unwrap();
+        let resumed_claim = orch8_types::worker::WorkerClaim::new("worker-a", resumed.claim_epoch);
+        assert!(
+            storage
+                .complete_worker_task(resumed.id, &resumed_claim, &json!({"ok":1}))
+                .await
+                .unwrap()
+        );
+        let accepted = storage
+            .get_worker_accepted_outcome(Some(&inst.tenant_id), resumed.id, &resumed_claim)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(accepted.output, json!({"ok":1}));
+        assert!(
+            storage
+                .get_worker_accepted_outcome(Some(&inst.tenant_id), resumed.id, &proof)
+                .await
+                .unwrap()
+                .is_none(),
+            "reclaimed worker inherited the replacement's acknowledgement"
+        );
         assert_eq!(receipt_state(&storage, &task).await, EffectState::Committed);
     }
 }

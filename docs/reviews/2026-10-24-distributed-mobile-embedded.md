@@ -6123,7 +6123,7 @@ Legacy backup/key rotation compatibility, compensation invocation identity and
 independent offline-owner/outcome handling remain broader review gates. Passing
 these tests does not prove those contracts or justify merging the draft.
 
-### DME198 follow-up: accepted success evidence (implementation checkpoint)
+### DME198 follow-up: accepted success evidence (checkpoint 0ef2acf9)
 
 The new lost-acknowledgement regression reproduced `NotFound` when a paused
 workflow's completed hot task was collected. Both completion transports now look
@@ -6168,3 +6168,87 @@ the backend matrix. Strict all-target lint passes for storage, gRPC and API;
 formatting and whitespace checks pass. The overflow regression proves that a
 completion cannot saturate an oversized caller epoch to a real i64::MAX lease.
 These results cover accepted-success retention, not the remaining protocol gates.
+
+### DME198 follow-up: atomic success settlement and GC lock order
+
+A new regression reproduced successful hot completion with its effect still
+Dispatched on all four storage backends. `complete_worker_task` now routes through
+an opaque `WorkerCompletion`: logical output fingerprint and bounded provider
+receipt metadata are derived before encryption, while the decorator reseals only
+the stored payload. The same transaction settles the original bound receipt,
+accepts the original result, completes the task and appends its attempt event.
+Journal insertion failure rolls back the receipt and task together. Both HTTP and
+gRPC completion and local delegation resumption no longer precommit independently.
+
+Admitted work checks the original request/kind/destination proof and the exact
+effect-attempt alias. Legacy immutable bindings retain their weaker classification;
+acceptance does not fabricate an admission or certify an unknown native target.
+Unknown effects can accept a factual success under their original binding. An
+already-Committed receipt without accepted result evidence refuses a regenerated
+payload and requires reconciliation; a durable legacy reconciliation workflow
+remains open. New success records retain an optional logical fingerprint, so old
+134 records remain readable without rewriting a published migration.
+
+The PostgreSQL lock review found an actual inversion: GC locked a native parent
+before waiting for its continuity owner, while completion takes owner before
+parent. A held-owner transaction deterministically reproduced a native UPDATE
+lock timeout. GC now takes physical namespace locks, fences owners/receipts and
+then locks eligible native rows. It skips busy namespaces and rechecks terminal
+and family eligibility after waits. The namespace key is shared with foreground
+admission. Cleanup awaits rollback on error; an independent pre-acquired
+connection verifies that a failed native DELETE has restored evidence and released
+the owner lock before returning. A separate test verifies busy history does not
+block cleanup of a healthy execution.
+
+This closes success effect/acceptance atomicity, not native outcome integration.
+The original output, context quota, exact activation, native transition and Applied
+receipt still need one fenced transaction and bounded recovery. Failure settlement
+still precedes its resolution transaction, and delegation integration remains a
+separate operation. Pending accepted outcomes must block or travel with snapshots
+and GC; explicit acknowledged archive must compact payloads while retaining
+immutable receipt identity. Reporter principal retention, protocol enforcement and
+the broader review gates remain required before merging this draft.
+
+An additional encrypted-backend regression reproduced storage interpreting an
+application's own valid ciphertext as an already sealed storage value. The opaque
+completion now distinguishes caller data from an internally sealed submission;
+caller results are sealed without interpreting their contents. Logical output
+fingerprints also prevent an accepted result that is already logical from being
+unwrapped again. Exact ciphertext values survive both hot-task and journal reads
+on PostgreSQL/SQLite with encryption enabled.
+
+The preceding 0ef2acf9 CI Unit job reached the distributed-worker API suite and
+found two additional synthetic fixtures without dispatch identity. The local
+full API sweep checked all 70 targets and found the same omission in the final
+workers suite. Both fixtures now capture a durable run/flat-step baseline and
+model a Waiting parent before task insertion; no production fence was weakened.
+All 70 API targets pass after rerunning the repaired target (1,357 cases).
+Completed test executables are removed between targets to keep disk bounded.
+
+Validation across the checkpoint's verification runs covers 5,003 distinct test
+cases: 600 storage integration/schema/encryption/dispatch/outcome/GC cases, two
+focused storage unit contracts (decorator interception and record codec), 2,145 engine unit and 29 distributed
+cases, 149 gRPC, 701 mobile, 20 embedded facade cases and 1,357 API cases. The
+checkpoint-resumption test uses the atomic completion path and proves the old
+claim cannot inherit its replacement's acknowledgement. Strict all-target lint
+passes for storage, engine, gRPC, API, mobile and the embedded facade; API lint was
+rerun after the final fixture repair. Native integration and the other stated
+merge gates remain open.
+
+The numeric roundtrip regression then reproduced a committed PostgreSQL result
+whose fingerprint could no longer validate: JSONB changed number representations.
+The private journal codec now stores the original logical output as versioned JSON
+text and decodes it before fingerprint validation. Public outcome serialization
+and established fingerprint algorithms stay unchanged. Tests cover integral
+floats, negative zero, nested numbers, legacy record decoding, unknown codec
+refusal and malformed encoded data.
+
+Migration 135 / SQLite schema 66 advertise the newer format and reject outdated
+journal writers. PostgreSQL downgrade refuses encoded records requiring the newer
+reader; empty downgrade/upgrade remains supported. Original unencoded 134 records
+remain readable when their fingerprints are valid. Previously malformed legacy
+numeric records require reconciliation rather than silent recertification.
+This format floor is narrower than the full coordinator/worker protocol floor,
+which remains open. After these final persistence changes, all 89 admission/outcome
+cases, 177 source-cut cases, 15 migration cases, 149 gRPC cases and the 134 API
+completion cases pass, along with strict all-target checks for six Rust packages.

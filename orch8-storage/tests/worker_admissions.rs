@@ -425,6 +425,9 @@ orch8_storage::backend_test!(async fn accepted_outcome_insert_failure_rolls_back
     assert!(storage.complete_worker_task(id,&claim,&json!({"value":"original"})).await.is_err());
     let after=storage.get_worker_task(id).await.unwrap().unwrap();
     assert_eq!(after.state,WorkerTaskState::Claimed);assert!(after.output.is_none());
+    let receipt=storage.get_effect_receipt(&fence.tenant_id,held.effect_id.unwrap()).await.unwrap().unwrap();
+    assert_eq!(receipt.state,EffectState::Dispatched,"journal failure committed an orphan effect");
+    assert!(receipt.provider_receipt_id.is_none());
     assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().is_none());
     assert!(!storage.list_worker_task_attempt_events(id,100).await.unwrap().iter().any(|e|e.event==WorkerAttemptEventKind::Completed));
 });
@@ -435,11 +438,14 @@ orch8_storage::backend_test!(async fn accepted_outcome_concurrent_payloads_have_
     let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
     let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
     let claim=WorkerClaim::new("worker",held.claim_epoch);
-    let left=json!({"value":"left"});let right=json!({"value":"right"});
+    let left=json!({"value":"left","provider_receipt_id":"left"});let right=json!({"value":"right","provider_receipt_id":"right"});
     let (a,b)=tokio::join!(storage.complete_worker_task(id,&claim,&left),storage.complete_worker_task(id,&claim,&right));
     let a=a.unwrap();let b=b.unwrap();assert_ne!(a,b);
     let accepted=storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap();
     assert_eq!(accepted.output,if a {left} else {right});
+    let receipt=storage.get_effect_receipt(&fence.tenant_id,held.effect_id.unwrap()).await.unwrap().unwrap();
+    assert_eq!(receipt.state,EffectState::Committed);
+    assert_eq!(receipt.provider_receipt_id.as_deref(),Some(if a {"left"} else {"right"}));
     assert_eq!(storage.get_worker_task(id).await.unwrap().unwrap().output,Some(accepted.output));
 });
 
@@ -502,8 +508,20 @@ async fn postgres_outcome_downgrade_preserves_accepted_evidence() {
     let down = include_str!("../../migrations/down/134_worker_accepted_outcomes.sql");
     let up = include_str!("../../migrations/134_worker_accepted_outcomes.sql");
     let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/135_worker_outcome_encoding.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/135_worker_outcome_encoding.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let (task, fence, _) = fixture(b.storage.as_ref()).await;
     let id = published(
@@ -577,3 +595,165 @@ orch8_storage::backend_test!(async fn completion_never_saturates_an_out_of_range
     assert_eq!(storage.get_worker_task(id).await.unwrap().unwrap().state,WorkerTaskState::Claimed);
     assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&oversized).await.unwrap().is_none());
 });
+
+orch8_storage::backend_test!(async fn completion_atomically_commits_bound_effect_with_original_result(b) {
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let output=json!({"result":"original","provider_receipt_id":"provider-original"});
+    assert!(storage.complete_worker_task(id,&claim,&output).await.unwrap());
+    let receipt=storage.get_effect_receipt(&fence.tenant_id,held.effect_id.unwrap()).await.unwrap().unwrap();
+    assert_eq!(receipt.state,EffectState::Committed,"task completion left its receipt unsettled");
+    assert_eq!(receipt.provider_receipt_id.as_deref(),Some("provider-original"));
+    assert_eq!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap().output,output);
+});
+
+orch8_storage::backend_test!(async fn completion_of_an_unknown_effect_keeps_original_binding(b) {
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let mut receipt=storage.get_effect_receipt(&fence.tenant_id,held.effect_id.unwrap()).await.unwrap().unwrap();
+    receipt.transition(EffectState::Unknown,Utc::now()).unwrap();
+    assert!(storage.cas_effect_receipt(&fence.tenant_id,receipt.id,EffectState::Dispatched,&receipt).await.unwrap());
+    assert!(storage.complete_worker_task(id,&claim,&json!({"request_id":"original-request"})).await.unwrap());
+    let accepted=storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap();
+    let committed=storage.get_effect_receipt(&fence.tenant_id,receipt.id).await.unwrap().unwrap();
+    assert_eq!(committed.state,EffectState::Committed);
+    assert_eq!(committed.provider_receipt_id.as_deref(),Some("original-request"));
+    assert_eq!(accepted.invocation.unwrap().effect_id,Some(receipt.id));
+    assert!(accepted.logical_output_sha256.is_some());
+});
+
+orch8_storage::backend_test!(async fn precommitted_effect_without_accepted_result_is_not_recertified(b) {
+    use orch8_types::worker::{WorkerClaim,WorkerTaskState};
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let mut receipt=storage.get_effect_receipt(&fence.tenant_id,held.effect_id.unwrap()).await.unwrap().unwrap();
+    receipt.provider_receipt_id=Some("original-provider".into());
+    receipt.transition(EffectState::Committed,Utc::now()).unwrap();
+    assert!(storage.cas_effect_receipt(&fence.tenant_id,receipt.id,EffectState::Dispatched,&receipt).await.unwrap());
+    assert!(storage.complete_worker_task(id,&claim,&json!({"provider_receipt_id":"regenerated"})).await.is_err());
+    let after=storage.get_worker_task(id).await.unwrap().unwrap();
+    assert_eq!(after.state,WorkerTaskState::Claimed);assert!(after.output.is_none());
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().is_none());
+    assert_eq!(storage.get_effect_receipt(&fence.tenant_id,receipt.id).await.unwrap().unwrap(),receipt);
+});
+
+orch8_storage::backend_test!(async fn completion_refuses_effect_receipt_drift_without_accepting_output(b) {
+    use orch8_types::worker::{WorkerClaim,WorkerTaskState};
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let mut receipt=storage.get_effect_receipt(&fence.tenant_id,held.effect_id.unwrap()).await.unwrap().unwrap();
+    receipt.request_sha256="00".repeat(32);
+    assert!(storage.cas_effect_receipt(&fence.tenant_id,receipt.id,EffectState::Dispatched,&receipt).await.unwrap());
+    assert!(storage.complete_worker_task(id,&claim,&json!({"value":"new"})).await.is_err());
+    assert_eq!(storage.get_worker_task(id).await.unwrap().unwrap().state,WorkerTaskState::Claimed);
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().is_none());
+    assert_eq!(storage.get_effect_receipt(&fence.tenant_id,receipt.id).await.unwrap().unwrap(),receipt);
+});
+
+orch8_storage::backend_test!(async fn application_ciphertext_is_preserved_as_an_opaque_worker_result(b) {
+    use orch8_types::{encryption::FieldEncryptor,worker::WorkerClaim};
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let encryptor=FieldEncryptor::from_hex_key(orch8_storage::testing::backends::TEST_ENCRYPTION_KEY_HEX).unwrap();
+    let application_output=encryptor.encrypt_value(&json!({"value":"APPLICATION_OPAQUE_VALUE"})).unwrap();
+    assert!(storage.complete_worker_task(id,&claim,&application_output).await.unwrap());
+    assert_eq!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap().output,application_output,"storage interpreted an application's own ciphertext as its storage envelope");
+    assert_eq!(storage.get_worker_task(id).await.unwrap().unwrap().output,Some(application_output));
+});
+
+orch8_storage::backend_test!(async fn accepted_result_fingerprint_survives_json_number_roundtrip(b) {
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let output=json!({"integer_float":1e18,"negative_zero":-0.0,"nested":[1e18,0.0]});
+    assert!(storage.complete_worker_task(id,&claim,&output).await.unwrap());
+    let accepted=storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap();
+    assert_eq!(accepted.output,output,"database numeric normalization changed the immutable accepted result");
+});
+
+orch8_storage::backend_test!(async fn outdated_worker_outcome_writer_is_rejected_by_storage(b) {
+    use orch8_storage::testing::backends::RawPool;
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    assert!(storage.complete_worker_task(id,&claim,&json!({"value":"original"})).await.unwrap());
+    let receipt=storage.get_worker_accepted_outcome(Some(&fence.tenant_id),id,&claim).await.unwrap().unwrap();
+    let mut legacy=serde_json::to_value(&receipt).unwrap();
+    let candidate=Uuid::now_v7();legacy["task_id"]=json!(candidate);legacy["invocation"]["task_id"]=json!(candidate);
+    let error=match &b.raw {
+        RawPool::Sqlite(pool)=>sqlx::query("INSERT INTO worker_accepted_outcomes(task_id,tenant_id,instance_id,record) VALUES(?1,?2,?3,?4)").bind(candidate.to_string()).bind(fence.tenant_id.as_str()).bind(fence.instance_id.to_string()).bind(legacy.to_string()).execute(pool).await.unwrap_err(),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>sqlx::query("INSERT INTO worker_accepted_outcomes(task_id,tenant_id,instance_id,record) VALUES($1,$2,$3,$4)").bind(candidate).bind(fence.tenant_id.as_str()).bind(fence.instance_id.into_uuid()).bind(legacy).execute(pool).await.unwrap_err(),
+    };
+    assert!(error.to_string().contains("requires json_text_v1 writer"));
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),candidate,&claim).await.unwrap().is_none());
+});
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_codec_downgrade_refuses_records_requiring_the_new_reader() {
+    use orch8_types::worker::WorkerClaim;
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let down = include_str!("../../migrations/down/135_worker_outcome_encoding.sql");
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/135_worker_outcome_encoding.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (task, fence, _) = fixture(b.storage.as_ref()).await;
+    let id = published(
+        &b.storage
+            .admit_worker_dispatch(&intent(task, fence.clone()))
+            .await
+            .unwrap(),
+    );
+    let held = b
+        .storage
+        .claim_worker_tasks("remote.work", "worker", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let claim = WorkerClaim::new("worker", held.claim_epoch);
+    assert!(
+        b.storage
+            .complete_worker_task(id, &claim, &json!({"value":1e18}))
+            .await
+            .unwrap()
+    );
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    let error = sqlx::raw_sql(down).execute(&mut *tx).await.unwrap_err();
+    assert!(error.to_string().contains("require the current reader"));
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        b.storage
+            .get_worker_accepted_outcome(Some(&fence.tenant_id), id, &claim)
+            .await
+            .unwrap()
+            .unwrap()
+            .output,
+        json!({"value":1e18})
+    );
+}

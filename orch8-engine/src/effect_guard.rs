@@ -575,7 +575,9 @@ pub enum WorkerEffectSettlement {
     Abandoned,
 }
 
-/// Commit the receipt created when an external worker task was dispatched.
+/// Reconcile a legacy external worker receipt independently of task acceptance.
+/// Production completions use `StorageBackend::complete_worker_task` so the
+/// receipt, original result and task state commit together.
 /// Legacy and non-continuity tasks are intentionally a no-op.
 pub async fn commit_external_worker_effect(
     storage: &dyn StorageBackend,

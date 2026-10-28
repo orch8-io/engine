@@ -337,9 +337,10 @@ pub async fn integrate_delegation_outcome(
 ///
 /// The local step was dispatched as a local worker task (placed off this
 /// runtime) that the runtime's delegation pump claimed as `claim`. `Ok`
-/// completes it exactly like a worker completion (receipt committed, block
-/// output saved, output merged into `context.data`, node completed, instance
-/// rescheduled, all in one write); `Err((message, retryable))` fails it
+/// durably accepts it like a worker completion (effect receipt, original
+/// result and task state in one transaction). Block output, context, node and
+/// native transition integration currently follow separately;
+/// `Err((message, retryable))` fails it
 /// through the fenced failure resolution (retry policy or fail the step).
 /// `delegation_result` is merged at `context.data.delegations.<id>`, like a
 /// server-hosted parent's integration.
@@ -380,13 +381,6 @@ pub async fn resume_local_parent(
         }
         Ok(output) => {
             if task.state == WorkerTaskState::Claimed {
-                crate::effect_guard::commit_external_worker_effect(
-                    storage,
-                    &instance.tenant_id,
-                    &task,
-                    output,
-                )
-                .await?;
                 if !storage.complete_worker_task(task.id, claim, output).await? {
                     return Ok(false);
                 }

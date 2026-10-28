@@ -24,12 +24,34 @@ pub(super) async fn lock_instance_on(
     tenant: &TenantId,
     instance: InstanceId,
 ) -> Result<(), StorageError> {
-    let key = serde_json::to_string(&("orch8-continuity-instance", tenant.as_str(), instance))?;
+    let key = instance_lock_key(tenant, instance)?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
         .bind(key)
         .execute(&mut *conn)
         .await?;
     Ok(())
+}
+
+fn instance_lock_key(tenant: &TenantId, instance: InstanceId) -> Result<String, StorageError> {
+    Ok(serde_json::to_string(&(
+        "orch8-continuity-instance",
+        tenant.as_str(),
+        instance,
+    ))?)
+}
+
+/// Background cleanup skips a namespace in use rather than blocking its owner.
+pub(super) async fn try_lock_instance_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    instance: InstanceId,
+) -> Result<bool, StorageError> {
+    Ok(
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,0))")
+            .bind(instance_lock_key(tenant, instance)?)
+            .fetch_one(conn)
+            .await?,
+    )
 }
 
 pub(super) async fn check_namespace_on(

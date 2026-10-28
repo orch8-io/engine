@@ -1,6 +1,6 @@
 use chrono::Utc;
 use orch8_api::test_harness::{TestServer, spawn_test_server_with_artifacts};
-use orch8_storage::{ContinuityStore, OutputStore, ResourceStore, WorkerStore};
+use orch8_storage::{ContinuityStore, InstanceStore, OutputStore, ResourceStore, WorkerStore};
 use orch8_types::continuity::CapsuleRequirements;
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
@@ -137,7 +137,33 @@ async fn seed_claimed_task(
     claim_epoch: u64,
 ) -> WorkerTask {
     let instance = create_instance(server, client, tenant).await;
-    let task = worker_task(
+    // Model a dispatched flat activity, including the durable identity used
+    // by failure/release fencing rather than an unidentified synthetic row.
+    let native_id = InstanceId::from_uuid(instance);
+    let mut parent = server
+        .storage
+        .get_instance(native_id)
+        .await
+        .unwrap()
+        .unwrap();
+    parent.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    parent.context.runtime.current_step = Some(BlockId::new("device-file"));
+    parent.context.runtime.current_step_started_at = Some(Utc::now());
+    server
+        .storage
+        .update_instance_context(native_id, &parent.context)
+        .await
+        .unwrap();
+    server
+        .storage
+        .update_instance_state(
+            native_id,
+            orch8_types::instance::InstanceState::Waiting,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut task = worker_task(
         instance,
         "device-file",
         CapsuleRequirements::default(),
@@ -146,6 +172,7 @@ async fn seed_claimed_task(
         Some(worker_id),
         claim_epoch,
     );
+    task.context = serde_json::to_value(&parent.context).unwrap();
     server.storage.create_worker_task(&task).await.unwrap();
     task
 }

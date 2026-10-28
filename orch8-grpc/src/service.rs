@@ -2043,17 +2043,7 @@ impl Orch8Service for Orch8GrpcService {
                 .map_err(|error| Status::invalid_argument(error.to_string()))?;
         }
 
-        // Settle the attempt's effect receipt (by its stored id) before the
-        // task is marked complete — the same order as the HTTP path.
-        orch8_engine::effect_guard::commit_external_worker_effect(
-            self.storage.as_ref(),
-            &pre_instance.tenant_id,
-            &pre_task,
-            &output,
-        )
-        .await
-        .map_err(engine_err)?;
-
+        // Storage settles the original admitted effect and accepts its result together.
         let updated = self
             .storage
             .complete_worker_task(task_id, &claim, &output)

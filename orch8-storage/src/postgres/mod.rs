@@ -1781,13 +1781,13 @@ impl crate::WorkerStore for PostgresStorage {
     ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
         worker_outcome::get(self, tenant_id, task_id, claim).await
     }
-    async fn complete_worker_task(
+    async fn accept_worker_completion(
         &self,
         task_id: Uuid,
         claim: &WorkerClaim,
-        output: &serde_json::Value,
+        completion: &crate::worker_outcome::WorkerCompletion,
     ) -> Result<bool, StorageError> {
-        workers::complete(self, task_id, claim, output).await
+        workers::complete(self, task_id, claim, completion).await
     }
 
     async fn fail_worker_task(

@@ -1328,15 +1328,6 @@ pub(crate) async fn complete_task(
     let tenant_for_cb = Some(inst.tenant_id);
 
     if !completion_retry {
-        orch8_engine::effect_guard::commit_external_worker_effect(
-            state.storage.as_ref(),
-            &tenant_id,
-            &pre_task,
-            &req.output,
-        )
-        .await
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-
         let updated = state
             .storage
             .complete_worker_task(task_id, &claim, &req.output)
@@ -1676,8 +1667,10 @@ pub(crate) async fn fail_task(
     }
     enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "fail").await?;
 
-    // One fenced transaction (shared with the reaper, timeouts and release):
-    // receipt → `unknown`, then the task fails and the instance advances per
+    // Fenced task/native resolution (shared with the reaper, timeouts and release).
+    // Failure effect settlement still precedes that transaction; the durable
+    // failure-outcome protocol must close this separate crash gap.
+    // The task fails and the instance advances per
     // the step's retry policy — or only the task fails for a delegation or a
     // terminal/paused instance. A racing lease change applies nothing.
     let failed = orch8_engine::worker_lease::fail_worker_task(

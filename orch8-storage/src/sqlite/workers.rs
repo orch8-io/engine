@@ -461,13 +461,15 @@ pub(super) async fn claim_matching(
     Ok(tasks)
 }
 
-#[instrument(skip(storage, output), fields(%task_id, worker_id))]
+#[instrument(skip(storage, completion), fields(%task_id, worker_id))]
 pub(super) async fn complete(
     storage: &SqliteStorage,
     task_id: Uuid,
     claim: &WorkerClaim,
-    output: &serde_json::Value,
+    completion: &crate::worker_outcome::WorkerCompletion,
 ) -> Result<bool, StorageError> {
+    completion.validate_stored()?;
+    let output = &completion.output;
     let epoch = i64::try_from(claim.claim_epoch)
         .map_err(|_| StorageError::Constraint("worker claim epoch exceeds SQL range".into()))?;
     let mut tx = begin_immediate(&storage.pool).await?;
@@ -483,7 +485,8 @@ pub(super) async fn complete(
         ?;
     let changed = result.rows_affected() > 0;
     if changed {
-        super::worker_outcome::insert_on(&mut tx, task_id, claim, output).await?;
+        super::worker_outcome::settle_on(&mut tx, task_id, completion).await?;
+            super::worker_outcome::insert_on(&mut tx, task_id, claim, completion).await?;
         insert_attempt_events(
             &mut tx,
             &[transition_event(

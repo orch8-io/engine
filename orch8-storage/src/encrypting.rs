@@ -2162,7 +2162,8 @@ passthrough_impl! {
         &self, tenant_id: Option<&TenantId>, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim,
     ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
         let mut outcome = self.inner.get_worker_accepted_outcome(tenant_id, task_id, claim).await?;
-        if let Some(outcome) = &mut outcome {
+        if let Some(outcome) = &mut outcome
+            && !outcome.is_logical_output() {
             outcome.output = self.decrypt_json_value(&outcome.output)?;
         }
         Ok(outcome)
@@ -2173,10 +2174,24 @@ passthrough_impl! {
         claim: &orch8_types::worker::WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
-        let encrypted = self.encrypt_json_value(output)?;
-        self.inner
-            .complete_worker_task(task_id, claim, &encrypted)
-            .await
+        self.accept_worker_completion(task_id, claim, &crate::worker_outcome::WorkerCompletion::new(output.clone())).await
+    }
+    async fn accept_worker_completion(
+        &self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim,
+        completion: &crate::worker_outcome::WorkerCompletion,
+    ) -> Result<bool, StorageError> {
+        completion.validate_stored()?;
+        // Caller results are logical values even if they contain an authentic
+        // application ciphertext. Only an already sealed private submission
+        // may use the double-encryption guard.
+        let output = if completion.stored_sealed {
+            self.encrypt_json_value(&completion.output)?
+        } else {
+            self.encryptor.encrypt_value(&completion.output)
+                .map_err(|error|StorageError::Encryption(error.to_string()))?
+        };
+        let sealed=completion.with_stored_output(output);
+        self.inner.accept_worker_completion(task_id, claim, &sealed).await
     }
     async fn fail_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
     async fn heartbeat_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim) -> Result<bool, StorageError>;

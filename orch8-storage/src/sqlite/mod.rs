@@ -581,6 +581,12 @@ impl SqliteStorage {
         sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(65)")
             .execute(&mut *retirement)
             .await?;
+        sqlx::raw_sql(include_str!("worker_outcome_encoding.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(66)")
+            .execute(&mut *retirement)
+            .await?;
         sqlx::raw_sql(include_str!("worker_admissions.sql"))
             .execute(&mut *retirement)
             .await?;
@@ -2173,13 +2179,13 @@ impl crate::WorkerStore for SqliteStorage {
     ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
         worker_outcome::get(self, tenant_id, task_id, claim).await
     }
-    async fn complete_worker_task(
+    async fn accept_worker_completion(
         &self,
         task_id: Uuid,
         claim: &WorkerClaim,
-        output: &serde_json::Value,
+        completion: &crate::worker_outcome::WorkerCompletion,
     ) -> Result<bool, StorageError> {
-        workers::complete(self, task_id, claim, output).await
+        workers::complete(self, task_id, claim, completion).await
     }
 
     async fn fail_worker_task(

@@ -1607,6 +1607,53 @@ async fn lock_gc_effects_and_filter_candidates(
     Ok(rows)
 }
 
+/// Fence a GC batch before taking native locks, matching foreground authority writes.
+async fn lock_gc_native_candidates(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    requested: &[uuid::Uuid],
+) -> Result<Vec<(uuid::Uuid, String)>, StorageError> {
+    // Namespace -> owner/receipts -> native. In particular, never hold a
+    // native row while waiting for the owner that completion locks first.
+    let candidates: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT t.id,t.tenant_id FROM task_instances t WHERE t.id=ANY($1) \
+         AND t.state IN ('completed','failed','cancelled') \
+         AND NOT EXISTS(SELECT 1 FROM task_instances p WHERE p.id=t.parent_instance_id \
+             AND p.state NOT IN ('completed','failed','cancelled')) \
+         ORDER BY t.tenant_id,t.id",
+    )
+    .bind(requested)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut available = Vec::with_capacity(candidates.len());
+    for (id, tenant) in candidates {
+        if super::portable_effects::try_lock_instance_on(
+            tx,
+            &TenantId::unchecked(tenant),
+            InstanceId::from_uuid(id),
+        )
+        .await?
+        {
+            available.push(id);
+        }
+    }
+    let fenced = lock_gc_effects_and_filter_candidates(tx, &available).await?;
+    let eligible: Vec<uuid::Uuid> = fenced.into_iter().map(|(id, _)| id).collect();
+    // Recheck terminal/family state after owner and receipt waits. SKIP LOCKED
+    // lets foreground native writes proceed without delaying the rest of GC.
+    let rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT t.id,t.tenant_id FROM task_instances t WHERE t.id=ANY($1) \
+         AND t.state IN ('completed','failed','cancelled') \
+         AND NOT EXISTS(SELECT 1 FROM task_instances p WHERE p.id=t.parent_instance_id \
+             AND p.state NOT IN ('completed','failed','cancelled')) \
+         ORDER BY t.tenant_id,t.id FOR UPDATE OF t SKIP LOCKED",
+    )
+    .bind(&eligible)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    Ok(rows)
+}
+
 /// See [`crate::ResourceStore::purge_terminal_instances`].
 pub(super) async fn purge_terminal_instances(
     store: &PostgresStorage,
@@ -1618,124 +1665,110 @@ pub(super) async fn purge_terminal_instances(
     let requested: Vec<uuid::Uuid> = ids.iter().map(|id| id.into_uuid()).collect();
     let mut tx = store.pool.begin().await?;
 
-    // Lock the rows that are still purgeable: terminal, and not the child of
-    // a parent that became live since the candidate scan (L3-08).
-    let locked: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT t.id, t.tenant_id FROM task_instances t \
-         WHERE t.id = ANY($1) \
-           AND t.state IN ('completed', 'failed', 'cancelled') \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM task_instances p \
-               WHERE p.id = t.parent_instance_id \
-                 AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
-         FOR UPDATE OF t SKIP LOCKED",
-    )
-    .bind(&requested)
-    .fetch_all(&mut *tx)
-    .await?;
-    let locked_ids: Vec<uuid::Uuid> = locked.iter().map(|(id, _)| *id).collect();
-    let mut rows = lock_gc_effects_and_filter_candidates(&mut tx, &locked_ids).await?;
+    let result = async {
+        let mut rows = lock_gc_native_candidates(&mut tx, &requested).await?;
 
-    // `task_instances.parent_instance_id` is a plain (NO ACTION) FK: a parent
-    // with a child outside this batch cannot be deleted, and trying would
-    // fail the whole batch (and every later one) with an FK violation.
-    // Drop such parents until the set is closed under "children included".
-    loop {
-        let set: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
-        let blocked: Vec<uuid::Uuid> = sqlx::query_scalar(
-            "SELECT DISTINCT parent_instance_id FROM task_instances \
+        // `task_instances.parent_instance_id` is a plain (NO ACTION) FK: a parent
+        // with a child outside this batch cannot be deleted, and trying would
+        // fail the whole batch (and every later one) with an FK violation.
+        // Drop such parents until the set is closed under "children included".
+        loop {
+            let set: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
+            let blocked: Vec<uuid::Uuid> = sqlx::query_scalar(
+                "SELECT DISTINCT parent_instance_id FROM task_instances \
              WHERE parent_instance_id = ANY($1) AND NOT (id = ANY($1))",
-        )
-        .bind(&set)
-        .fetch_all(&mut *tx)
-        .await?;
-        if blocked.is_empty() {
-            break;
+            )
+            .bind(&set)
+            .fetch_all(&mut *tx)
+            .await?;
+            if blocked.is_empty() {
+                break;
+            }
+            rows.retain(|(id, _)| !blocked.contains(id));
         }
-        rows.retain(|(id, _)| !blocked.contains(id));
-    }
-    if rows.is_empty() {
-        tx.commit().await?;
-        return Ok(0);
-    }
-    let ids: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
-    let tenants: Vec<String> = rows.iter().map(|(_, t)| t.clone()).collect();
-    let id_texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let ids: Vec<uuid::Uuid> = rows.iter().map(|(id, _)| *id).collect();
+        let tenants: Vec<String> = rows.iter().map(|(_, t)| t.clone()).collect();
+        let id_texts: Vec<String> = ids.iter().map(ToString::to_string).collect();
 
-    // Worker-task attempt evidence has no FK (by design, migration 080), so
-    // it must go before the worker_tasks cascade removes the task ids (L1-02).
-    sqlx::query(
-        "DELETE FROM worker_task_attempt_events \
+        // Worker-task attempt evidence has no FK (by design, migration 080), so
+        // it must go before the worker_tasks cascade removes the task ids (L1-02).
+        sqlx::query(
+            "DELETE FROM worker_task_attempt_events \
          WHERE task_id IN (SELECT id FROM worker_tasks WHERE instance_id = ANY($1))",
-    )
-    .bind(&ids)
-    .execute(&mut *tx)
-    .await?;
-
-    // The continuity record (and everything scoped to it) of every purged
-    // instance that is still its current instance (L1-01). Matched through
-    // the (tenant_id, record->>'current_instance_id') unique index.
-    let continuities: Vec<(String, uuid::Uuid)> = sqlx::query_as(
-        "SELECT ce.tenant_id, ce.continuity_id FROM continuity_executions ce \
-         JOIN UNNEST($1::text[], $2::text[]) AS p(tenant_id, instance_id) \
-           ON ce.tenant_id = p.tenant_id \
-          AND ce.record->>'current_instance_id' = p.instance_id",
-    )
-    .bind(&tenants)
-    .bind(&id_texts)
-    .fetch_all(&mut *tx)
-    .await?;
-    if !continuities.is_empty() {
-        let c_tenants: Vec<String> = continuities.iter().map(|(t, _)| t.clone()).collect();
-        let c_ids: Vec<uuid::Uuid> = continuities.iter().map(|(_, c)| *c).collect();
-        for table in CONTINUITY_CHILD_TABLES
-            .iter()
-            .copied()
-            .chain(std::iter::once("continuity_executions"))
-        {
-            // Table names come from the constant list above, never input.
-            let sql = format!(
-                "DELETE FROM {table} WHERE (tenant_id, continuity_id) IN \
-                 (SELECT * FROM UNNEST($1::text[], $2::uuid[]))"
-            );
-            sqlx::query(sqlx::AssertSqlSafe(sql))
-                .bind(&c_tenants)
-                .bind(&c_ids)
-                .execute(&mut *tx)
-                .await?;
-        }
-    }
-
-    // `step_logs`, `usage_events`, `instance_kv_state` and `event_waits`
-    // have no FK to `task_instances` on Postgres, so
-    // they are not covered by the `ON DELETE CASCADE` the instance row
-    // deletion below relies on for execution_tree / block_outputs /
-    // signal_inbox / worker_tasks / checkpoints / externalized_state /
-    // audit_log (all cascade -- see migrations 016 and 034).
-    for sql in [
-        "DELETE FROM step_logs WHERE instance_id = ANY($1)",
-        "DELETE FROM usage_events WHERE instance_id = ANY($1)",
-        "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
-        "DELETE FROM event_waits WHERE instance_id = ANY($1)",
-    ] {
-        sqlx::query(sql).bind(&ids).execute(&mut *tx).await?;
-    }
-    // Parent-scoped dedupe rows of a purged parent can never match again.
-    sqlx::query(
-        "DELETE FROM emit_event_dedupe \
-         WHERE scope_kind = 'parent' AND scope_value = ANY($1::uuid[]::text[])",
-    )
-    .bind(&ids)
-    .execute(&mut *tx)
-    .await?;
-
-    let result = sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
+        )
         .bind(&ids)
         .execute(&mut *tx)
         .await?;
 
-    tx.commit().await?;
-    Ok(result.rows_affected())
+        // The continuity record (and everything scoped to it) of every purged
+        // instance that is still its current instance (L1-01). Matched through
+        // the (tenant_id, record->>'current_instance_id') unique index.
+        let continuities: Vec<(String, uuid::Uuid)> = sqlx::query_as(
+            "SELECT ce.tenant_id, ce.continuity_id FROM continuity_executions ce \
+         JOIN UNNEST($1::text[], $2::text[]) AS p(tenant_id, instance_id) \
+           ON ce.tenant_id = p.tenant_id \
+          AND ce.record->>'current_instance_id' = p.instance_id",
+        )
+        .bind(&tenants)
+        .bind(&id_texts)
+        .fetch_all(&mut *tx)
+        .await?;
+        if !continuities.is_empty() {
+            let c_tenants: Vec<String> = continuities.iter().map(|(t, _)| t.clone()).collect();
+            let c_ids: Vec<uuid::Uuid> = continuities.iter().map(|(_, c)| *c).collect();
+            for table in CONTINUITY_CHILD_TABLES
+                .iter()
+                .copied()
+                .chain(std::iter::once("continuity_executions"))
+            {
+                // Table names come from the constant list above, never input.
+                let sql = format!(
+                    "DELETE FROM {table} WHERE (tenant_id, continuity_id) IN \
+                 (SELECT * FROM UNNEST($1::text[], $2::uuid[]))"
+                );
+                sqlx::query(sqlx::AssertSqlSafe(sql))
+                    .bind(&c_tenants)
+                    .bind(&c_ids)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+
+        // `step_logs`, `usage_events`, `instance_kv_state` and `event_waits`
+        // have no FK to `task_instances` on Postgres, so
+        // they are not covered by the `ON DELETE CASCADE` the instance row
+        // deletion below relies on for execution_tree / block_outputs /
+        // signal_inbox / worker_tasks / checkpoints / externalized_state /
+        // audit_log (all cascade -- see migrations 016 and 034).
+        for sql in [
+            "DELETE FROM step_logs WHERE instance_id = ANY($1)",
+            "DELETE FROM usage_events WHERE instance_id = ANY($1)",
+            "DELETE FROM instance_kv_state WHERE instance_id = ANY($1)",
+            "DELETE FROM event_waits WHERE instance_id = ANY($1)",
+        ] {
+            sqlx::query(sql).bind(&ids).execute(&mut *tx).await?;
+        }
+        // Parent-scoped dedupe rows of a purged parent can never match again.
+        sqlx::query(
+            "DELETE FROM emit_event_dedupe \
+         WHERE scope_kind = 'parent' AND scope_value = ANY($1::uuid[]::text[])",
+        )
+        .bind(&ids)
+        .execute(&mut *tx)
+        .await?;
+
+        let result = sqlx::query("DELETE FROM task_instances WHERE id = ANY($1)")
+            .bind(&ids)
+            .execute(&mut *tx)
+            .await?;
+
+        Ok(result.rows_affected())
+    }
+    .await;
+    super::finish_transaction(tx, result).await
 }
 
 /// Mark an instance artifact-swept (idempotent). See

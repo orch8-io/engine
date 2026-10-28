@@ -459,26 +459,32 @@ pub(super) async fn complete(
     store: &PostgresStorage,
     task_id: Uuid,
     claim: &WorkerClaim,
-    output: &serde_json::Value,
+    completion: &crate::worker_outcome::WorkerCompletion,
 ) -> Result<bool, StorageError> {
+    completion.validate_stored()?;
+    let output = &completion.output;
     let epoch = i64::try_from(claim.claim_epoch)
         .map_err(|_| StorageError::Constraint("worker claim epoch exceeds SQL range".into()))?;
     let mut tx = store.pool.begin().await?;
     let result = async {
+        let Some((instance_id,effect_id)) = super::worker_outcome::lock_on(&mut tx,task_id).await? else { return Ok(false); };
         let row: Option<(i64,)> = sqlx::query_as(
             r"UPDATE worker_tasks
           SET state = 'completed', output = $3, completed_at = NOW()
-          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed'
+          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed' AND instance_id=$5 AND effect_id IS NOT DISTINCT FROM $6
           RETURNING claim_epoch",
         )
         .bind(task_id)
         .bind(&claim.worker_id)
         .bind(output)
         .bind(epoch)
+        .bind(instance_id.into_uuid())
+        .bind(effect_id)
         .fetch_optional(&mut *tx)
         .await?;
         if row.is_some() {
-            super::worker_outcome::insert_on(&mut tx, task_id, claim, output).await?;
+            super::worker_outcome::settle_on(&mut tx, task_id, completion).await?;
+            super::worker_outcome::insert_on(&mut tx, task_id, claim, completion).await?;
             insert_attempt_events(
                 &mut tx,
                 &[transition_event(
