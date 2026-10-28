@@ -215,6 +215,9 @@ fault_impl! {
         async fn finalize_stranded_worker_dispatch(&self, task_id: Uuid, attempt: u16, effect: Option<&crate::worker_invocation::WorkerDispatchEffect>, continuity_epoch: Option<u64>) -> Result<bool, StorageError>;
         async fn resolve_worker_task(&self, resolution: &orch8_types::worker::WorkerTaskResolution) -> Result<bool, StorageError>;
         async fn resolve_worker_task_with_evidence(&self, resolution: &orch8_types::worker::WorkerTaskResolution, evidence:&crate::worker_resolution::WorkerResolutionEvidence) -> Result<bool, StorageError>;
+        async fn get_worker_resolution_outcome_by_id(&self,tenant:&TenantId,id:Uuid)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>;
+        async fn claim_worker_resolution_recovery_page(&self,limit:u32)->Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>,StorageError>;
+        async fn apply_worker_resolution_integration(&self,plan:&crate::worker_resolution_application::WorkerResolutionIntegration)->Result<crate::worker_resolution_application::WorkerResolutionApplication,StorageError>;
         async fn get_worker_resolution_outcome(&self,tenant_id:Option<&TenantId>,task_id:Uuid,claim:Option<&WorkerClaim>)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>;
         async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;

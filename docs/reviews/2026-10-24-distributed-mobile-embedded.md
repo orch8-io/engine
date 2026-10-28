@@ -6290,3 +6290,28 @@ payload compaction after acknowledgement, transported history/key/backup
 compatibility and public SDK/platform integration. The existing acknowledged
 catalog-run archive and account/catalog isolation are implemented and covered;
 the remaining compaction gate must be audited against those current APIs.
+
+
+## Retained paused failure application
+
+The [paused worker failure application review](2026-10-28-paused-worker-failure-application.md)
+records the next correction. Two reproductions showed that explicit resume left
+reported retryable and permanent failures stranded. A bounded durable queue now
+applies the original failure policy under exact invocation and owner fences,
+with the native change and immutable application receipt committed together.
+Retry reservations carry no parent application context and remain unclaimable
+until fresh normal dispatch. Pause is preserved; old effect uncertainty remains.
+
+PostgreSQL migration 139 / SQLite schema 69 guard pending failures during capsule
+capture and refuse evidence-losing downgrade. Recovery survives hot task cleanup,
+rotates deferred reports, skips busy authority/clock/task/effect rows and applies
+once under concurrency. New PostgreSQL regressions reproduced and fixed both
+busy-task and busy-effect scheduler stalls. Selected verification passes 3,591
+cases across engine/storage/mobile/embedded and the affected integration suites.
+
+The original review remains incomplete: late factual outcomes and reconciliation,
+issued-claim/principal lifetime, full coordinator protocol enforcement, poisoned
+recovery disposition/backoff, native acknowledged payload compaction, transported
+history/key/backup compatibility, server delegation and SDK/platform integration
+remain required. The existing catalog archive API is already implemented. This
+checkpoint does not authorize release or establish readiness to merge the draft.

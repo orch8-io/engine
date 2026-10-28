@@ -269,7 +269,7 @@ async fn recovery_page_on(
 }
 
 /// Validate the original activation without consulting any reusable hot task alias.
-async fn target_is_current_on(
+pub(super) async fn target_is_current_on(
     conn: &mut sqlx::SqliteConnection,
     instance: &orch8_types::instance::TaskInstance,
     invocation: &crate::worker_invocation::WorkerInvocation,

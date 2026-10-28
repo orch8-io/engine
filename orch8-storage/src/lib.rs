@@ -11,6 +11,7 @@ pub mod worker_admission;
 pub mod worker_invocation;
 pub mod worker_outcome;
 pub mod worker_resolution;
+pub mod worker_resolution_application;
 pub use compensation_start::CompensationStart;
 mod effect_dispatch;
 mod effect_receipts;
@@ -93,7 +94,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 138;
+pub const STORAGE_SCHEMA_VERSION: u32 = 139;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -2274,6 +2275,19 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     /// Read retained report evidence independently of hot/native history. None claim is
     /// reserved for trusted reconciliation; worker callbacks provide their exact claim.
+    async fn get_worker_resolution_outcome_by_id(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError>;
+    async fn claim_worker_resolution_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>, StorageError>;
+    async fn apply_worker_resolution_integration(
+        &self,
+        plan: &crate::worker_resolution_application::WorkerResolutionIntegration,
+    ) -> Result<crate::worker_resolution_application::WorkerResolutionApplication, StorageError>;
     async fn get_worker_resolution_outcome(
         &self,
         tenant_id: Option<&TenantId>,

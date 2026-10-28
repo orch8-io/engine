@@ -583,3 +583,54 @@ pub async fn plan_failure_action(
         })
     }
 }
+
+/// Apply the original accepted failure independently of worker retries and hot history.
+pub async fn recover_worker_failure(
+    storage: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    id: uuid::Uuid,
+) -> Result<orch8_storage::worker_resolution_application::WorkerResolutionApplication, EngineError>
+{
+    use orch8_storage::worker_resolution_application::{
+        WorkerResolutionApplication as A, WorkerResolutionIntegration,
+    };
+    let Some(report) = storage
+        .get_worker_resolution_outcome_by_id(tenant, id)
+        .await?
+    else {
+        return Ok(A::ReconciliationRequired);
+    };
+    let Some(instance) = storage.get_instance(report.instance_id).await? else {
+        return Ok(A::Deferred);
+    };
+    let Some(source) = report.invocation.as_ref() else {
+        return Ok(A::ReconciliationRequired);
+    };
+    if instance.state.is_terminal()
+        || instance.state == orch8_types::instance::InstanceState::Running
+    {
+        return Ok(A::Deferred);
+    }
+    if instance.tenant_id != *tenant
+        || instance.sequence_id != source.sequence_id
+        || instance.context.runtime.run_id != source.run_id
+        || instance.context.runtime.dry_run != source.dry_run
+    {
+        return Ok(A::ReconciliationRequired);
+    }
+    if source.handler_name == crate::delegation::DELEGATION_HANDLER
+        || matches!(
+            source.target,
+            orch8_storage::worker_invocation::WorkerInvocationTarget::Unbound { .. }
+        )
+    {
+        return Ok(A::ReconciliationRequired);
+    }
+    let shell = WorkerResolutionIntegration::retry_source(&report)?;
+    let message = report.reason.as_str().ok_or_else(|| {
+        orch8_types::error::StorageError::Constraint("invalid retained failure reason".into())
+    })?;
+    let action = plan_failure_action(storage, &instance, &shell, report.retryable, message).await?;
+    let plan = WorkerResolutionIntegration::new(report, action)?;
+    Ok(storage.apply_worker_resolution_integration(&plan).await?)
+}

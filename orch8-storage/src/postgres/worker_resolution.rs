@@ -116,7 +116,10 @@ pub(super) async fn get(
     let row=sqlx::query("SELECT id,task_id,tenant_id,instance_id,claim_epoch,worker_id,kind,record FROM worker_resolution_outcomes WHERE task_id=$1 AND ($2::text IS NULL OR tenant_id=$2) AND ($3::bigint IS NULL OR (claim_epoch=$3 AND worker_id=$4)) ORDER BY created_at DESC,id DESC LIMIT 1")
         .bind(task_id).bind(tenant.map(TenantId::as_str)).bind(epoch).bind(claim.map(|c|c.worker_id.as_str()))
         .fetch_optional(&store.pool).await?;
-    let Some(row) = row else { return Ok(None) };
+    row.as_ref().map(decode_row).transpose()
+}
+fn decode_row(row: &sqlx::postgres::PgRow) -> Result<WorkerResolutionOutcome, StorageError> {
+    let task_id: Uuid = row.get("task_id");
     let outcome = crate::worker_resolution::decode_record(row.get("record"))?;
     outcome.validate(
         &TenantId::unchecked(row.get::<String, _>("tenant_id")),
@@ -130,5 +133,23 @@ pub(super) async fn get(
     {
         return Err(invalid());
     }
-    Ok(Some(outcome))
+    Ok(outcome)
+}
+
+pub(super) async fn get_by_id(
+    store: &PostgresStorage,
+    tenant: &TenantId,
+    id: Uuid,
+) -> Result<Option<WorkerResolutionOutcome>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    get_by_id_on(&mut conn, tenant, id).await
+}
+pub(super) async fn get_by_id_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    id: Uuid,
+) -> Result<Option<WorkerResolutionOutcome>, StorageError> {
+    let row=sqlx::query("SELECT id,task_id,tenant_id,instance_id,claim_epoch,worker_id,kind,record FROM worker_resolution_outcomes WHERE id=$1 AND tenant_id=$2")
+        .bind(id).bind(tenant.as_str()).fetch_optional(&mut *conn).await?;
+    row.as_ref().map(decode_row).transpose()
 }

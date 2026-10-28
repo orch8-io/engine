@@ -127,6 +127,33 @@ impl WorkerResolutionOutcome {
         }
         Ok(())
     }
+    pub(crate) fn validate_retained_receipt(
+        &self,
+        receipt: EffectReceipt,
+    ) -> Result<(), StorageError> {
+        let source = self.invocation.as_ref().ok_or_else(invalid)?;
+        let snapshot = ResolutionSource {
+            tenant: self.tenant_id.clone(),
+            task_id: self.task_id,
+            instance: self.instance_id,
+            block: source.block_id.clone(),
+            handler: source.handler_name.clone(),
+            attempt: source.attempt,
+            state: WorkerTaskState::Failed,
+            claim_epoch: self.claim_epoch,
+            worker_id: self.worker_id.clone(),
+            effect_id: self.effect_id,
+            invocation: Some(source.clone()),
+            proof: self.dispatch_effect.clone(),
+            admitted: self.admitted,
+        };
+        snapshot.validate()?;
+        if Some(receipt.state) != self.effect_state_after || receipt.state != EffectState::Unknown {
+            return Err(invalid());
+        }
+        snapshot.settled_receipt(WorkerTaskEffectResolution::Keep, receipt)?;
+        Ok(())
+    }
     pub(crate) fn is_logical_reason(&self) -> bool {
         digest(&self.reason) == self.logical_reason_sha256
     }

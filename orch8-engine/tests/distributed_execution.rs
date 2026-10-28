@@ -2313,3 +2313,156 @@ async fn failure_resolution_new_attempt_drops_the_previous_activity_checkpoint()
         assert_eq!(next.checkpoint_seq, 0);
     }
 }
+
+async fn paused_failure_recovers_through_scheduler(retryable: bool, tree: bool, remove_hot: bool) {
+    use orch8_engine::testing::TestEngine;
+    use orch8_types::worker::WorkerClaim;
+    for backend in TestBackend::all(&[
+        orch8_storage::testing::backends::BackendKind::Sqlite,
+        orch8_storage::testing::backends::BackendKind::Postgres,
+        orch8_storage::testing::backends::BackendKind::EncryptedSqlite,
+        orch8_storage::testing::backends::BackendKind::EncryptedPostgres,
+    ])
+    .await
+    {
+        let storage = Arc::clone(&backend.storage);
+        let handler = unique_handler("paused-failure");
+        let work = mk_step_with_retry("work", &handler, if retryable { 2 } else { 1 });
+        let blocks = if tree {
+            vec![BlockDefinition::Parallel(Box::new(
+                orch8_types::sequence::ParallelDef {
+                    id: orch8_types::ids::BlockId::new("parallel"),
+                    branches: vec![vec![work]],
+                },
+            ))]
+        } else {
+            vec![work]
+        };
+        let mut sequence = mk_sequence(blocks);
+        sequence.name = format!("paused-failure-{}", uuid::Uuid::now_v7());
+        let engine = TestEngine::builder()
+            .storage(Arc::clone(&storage))
+            .build()
+            .await;
+        let id = engine.start(&sequence).await;
+        for _ in 0..6 {
+            engine.advance(Duration::from_secs(1));
+            engine.tick().await;
+            if !tasks_of(&storage, id).await.is_empty() {
+                break;
+            }
+        }
+        let task = only_task(&storage, id).await;
+        let held = claim(&storage, &task).await;
+        let proof = WorkerClaim::new("worker-a", held.claim_epoch);
+        storage
+            .update_instance_state(id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+        let paused = storage.get_instance(id).await.unwrap().unwrap();
+        assert!(
+            orch8_engine::worker_lease::fail_worker_task(
+                storage.as_ref(),
+                &paused,
+                &held,
+                &proof,
+                "provider failure while paused",
+                retryable
+            )
+            .await
+            .unwrap()
+        );
+        if remove_hot {
+            storage.delete_worker_task(held.id).await.unwrap();
+        }
+        engine.advance(Duration::from_secs(1));
+        engine.tick().await;
+        assert_eq!(
+            storage.get_instance(id).await.unwrap().unwrap().state,
+            InstanceState::Paused,
+            "{}: reporting failure resumed the paused parent",
+            backend.name()
+        );
+        assert_eq!(receipt_state(&storage, &held).await, EffectState::Unknown);
+        assert!(
+            storage
+                .claim_worker_tasks(&handler, "while-paused", 1)
+                .await
+                .unwrap()
+                .is_empty(),
+            "paused recovery exposed runnable provider work"
+        );
+        storage
+            .update_instance_state(id, InstanceState::Scheduled, Some(engine.now()))
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            engine.advance(Duration::from_secs(1));
+            engine.tick().await;
+            let parent = storage.get_instance(id).await.unwrap().unwrap();
+            if parent.state.is_terminal()
+                || tasks_of(&storage, id)
+                    .await
+                    .iter()
+                    .any(|task| task.attempt > held.attempt)
+            {
+                break;
+            }
+        }
+        if retryable {
+            let retry = only_task(&storage, id).await;
+            assert_eq!(
+                retry.attempt,
+                held.attempt + 1,
+                "{}: resuming did not apply the retained failure's retry policy",
+                backend.name()
+            );
+            assert_ne!(retry.id, held.id);
+            assert!(retry.effect_id.is_some());
+            assert_eq!(retry.state, WorkerTaskState::Pending);
+        } else {
+            assert_eq!(
+                storage.get_instance(id).await.unwrap().unwrap().state,
+                InstanceState::Failed,
+                "{}: resuming left a reported terminal failure stranded",
+                backend.name()
+            );
+        }
+        assert_eq!(
+            receipt_state(&storage, &held).await,
+            EffectState::Unknown,
+            "recovery must not relabel an uncertain provider action"
+        );
+        let report = storage
+            .get_worker_resolution_outcome(Some(&paused.tenant_id), held.id, Some(&proof))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.reason, json!("provider failure while paused"));
+    }
+}
+#[tokio::test]
+async fn paused_nonretryable_failure_is_applied_after_explicit_resume() {
+    paused_failure_recovers_through_scheduler(false, false, false).await;
+}
+#[tokio::test]
+async fn paused_retryable_failure_is_applied_after_explicit_resume() {
+    paused_failure_recovers_through_scheduler(true, false, false).await;
+}
+
+#[tokio::test]
+async fn paused_tree_nonretryable_failure_survives_hot_task_gc() {
+    paused_failure_recovers_through_scheduler(false, true, true).await;
+}
+#[tokio::test]
+async fn paused_tree_retryable_failure_survives_hot_task_gc() {
+    paused_failure_recovers_through_scheduler(true, true, true).await;
+}
+#[tokio::test]
+async fn paused_flat_nonretryable_failure_survives_hot_task_gc() {
+    paused_failure_recovers_through_scheduler(false, false, true).await;
+}
+#[tokio::test]
+async fn paused_flat_retryable_failure_survives_hot_task_gc() {
+    paused_failure_recovers_through_scheduler(true, false, true).await;
+}

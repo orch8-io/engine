@@ -265,8 +265,20 @@ async fn resolution_migration_roundtrips_empty_and_refuses_to_discard_retained_r
     let down = include_str!("../../migrations/down/137_worker_resolution_outcomes.sql");
     let up = include_str!("../../migrations/137_worker_resolution_outcomes.sql");
     let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/139_worker_resolution_application.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/139_worker_resolution_application.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let (task, claim, tenant) = legacy_fixture(b.storage.as_ref()).await;
     assert!(
@@ -412,4 +424,227 @@ orch8_storage::backend_test!(async fn resolution_boundary_preserves_utf8_reports
     assert!(s.resolve_worker_task(&resolution).await.unwrap(),"{}",b.name());
     let report=s.get_worker_resolution_outcome(Some(&tenant),task.id,Some(&claim)).await.unwrap().unwrap();
     assert_eq!(report.reason,json!(resolution.reason));
+});
+
+async fn pending_failure(
+    s: &dyn StorageBackend,
+) -> (
+    WorkerTask,
+    ExecutionNodeId,
+    orch8_storage::worker_resolution::WorkerResolutionOutcome,
+) {
+    let (task, claim, node, tenant) = fixture(s).await;
+    s.update_instance_state(task.instance_id, InstanceState::Paused, None)
+        .await
+        .unwrap();
+    let mut resolution = task_only(&task);
+    resolution.retryable = true;
+    assert!(s.resolve_worker_task(&resolution).await.unwrap());
+    let report = s
+        .get_worker_resolution_outcome(Some(&tenant), task.id, Some(&claim))
+        .await
+        .unwrap()
+        .unwrap();
+    (task, node, report)
+}
+
+orch8_storage::backend_test!(async fn retained_failure_application_is_atomic_idempotent_and_unclaimable(b) {
+    use orch8_storage::worker_resolution_application::{WorkerResolutionApplication as A, WorkerResolutionIntegration as Plan};
+    use orch8_storage::testing::backends::RawPool;
+    let s = b.storage.as_ref();
+    let (task, node, report) = pending_failure(s).await;
+    let shell = Plan::retry_source(&report).unwrap();
+    assert!(shell.context["data"].is_null());
+    assert!(shell.context["config"].is_null());
+    assert!(shell.context["audit"].as_array().unwrap().is_empty());
+    assert_eq!(shell.context["runtime"]["run_id"], task.context["runtime"]["run_id"]);
+    let action = retry(&shell, node).action;
+    let next_id = match &action { WorkerTaskResolutionAction::Retry {retry_task,..} => retry_task.id, _=> unreachable!() };
+    let plan = Plan::new(report.clone(), action).unwrap();
+    assert_eq!(s.get_worker_resolution_outcome_by_id(&TenantId::unchecked("foreign"),report.id).await.unwrap(),None);
+    assert!(s.claim_worker_resolution_recovery_page(0).await.unwrap().is_empty());
+    assert_eq!(s.claim_worker_resolution_recovery_page(1).await.unwrap()[0].id, report.id);
+    match &b.raw {
+        RawPool::Sqlite(pool) => { sqlx::raw_sql("CREATE TRIGGER reject_application_test BEFORE INSERT ON worker_resolution_integrations BEGIN SELECT RAISE(ABORT,'injected application failure'); END;").execute(pool).await.unwrap(); },
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool) => { sqlx::raw_sql("CREATE FUNCTION reject_application_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected application failure'; END $$; CREATE TRIGGER reject_application_test BEFORE INSERT ON worker_resolution_integrations FOR EACH ROW EXECUTE FUNCTION reject_application_test();").execute(pool).await.unwrap(); },
+    }
+    assert!(s.apply_worker_resolution_integration(&plan).await.is_err());
+    assert!(s.get_worker_task(next_id).await.unwrap().is_none());
+    assert_eq!(s.get_worker_task(task.id).await.unwrap().unwrap().state,WorkerTaskState::Failed);
+    assert_eq!(s.get_execution_tree(task.instance_id).await.unwrap().iter().find(|n|n.id==node).unwrap().state,NodeState::Waiting);
+    assert_eq!(s.get_instance(task.instance_id).await.unwrap().unwrap().state,InstanceState::Paused);
+    assert_eq!(s.claim_worker_resolution_recovery_page(1).await.unwrap()[0].id, report.id);
+    match &b.raw {
+        RawPool::Sqlite(pool) => { sqlx::raw_sql("DROP TRIGGER reject_application_test").execute(pool).await.unwrap(); },
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool) => { sqlx::raw_sql("DROP TRIGGER reject_application_test ON worker_resolution_integrations; DROP FUNCTION reject_application_test();").execute(pool).await.unwrap(); },
+    }
+    s.delete_worker_task(task.id).await.unwrap();
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(), A::Applied);
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(), A::AlreadyApplied);
+    assert!(s.claim_worker_resolution_recovery_page(1).await.unwrap().is_empty());
+    assert_eq!(s.get_instance(task.instance_id).await.unwrap().unwrap().state,InstanceState::Paused);
+    assert!(s.claim_worker_tasks(&task.handler_name,"other-worker",1).await.unwrap().is_empty());
+    assert_eq!(s.get_effect_receipt(&report.tenant_id,task.effect_id.unwrap()).await.unwrap().unwrap().state,EffectState::Unknown);
+    assert_eq!(s.get_worker_resolution_outcome_by_id(&report.tenant_id,report.id).await.unwrap().unwrap(),report);
+    match &b.raw {
+        RawPool::Sqlite(pool) => {
+            assert!(sqlx::raw_sql("UPDATE worker_resolution_integrations SET action=action").execute(pool).await.is_err());
+            assert!(sqlx::raw_sql("DELETE FROM worker_resolution_integrations").execute(pool).await.is_err());
+        },
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool) => {
+            assert!(sqlx::raw_sql("UPDATE worker_resolution_integrations SET action=action").execute(pool).await.is_err());
+            assert!(sqlx::raw_sql("DELETE FROM worker_resolution_integrations").execute(pool).await.is_err());
+            assert!(sqlx::raw_sql(include_str!("../../migrations/down/139_worker_resolution_application.sql")).execute(pool).await.is_err());
+        },
+    }
+});
+
+orch8_storage::backend_test!(async fn retained_failure_application_refuses_changed_run_and_settled_effect(b) {
+    use orch8_storage::worker_resolution_application::{WorkerResolutionApplication as A, WorkerResolutionIntegration as Plan};
+    let s=b.storage.as_ref();
+    let (task,node,report)=pending_failure(s).await;
+    let plan=Plan::new(report.clone(),WorkerTaskResolutionAction::FailNode { node_id:Some(node),fire_at:Utc::now() }).unwrap();
+    let mut parent=s.get_instance(task.instance_id).await.unwrap().unwrap();
+    let original=parent.context.runtime.run_id.clone();
+    parent.context.runtime.run_id=Some(Uuid::now_v7().to_string());
+    s.update_instance_context(task.instance_id,&parent.context).await.unwrap();
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(),A::ReconciliationRequired);
+    parent.context.runtime.run_id=original;
+    s.update_instance_context(task.instance_id,&parent.context).await.unwrap();
+    let mut effect=s.get_effect_receipt(&report.tenant_id,task.effect_id.unwrap()).await.unwrap().unwrap();
+    effect.transition(EffectState::Abandoned,Utc::now()).unwrap();
+    assert!(s.cas_effect_receipt(&report.tenant_id,effect.id,EffectState::Unknown,&effect).await.unwrap());
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(),A::ReconciliationRequired);
+    assert_eq!(s.get_instance(task.instance_id).await.unwrap().unwrap().state,InstanceState::Paused);
+    assert_eq!(s.get_execution_tree(task.instance_id).await.unwrap().iter().find(|n|n.id==node).unwrap().state,NodeState::Waiting);
+    assert_eq!(s.claim_worker_resolution_recovery_page(1).await.unwrap()[0].id,report.id);
+});
+
+orch8_storage::backend_test!(async fn retained_failure_recovery_rotates_and_concurrent_application_has_one_winner(b) {
+    use orch8_storage::worker_resolution_application::{WorkerResolutionApplication as A, WorkerResolutionIntegration as Plan};
+    let s=b.storage.as_ref();
+    let (first,node,report)=pending_failure(s).await;
+    let (_,_,second)=pending_failure(s).await;
+    let a=s.claim_worker_resolution_recovery_page(1).await.unwrap().pop().unwrap();
+    let b=s.claim_worker_resolution_recovery_page(1).await.unwrap().pop().unwrap();
+    assert_ne!(a.id,b.id,"a deferred report starved a younger report");
+    assert!([a.id,b.id].contains(&report.id));
+    assert!([a.id,b.id].contains(&second.id));
+    let plan=Plan::new(report.clone(),WorkerTaskResolutionAction::FailNode {node_id:Some(node),fire_at:Utc::now()}).unwrap();
+    s.delete_worker_task(first.id).await.unwrap();
+    let (a,b)=tokio::join!(s.apply_worker_resolution_integration(&plan),s.apply_worker_resolution_integration(&plan));
+    let results=[a.unwrap(),b.unwrap()];
+    assert_eq!(results.iter().filter(|&&r|r==A::Applied).count(),1);
+    assert!(results.iter().all(|r|matches!(r,A::Applied|A::AlreadyApplied|A::Deferred)));
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(),A::AlreadyApplied);
+    assert_eq!(s.claim_worker_resolution_recovery_page(2).await.unwrap().iter().map(|r|r.id).collect::<Vec<_>>(),vec![second.id]);
+});
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn failure_recovery_scanner_skips_a_busy_clock() {
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    pending_failure(b.storage.as_ref()).await;
+    let mut held = b.pg_pool().begin().await.unwrap();
+    sqlx::query("SELECT singleton FROM worker_outcome_recovery_clock WHERE singleton=1 FOR UPDATE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let scan = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        b.storage.claim_worker_resolution_recovery_page(1),
+    )
+    .await;
+    assert!(scan.unwrap().unwrap().is_empty());
+    held.rollback().await.unwrap();
+    assert_eq!(
+        b.storage
+            .claim_worker_resolution_recovery_page(1)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[cfg(feature = "postgres")]
+async fn assert_failure_application_skips_busy_attempt(effect: bool) {
+    use orch8_storage::worker_resolution_application::{
+        WorkerResolutionApplication as A, WorkerResolutionIntegration as Plan,
+    };
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let s = b.storage.as_ref();
+    let (task, node, report) = pending_failure(s).await;
+    let plan = Plan::new(
+        report,
+        WorkerTaskResolutionAction::FailNode {
+            node_id: Some(node),
+            fire_at: Utc::now(),
+        },
+    )
+    .unwrap();
+    let mut held = b.pg_pool().begin().await.unwrap();
+    if effect {
+        sqlx::query("SELECT id FROM effect_receipts WHERE id=$1 FOR UPDATE")
+            .bind(task.effect_id.unwrap().into_uuid())
+            .execute(&mut *held)
+            .await
+            .unwrap();
+    } else {
+        sqlx::query("SELECT id FROM worker_tasks WHERE id=$1 FOR UPDATE")
+            .bind(task.id)
+            .execute(&mut *held)
+            .await
+            .unwrap();
+    }
+    let attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        s.apply_worker_resolution_integration(&plan),
+    )
+    .await;
+    held.rollback().await.unwrap();
+    assert!(
+        matches!(attempt, Ok(Ok(A::Deferred))),
+        "a busy attempt stalled recovery or was misclassified: {attempt:?}"
+    );
+    assert_eq!(
+        s.apply_worker_resolution_integration(&plan).await.unwrap(),
+        A::Applied
+    );
+}
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn failure_application_skips_busy_effect_receipt() {
+    assert_failure_application_skips_busy_attempt(true).await;
+}
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn failure_application_skips_busy_hot_task() {
+    assert_failure_application_skips_busy_attempt(false).await;
+}
+
+orch8_storage::backend_test!(async fn retained_legacy_failure_without_effect_defers_flat_termination_until_resume(b) {
+    use orch8_storage::worker_resolution_application::{WorkerResolutionApplication as A, WorkerResolutionIntegration as Plan};
+    let s=b.storage.as_ref();
+    let (task,claim,tenant)=legacy_fixture(s).await;
+    assert!(task.effect_id.is_none());
+    s.update_instance_state(task.instance_id,InstanceState::Paused,None).await.unwrap();
+    assert!(s.resolve_worker_task(&task_only(&task)).await.unwrap());
+    let report=s.get_worker_resolution_outcome(Some(&tenant),task.id,Some(&claim)).await.unwrap().unwrap();
+    assert!(!report.admitted);
+    let plan=Plan::new(report,WorkerTaskResolutionAction::FailInstance).unwrap();
+    s.delete_worker_task(task.id).await.unwrap();
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(),A::Deferred);
+    assert_eq!(s.get_instance(task.instance_id).await.unwrap().unwrap().state,InstanceState::Paused);
+    s.update_instance_state(task.instance_id,InstanceState::Scheduled,Some(Utc::now())).await.unwrap();
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(),A::Applied);
+    assert_eq!(s.get_instance(task.instance_id).await.unwrap().unwrap().state,InstanceState::Failed);
+    assert_eq!(s.apply_worker_resolution_integration(&plan).await.unwrap(),A::AlreadyApplied);
 });

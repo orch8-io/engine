@@ -327,7 +327,7 @@ async fn recovery_page_on(
 
 /// Validate the original activation without consulting any reusable hot task alias.
 /// None means a current node is busy, not invalid or superseded.
-async fn target_is_current_on(
+pub(super) async fn target_is_current_on(
     conn: &mut sqlx::PgConnection,
     instance: &orch8_types::instance::TaskInstance,
     invocation: &crate::worker_invocation::WorkerInvocation,
@@ -402,8 +402,23 @@ async fn try_lock_native_on(
     conn: &mut sqlx::PgConnection,
     accepted: &WorkerAcceptedOutcome,
 ) -> Result<bool, StorageError> {
-    let tenant = &accepted.tenant_id;
-    let instance = accepted.instance_id;
+    if !try_lock_instance_authority_on(conn, &accepted.tenant_id, accepted.instance_id).await? {
+        return Ok(false);
+    }
+    let queued: Option<Uuid> = sqlx::query_scalar(
+        "SELECT task_id FROM worker_outcome_recovery WHERE task_id=$1 FOR UPDATE SKIP LOCKED",
+    )
+    .bind(accepted.task_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(queued.is_some())
+}
+
+pub(super) async fn try_lock_instance_authority_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    instance: InstanceId,
+) -> Result<bool, StorageError> {
     if !super::portable_effects::try_lock_instance_on(conn, tenant, instance).await? {
         return Ok(false);
     }
@@ -426,11 +441,5 @@ async fn try_lock_native_on(
     if native.is_none() {
         return Ok(false);
     }
-    let queued: Option<Uuid> = sqlx::query_scalar(
-        "SELECT task_id FROM worker_outcome_recovery WHERE task_id=$1 FOR UPDATE SKIP LOCKED",
-    )
-    .bind(accepted.task_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    Ok(queued.is_some())
+    Ok(true)
 }

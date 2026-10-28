@@ -2321,6 +2321,21 @@ passthrough_impl! {
     async fn resolve_worker_task(&self,resolution:&orch8_types::worker::WorkerTaskResolution)->Result<bool,StorageError>{
         self.resolve_worker_task_with_evidence(resolution,&crate::worker_resolution::WorkerResolutionEvidence::new(resolution)).await
     }
+    async fn get_worker_resolution_outcome_by_id(&self,tenant:&TenantId,id:Uuid)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>{
+        let mut report=self.inner.get_worker_resolution_outcome_by_id(tenant,id).await?;
+        if let Some(report)=&mut report && !report.is_logical_reason(){report.reason=self.decrypt_json_value(&report.reason)?;}
+        Ok(report)
+    }
+    async fn claim_worker_resolution_recovery_page(&self,limit:u32)->Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>,StorageError>;
+    async fn apply_worker_resolution_integration(&self,plan:&crate::worker_resolution_application::WorkerResolutionIntegration)->Result<crate::worker_resolution_application::WorkerResolutionApplication,StorageError>{
+        plan.validate()?;
+        let mut sealed=plan.clone();
+        if let orch8_types::worker::WorkerTaskResolutionAction::Retry{retry_task,retry_output,..}=&mut sealed.action {
+            **retry_task=self.encrypt_worker_task(retry_task)?.into_owned();
+            if let Some(output)=retry_output{**output=self.encrypt_block_output(output)?.into_owned();}
+        }
+        self.inner.apply_worker_resolution_integration(&sealed).await
+    }
     async fn get_worker_resolution_outcome(&self,tenant_id:Option<&TenantId>,task_id:Uuid,claim:Option<&orch8_types::worker::WorkerClaim>)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>{
         let mut report=self.inner.get_worker_resolution_outcome(tenant_id,task_id,claim).await?;
         if let Some(report)=&mut report && !report.is_logical_reason() {report.reason=self.decrypt_json_value(&report.reason)?;}

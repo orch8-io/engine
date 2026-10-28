@@ -935,49 +935,7 @@ pub(super) async fn resolve(
         return Ok(false);
     }
     super::worker_resolution::record_on(&mut conn,&report_source,resolution,evidence).await?;
-    let instance_id = resolution.instance_id.into_uuid().to_string();
-    match &resolution.action {
-        Action::Requeue | Action::FailTaskOnly => {}
-        Action::Retry {
-            retry_task,
-            retry_output,
-            node_id,
-            fire_at,
-        } => {
-            let source = source
-                .as_ref()
-                .ok_or_else(|| StorageError::Constraint("missing retry source".into()))?;
-            super::worker_invocations::reserve_retry_on(&mut conn, source, retry_task, *node_id)
-                .await?;
-            if let Some(output) = retry_output.as_deref() {
-                super::outputs::save_on(&mut conn, output).await?;
-            }
-            schedule_live_instance(&mut conn, &instance_id, &ts(*fire_at), &now).await?;
-        }
-        Action::FailNode { node_id, fire_at } => {
-            if let Some(node_id) = node_id {
-                sqlx::query(
-                "UPDATE execution_tree SET state='failed', completed_at=COALESCE(completed_at, ?2) \
-                 WHERE id=?1 AND state IN ('running','waiting')",
-            )
-            .bind(node_id.into_uuid().to_string())
-            .bind(&now)
-            .execute(&mut *conn)
-            .await?;
-            }
-            schedule_live_instance(&mut conn, &instance_id, &ts(*fire_at), &now).await?;
-        }
-        Action::FailInstance => {
-            sqlx::query(
-                "UPDATE task_instances SET state='failed', next_fire_at=NULL, updated_at=?2 \
-                 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",
-            )
-            .bind(&instance_id)
-            .bind(&now)
-            .execute(&mut *conn)
-            .await?;
-        }
-    }
+    apply_resolution_action_on(&mut conn,resolution.instance_id,&resolution.action,source.as_ref()).await?;
     insert_attempt_events(
         &mut conn,
         &[transition_event(
@@ -1315,4 +1273,57 @@ pub(super) async fn claimed_counts_by_worker(
         .await?
     };
     Ok(rows)
+}
+
+pub(super) async fn apply_resolution_action_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance: orch8_types::ids::InstanceId,
+    action: &orch8_types::worker::WorkerTaskResolutionAction,
+    source: Option<&crate::worker_invocation::WorkerInvocation>,
+) -> Result<(), StorageError> {
+    use orch8_types::worker::WorkerTaskResolutionAction as Action;
+    let now = ts(Utc::now());
+    let instance_id = instance.to_string();
+    match action {
+        Action::Requeue | Action::FailTaskOnly => {}
+        Action::Retry {
+            retry_task,
+            retry_output,
+            node_id,
+            fire_at,
+        } => {
+            let source =
+                source.ok_or_else(|| StorageError::Constraint("missing retry source".into()))?;
+            super::worker_invocations::reserve_retry_on(&mut *conn, source, retry_task, *node_id)
+                .await?;
+            if let Some(output) = retry_output.as_deref() {
+                super::outputs::save_on(&mut *conn, output).await?;
+            }
+            schedule_live_instance(&mut *conn, &instance_id, &ts(*fire_at), &now).await?;
+        }
+        Action::FailNode { node_id, fire_at } => {
+            if let Some(node_id) = node_id {
+                sqlx::query(
+                "UPDATE execution_tree SET state='failed', completed_at=COALESCE(completed_at, ?2) \
+                 WHERE id=?1 AND state IN ('running','waiting')",
+            )
+            .bind(node_id.into_uuid().to_string())
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+            }
+            schedule_live_instance(&mut *conn, &instance_id, &ts(*fire_at), &now).await?;
+        }
+        Action::FailInstance => {
+            sqlx::query(
+                "UPDATE task_instances SET state='failed', next_fire_at=NULL, updated_at=?2 \
+                 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",
+            )
+            .bind(&instance_id)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
 }

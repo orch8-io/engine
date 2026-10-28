@@ -63,6 +63,7 @@ mod worker_dispatch;
 mod worker_invocations;
 mod worker_outcome;
 mod worker_resolution;
+mod worker_resolution_application;
 mod worker_version_pins;
 mod workers;
 
@@ -1915,6 +1916,27 @@ impl crate::WorkerStore for PostgresStorage {
         evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
         workers::resolve(self, resolution, evidence).await
+    }
+    async fn get_worker_resolution_outcome_by_id(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get_by_id(self, tenant, id).await
+    }
+    async fn claim_worker_resolution_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>, StorageError>
+    {
+        worker_resolution_application::recovery_page(self, limit).await
+    }
+    async fn apply_worker_resolution_integration(
+        &self,
+        plan: &crate::worker_resolution_application::WorkerResolutionIntegration,
+    ) -> Result<crate::worker_resolution_application::WorkerResolutionApplication, StorageError>
+    {
+        worker_resolution_application::apply(self, plan).await
     }
     async fn get_worker_resolution_outcome(
         &self,

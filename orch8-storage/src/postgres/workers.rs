@@ -6,7 +6,7 @@ use orch8_types::error::StorageError;
 use orch8_types::worker::{
     WorkerAttemptEventKind, WorkerClaim, WorkerTask, WorkerTaskAttemptEvent,
 };
-use sqlx::{Postgres, Transaction};
+use sqlx::Postgres;
 
 use super::PostgresStorage;
 use super::rows::{WorkerTaskRow, worker_task_columns};
@@ -982,47 +982,7 @@ pub(super) async fn resolve(
         return Ok(false);
     }
     super::worker_resolution::record_on(&mut tx,&report_source,resolution,evidence).await?;
-    let instance_id = resolution.instance_id.into_uuid();
-    match &resolution.action {
-        Action::Requeue | Action::FailTaskOnly => {}
-        Action::Retry {
-            retry_task,
-            retry_output,
-            node_id,
-            fire_at,
-        } => {
-            let source = source
-                .as_ref()
-                .ok_or_else(|| StorageError::Constraint("missing retry source".into()))?;
-            super::worker_invocations::reserve_retry_on(&mut tx, source, retry_task, *node_id)
-                .await?;
-            if let Some(output) = retry_output.as_deref() {
-                super::outputs::save_on(&mut tx, output).await?;
-            }
-            schedule_live_instance(&mut tx, instance_id, *fire_at).await?;
-        }
-        Action::FailNode { node_id, fire_at } => {
-            if let Some(node_id) = node_id {
-                sqlx::query(
-                "UPDATE execution_tree SET state = 'failed', completed_at = COALESCE(completed_at, NOW()) \
-                 WHERE id = $1 AND state IN ('running', 'waiting')",
-            )
-            .bind(node_id.into_uuid())
-            .execute(&mut *tx)
-            .await?;
-            }
-            schedule_live_instance(&mut tx, instance_id, *fire_at).await?;
-        }
-        Action::FailInstance => {
-            sqlx::query(
-                "UPDATE task_instances SET state = 'failed', next_fire_at = NULL, updated_at = NOW() \
-                 WHERE id = $1 AND state NOT IN ('completed', 'failed', 'cancelled')",
-            )
-            .bind(instance_id)
-            .execute(&mut *tx)
-            .await?;
-        }
-    }
+    apply_resolution_action_on(&mut tx,resolution.instance_id,&resolution.action,source.as_ref()).await?;
     insert_attempt_events(
         &mut tx,
         &[transition_event(
@@ -1043,7 +1003,7 @@ pub(super) async fn resolve(
 /// resolved worker step. A paused instance stays paused (its resume path
 /// re-schedules it); a terminal one is never resurrected.
 async fn schedule_live_instance(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut sqlx::PgConnection,
     instance_id: Uuid,
     fire_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), StorageError> {
@@ -1053,7 +1013,7 @@ async fn schedule_live_instance(
     )
     .bind(instance_id)
     .bind(fire_at)
-    .execute(&mut **tx)
+    .execute(&mut *tx)
     .await?;
     Ok(())
 }
@@ -1438,4 +1398,54 @@ pub(super) async fn claimed_counts_by_worker(
         .await?
     };
     Ok(rows)
+}
+
+pub(super) async fn apply_resolution_action_on(
+    conn: &mut sqlx::PgConnection,
+    instance: orch8_types::ids::InstanceId,
+    action: &orch8_types::worker::WorkerTaskResolutionAction,
+    source: Option<&crate::worker_invocation::WorkerInvocation>,
+) -> Result<(), StorageError> {
+    use orch8_types::worker::WorkerTaskResolutionAction as Action;
+    let instance_id = instance.into_uuid();
+    match action {
+        Action::Requeue | Action::FailTaskOnly => {}
+        Action::Retry {
+            retry_task,
+            retry_output,
+            node_id,
+            fire_at,
+        } => {
+            let source =
+                source.ok_or_else(|| StorageError::Constraint("missing retry source".into()))?;
+            super::worker_invocations::reserve_retry_on(&mut *conn, source, retry_task, *node_id)
+                .await?;
+            if let Some(output) = retry_output.as_deref() {
+                super::outputs::save_on(&mut *conn, output).await?;
+            }
+            schedule_live_instance(&mut *conn, instance_id, *fire_at).await?;
+        }
+        Action::FailNode { node_id, fire_at } => {
+            if let Some(node_id) = node_id {
+                sqlx::query(
+                "UPDATE execution_tree SET state = 'failed', completed_at = COALESCE(completed_at, NOW()) \
+                 WHERE id = $1 AND state IN ('running', 'waiting')",
+            )
+            .bind(node_id.into_uuid())
+            .execute(&mut *conn)
+            .await?;
+            }
+            schedule_live_instance(&mut *conn, instance_id, *fire_at).await?;
+        }
+        Action::FailInstance => {
+            sqlx::query(
+                "UPDATE task_instances SET state = 'failed', next_fire_at = NULL, updated_at = NOW() \
+                 WHERE id = $1 AND state NOT IN ('completed', 'failed', 'cancelled')",
+            )
+            .bind(instance_id)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
 }

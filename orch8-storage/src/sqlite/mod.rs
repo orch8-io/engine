@@ -92,6 +92,7 @@ mod worker_dispatch;
 mod worker_invocations;
 mod worker_outcome;
 mod worker_resolution;
+mod worker_resolution_application;
 mod worker_version_pins;
 mod workers;
 
@@ -606,6 +607,18 @@ impl SqliteStorage {
         sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(68)")
             .execute(&mut *retirement)
             .await?;
+        let resolution_application_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=69)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !resolution_application_schema {
+            sqlx::raw_sql(include_str!("worker_resolution_application.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(69)")
+                .execute(&mut *retirement)
+                .await?;
+        }
         sqlx::raw_sql(include_str!("worker_admissions.sql"))
             .execute(&mut *retirement)
             .await?;
@@ -2381,6 +2394,27 @@ impl crate::WorkerStore for SqliteStorage {
         evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
         workers::resolve(self, resolution, evidence).await
+    }
+    async fn get_worker_resolution_outcome_by_id(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get_by_id(self, tenant, id).await
+    }
+    async fn claim_worker_resolution_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>, StorageError>
+    {
+        worker_resolution_application::recovery_page(self, limit).await
+    }
+    async fn apply_worker_resolution_integration(
+        &self,
+        plan: &crate::worker_resolution_application::WorkerResolutionIntegration,
+    ) -> Result<crate::worker_resolution_application::WorkerResolutionApplication, StorageError>
+    {
+        worker_resolution_application::apply(self, plan).await
     }
     async fn get_worker_resolution_outcome(
         &self,

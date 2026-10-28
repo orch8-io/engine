@@ -472,6 +472,27 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
         Err(error) => tracing::warn!(%error, "worker result recovery scan failed"),
     }
 
+    match ctx
+        .storage
+        .claim_worker_resolution_recovery_page(ctx.batch_size.min(64))
+        .await
+    {
+        Ok(page) => {
+            for candidate in page {
+                if let Err(error) = crate::worker_lease::recover_worker_failure(
+                    ctx.storage.as_ref(),
+                    &candidate.tenant_id,
+                    candidate.id,
+                )
+                .await
+                {
+                    tracing::warn!(outcome_id=%candidate.id,%error,"worker failure integration deferred");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error,"worker failure recovery scan failed"),
+    }
+
     let available = ctx.semaphore.available_permits();
     if available == 0 {
         return Ok(Vec::new());

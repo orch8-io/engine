@@ -619,6 +619,8 @@ orch8_storage::backend_test!(async fn artifact_retirement_tombstone_survives_cut
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+// Keep the complete downgrade/recovery lifecycle visible in this scenario.
+#[allow(clippy::too_many_lines)]
 async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidence() {
     use orch8_storage::testing::backends::TestBackend;
     let Some(b) = TestBackend::postgres().await else {
@@ -632,6 +634,12 @@ async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidenc
     let pool = b.pg_pool();
     let encoding_down = include_str!("../../migrations/down/138_native_json_encoding.sql");
     let encoding_up = include_str!("../../migrations/138_native_json_encoding.sql");
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/139_worker_resolution_application.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
     sqlx::raw_sql(encoding_down).execute(pool).await.unwrap();
     // An empty installation can roll back and reapply without changing the
     // independent continuity schema. Reapplying is safe after an ambiguous DDL ack.
@@ -647,6 +655,12 @@ async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidenc
     sqlx::raw_sql(retirement_up).execute(pool).await.unwrap();
     sqlx::raw_sql(captured_up).execute(pool).await.unwrap();
     sqlx::raw_sql(encoding_up).execute(pool).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/139_worker_resolution_application.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
     let request = fixture(b.storage.as_ref()).await;
     let cut = capture(b.storage.as_ref(), &request).await;
     assert!(sqlx::raw_sql(captured_down).execute(pool).await.is_err());
@@ -2416,4 +2430,33 @@ orch8_storage::backend_test!(async fn lossless_native_json_survives_checkpoint_s
     assert_eq!(serde_json::to_string(&replay.snapshot).unwrap(),serde_json::to_string(&first.snapshot).unwrap());
     assert!(s.abort_preparing_capsule_cut(&request.owner.tenant_id,first.id).await.unwrap());
     assert_eq!(serde_json::to_string(&s.get_instance(instance.id).await.unwrap().unwrap().context).unwrap(),serde_json::to_string(&instance.context).unwrap());
+});
+
+orch8_storage::backend_test!(async fn pending_reported_worker_failure_blocks_capture_after_hot_gc(b) {
+    use orch8_types::worker::{WorkerClaim, WorkerTask};
+    use orch8_storage::capsule_export::CapsuleCutRefusal;
+    let storage=b.storage.as_ref();let request=fixture(storage).await;
+    let task:WorkerTask=serde_json::from_value(json!({"id":uuid::Uuid::now_v7(),"instance_id":request.owner.current_instance_id,"block_id":"charge","handler_name":"remote.capture-test","attempt":0,"params":{},"context":{},"state":"pending","created_at":Utc::now()})).unwrap();
+    storage.create_worker_task(&task).await.unwrap();
+    let held=storage.claim_worker_tasks(&task.handler_name,"worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    assert!(storage.resolve_worker_task(&orch8_types::worker::WorkerTaskResolution {
+        task_id: held.id, instance_id: held.instance_id, expected_state: held.state,
+        expected_claim_epoch: held.claim_epoch, expected_worker_id: held.worker_id.clone(),
+        holder_worker_id: held.worker_id.clone(), event: orch8_types::worker::WorkerAttemptEventKind::Failed,
+        effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Unknown,
+        reason: "failed during pause".into(), retryable: true,
+        action: orch8_types::worker::WorkerTaskResolutionAction::FailTaskOnly,
+    }).await.unwrap());
+    storage.delete_worker_task(task.id).await.unwrap();
+    assert!(matches!(storage.capture_capsule_cut(&request).await.unwrap(),CapsuleCutCapture::Refused(CapsuleCutRefusal::UnsafeBoundary)));
+    let error = match &b.raw {
+        orch8_storage::testing::backends::RawPool::Sqlite(pool) => sqlx::query("INSERT INTO capsule_source_cuts(source_instance_id,state) VALUES(?1,'captured')")
+            .bind(task.instance_id.to_string()).execute(pool).await.unwrap_err(),
+        #[cfg(feature="postgres")]
+        orch8_storage::testing::backends::RawPool::Postgres(pool) => sqlx::query("INSERT INTO capsule_source_cuts(source_instance_id,state) VALUES($1,'captured')")
+            .bind(task.instance_id.into_uuid()).execute(pool).await.unwrap_err(),
+    };
+    assert!(error.to_string().contains("unapplied worker failure prevents capsule cut"),"{error}");
+    assert!(storage.get_worker_resolution_outcome(Some(&request.owner.tenant_id),task.id,Some(&claim)).await.unwrap().is_some());
 });
