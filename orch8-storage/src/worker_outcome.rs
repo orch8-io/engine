@@ -22,6 +22,7 @@ pub struct WorkerCompletion {
     pub(crate) stored_sealed: bool,
     pub(crate) provider_receipt_id: Option<String>,
     pub(crate) delegation: Option<WorkerDelegationCompletion>,
+    pub(crate) reconciliation: Option<crate::worker_reconciliation::WorkerReconciliationApproval>,
 }
 
 /// Host-supplied application data travels with the original accepted result.
@@ -68,7 +69,30 @@ impl WorkerCompletion {
             stored_sealed: false,
             provider_receipt_id,
             delegation: None,
+            reconciliation: None,
         }
+    }
+    /// A trusted operator explicitly accepts this exact legacy report.
+    pub fn for_legacy_reconciliation(
+        output: Value,
+        approval: crate::worker_reconciliation::WorkerReconciliationApproval,
+    ) -> Result<Self, StorageError> {
+        approval.validate()?;
+        let mut completion = Self::new(output);
+        completion.reconciliation = Some(approval);
+        Ok(completion)
+    }
+    /// Match a retry of this exact decision/result; unsupported metadata never matches.
+    #[must_use]
+    pub fn matches_reconciled_outcome(&self, outcome: &WorkerAcceptedOutcome) -> bool {
+        self.reconciliation
+            .as_ref()
+            .zip(outcome.reconciliation.as_ref())
+            .is_some_and(|(approval, decision)| {
+                decision.validate(outcome).is_ok()
+                    && *approval == decision.approval
+                    && self.logical_sha256 == decision.logical_output_sha256
+            })
     }
     pub(crate) fn with_stored_output(&self, output: Value) -> Self {
         Self {
@@ -78,6 +102,7 @@ impl WorkerCompletion {
             stored_sealed: true,
             provider_receipt_id: self.provider_receipt_id.clone(),
             delegation: self.delegation.clone(),
+            reconciliation: self.reconciliation.clone(),
         }
     }
     /// Only a hosting runtime uses this constructor; worker HTTP/gRPC reports
@@ -105,6 +130,9 @@ impl WorkerCompletion {
         Ok(completion)
     }
     pub(crate) fn validate_stored(&self) -> Result<(), StorageError> {
+        if let Some(approval) = &self.reconciliation {
+            approval.validate()?;
+        }
         if let Some(delegation) = &self.delegation {
             delegation.validate_stored()?;
             if !self.stored_sealed && !delegation.is_logical() {
@@ -148,6 +176,8 @@ pub struct WorkerAcceptedOutcome {
     pub accepted_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) delegation: Option<WorkerDelegationCompletion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reconciliation: Option<crate::worker_reconciliation::WorkerReconciliationDecision>,
 }
 impl std::fmt::Debug for WorkerAcceptedOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -179,6 +209,7 @@ impl WorkerAcceptedOutcome {
             stored_output_sha256,
             accepted_at: Utc::now(),
             delegation: completion.delegation.clone(),
+            reconciliation: None,
         }
     }
     pub(crate) fn is_logical_output(&self) -> bool {
@@ -203,6 +234,9 @@ impl WorkerAcceptedOutcome {
             return Err(StorageError::Constraint(
                 "accepted worker outcome scope or payload mismatch".into(),
             ));
+        }
+        if let Some(decision) = &self.reconciliation {
+            decision.validate(self)?;
         }
         if let Some(invocation) = &self.invocation {
             invocation.validate_scope(tenant, task, instance)?;
@@ -272,7 +306,14 @@ pub(crate) fn encode_record(outcome: &WorkerAcceptedOutcome) -> Result<Value, St
     })?;
     fields.insert(
         "output_encoding".into(),
-        Value::String("json_text_v1".into()),
+        Value::String(
+            if outcome.reconciliation.is_some() {
+                "json_text_reconciled_v1"
+            } else {
+                "json_text_v1"
+            }
+            .into(),
+        ),
     );
     fields.insert(
         "output".into(),
@@ -284,8 +325,22 @@ pub(crate) fn encode_record(outcome: &WorkerAcceptedOutcome) -> Result<Value, St
 /// Read the original 134 representation as well as the versioned encoding.
 /// Unknown codecs fail closed rather than interpreting encoded data as output.
 pub(crate) fn decode_record(mut record: Value) -> Result<WorkerAcceptedOutcome, StorageError> {
+    let reconciled = record
+        .get("reconciliation")
+        .is_some_and(|value| !value.is_null());
+    if reconciled
+        != (record.get("output_encoding").and_then(Value::as_str)
+            == Some("json_text_reconciled_v1"))
+    {
+        return Err(StorageError::Constraint(
+            "worker reconciliation requires its versioned reader".into(),
+        ));
+    }
     if let Some(encoding) = record.get("output_encoding") {
-        if encoding.as_str() != Some("json_text_v1") {
+        if !matches!(
+            encoding.as_str(),
+            Some("json_text_v1" | "json_text_reconciled_v1")
+        ) {
             return Err(StorageError::Constraint(
                 "unsupported worker outcome output encoding".into(),
             ));
@@ -333,6 +388,62 @@ mod tests {
         let mut malformed = encoded;
         malformed["output"] = Value::Null;
         assert!(decode_record(malformed).is_err());
+    }
+    #[test]
+    fn reconciled_records_require_explicit_codec_scope_and_supported_decision_version() {
+        use crate::{
+            worker_claim::WorkerClaimPrincipal,
+            worker_reconciliation::{WorkerReconciliationApproval, WorkerReconciliationDecision},
+        };
+        let tenant = TenantId::unchecked("reconciled-codec");
+        let task = Uuid::now_v7();
+        let claim = WorkerClaim::new("old-worker", 0);
+        let approval = WorkerReconciliationApproval::new(
+            WorkerClaimPrincipal::Root {},
+            tenant.clone(),
+            task,
+            claim.clone(),
+            Uuid::now_v7(),
+            "backend-ack".into(),
+        )
+        .unwrap();
+        let completion = WorkerCompletion::for_legacy_reconciliation(
+            serde_json::json!({"secret":"PRIVATE_OUTPUT_CANARY\0λ","number":-0.0}),
+            approval.clone(),
+        )
+        .unwrap();
+        let mut outcome = WorkerAcceptedOutcome::new(
+            tenant.clone(),
+            task,
+            InstanceId::new(),
+            claim,
+            None,
+            &completion,
+        );
+        outcome.reconciliation =
+            Some(WorkerReconciliationDecision::prepare(&approval, &outcome, None).unwrap());
+        let encoded = encode_record(&outcome).unwrap();
+        assert_eq!(encoded["output_encoding"], "json_text_reconciled_v1");
+        assert_eq!(decode_record(encoded.clone()).unwrap(), outcome);
+        assert!(
+            !serde_json::to_string(&outcome.reconciliation)
+                .unwrap()
+                .contains("PRIVATE_OUTPUT_CANARY")
+        );
+        let mut downgraded = encoded.clone();
+        downgraded["output_encoding"] = serde_json::json!("json_text_v1");
+        assert!(decode_record(downgraded).is_err());
+        let mut missing = encoded.clone();
+        missing.as_object_mut().unwrap().remove("reconciliation");
+        assert!(decode_record(missing).is_err());
+        let mut future = encoded.clone();
+        future["reconciliation"]["version"] = serde_json::json!(2);
+        let future = decode_record(future).unwrap();
+        assert!(future.validate(&tenant, task, outcome.instance_id).is_err());
+        assert!(!completion.matches_reconciled_outcome(&future));
+        let mut scoped = encoded;
+        scoped["reconciliation"]["approval"]["actor"]["realm"] = serde_json::json!("future-realm");
+        assert!(decode_record(scoped).is_err());
     }
 }
 

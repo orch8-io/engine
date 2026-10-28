@@ -64,6 +64,7 @@ mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
 mod worker_outcome;
+mod worker_reconciliation;
 mod worker_resolution;
 mod worker_resolution_application;
 mod worker_version_pins;

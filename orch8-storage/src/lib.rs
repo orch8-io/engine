@@ -12,6 +12,7 @@ pub mod worker_admission;
 pub mod worker_claim;
 pub mod worker_invocation;
 pub mod worker_outcome;
+pub mod worker_reconciliation;
 pub mod worker_resolution;
 pub mod worker_resolution_application;
 pub use compensation_start::CompensationStart;
@@ -96,7 +97,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 140;
+pub const STORAGE_SCHEMA_VERSION: u32 = 141;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.

@@ -1,3 +1,5 @@
+pub(crate) mod reconciliation;
+
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -105,6 +107,10 @@ pub fn routes() -> Router<AppState> {
         .route("/workers/tasks/poll", post(poll_tasks))
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
+        .route(
+            "/workers/tasks/{id}/reconcile-completion",
+            post(reconciliation::reconcile_completion),
+        )
         .route(
             "/workers/tasks/{id}/artifacts/{upload_id}",
             post(upload_task_artifact),

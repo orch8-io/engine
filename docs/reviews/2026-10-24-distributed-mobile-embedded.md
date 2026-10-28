@@ -6484,3 +6484,44 @@ unknown worker identity or reconstruct missing worker output.
 Final validation also passes strict all-target checks across eight affected
 packages, standalone mobile-library compilation, generated Rust/JavaScript
 client contracts, the unchanged OpenAPI fingerprint and formatting checks.
+
+## Functional explicit legacy completion acceptance
+
+An authenticated Operator/root can now acknowledge one held legacy completion
+through `/workers/tasks/{id}/reconcile-completion`. The immutable accepted
+outcome retains the verified approver, permanent approval UUID, exact tenant,
+task/worker/epoch, backend evidence reference and logical output digest. The
+original issuer is never rewritten; epoch-zero history remains zero. Known
+authenticated claims cannot be reclassified through this path.
+
+Approval, accepted body, effect settlement and completion event share the
+existing transaction. A real PostgreSQL blocked-key test reproduced expiry
+being evaluated before a row-lock wait; the approver's authority is now checked
+against fresh database time after acquiring the lock. Revoked or non-Operator
+keys roll back the completion and bound effect. A permanent unique index refuses
+approval-ID reuse across reports, including tasks with the same label and epoch.
+Identical concurrent requests retain one decision/event; changed bodies or
+references conflict. Cold retry survives hot/native cleanup and encrypted legs.
+
+PostgreSQL migration 141 / SQLite schema 71 require a distinct reconciled codec
+and preserve the current lossless JSON validator. The matrix caught an initial
+copy of a pre-138 JSONB guard that rejected NUL output; both migration directions
+now retain JSON text validation. Downgrade refuses retained decisions. Current
+readers reject missing/downgraded metadata and unsupported attribution versions.
+A file-backed SQLite upgrade/reopen test verifies retention.
+
+The final production behavior passes 899 distinct selected cases: 368 API units,
+261 storage units, 45 reconciliation HTTP cases, 153 admission cases, 56 issued
+claim cases, 15 migration checks and one file-backed upgrade/reopen case. Native
+application, original Unknown-effect settlement with a provider confirmation,
+and role-failure rollback of an effect are covered across all four backends.
+Strict all-target checks across eight consumers, standalone mobile compilation,
+generated Rust/JavaScript client contracts, OpenAPI fingerprint, formatting and
+a fresh real-server build pass. See `2026-10-28-worker-reconciliation.md` and
+`../worker-reconciliation.md` for the workflow and its limits.
+
+This is the first explicit completion path, not closure of the legacy gate.
+Unattributed callback compatibility remains, as do failures/late reports without
+a held task, independent review/read of already accepted history after approver
+key retirement, continuing handoff/revocation, the complete coordinator/database
+write floor, functional claim-bound artifacts and all original review gates.

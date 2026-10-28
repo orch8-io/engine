@@ -93,6 +93,7 @@ mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
 mod worker_outcome;
+mod worker_reconciliation;
 mod worker_resolution;
 mod worker_resolution_application;
 mod worker_version_pins;
@@ -630,6 +631,18 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
             sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(70)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let reconciliation_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=71)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !reconciliation_schema {
+            sqlx::raw_sql(include_str!("worker_reconciliation.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(71)")
                 .execute(&mut *retirement)
                 .await?;
         }

@@ -9256,6 +9256,54 @@
         }
       }
     },
+    "/workers/tasks/{id}/reconcile-completion": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "reconcile_completion",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Legacy worker task ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReconcileCompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Operator decision and original result retained; native application recovers separately",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconciliationReceipt"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Authenticated Operator or root required"
+          },
+          "409": {
+            "description": "Claim changed, authenticated issuer exists, or decision conflicts"
+          }
+        }
+      }
+    },
     "/workers/tasks/{id}/release": {
       "post": {
         "tags": [
@@ -17309,6 +17357,57 @@
             "type": "number",
             "format": "double",
             "description": "Tokens refilled per second (e.g. `25` for 25 req/s, `0.5` for 30/min)."
+          }
+        }
+      },
+      "ReconcileCompletionRequest": {
+        "type": "object",
+        "required": [
+          "worker_id",
+          "claim_epoch",
+          "approval_id",
+          "evidence_reference",
+          "output"
+        ],
+        "properties": {
+          "approval_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "claim_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "evidence_reference": {
+            "type": "string",
+            "description": "Opaque app/backend acknowledgement reference; never credentials or raw evidence."
+          },
+          "output": {},
+          "worker_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReconciliationReceipt": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "accepted_at",
+          "decision"
+        ],
+        "properties": {
+          "accepted_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "decision": {
+            "description": "Retained approver, exact scope, output digest and original history classification."
+          },
+          "task_id": {
+            "type": "string",
+            "format": "uuid"
           }
         }
       },

@@ -39,7 +39,7 @@ pub(super) async fn insert_on(
     let raw: Option<serde_json::Value>=sqlx::query_scalar("SELECT COALESCE((SELECT record->'invocation' FROM worker_task_admissions WHERE task_id=$1),(SELECT record FROM worker_task_invocations WHERE task_id=$1))")
         .bind(task_id).fetch_one(&mut *conn).await?;
     let invocation = raw.map(serde_json::from_value).transpose()?;
-    let outcome = WorkerAcceptedOutcome::new(
+    let mut outcome = WorkerAcceptedOutcome::new(
         TenantId::unchecked(row.get::<String, _>("tenant_id")),
         task_id,
         InstanceId::from_uuid(row.get("instance_id")),
@@ -47,10 +47,14 @@ pub(super) async fn insert_on(
         invocation,
         completion,
     );
+    if let Some(approval) = &completion.reconciliation {
+        outcome.reconciliation =
+            Some(super::worker_reconciliation::decision_on(conn, approval, &outcome).await?);
+    }
     outcome.validate(&outcome.tenant_id, task_id, outcome.instance_id)?;
     sqlx::query("INSERT INTO worker_accepted_outcomes(task_id,tenant_id,instance_id,record) VALUES($1,$2,$3,$4)")
         .bind(task_id).bind(outcome.tenant_id.as_str()).bind(outcome.instance_id.into_uuid()).bind(crate::worker_outcome::encode_record(&outcome)?)
-        .execute(&mut *conn).await?;
+        .execute(&mut *conn).await.map_err(crate::worker_reconciliation::insert_error)?;
     Ok(())
 }
 
