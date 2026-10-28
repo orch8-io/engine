@@ -6636,3 +6636,30 @@ verified remote-definition SDK contract, tenant/scoped proxy quota integration,
 complete writer enforcement, legacy attribution retirement, continuing
 handoff/revocation, acknowledged compaction, transported history and all original
 ledger gates remain required. The overall review objective is not complete.
+
+## 2026-10-28: durable published mailbox outcomes
+
+The atomic publication checkpoint did not make parent outcome application atomic.
+Four-backend fault injection now reproduces the separate-write failure and the
+suppressed-output false acknowledgement. The follow-up implementation routes
+published mailbox successes through accepted-outcome recovery, using immutable
+publication evidence as a mailbox target rather than inventing a native step.
+Native output/context/state and the application receipt share one transaction;
+held-result retries and scheduler recovery survive hot task cleanup. HTTP/gRPC
+use the same recovery entry point. See
+[the focused review](2026-10-28-durable-delegation-results.md) for boundaries,
+compatibility and validation.
+
+This closes neither historical unbound mailbox reconciliation nor failure/late
+fact integration. It also exposes follow-up cases to complete: proxy control and
+scheduler exclusion on pause/resume, and matching first-report context-size
+preflight to the nested delegation projection used by durable application.
+Frozen remote definition retrieval, scoped quotas, continuing handoff/revocation,
+claim-bound artifacts, recovery dispositions and acknowledged payload compaction
+remain in the original review scope.
+
+Final outcome-checkpoint validation passes 1,127 selected Rust cases plus all 232
+fresh-server lifecycle/continuity cases, strict all-target checks across eight
+consumers and standalone mobile compilation. The focused review lists the tested
+scopes and the historical compatibility boundary; these results do not close the
+remaining original review gates.

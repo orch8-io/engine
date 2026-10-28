@@ -354,6 +354,53 @@ pub async fn integrate_delegation_outcome(
     Ok(())
 }
 
+/// Apply a retained success. Published mailboxes use atomic storage recovery;
+/// historical unbound mailbox rows keep their compatibility path until reconciled.
+pub async fn integrate_completed_worker_outcome(
+    storage: &dyn StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    task_id: uuid::Uuid,
+    claim: &orch8_types::worker::WorkerClaim,
+    max_context_bytes: u32,
+) -> Result<(), EngineError> {
+    let accepted = storage
+        .get_worker_accepted_outcome(Some(tenant), task_id, claim)
+        .await?;
+    if accepted.as_ref().is_none_or(|accepted| {
+        !accepted
+            .invocation
+            .as_ref()
+            .is_some_and(orch8_storage::worker_invocation::WorkerInvocation::is_published_mailbox)
+    }) && let Some(task) = storage.get_worker_task(task_id).await?
+        && is_delegation_task(&task)
+        && task.state == WorkerTaskState::Completed
+        && task.worker_id.as_deref() == Some(claim.worker_id.as_str())
+        && task.claim_epoch == claim.claim_epoch
+        && !storage
+            .get_worker_invocation(tenant, task_id)
+            .await?
+            .as_ref()
+            .is_some_and(orch8_storage::worker_invocation::WorkerInvocation::is_published_mailbox)
+        && let Some(output) = accepted
+            .as_ref()
+            .map(|accepted| &accepted.output)
+            .or(task.output.as_ref())
+    {
+        // Do not infer completion from a standalone block output: the context
+        // and wake may still be missing after an interrupted historical write.
+        return integrate_delegation_outcome(storage, &task, Ok(output)).await;
+    }
+    orch8_storage::worker_outcome::integrate_worker_outcome(
+        storage,
+        tenant,
+        task_id,
+        claim,
+        max_context_bytes,
+    )
+    .await?;
+    Ok(())
+}
+
 /// Resume a parked local step with the outcome of its delegation — the
 /// hosting runtime's half of a delegation from a runtime-hosted parent.
 ///

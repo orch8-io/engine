@@ -74,6 +74,13 @@ pub(crate) fn dispatch_target(
 }
 
 impl WorkerInvocation {
+    /// Published mailbox evidence is distinct from an uncertain legacy target.
+    #[must_use]
+    pub fn is_published_mailbox(&self) -> bool {
+        matches!(&self.target, WorkerInvocationTarget::Unbound { reason }
+            if reason == crate::delegation_publication::INVOCATION_REASON)
+    }
+
     pub(crate) fn validate_scope(
         &self,
         tenant: &TenantId,

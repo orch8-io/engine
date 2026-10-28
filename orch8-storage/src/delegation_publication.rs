@@ -531,3 +531,66 @@ fn validate_parent(plan: &DelegationPlan) -> Result<(), StorageError> {
 
     Ok(())
 }
+
+/// Only a durable publication can authorize application to a synthetic mailbox block.
+pub(crate) fn mailbox_id(
+    invocation: &crate::worker_invocation::WorkerInvocation,
+) -> Result<Option<Uuid>, StorageError> {
+    if !invocation.is_published_mailbox() {
+        return Ok(None);
+    }
+    invocation
+        .block_id
+        .as_str()
+        .strip_prefix("delegation-")
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .map(Some)
+        .ok_or_else(conflict)
+}
+impl DelegationPublication {
+    pub(crate) fn matches_outcome(
+        &self,
+        accepted: &crate::worker_outcome::WorkerAcceptedOutcome,
+    ) -> Result<bool, StorageError> {
+        self.validate()?;
+        let Some(invocation) = &accepted.invocation else {
+            return Ok(false);
+        };
+        Ok(
+            mailbox_id(invocation)? == Some(self.delegation.id.into_uuid())
+                && self.task_id == accepted.task_id
+                && self.instance_id == accepted.instance_id
+                && self.delegation.tenant_id == accepted.tenant_id
+                && invocation.task_id == self.task_id
+                && invocation.instance_id == self.instance_id
+                && invocation.tenant_id == self.delegation.tenant_id
+                && invocation.handler_name == "orch8.delegation"
+                && invocation.attempt == 0
+                && invocation.effect_id == Some(self.effect_id)
+                && invocation.continuity.as_ref() == Some(&self.task_owner)
+                && invocation.continuity_epoch == Some(self.task_owner.epoch)
+                && accepted.claim.worker_id == self.delegation.destination_runtime_id.to_string(),
+        )
+    }
+    pub(crate) fn is_proxy(&self, instance: &TaskInstance) -> Result<bool, StorageError> {
+        let expected_owner =
+            proxy_owner(&self.delegation.tenant_id, instance.id, self.published_at);
+        let is_proxy = self.task_owner.continuity_id == expected_owner.continuity_id
+            && self.task_owner.epoch == expected_owner.epoch.get()
+            && self.task_owner.owner_runtime_id == expected_owner.owner_runtime_id;
+        match (is_proxy, instance.metadata.get("orch8_delegation_proxy")) {
+            (true, Some(proxy)) => {
+                let delegation: DeviceDelegation =
+                    serde_json::from_value(proxy["delegation"].clone())?;
+                if delegation != self.delegation
+                    || instance.id.into_uuid() != self.delegation.id.into_uuid()
+                {
+                    return Err(conflict());
+                }
+                Ok(true)
+            }
+            (false, None) => Ok(false),
+            _ => Err(conflict()),
+        }
+    }
+}

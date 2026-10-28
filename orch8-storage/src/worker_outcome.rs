@@ -467,6 +467,7 @@ pub struct WorkerOutcomeIntegration {
     pub(crate) context: orch8_types::context::ExecutionContext,
     pub(crate) output: orch8_types::output::BlockOutput,
     pub(crate) within_context_limit: bool,
+    pub(crate) mailbox: Option<crate::delegation_publication::DelegationPublication>,
 }
 
 /// Recover application independently of the hot task or the reporting worker.
@@ -492,61 +493,30 @@ pub async fn integrate_worker_outcome(
         if instance.tenant_id != *tenant {
             return Ok(ReconciliationRequired);
         }
-        let mut context = instance.context.clone();
-        if let Some(fields) = accepted.output.as_object() {
-            if !context.data.is_object() {
-                context.data = serde_json::json!({});
-            }
-            context
-                .data
-                .as_object_mut()
-                .expect("object initialized")
-                .extend(fields.clone());
-        }
-        if let Some(delegation) = &accepted.delegation {
-            if !delegation.is_logical() {
-                return Err(StorageError::Constraint(
-                    "delegation completion is not decrypted".into(),
-                ));
-            }
-            let body: Value = serde_json::from_str(delegation.body.as_str().ok_or_else(|| {
-                StorageError::Constraint("invalid delegation completion body".into())
-            })?)?;
-            let id = body
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty() && id.len() <= 256)
-                .ok_or_else(|| {
-                    StorageError::Constraint("invalid delegation completion identity".into())
-                })?;
-            if !context.data.is_object() {
-                context.data = serde_json::json!({});
-            }
-            let delegations = context
-                .data
-                .as_object_mut()
-                .expect("object initialized")
-                .entry("delegations")
-                .or_insert_with(|| serde_json::json!({}));
-            if !delegations.is_object() {
-                *delegations = serde_json::json!({});
-            }
-            delegations
-                .as_object_mut()
-                .expect("object initialized")
-                .insert(id.to_owned(), body["result"].clone());
-        }
-        let within_context_limit = context.check_size(max_context_bytes).is_ok();
         let Some(invocation) = accepted.invocation.as_ref() else {
             return Ok(ReconciliationRequired);
         };
+        let mailbox = if let Some(id) = crate::delegation_publication::mailbox_id(invocation)? {
+            let Some(publication) = storage.get_delegation_publication(tenant, id).await? else {
+                return Ok(ReconciliationRequired);
+            };
+            if !publication.matches_outcome(&accepted)? {
+                return Ok(ReconciliationRequired);
+            }
+            Some(publication)
+        } else {
+            None
+        };
+        let (context, output_value) =
+            application_values(&accepted, &instance.context, mailbox.as_ref())?;
+        let within_context_limit = context.check_size(max_context_bytes).is_ok();
         let output = orch8_types::output::BlockOutput {
             id: Uuid::now_v7(),
             instance_id: accepted.instance_id,
             block_id: invocation.block_id.clone(),
-            output: accepted.output.clone(),
+            output: output_value.clone(),
             output_ref: None,
-            output_size: u32::try_from(serde_json::to_vec(&accepted.output)?.len())
+            output_size: u32::try_from(serde_json::to_vec(&output_value)?.len())
                 .map_err(|_| StorageError::Constraint("worker output too large".into()))?,
             attempt: invocation.attempt,
             created_at: Utc::now(),
@@ -557,6 +527,7 @@ pub async fn integrate_worker_outcome(
             context,
             output,
             within_context_limit,
+            mailbox,
         };
         let result = storage
             .apply_worker_outcome_integration(&integration)
@@ -568,17 +539,101 @@ pub async fn integrate_worker_outcome(
     Ok(Deferred)
 }
 
+fn merge_delegation(context: &mut orch8_types::context::ExecutionContext, id: &str, result: Value) {
+    if !context.data.is_object() {
+        context.data = serde_json::json!({});
+    }
+    let delegations = context
+        .data
+        .as_object_mut()
+        .expect("object initialized")
+        .entry("delegations")
+        .or_insert_with(|| serde_json::json!({}));
+    if !delegations.is_object() {
+        *delegations = serde_json::json!({});
+    }
+    delegations
+        .as_object_mut()
+        .expect("object initialized")
+        .insert(id.to_owned(), result);
+}
+
+fn application_values(
+    accepted: &WorkerAcceptedOutcome,
+    context: &orch8_types::context::ExecutionContext,
+    mailbox: Option<&crate::delegation_publication::DelegationPublication>,
+) -> Result<(orch8_types::context::ExecutionContext, Value), StorageError> {
+    let mut context = context.clone();
+    if let Some(publication) = mailbox {
+        let result = serde_json::json!({"status":"completed","delegation_id":publication.delegation.id,
+            "runtime_id":accepted.claim.worker_id,"output":accepted.output});
+        merge_delegation(
+            &mut context,
+            &publication.delegation.id.to_string(),
+            result.clone(),
+        );
+        return Ok((context, result));
+    }
+    if let Some(fields) = accepted.output.as_object() {
+        if !context.data.is_object() {
+            context.data = serde_json::json!({});
+        }
+        context
+            .data
+            .as_object_mut()
+            .expect("object initialized")
+            .extend(fields.clone());
+    }
+    if let Some(delegation) = &accepted.delegation {
+        if !delegation.is_logical() {
+            return Err(StorageError::Constraint(
+                "delegation completion is not decrypted".into(),
+            ));
+        }
+        let body: Value = serde_json::from_str(delegation.body.as_str().ok_or_else(|| {
+            StorageError::Constraint("invalid delegation completion body".into())
+        })?)?;
+        let id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .ok_or_else(|| {
+                StorageError::Constraint("invalid delegation completion identity".into())
+            })?;
+        merge_delegation(&mut context, id, body["result"].clone());
+    }
+    Ok((context, accepted.output.clone()))
+}
+
 /// Runtime fields are unsealed. Compare the full invocation, never a block alias.
 pub(crate) fn integration_source_matches(
     invocation: &WorkerInvocation,
     instance: &orch8_types::instance::TaskInstance,
     owner: Option<&orch8_types::continuity::ContinuityExecution>,
 ) -> bool {
+    source_matches(invocation, instance, owner, true)
+}
+
+/// A published mailbox can have no native run, but still binds its exact owner and run snapshot.
+pub(crate) fn mailbox_source_matches(
+    invocation: &WorkerInvocation,
+    instance: &orch8_types::instance::TaskInstance,
+    owner: Option<&orch8_types::continuity::ContinuityExecution>,
+) -> bool {
+    !invocation.dry_run && source_matches(invocation, instance, owner, false)
+}
+
+fn source_matches(
+    invocation: &WorkerInvocation,
+    instance: &orch8_types::instance::TaskInstance,
+    owner: Option<&orch8_types::continuity::ContinuityExecution>,
+    require_native_run: bool,
+) -> bool {
     use orch8_types::continuity::OwnershipState;
     invocation.instance_id == instance.id
         && invocation.tenant_id == instance.tenant_id
         && invocation.sequence_id == instance.sequence_id
-        && invocation.run_id.as_ref().is_some_and(|id| !id.is_empty())
+        && (!require_native_run || invocation.run_id.as_ref().is_some_and(|id| !id.is_empty()))
         && invocation.run_id == instance.context.runtime.run_id
         && invocation.dry_run == instance.context.runtime.dry_run
         && match (&invocation.continuity, owner) {

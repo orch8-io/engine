@@ -1227,26 +1227,16 @@ pub(crate) async fn complete_task(
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
     if let Some(receipt) = &accepted {
-        let hot = state
-            .storage
-            .get_worker_task(task_id)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-        if hot
-            .as_ref()
-            .is_none_or(|task| !orch8_engine::delegation::is_delegation_task(task))
-        {
-            orch8_storage::worker_outcome::integrate_worker_outcome(
-                state.storage.as_ref(),
-                &receipt.tenant_id,
-                task_id,
-                &replay_claim,
-                state.max_context_bytes,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-            return Ok(StatusCode::OK);
-        }
+        orch8_engine::delegation::integrate_completed_worker_outcome(
+            state.storage.as_ref(),
+            &receipt.tenant_id,
+            task_id,
+            &replay_claim,
+            state.max_context_bytes,
+        )
+        .await
+        .map_err(ApiError::from)?;
+        return Ok(StatusCode::OK);
     }
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
@@ -1381,33 +1371,7 @@ pub(crate) async fn complete_task(
 
     let task = pre_task;
 
-    // Device-mesh delegation: integrate the result into the parent (block
-    // output + `context.data.delegations.<id>` + wake) instead of treating
-    // the mailbox task as one of the parent's own steps.
-    if orch8_engine::delegation::is_delegation_task(&task) {
-        // A completion retry (the first response was lost) integrates only
-        // when the first attempt did not get that far: the result block
-        // output is the integration's first write.
-        let integrated = completion_retry
-            && state
-                .storage
-                .get_block_output(task.instance_id, &task.block_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "block_output"))?
-                .is_some();
-        if !integrated {
-            orch8_engine::delegation::integrate_delegation_outcome(
-                state.storage.as_ref(),
-                &task,
-                Ok(&req.output),
-            )
-            .await
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
-        }
-        return Ok(StatusCode::OK);
-    }
-
-    orch8_storage::worker_outcome::integrate_worker_outcome(
+    orch8_engine::delegation::integrate_completed_worker_outcome(
         state.storage.as_ref(),
         &tenant_id,
         task_id,
@@ -1415,7 +1379,7 @@ pub(crate) async fn complete_task(
         state.max_context_bytes,
     )
     .await
-    .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    .map_err(ApiError::from)?;
 
     // Roll external-worker success into the same breaker registry the
     // in-process step-exec path uses. Skip-listed handlers (pure control-flow

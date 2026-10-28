@@ -192,16 +192,47 @@ async fn apply_on(
     let Some(invocation) = expected.invocation.as_ref() else {
         return Ok(ReconciliationRequired);
     };
-    if !crate::worker_outcome::integration_source_matches(invocation, &instance, owner.as_ref()) {
-        return Ok(ReconciliationRequired);
-    }
+    let mailbox = if let Some(expected_publication) = &integration.mailbox {
+        let Some(publication) = super::delegation_publication::get_on(
+            conn,
+            &expected.tenant_id,
+            expected_publication.delegation.id.into_uuid(),
+        )
+        .await?
+        else {
+            return Ok(ReconciliationRequired);
+        };
+        if publication != *expected_publication
+            || !publication.matches_outcome(expected)?
+            || !crate::worker_outcome::mailbox_source_matches(invocation, &instance, owner.as_ref())
+        {
+            return Ok(ReconciliationRequired);
+        }
+        Some(publication)
+    } else {
+        if !crate::worker_outcome::integration_source_matches(invocation, &instance, owner.as_ref())
+        {
+            return Ok(ReconciliationRequired);
+        }
+        None
+    };
     if serde_json::to_value(&instance.context)?
         != serde_json::to_value(&integration.expected_context)?
     {
         return Ok(ContextChanged);
     }
-    if !target_is_current_on(conn, &instance, invocation).await? {
+    if mailbox.is_none() && !target_is_current_on(conn, &instance, invocation).await? {
         return Ok(ReconciliationRequired);
+    }
+    let proxy = mailbox
+        .as_ref()
+        .map(|publication| publication.is_proxy(&instance))
+        .transpose()?
+        .unwrap_or(false);
+    // A paused proxy has no native step to resume; retain recovery until it
+    // can atomically reach its terminal state without scheduling its sequence.
+    if proxy && instance.state == InstanceState::Paused {
+        return Ok(Deferred);
     }
     super::outputs::save_on(conn, &integration.output).await?;
     if let WorkerInvocationTarget::Tree {
@@ -219,15 +250,32 @@ async fn apply_on(
         }
     }
     let paused = instance.state == InstanceState::Paused;
-    sqlx::query("UPDATE task_instances SET context=?1,state=?2,next_fire_at=?3,updated_at=?4,claimed_at=NULL WHERE id=?5 AND tenant_id=?6")
+    let next_state = if paused {
+        "paused"
+    } else if proxy {
+        "completed"
+    } else {
+        "scheduled"
+    };
+    let changed = sqlx::query("UPDATE task_instances SET context=?1,state=?2,next_fire_at=?3,updated_at=?4,claimed_at=NULL WHERE id=?5 AND tenant_id=?6")
         .bind(serde_json::to_string(&integration.context)?)
-        .bind(if paused { "paused" } else { "scheduled" })
-        .bind((!paused).then(|| super::helpers::ts(chrono::Utc::now())))
+        .bind(next_state)
+        .bind((!paused && !proxy).then(|| super::helpers::ts(chrono::Utc::now())))
         .bind(super::helpers::ts(chrono::Utc::now()))
-        .bind(expected.instance_id.to_string()).bind(expected.tenant_id.as_str()).execute(&mut *conn).await?;
-    sqlx::query("INSERT INTO worker_outcome_integrations(task_id,tenant_id,instance_id,output_id,applied_at) VALUES(?1,?2,?3,?4,?5)")
+        .bind(expected.instance_id.to_string()).bind(expected.tenant_id.as_str()).execute(&mut *conn).await?.rows_affected();
+    if changed != 1 {
+        return Err(StorageError::Conflict(
+            "worker outcome native write suppressed".into(),
+        ));
+    }
+    let changed = sqlx::query("INSERT INTO worker_outcome_integrations(task_id,tenant_id,instance_id,output_id,applied_at) VALUES(?1,?2,?3,?4,?5)")
         .bind(expected.task_id.to_string()).bind(expected.tenant_id.as_str()).bind(expected.instance_id.to_string())
-        .bind(integration.output.id.to_string()).bind(super::helpers::ts(chrono::Utc::now())).execute(&mut *conn).await?;
+        .bind(integration.output.id.to_string()).bind(super::helpers::ts(chrono::Utc::now())).execute(&mut *conn).await?.rows_affected();
+    if changed != 1 {
+        return Err(StorageError::Conflict(
+            "worker outcome application receipt suppressed".into(),
+        ));
+    }
     sqlx::query("DELETE FROM worker_outcome_recovery WHERE task_id=?1")
         .bind(expected.task_id.to_string())
         .execute(&mut *conn)

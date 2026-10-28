@@ -2059,28 +2059,15 @@ impl Orch8Service for Orch8GrpcService {
             .await
             .map_err(storage_err)?
         {
-            let hot = self
-                .storage
-                .get_worker_task(task_id)
-                .await
-                .map_err(storage_err)?;
-            if hot
-                .as_ref()
-                .is_none_or(|task| !orch8_engine::delegation::is_delegation_task(task))
-            {
-                orch8_storage::worker_outcome::integrate_worker_outcome(
-                    self.storage.as_ref(),
-                    &receipt.tenant_id,
-                    task_id,
-                    &replay_claim,
-                    self.max_context_bytes,
-                )
-                .await
-                .map_err(storage_err)?;
-                return Ok(Response::new(proto::Empty {}));
-            }
-            // Mailbox application has its own protocol; acknowledgement still
-            // refers to the durable first result, regardless of the hot lease.
+            orch8_engine::delegation::integrate_completed_worker_outcome(
+                self.storage.as_ref(),
+                &receipt.tenant_id,
+                task_id,
+                &replay_claim,
+                self.max_context_bytes,
+            )
+            .await
+            .map_err(engine_err)?;
             return Ok(Response::new(proto::Empty {}));
         }
         let (pre_task, pre_instance) =
@@ -2140,22 +2127,7 @@ impl Orch8Service for Orch8GrpcService {
         )
         .await;
 
-        let task = pre_task;
-
-        // Device-mesh delegation: integrate the result into the parent
-        // instead of treating the mailbox task as one of its steps.
-        if orch8_engine::delegation::is_delegation_task(&task) {
-            orch8_engine::delegation::integrate_delegation_outcome(
-                self.storage.as_ref(),
-                &task,
-                Ok(&output),
-            )
-            .await
-            .map_err(engine_err)?;
-            return Ok(Response::new(proto::Empty {}));
-        }
-
-        orch8_storage::worker_outcome::integrate_worker_outcome(
+        orch8_engine::delegation::integrate_completed_worker_outcome(
             self.storage.as_ref(),
             &pre_instance.tenant_id,
             task_id,
@@ -2163,7 +2135,7 @@ impl Orch8Service for Orch8GrpcService {
             self.max_context_bytes,
         )
         .await
-        .map_err(storage_err)?;
+        .map_err(engine_err)?;
 
         Ok(Response::new(proto::Empty {}))
     }

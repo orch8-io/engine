@@ -538,6 +538,9 @@ async fn delivery(b: TestBackend) {
 }
 orch8_storage::backend_test!(async fn published_mailbox_preserves_lossless_input_and_destination_delivery(b){delivery(b).await;});
 
+#[path = "delegation_publication/outcome.rs"]
+mod outcome;
+
 #[tokio::test]
 async fn postgres_rechecks_grant_and_operator_deadlines_after_a_real_lock_wait() {
     use orch8_storage::testing::backends::BackendKind;

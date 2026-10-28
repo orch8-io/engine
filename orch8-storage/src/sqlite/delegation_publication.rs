@@ -25,7 +25,7 @@ pub(super) async fn get(
     let mut conn = store.pool.acquire().await?;
     get_on(&mut conn, tenant, id).await
 }
-async fn get_on(
+pub(super) async fn get_on(
     conn: &mut sqlx::SqliteConnection,
     tenant: &TenantId,
     id: Uuid,

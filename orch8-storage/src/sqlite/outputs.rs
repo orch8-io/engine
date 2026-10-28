@@ -23,7 +23,7 @@ pub(super) async fn save_on(
     conn: &mut sqlx::SqliteConnection,
     output: &BlockOutput,
 ) -> Result<(), StorageError> {
-    sqlx::query(
+    let changed = sqlx::query(
         "INSERT INTO block_outputs (id,instance_id,block_id,output,output_ref,output_size,attempt,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)"
     )
     .bind(output.id.to_string())
@@ -34,7 +34,12 @@ pub(super) async fn save_on(
     .bind(output.output_size as i64)
     .bind(output.attempt as i64)
     .bind(ts(output.created_at))
-    .execute(&mut *conn).await?;
+    .execute(&mut *conn).await?.rows_affected();
+    if changed != 1 {
+        return Err(StorageError::Conflict(
+            "block output write suppressed".into(),
+        ));
+    }
     Ok(())
 }
 

@@ -42,7 +42,7 @@ pub(super) async fn save_on(
     output: &BlockOutput,
 ) -> Result<(), StorageError> {
     let encoded_output = super::json_encoding::encode(&output.output)?;
-    sqlx::query(
+    let changed = sqlx::query(
         r"
         INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -58,7 +58,12 @@ pub(super) async fn save_on(
     .bind(output.created_at)
     .bind(encoded_output.encoding)
     .execute(&mut *conn)
-    .await?;
+    .await?.rows_affected();
+    if changed != 1 {
+        return Err(StorageError::Conflict(
+            "block output write suppressed".into(),
+        ));
+    }
     Ok(())
 }
 
