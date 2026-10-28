@@ -157,8 +157,10 @@ pub(super) async fn claim(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut tx = store.pool.begin().await?;
+    let result=async {
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         concat!(r"UPDATE worker_tasks
           SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
@@ -197,9 +199,11 @@ pub(super) async fn claim(
             )
         })
         .collect();
+    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 /// Tenant-scoped claim: the `task_instances` join is inside the same
@@ -214,9 +218,11 @@ pub(super) async fn claim_for_tenant(
     worker_id: &str,
     tenant_id: &orch8_types::TenantId,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     fill_pending_tenants(store, handler_name).await?;
     let mut tx = store.pool.begin().await?;
+    let result=async {
     // `wt.tenant_id` (L4-03) lets the poll walk only this tenant's pending
     // rows (idx_worker_tasks_tenant_poll); the instance join only re-checks
     // that the instance is still live.
@@ -263,9 +269,11 @@ pub(super) async fn claim_for_tenant(
             )
         })
         .collect();
+    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 /// Stamp `tenant_id` onto pending rows of `handler_name` that lack it (rows
@@ -301,9 +309,13 @@ pub(super) async fn claim_matching(
     worker_id: &str,
     tenant_id: Option<&orch8_types::TenantId>,
     queue_name: Option<&str>,
-    capabilities: &orch8_types::continuity::RuntimeCapabilities,
+    runtime: crate::worker_claim::ClaimRuntime<'_>,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let crate::worker_claim::ClaimRuntime {
+        capabilities,
+        principal,
+    } = runtime;
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -419,6 +431,7 @@ pub(super) async fn claim_matching(
     // Phase 2: lock only the chosen rows (re-checking `pending`, since the
     // scan was unlocked) and claim at most `limit` of them, oldest first.
     let mut tx = store.pool.begin().await?;
+    let result=async {
     let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
         r"UPDATE worker_tasks SET state='claimed', worker_id=$1, claimed_at=NOW(),
              heartbeat_at=NOW(), claim_epoch=claim_epoch+1,
@@ -461,9 +474,11 @@ pub(super) async fn claim_matching(
             )
         })
         .collect::<Vec<_>>();
+    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 pub(super) async fn complete(

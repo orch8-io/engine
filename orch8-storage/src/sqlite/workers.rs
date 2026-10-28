@@ -151,6 +151,7 @@ pub(super) async fn claim(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(Utc::now());
 
@@ -165,6 +166,7 @@ pub(super) async fn claim(
     // Keep transaction ownership in SQLx so errors and cancelled futures
     // roll back before the connection is reused.
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result=async {
 
     let select_res = sqlx::query(
         "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
@@ -224,11 +226,13 @@ pub(super) async fn claim(
                 )
             })
             .collect();
-        insert_attempt_events(&mut conn, &events).await?;
+        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+    insert_attempt_events(&mut conn, &events).await?;
     }
 
-    conn.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
 /// Tenant-scoped variant of [`claim`]. The tenant predicate is evaluated
@@ -242,9 +246,11 @@ pub(super) async fn claim_for_tenant(
     worker_id: &str,
     tenant_id: &orch8_types::TenantId,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(Utc::now());
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result=async {
 
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
@@ -306,11 +312,13 @@ pub(super) async fn claim_for_tenant(
                 )
             })
             .collect();
-        insert_attempt_events(&mut conn, &events).await?;
+        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+    insert_attempt_events(&mut conn, &events).await?;
     }
 
-    conn.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
 /// Upper bound on pending rows one `claim_matching` poll inspects.
@@ -322,14 +330,19 @@ pub(super) async fn claim_matching(
     worker_id: &str,
     tenant_id: Option<&orch8_types::TenantId>,
     queue_name: Option<&str>,
-    capabilities: &orch8_types::continuity::RuntimeCapabilities,
+    runtime: crate::worker_claim::ClaimRuntime<'_>,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let crate::worker_claim::ClaimRuntime {
+        capabilities,
+        principal,
+    } = runtime;
     if limit == 0 {
         return Ok(Vec::new());
     }
     let now_text = ts(Utc::now());
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result=async {
 
     let now = Utc::now();
     let mut tasks = Vec::with_capacity(limit as usize);
@@ -455,10 +468,12 @@ pub(super) async fn claim_matching(
                 )
             })
             .collect::<Vec<_>>();
-        insert_attempt_events(&mut conn, &events).await?;
+        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+    insert_attempt_events(&mut conn, &events).await?;
     }
-    conn.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
 #[instrument(skip(storage, completion), fields(%task_id, worker_id))]

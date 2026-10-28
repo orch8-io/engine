@@ -6345,3 +6345,31 @@ advancement. The fixture now performs a valid generation transition and retains
 its original lock-scope and source-query checks. All 44 PostgreSQL integration
 cases pass on the isolated repair source; production claim fences are unchanged.
 Unfinished schema-140 issued-claim work was saved separately during verification.
+
+## Issued-claim persistence prerequisite
+
+PostgreSQL migration 140 / SQLite schema 70 retain an immutable, versioned
+journal of every issued task generation in the lease transaction. All five
+normal selectors capture original worker, tenant, physical instance and
+invocation/admission metadata. Legacy callers are explicitly recorded as
+unattributed, without inventing authentication. A validated internal selector
+can retain verified API key, workload, runtime/device, root or unsecured identity.
+The journal contains no task input or checkpoint payload. Transaction failure
+rolls back every lease, event and journal batch; native/hot cleanup cannot erase
+the claim or permit reuse of its task UUID.
+
+The final issued-claim contract suite passes 32 tests, including four backend
+configurations, after a red test exposed Serde unit variants silently dropping
+unknown identity scope. Empty struct variants reject those extra fields.
+Unsupported journal versions cannot satisfy ownership checks. Trusted-root lookup
+can recover the indexed tenant after native cleanup without broadening scoped
+lookup; retrieval itself confers no mutation or replay authority. Strict Clippy
+passes across all eight affected packages. See
+`2026-10-28-issued-worker-claim-journal.md` for evidence and limits.
+
+This is persistence groundwork: HTTP/gRPC still use legacy selectors. Verified
+transport identity wiring, ownership before mutation/replay/reconnect, legacy
+reconciliation, the complete rolling coordinator protocol floor and functional
+claim-bound artifact access remain open. Runtime normal polling also needs a
+reproduced queue-scope bypass test and a functional fix. No original scope gate
+is closed solely by adding this table or by passing these tests.

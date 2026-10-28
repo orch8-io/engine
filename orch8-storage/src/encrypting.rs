@@ -2073,6 +2073,12 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::WorkerStore for EncryptingStorage {
+    async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<orch8_types::worker::WorkerTask>,StorageError>{
+        let mut tasks=self.inner.claim_worker_tasks_with_authority(request).await?;
+        for task in &mut tasks{self.decrypt_worker_task(task)?;}Ok(tasks)
+    }
+    async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
+
     async fn create_worker_task(
         &self,
         task: &orch8_types::worker::WorkerTask,

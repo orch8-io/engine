@@ -58,6 +58,7 @@ mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_admission;
+mod worker_claim;
 mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
@@ -1693,6 +1694,83 @@ impl crate::SignalStore for PostgresStorage {
 
 #[async_trait]
 impl crate::WorkerStore for PostgresStorage {
+    async fn claim_worker_tasks_with_authority(
+        &self,
+        request: &crate::worker_claim::WorkerClaimRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        request.validate()?;
+        let principal = Some(&request.principal);
+        if let Some(capabilities) = &request.capabilities {
+            return workers::claim_matching(
+                self,
+                &request.handler_name,
+                &request.worker_id,
+                request.tenant_id.as_ref(),
+                request.queue_name.as_deref(),
+                crate::worker_claim::ClaimRuntime {
+                    capabilities,
+                    principal,
+                },
+                request.limit,
+            )
+            .await;
+        }
+        match (request.queue_name.as_deref(), request.tenant_id.as_ref()) {
+            (Some(queue), Some(tenant)) => {
+                misc::claim_worker_tasks_from_queue_for_tenant(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (Some(queue), None) => {
+                misc::claim_worker_tasks_from_queue(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, Some(tenant)) => {
+                workers::claim_for_tenant(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, None) => {
+                workers::claim(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+        }
+    }
+    async fn get_worker_issued_claim(
+        &self,
+        tenant: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_claim::WorkerIssuedClaim>, StorageError> {
+        worker_claim::get(self, tenant, task_id, claim).await
+    }
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError> {
         workers::create(self, task).await
     }
@@ -1745,7 +1823,7 @@ impl crate::WorkerStore for PostgresStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim(self, handler_name, worker_id, limit).await
+        workers::claim(self, handler_name, worker_id, limit, None).await
     }
 
     async fn claim_worker_tasks_for_tenant(
@@ -1755,7 +1833,7 @@ impl crate::WorkerStore for PostgresStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
+        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None).await
     }
 
     async fn claim_worker_tasks_matching(
@@ -1773,7 +1851,10 @@ impl crate::WorkerStore for PostgresStorage {
             worker_id,
             tenant_id,
             queue_name,
-            capabilities,
+            crate::worker_claim::ClaimRuntime {
+                capabilities,
+                principal: None,
+            },
             limit,
         )
         .await
@@ -2002,7 +2083,8 @@ impl crate::WorkerStore for PostgresStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit).await
+        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit, None)
+            .await
     }
 
     async fn claim_worker_tasks_from_queue_for_tenant(
@@ -2020,6 +2102,7 @@ impl crate::WorkerStore for PostgresStorage {
             worker_id,
             tenant_id,
             limit,
+            None,
         )
         .await
     }

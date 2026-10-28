@@ -87,6 +87,7 @@ mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_admission;
+mod worker_claim;
 mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
@@ -616,6 +617,18 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
             sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(69)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let issued_claim_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=70)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !issued_claim_schema {
+            sqlx::raw_sql(include_str!("worker_claims.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(70)")
                 .execute(&mut *retirement)
                 .await?;
         }
@@ -2117,6 +2130,83 @@ impl crate::SignalStore for SqliteStorage {
 
 #[async_trait]
 impl crate::WorkerStore for SqliteStorage {
+    async fn claim_worker_tasks_with_authority(
+        &self,
+        request: &crate::worker_claim::WorkerClaimRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        request.validate()?;
+        let principal = Some(&request.principal);
+        if let Some(capabilities) = &request.capabilities {
+            return workers::claim_matching(
+                self,
+                &request.handler_name,
+                &request.worker_id,
+                request.tenant_id.as_ref(),
+                request.queue_name.as_deref(),
+                crate::worker_claim::ClaimRuntime {
+                    capabilities,
+                    principal,
+                },
+                request.limit,
+            )
+            .await;
+        }
+        match (request.queue_name.as_deref(), request.tenant_id.as_ref()) {
+            (Some(queue), Some(tenant)) => {
+                misc::claim_worker_tasks_from_queue_for_tenant(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (Some(queue), None) => {
+                misc::claim_worker_tasks_from_queue(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, Some(tenant)) => {
+                workers::claim_for_tenant(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, None) => {
+                workers::claim(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+        }
+    }
+    async fn get_worker_issued_claim(
+        &self,
+        tenant: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_claim::WorkerIssuedClaim>, StorageError> {
+        worker_claim::get(self, tenant, task_id, claim).await
+    }
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError> {
         workers::create(self, task).await
     }
@@ -2169,7 +2259,7 @@ impl crate::WorkerStore for SqliteStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim(self, handler_name, worker_id, limit).await
+        workers::claim(self, handler_name, worker_id, limit, None).await
     }
 
     async fn claim_worker_tasks_for_tenant(
@@ -2179,7 +2269,7 @@ impl crate::WorkerStore for SqliteStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
+        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None).await
     }
 
     async fn claim_worker_tasks_matching(
@@ -2197,7 +2287,10 @@ impl crate::WorkerStore for SqliteStorage {
             worker_id,
             tenant_id,
             queue_name,
-            capabilities,
+            crate::worker_claim::ClaimRuntime {
+                capabilities,
+                principal: None,
+            },
             limit,
         )
         .await
@@ -2482,7 +2575,8 @@ impl crate::WorkerStore for SqliteStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit).await
+        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit, None)
+            .await
     }
 
     async fn claim_worker_tasks_from_queue_for_tenant(
@@ -2500,6 +2594,7 @@ impl crate::WorkerStore for SqliteStorage {
             worker_id,
             tenant_id,
             limit,
+            None,
         )
         .await
     }

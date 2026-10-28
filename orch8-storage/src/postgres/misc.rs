@@ -240,8 +240,10 @@ pub(super) async fn claim_worker_tasks_from_queue(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut tx = store.pool.begin().await?;
+    let result=async {
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
@@ -284,9 +286,11 @@ pub(super) async fn claim_worker_tasks_from_queue(
             )
         })
         .collect();
+    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     super::workers::insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 /// Tenant-scoped variant — same lock-and-filter discipline as
@@ -299,8 +303,10 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     worker_id: &str,
     tenant_id: &orch8_types::TenantId,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let mut tx = store.pool.begin().await?;
+    let result=async {
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
@@ -347,9 +353,11 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
             )
         })
         .collect();
+    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     super::workers::insert_attempt_events(&mut tx, &events).await?;
-    tx.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 // === Dynamic Step Injection ===

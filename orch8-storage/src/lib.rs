@@ -8,6 +8,7 @@ mod current_outputs;
 mod effect_attempt;
 pub mod local_migration;
 pub mod worker_admission;
+pub mod worker_claim;
 pub mod worker_invocation;
 pub mod worker_outcome;
 pub mod worker_resolution;
@@ -94,7 +95,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 139;
+pub const STORAGE_SCHEMA_VERSION: u32 = 140;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -1984,6 +1985,22 @@ pub trait SignalStore: Send + Sync + 'static {
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait WorkerStore: Send + Sync + 'static {
+    /// Claim and retain the authenticated owner in the same transaction.
+    async fn claim_worker_tasks_with_authority(
+        &self,
+        request: &worker_claim::WorkerClaimRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+    /// Original issued claim, retained after hot task/native history cleanup.
+    /// Scoped callers must supply their verified tenant. `None` is reserved for
+    /// trusted root lookup when the native instance no longer exists; finding
+    /// a record does not itself authorize mutation or receipt replay.
+    async fn get_worker_issued_claim(
+        &self,
+        tenant: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<worker_claim::WorkerIssuedClaim>, StorageError>;
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
 
     /// Capture a consistent source claim, owner and activation before asynchronous
