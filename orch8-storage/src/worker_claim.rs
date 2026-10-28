@@ -36,6 +36,46 @@ pub enum WorkerClaimPrincipal {
 fn identifier(value: &str, max: usize) -> bool {
     !value.trim().is_empty() && value.len() <= max && !value.contains('\0')
 }
+
+/// A recorded issuer check, distinct from attribution of older unjournaled leases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordedReporter {
+    Matches,
+    Different,
+    /// No authenticated original issuer was retained. This is not ownership evidence.
+    Unattributed,
+}
+
+/// Check immutable issuance before accepting mutations or replaying retained results.
+/// Callers must still enforce tenant, current lease and native ownership fences.
+/// Unattributed claims require the separate legacy reconciliation/rollout policy.
+pub async fn recorded_reporter(
+    storage: &dyn crate::WorkerStore,
+    tenant: Option<&TenantId>,
+    task_id: Uuid,
+    claim: &WorkerClaim,
+    principal: &WorkerClaimPrincipal,
+) -> Result<RecordedReporter, StorageError> {
+    principal.validate()?;
+    let Some(issued) = storage
+        .get_worker_issued_claim(tenant, task_id, claim)
+        .await?
+    else {
+        return Ok(RecordedReporter::Unattributed);
+    };
+    if matches!(issued.principal, WorkerClaimPrincipal::Legacy {}) {
+        return Ok(RecordedReporter::Unattributed);
+    }
+    // Explicitly unsecured dev mode keeps its existing protocol without being
+    // certified as authenticated ownership or inheriting an authenticated issuer.
+    let unsecured = matches!(issued.principal, WorkerClaimPrincipal::Unsecured {})
+        && matches!(principal, WorkerClaimPrincipal::Unsecured {});
+    Ok(if unsecured || issued.belongs_to(principal) {
+        RecordedReporter::Matches
+    } else {
+        RecordedReporter::Different
+    })
+}
 pub(crate) fn invalid() -> StorageError {
     StorageError::Constraint("invalid issued worker claim scope".into())
 }

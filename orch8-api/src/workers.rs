@@ -190,6 +190,33 @@ async fn record_stale_rejection(
     }
 }
 
+async fn enforce_recorded_reporter(
+    state: &AppState,
+    tenant: &crate::auth::OptionalTenant,
+    caller: &crate::auth::WorkerCaller,
+    task_id: Uuid,
+    claim: &WorkerClaim,
+) -> Result<(), ApiError> {
+    let attribution = orch8_storage::worker_claim::recorded_reporter(
+        state.storage.as_ref(),
+        tenant.as_ref().map(|ctx| &ctx.tenant_id),
+        task_id,
+        claim,
+        &caller.0,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    if attribution == orch8_storage::worker_claim::RecordedReporter::Different {
+        return Err(ApiError::Forbidden(
+            "worker claim belongs to a different authenticated reporter".into(),
+        ));
+    }
+    // Unattributed history still follows the pre-journal protocol. This is a
+    // compatibility gap, not inferred ownership; reconciliation and a write floor
+    // must close it before the full ownership gate can be considered complete.
+    Ok(())
+}
+
 /// Ownership half of the lease fence: a task dispatched under an older
 /// continuity owner (or whose execution is mid-export) cannot mutate its
 /// lease, even with a current `claim_epoch`. 409, like a lost lease.
@@ -1020,12 +1047,21 @@ pub(crate) struct WorkerArtifactReceipt {
 #[allow(clippy::too_many_lines)] // lease + ownership fence + bounded upload in one handler
 pub(crate) async fn upload_task_artifact(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     Path((task_id, upload_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<ArtifactUploadQuery>,
     request: Request,
 ) -> Result<impl IntoResponse, ApiError> {
     use sha2::{Digest, Sha256};
+    enforce_recorded_reporter(
+        &state,
+        &tenant_ctx,
+        &caller,
+        task_id,
+        &WorkerClaim::new(query.worker_id.clone(), query.claim_epoch),
+    )
+    .await?;
 
     let task = state
         .storage
@@ -1165,6 +1201,7 @@ async fn persist_reported_logs(
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn complete_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
@@ -1173,6 +1210,7 @@ pub(crate) async fn complete_task(
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
     let replay_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    enforce_recorded_reporter(&state, &tenant_ctx, &caller, task_id, &replay_claim).await?;
     let accepted = state
         .storage
         .get_worker_accepted_outcome(
@@ -1408,6 +1446,7 @@ pub(crate) struct FailRequest {
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn fail_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
@@ -1415,6 +1454,7 @@ pub(crate) async fn fail_task(
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
     let report_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    enforce_recorded_reporter(&state, &tenant_ctx, &caller, task_id, &report_claim).await?;
     if let Some(report) = state
         .storage
         .get_worker_resolution_outcome(
@@ -1536,12 +1576,21 @@ pub(crate) struct HeartbeatRequest {
 )]
 pub(crate) async fn heartbeat_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    enforce_recorded_reporter(
+        &state,
+        &tenant_ctx,
+        &caller,
+        task_id,
+        &WorkerClaim::new(req.worker_id.clone(), req.claim_epoch),
+    )
+    .await?;
     // Fetch task first to verify tenant access via its instance.
     let task = state
         .storage
@@ -1634,12 +1683,21 @@ pub(crate) struct ReleaseRequest {
 )]
 pub(crate) async fn release_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<ReleaseRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    enforce_recorded_reporter(
+        &state,
+        &tenant_ctx,
+        &caller,
+        task_id,
+        &WorkerClaim::new(req.worker_id.clone(), req.claim_epoch),
+    )
+    .await?;
     let task = state
         .storage
         .get_worker_task(task_id)

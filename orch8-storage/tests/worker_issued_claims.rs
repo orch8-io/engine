@@ -486,3 +486,31 @@ fn owner_identity_decoding_refuses_unknown_scope_fields() {
         );
     }
 }
+
+orch8_storage::backend_test!(async fn recorded_reporter_distinguishes_ownership_from_unattributed_history(b) {
+    use orch8_storage::worker_claim::{RecordedReporter,recorded_reporter};
+    let s=b.storage.as_ref();let tenant=TenantId::unchecked("issued-claims");
+    let task=fixture(s,false).await;
+    let held=s.claim_worker_tasks_with_authority(&request(1)).await.unwrap().pop().unwrap();
+    assert_eq!(held.id,task.id);
+    let original=Principal::ApiKey{tenant_id:tenant.clone(),key_id:"ak-original".into()};
+    assert_eq!(recorded_reporter(s,Some(&tenant),task.id,&proof(&held),&original).await.unwrap(),RecordedReporter::Matches);
+    for foreign in [Principal::Root {},Principal::Unsecured {},Principal::ApiKey{tenant_id:tenant.clone(),key_id:"ak-other".into()}] {
+        assert_eq!(recorded_reporter(s,Some(&tenant),task.id,&proof(&held),&foreign).await.unwrap(),RecordedReporter::Different);
+    }
+    s.delete_worker_task(task.id).await.unwrap();
+    assert_eq!(recorded_reporter(s,Some(&tenant),task.id,&proof(&held),&original).await.unwrap(),RecordedReporter::Matches);
+    let legacy=fixture(s,false).await;
+    let held=s.claim_worker_tasks_for_tenant("noop","old-worker",&tenant,1).await.unwrap().pop().unwrap();
+    assert_eq!(held.id,legacy.id);
+    assert_eq!(recorded_reporter(s,Some(&tenant),held.id,&proof(&held),&original).await.unwrap(),RecordedReporter::Unattributed);
+    assert!(matches!(s.get_worker_issued_claim(Some(&tenant),held.id,&proof(&held)).await.unwrap().unwrap().principal,Principal::Legacy {}));
+    s.delete_worker_task(legacy.id).await.unwrap();
+    let dev=fixture(s,false).await;
+    let request=WorkerClaimRequest::new(Principal::Unsecured {},"noop".into(),"dev-worker".into(),Some(tenant.clone()),None,None,1).unwrap();
+    let held=s.claim_worker_tasks_with_authority(&request).await.unwrap().pop().unwrap();
+    assert_eq!(held.id,dev.id);
+    assert_eq!(recorded_reporter(s,Some(&tenant),held.id,&proof(&held),&Principal::Unsecured {}).await.unwrap(),RecordedReporter::Matches);
+    assert_eq!(recorded_reporter(s,Some(&tenant),held.id,&proof(&held),&original).await.unwrap(),RecordedReporter::Different);
+
+});

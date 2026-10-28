@@ -24,7 +24,14 @@ async fn servers() -> Vec<(&'static str, BackendTestServer)> {
     let mut out = vec![(
         "sqlite",
         spawn_test_server_on(
-            Arc::new(SqliteStorage::in_memory().await.unwrap()) as Arc<dyn StorageBackend>,
+            Arc::new(
+                SqliteStorage::in_memory()
+                    .await
+                    .unwrap()
+                    .with_artifact_store(Arc::new(
+                        orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                    )),
+            ) as Arc<dyn StorageBackend>,
             Some(ROOT),
         )
         .await,
@@ -34,7 +41,13 @@ async fn servers() -> Vec<(&'static str, BackendTestServer)> {
         pg.run_migrations().await.unwrap();
         out.push((
             "postgres",
-            spawn_test_server_on(Arc::new(pg) as Arc<dyn StorageBackend>, Some(ROOT)).await,
+            spawn_test_server_on(
+                Arc::new(pg.with_artifact_store(Arc::new(
+                    orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                ))) as Arc<dyn StorageBackend>,
+                Some(ROOT),
+            )
+            .await,
         ));
     }
     out
@@ -575,6 +588,96 @@ async fn expired_or_forged_tokens_are_unauthorized() {
             StatusCode::UNAUTHORIZED,
             "{backend}: forged"
         );
+    }
+}
+
+#[tokio::test]
+async fn another_key_cannot_mutate_or_replay_a_recorded_lease() {
+    let client = Client::new();
+    for (backend, server) in servers().await {
+        let tenant = tenant();
+        let handler = format!("recorded_owner_{}", Uuid::now_v7().simple());
+        let task = seed_task(&server, &client, &tenant, &handler).await;
+        let mut keys = Vec::new();
+        for name in ["original", "replacement"] {
+            let key: Value = client
+                .post(format!("{}/api-keys", server.v1_url()))
+                .header("x-api-key", ROOT)
+                .json(&json!({"tenant_id":tenant,"name":name,"capabilities":["worker"]}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            keys.push(key["secret"].as_str().unwrap().to_owned());
+        }
+        let response = client
+            .post(format!("{}/workers/tasks/poll", server.v1_url()))
+            .header("x-api-key", &keys[0])
+            .json(&json!({"handler_name":handler,"worker_id":"shared-label"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{backend}");
+        let body: Value = response.json().await.unwrap();
+        let epoch = body["tasks"][0]["claim_epoch"].as_u64().unwrap();
+        for operation in ["heartbeat", "complete", "fail", "release"] {
+            let response=client.post(format!("{}/workers/tasks/{}/{operation}",server.v1_url(),task.id))
+                .header("x-api-key",&keys[1])
+                .json(&json!({"worker_id":"shared-label","claim_epoch":epoch,"output":{},"message":"foreign"}))
+                .send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{backend}: {operation} inherited another key's claim"
+            );
+        }
+        let upload = Uuid::now_v7();
+        for (key, expected) in [
+            (&keys[1], StatusCode::FORBIDDEN),
+            (&keys[0], StatusCode::CREATED),
+        ] {
+            let response = client.post(format!("{}/workers/tasks/{}/artifacts/{upload}?worker_id=shared-label&claim_epoch={epoch}", server.v1_url(), task.id))
+                .header("x-api-key", key).header("content-type", "application/octet-stream")
+                .body("original reporter bytes").send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "{backend}: upload must enforce the recorded reporter before storing bytes"
+            );
+        }
+        let response = client
+            .post(format!(
+                "{}/workers/tasks/{}/complete",
+                server.v1_url(),
+                task.id
+            ))
+            .header("x-api-key", &keys[0])
+            .json(&json!({"worker_id":"shared-label","claim_epoch":epoch,"output":{"value":7}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{backend}: original reporter must remain functional"
+        );
+        server.storage.delete_worker_task(task.id).await.unwrap();
+        for (key, expected) in [
+            (&keys[1], StatusCode::FORBIDDEN),
+            (&keys[0], StatusCode::OK),
+        ] {
+            let response=client.post(format!("{}/workers/tasks/{}/complete",server.v1_url(),task.id))
+                .header("x-api-key",key)
+                .json(&json!({"worker_id":"shared-label","claim_epoch":epoch,"output":{"value":"ignored replay"}}))
+                .send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "{backend}: replay must retain the original reporter after hot GC"
+            );
+        }
     }
 }
 

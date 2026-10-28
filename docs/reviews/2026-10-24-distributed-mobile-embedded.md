@@ -6403,3 +6403,21 @@ process loss and routing metadata on both SQLite and PostgreSQL. See
 `2026-10-28-worker-transport-identity.md` for the current evidence and remaining
 ownership gates. OpenAPI and the four mobile SDK integration guides reflect the
 additive queue grant; token providers still receive opaque tokens.
+
+## Recorded reporter enforcement: HTTP slice
+
+A real two-key HTTP regression found the second Worker key could heartbeat the
+first key's recorded lease by repeating its worker label and epoch. The new
+classifier distinguishes recorded matches, mismatches and unattributed history.
+HTTP complete/fail/heartbeat/release/upload now reject recorded mismatches before
+mutation, body upload or accepted/resolution receipt integration. Original
+reporting and completion replay remain functional after hot cleanup. Verification
+passes 413 API and 40 issued-claim matrix cases, with strict all-target checks
+across eight packages. See `2026-10-28-recorded-worker-reporter.md`.
+
+This is deliberately not a closed ownership gate: gRPC mutations/reconnect
+adoption still require equivalent enforcement and authenticated internal frame
+context. Unattributed history still uses the old transport behavior; explicit
+durable backend/operator approval, revocation and reconciliation must replace
+that gap before a write floor can safely remove legacy compatibility. Claim-bound
+artifact reads and all original scope gates remain required.
