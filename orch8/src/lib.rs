@@ -189,3 +189,7 @@ pub use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 /// Signal types for [`Engine::send_signal`] (`Pause`, `Resume`, `Cancel`,
 /// `UpdateContext`, or `Custom`).
 pub use orch8_types::signal::SignalType;
+
+// Shared by the native bindings before opening a recovery-owned pool.
+#[doc(hidden)]
+pub use orch8_storage::sqlite::resolve_sqlite_database_path;

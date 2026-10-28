@@ -35,6 +35,11 @@ unified versioning: Swift, Android, Flutter, and React Native packages at
 
 The SDK embeds the full orch8 engine compiled as a native library. Sequences are synced from your server, verified with Ed25519 signatures, stored in a local SQLite database, and executed entirely on-device.
 
+Use a dedicated engine database file. Other SQLite bindings in the app should
+use separate files; close the engine before inspecting its file through another
+binding. Separate SQLite library copies in one process can interfere with each
+other's file locks ([SQLite documentation](https://www.sqlite.org/howtocorrupt.html#multiple_copies_of_sqlite_linked_into_the_same_application)).
+
 ## 10-minute install
 
 Every channel resolves the same native engine, pinned to the same version

@@ -6579,3 +6579,27 @@ The next published CI checkpoint, e7354152, also exposed a Python native snapsho
 test failure: corrupting the current diagnostic did not make `engine.get` raise
 the expected serialization error. The job log is retained for investigation;
 this gate is unresolved, not classified as an infrastructure failure.
+
+## Native/mobile SQLite ownership preserves live file locks
+
+The Python CI investigation reproduced stale reads and a malformed database when
+the fixture used two SQLite library copies against one live file in one process.
+Fault injection now runs in a separate process, retaining the strict current-row
+serialization assertion and verifying affected rows. The corrected snapshot
+test passes 100 consecutive repetitions; the full real Python and packed Node
+binding suites also pass.
+
+The same investigation exposed an independent production defect: rejected
+native/mobile owner attempts opened and closed the database inode, destroying
+the live process's SQLite advisory locks. A real read-transaction/external
+exclusive-lock probe failed before the repair and passes for both ownership
+paths afterward. Both now share metadata-only path resolution and recheck the
+canonical path under their companion lock. Native initialization opens exactly
+that canonical file. Literal filename handling also fixes percent/query syntax
+selecting a different database. Cold reopen tests cover those names.
+
+All 12 native ownership, 261 complete storage unit, 39 facade unit and 41 native
+snapshot/callback/deadline/preflight tests pass, as do strict all-target checks
+across eight consumers and standalone mobile library compilation. See
+`2026-10-28-sqlite-ownership-locks.md` for evidence and the remaining original
+gates. Atomic server delegation publication and integration are still open.

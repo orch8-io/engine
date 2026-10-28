@@ -55,7 +55,11 @@ mod execution_tree;
 mod externalized;
 mod externalized_snapshot;
 mod federation;
+mod file_path;
 mod helpers;
+
+#[doc(hidden)]
+pub use file_path::resolve_sqlite_database_path;
 mod instances;
 mod kv_state;
 mod local_migration;
@@ -308,7 +312,26 @@ impl SqliteStorage {
     pub async fn file(path: &str) -> Result<Self, StorageError> {
         let uri = format!("sqlite:{path}");
         let opts = SqliteConnectOptions::from_str(&uri)
-            .map_err(|e| StorageError::Connection(e.to_string()))?
+            .map_err(|e| StorageError::Connection(e.to_string()))?;
+        Self::file_with_options(opts, &uri).await
+    }
+
+    /// Open a literal filesystem path. Unlike `file`, URI parameters and
+    /// percent escapes in a filename do not select another database.
+    pub async fn file_path(path: &str) -> Result<Self, StorageError> {
+        if path == ":memory:" {
+            return Self::in_memory().await;
+        }
+        let path = std::path::absolute(path)
+            .map_err(|error| StorageError::Connection(error.to_string()))?;
+        Self::file_with_options(SqliteConnectOptions::new().filename(path), "").await
+    }
+
+    async fn file_with_options(
+        opts: SqliteConnectOptions,
+        uri: &str,
+    ) -> Result<Self, StorageError> {
+        let opts = opts
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5))
@@ -316,7 +339,7 @@ impl SqliteStorage {
             .foreign_keys(true);
         let opts = space_reclaiming(opts);
 
-        let (pool, memory_database) = memory::connect(pool_options(8), opts, &uri).await?;
+        let (pool, memory_database) = memory::connect(pool_options(8), opts, uri).await?;
 
         let storage = Self {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),

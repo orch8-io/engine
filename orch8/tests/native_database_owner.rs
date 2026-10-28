@@ -238,6 +238,110 @@ async fn failed_initialization_releases_its_reservation() {
 
 use durable::database as ownership;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn database_reader_lock_child() {
+    use sqlx::Connection;
+    let Some(path) = std::env::var_os("ORCH8_NATIVE_READER_LOCK_PATH") else {
+        return;
+    };
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(path)
+        .busy_timeout(Duration::ZERO);
+    let mut connection = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    let result = sqlx::query("BEGIN EXCLUSIVE")
+        .execute(&mut connection)
+        .await;
+    connection.close().await.unwrap();
+    assert!(
+        matches!(result, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("5")),
+        "the live owner's reader lock was lost: {result:?}"
+    );
+}
+
+#[cfg(unix)]
+async fn assert_reader_lock_is_held(path: &std::path::Path) {
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", "database_reader_lock_child", "--nocapture"])
+        .env("ORCH8_NATIVE_READER_LOCK_PATH", path)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(10), child.output())
+        .await
+        .expect("reader-lock probe timed out")
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "reader-lock probe failed: {} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn refused_owner_must_not_close_the_live_sqlite_database_file() {
+    use sqlx::Connection;
+    let root = directory();
+    let path = root.join("engine.db");
+    let owner = ownership::Owner::acquire(path.to_str().unwrap()).unwrap();
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
+    let mut connection = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE probe(value INTEGER)")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    let mut transaction = connection.begin().await.unwrap();
+    sqlx::query("SELECT * FROM probe")
+        .fetch_all(&mut *transaction)
+        .await
+        .unwrap();
+    assert_reader_lock_is_held(&path).await;
+    assert!(ownership::Owner::acquire(path.to_str().unwrap()).is_err());
+    assert_reader_lock_is_held(&path).await;
+    assert!(
+        orch8_storage::sqlite::SqliteStorage::file_mobile_owned(path.to_str().unwrap())
+            .await
+            .is_err()
+    );
+    assert_reader_lock_is_held(&path).await;
+    transaction.rollback().await.unwrap();
+    connection.close().await.unwrap();
+    drop(owner);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn native_database_paths_are_literal_and_reopen_the_same_file() {
+    let root = directory();
+    for name in [
+        "percent%2F.db",
+        "query?mode=memory.db",
+        "hash#literal.db",
+        "with space.db",
+    ] {
+        let path = root.join(name);
+        let engine = DurableEngine::new(path.to_string_lossy());
+        deploy(&engine).await.unwrap();
+        let id = engine.start("owner", None, None, None).await.unwrap();
+        engine.close().await;
+        assert!(path.metadata().unwrap().len() > 0);
+        let reopened = DurableEngine::new(path.to_string_lossy());
+        let snapshot: serde_json::Value =
+            serde_json::from_str(&reopened.get(&id).await.unwrap()).unwrap();
+        assert_eq!(snapshot["state"], "scheduled");
+        reopened.close().await;
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_initializer_retains_authority_until_its_build_settles() {
     use std::sync::Arc;
