@@ -2075,3 +2075,241 @@ async fn mobile_tick_recovers_cold_accepted_result_while_preserving_pause() {
         );
     }
 }
+
+#[tokio::test]
+async fn stranded_recovery_never_replaces_a_missing_retained_receipt() {
+    use orch8_engine::worker_lease::finalize_stranded_dispatches;
+    use orch8_storage::testing::backends::RawPool;
+    use orch8_types::{
+        continuity::{ContinuityExecution, ContinuityId, EffectId, ExecutionEpoch},
+        execution::{BlockType, ExecutionNode},
+        ids::{BlockId, ExecutionNodeId},
+    };
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let handler = unique_handler("missing-original-receipt");
+        let sequence = mk_sequence(vec![mk_step("work", &handler)]);
+        storage.create_sequence(&sequence).await.unwrap();
+        let mut instance = mk_instance(sequence.id);
+        instance.state = InstanceState::Waiting;
+        instance.context.runtime.run_id = Some(uuid::Uuid::now_v7().to_string());
+        storage.create_instance(&instance).await.unwrap();
+        let owner = ContinuityExecution {
+            continuity_id: ContinuityId::new(),
+            tenant_id: instance.tenant_id.clone(),
+            current_instance_id: instance.id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: Utc::now(),
+        };
+        storage.create_continuity_execution(&owner).await.unwrap();
+        storage
+            .create_execution_node(&ExecutionNode {
+                id: ExecutionNodeId::new(),
+                instance_id: instance.id,
+                block_id: BlockId::new("work"),
+                parent_id: None,
+                block_type: BlockType::Step,
+                branch_index: None,
+                state: NodeState::Waiting,
+                started_at: Some(Utc::now()),
+                completed_at: None,
+            })
+            .await
+            .unwrap();
+        let original = EffectId::new();
+        let task:WorkerTask = serde_json::from_value(json!({
+            "id":uuid::Uuid::now_v7(),"instance_id":instance.id,"block_id":"work","handler_name":handler,
+            "attempt":0,"params":{"request":"cached receipt was lost"},"context":instance.context,
+            "state":"pending","effect_id":original,"continuity_epoch":0,
+            "created_at":Utc::now()-chrono::Duration::minutes(5),
+        })).unwrap();
+        storage.create_worker_task(&task).await.unwrap();
+        let source = storage
+            .get_worker_invocation(&instance.tenant_id, task.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source.effect_id, Some(original));
+        match &backend.raw {
+            RawPool::Sqlite(pool) => {
+                sqlx::query("UPDATE worker_tasks SET effect_id=NULL,continuity_epoch=NULL,awaiting_dispatch=1 WHERE id=?1").bind(task.id.to_string()).execute(pool).await.unwrap();
+            }
+            RawPool::Postgres(pool) => {
+                sqlx::query("UPDATE worker_tasks SET effect_id=NULL,continuity_epoch=NULL,awaiting_dispatch=TRUE WHERE id=$1").bind(task.id).execute(pool).await.unwrap();
+            }
+        }
+        assert_eq!(
+            finalize_stranded_dispatches(storage.as_ref(), Duration::ZERO)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            storage
+                .list_effect_receipts(&instance.tenant_id, owner.continuity_id, 100)
+                .await
+                .unwrap()
+                .is_empty(),
+            "{}: recovery admitted a replacement request instead of retaining missing-receipt uncertainty",
+            backend.name()
+        );
+        assert!(
+            storage
+                .claim_worker_tasks(&task.handler_name, "must-not-replay", 1)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn failure_resolution_rejection_never_presettles_the_effect() {
+    use orch8_storage::testing::faulty::FaultStorage;
+    use orch8_types::{error::StorageError, worker::WorkerClaim};
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let handler = unique_handler("atomic-failure");
+        let (_, instance) = start(&storage, vec![mk_step_with_retry("work", &handler, 2)]).await;
+        let task = only_task(&storage, instance.id).await;
+        let held = claim(&storage, &task).await;
+        let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+        let proof = WorkerClaim::new("worker-a", held.claim_epoch);
+        let (injected, faults) = FaultStorage::wrap(Arc::clone(&storage));
+        faults
+            .on("resolve_worker_task")
+            .times(1)
+            .fail_with(StorageError::Query("injected resolution rejection".into()));
+        assert!(
+            orch8_engine::worker_lease::fail_worker_task(
+                injected.as_ref(),
+                &current,
+                &held,
+                &proof,
+                "failure evidence",
+                true
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            receipt_state(&storage, &held).await,
+            EffectState::Dispatched,
+            "{}: rejected failure mutated the effect before its resolution transaction",
+            backend.name()
+        );
+        assert_eq!(
+            storage
+                .get_worker_task(held.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerTaskState::Claimed
+        );
+        assert_eq!(only_task(&storage, instance.id).await.id, held.id);
+    }
+}
+
+#[tokio::test]
+async fn failure_resolution_timeout_of_a_resumed_pending_task_keeps_uncertainty() {
+    let _reaper = ZERO_LEASE_REAPER.lock().await;
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let handler = unique_handler("resumed-timeout");
+        let (_, instance) = start(
+            &storage,
+            vec![common::mk_step_with_timeout("work", &handler, 60_000)],
+        )
+        .await;
+        let task = only_task(&storage, instance.id).await;
+        let held = claim(&storage, &task).await;
+        let proof = orch8_types::worker::WorkerClaim::new("worker-a", held.claim_epoch);
+        assert_eq!(
+            storage
+                .checkpoint_worker_task(held.id, &proof, 0, &json!({"cursor":1}))
+                .await
+                .unwrap(),
+            Some(1)
+        );
+        reap_worker_tasks(storage.as_ref(), Duration::ZERO)
+            .await
+            .unwrap();
+        let resumed = storage.get_worker_task(held.id).await.unwrap().unwrap();
+        assert_eq!(resumed.state, WorkerTaskState::Pending);
+        assert!(resumed.claim_epoch > 0);
+        assert_eq!(receipt_state(&storage, &held).await, EffectState::Unknown);
+        backend
+            .raw
+            .backdate(
+                "worker_tasks",
+                "created_at",
+                "id",
+                &held.id.to_string(),
+                Utc::now() - chrono::Duration::days(1),
+            )
+            .await;
+        let report = reap_worker_tasks(storage.as_ref(), Duration::from_secs(86_400))
+            .await
+            .unwrap();
+        assert_eq!(report.timed_out, 1);
+        assert_eq!(
+            receipt_state(&storage, &held).await,
+            EffectState::Unknown,
+            "{}: pending state erased evidence that a previous claimant may have acted",
+            backend.name()
+        );
+    }
+}
+
+#[tokio::test]
+async fn failure_resolution_new_attempt_drops_the_previous_activity_checkpoint() {
+    for backend in backends().await {
+        let storage = Arc::clone(&backend.storage);
+        let handler = unique_handler("checkpoint-new-attempt");
+        let (_, instance) = start(&storage, vec![mk_step_with_retry("work", &handler, 3)]).await;
+        let task = only_task(&storage, instance.id).await;
+        let held = claim(&storage, &task).await;
+        let proof = orch8_types::worker::WorkerClaim::new("worker-a", held.claim_epoch);
+        storage
+            .checkpoint_worker_task(held.id, &proof, 0, &json!({"old_attempt_cursor":7}))
+            .await
+            .unwrap();
+        let held = storage.get_worker_task(held.id).await.unwrap().unwrap();
+        let current = storage.get_instance(instance.id).await.unwrap().unwrap();
+        let action = orch8_engine::worker_lease::plan_failure_action(
+            storage.as_ref(),
+            &current,
+            &held,
+            true,
+            "retry",
+        )
+        .await
+        .unwrap();
+        let orch8_types::worker::WorkerTaskResolutionAction::Retry { retry_task, .. } = action
+        else {
+            panic!("retry policy")
+        };
+        assert!(retry_task.resume_checkpoint.is_none());
+        assert_eq!(retry_task.checkpoint_seq, 0);
+        assert!(
+            orch8_engine::worker_lease::fail_worker_task(
+                storage.as_ref(),
+                &current,
+                &held,
+                &proof,
+                "retry",
+                true
+            )
+            .await
+            .unwrap()
+        );
+        let next = only_task(&storage, instance.id).await;
+        assert_ne!(next.id, held.id);
+        assert_eq!(next.attempt, held.attempt + 1);
+        assert!(next.resume_checkpoint.is_none());
+        assert_eq!(next.checkpoint_seq, 0);
+    }
+}

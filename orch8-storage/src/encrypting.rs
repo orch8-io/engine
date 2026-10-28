@@ -2166,6 +2166,10 @@ passthrough_impl! {
             && !outcome.is_logical_output() {
             outcome.output = self.decrypt_json_value(&outcome.output)?;
         }
+        if let Some(delegation) = outcome.as_mut().and_then(|outcome| outcome.delegation.as_mut())
+            && !delegation.is_logical() {
+            delegation.body = self.decrypt_json_value(&delegation.body)?;
+        }
         Ok(outcome)
     }
     async fn complete_worker_task(
@@ -2212,7 +2216,16 @@ passthrough_impl! {
             self.encryptor.encrypt_value(&completion.output)
                 .map_err(|error|StorageError::Encryption(error.to_string()))?
         };
-        let sealed=completion.with_stored_output(output);
+        let mut sealed=completion.with_stored_output(output);
+        if let Some(delegation) = &completion.delegation {
+            let body = if completion.stored_sealed {
+                self.encrypt_json_value(&delegation.body)?
+            } else {
+                self.encryptor.encrypt_value(&delegation.body)
+                    .map_err(|error|StorageError::Encryption(error.to_string()))?
+            };
+            sealed.delegation = Some(delegation.with_stored_body(body));
+        }
         self.inner.accept_worker_completion(task_id, claim, &sealed).await
     }
     async fn fail_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
@@ -2305,11 +2318,26 @@ passthrough_impl! {
             .await
     }
 
-    async fn resolve_worker_task(
+    async fn resolve_worker_task(&self,resolution:&orch8_types::worker::WorkerTaskResolution)->Result<bool,StorageError>{
+        self.resolve_worker_task_with_evidence(resolution,&crate::worker_resolution::WorkerResolutionEvidence::new(resolution)).await
+    }
+    async fn get_worker_resolution_outcome(&self,tenant_id:Option<&TenantId>,task_id:Uuid,claim:Option<&orch8_types::worker::WorkerClaim>)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>{
+        let mut report=self.inner.get_worker_resolution_outcome(tenant_id,task_id,claim).await?;
+        if let Some(report)=&mut report && !report.is_logical_reason() {report.reason=self.decrypt_json_value(&report.reason)?;}
+        Ok(report)
+    }
+    async fn resolve_worker_task_with_evidence(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
         use orch8_types::worker::WorkerTaskResolutionAction as Action;
+        evidence.validate(resolution)?;
+        let body=if evidence.sealed {self.encrypt_json_value(&evidence.reason)?} else {
+            self.encryptor.encrypt_value(&evidence.reason).map_err(|e|StorageError::Encryption(e.to_string()))?
+        };
+        let evidence=evidence.with_stored_reason(body);
+
         if let Action::Retry {
             retry_task,
             retry_output,
@@ -2325,9 +2353,9 @@ passthrough_impl! {
                 node_id: *node_id,
                 fire_at: *fire_at,
             };
-            return self.inner.resolve_worker_task(&sealed).await;
+            return self.inner.resolve_worker_task_with_evidence(&sealed,&evidence).await;
         }
-        self.inner.resolve_worker_task(resolution).await
+        self.inner.resolve_worker_task_with_evidence(resolution,&evidence).await
     }
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
 

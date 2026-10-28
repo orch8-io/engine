@@ -21,6 +21,36 @@ pub struct WorkerCompletion {
     pub(crate) stored_sha256: String,
     pub(crate) stored_sealed: bool,
     pub(crate) provider_receipt_id: Option<String>,
+    pub(crate) delegation: Option<WorkerDelegationCompletion>,
+}
+
+/// Host-supplied application data travels with the original accepted result.
+/// JSON text keeps the exact result representable in `PostgreSQL` JSONB.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct WorkerDelegationCompletion {
+    pub(crate) body: Value,
+    pub(crate) logical_sha256: String,
+    pub(crate) stored_sha256: String,
+}
+impl WorkerDelegationCompletion {
+    fn validate_stored(&self) -> Result<(), StorageError> {
+        if digest(&self.body) != self.stored_sha256 {
+            return Err(StorageError::Constraint(
+                "delegation completion body changed".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn is_logical(&self) -> bool {
+        digest(&self.body) == self.logical_sha256
+    }
+    pub(crate) fn with_stored_body(&self, body: Value) -> Self {
+        Self {
+            stored_sha256: digest(&body),
+            body,
+            logical_sha256: self.logical_sha256.clone(),
+        }
+    }
 }
 impl WorkerCompletion {
     #[must_use]
@@ -37,6 +67,7 @@ impl WorkerCompletion {
             logical_sha256,
             stored_sealed: false,
             provider_receipt_id,
+            delegation: None,
         }
     }
     pub(crate) fn with_stored_output(&self, output: Value) -> Self {
@@ -46,9 +77,42 @@ impl WorkerCompletion {
             logical_sha256: self.logical_sha256.clone(),
             stored_sealed: true,
             provider_receipt_id: self.provider_receipt_id.clone(),
+            delegation: self.delegation.clone(),
         }
     }
+    /// Only a hosting runtime uses this constructor; worker HTTP/gRPC reports
+    /// cannot supply application metadata through their output objects.
+    pub fn for_local_delegation(
+        output: Value,
+        id: &str,
+        result: &Value,
+    ) -> Result<Self, StorageError> {
+        if id.is_empty() || id.len() > 256 {
+            return Err(StorageError::Constraint(
+                "invalid local delegation identity".into(),
+            ));
+        }
+        let body = Value::String(serde_json::to_string(
+            &serde_json::json!({"id":id,"result":result}),
+        )?);
+        let hash = digest(&body);
+        let mut completion = Self::new(output);
+        completion.delegation = Some(WorkerDelegationCompletion {
+            body,
+            logical_sha256: hash.clone(),
+            stored_sha256: hash,
+        });
+        Ok(completion)
+    }
     pub(crate) fn validate_stored(&self) -> Result<(), StorageError> {
+        if let Some(delegation) = &self.delegation {
+            delegation.validate_stored()?;
+            if !self.stored_sealed && !delegation.is_logical() {
+                return Err(StorageError::Constraint(
+                    "delegation completion is not logical".into(),
+                ));
+            }
+        }
         if digest(&self.output) != self.stored_sha256
             || (!self.stored_sealed && self.logical_sha256 != self.stored_sha256)
         {
@@ -82,6 +146,8 @@ pub struct WorkerAcceptedOutcome {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logical_output_sha256: Option<String>,
     pub accepted_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) delegation: Option<WorkerDelegationCompletion>,
 }
 impl std::fmt::Debug for WorkerAcceptedOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -112,6 +178,7 @@ impl WorkerAcceptedOutcome {
             logical_output_sha256: Some(completion.logical_sha256.clone()),
             stored_output_sha256,
             accepted_at: Utc::now(),
+            delegation: completion.delegation.clone(),
         }
     }
     pub(crate) fn is_logical_output(&self) -> bool {
@@ -125,6 +192,9 @@ impl WorkerAcceptedOutcome {
         task: Uuid,
         instance: InstanceId,
     ) -> Result<(), StorageError> {
+        if let Some(delegation) = &self.delegation {
+            delegation.validate_stored()?;
+        }
         if self.tenant_id != *tenant
             || self.task_id != task
             || self.instance_id != instance
@@ -140,7 +210,7 @@ impl WorkerAcceptedOutcome {
         Ok(())
     }
 }
-fn digest(output: &Value) -> String {
+pub(crate) fn digest(output: &Value) -> String {
     let mut result = String::with_capacity(64);
     for byte in Sha256::digest(orch8_types::ai::canonical_json(output).as_bytes()) {
         write!(result, "{byte:02x}").expect("writing into a String cannot fail");
@@ -321,6 +391,39 @@ pub async fn integrate_worker_outcome(
                 .as_object_mut()
                 .expect("object initialized")
                 .extend(fields.clone());
+        }
+        if let Some(delegation) = &accepted.delegation {
+            if !delegation.is_logical() {
+                return Err(StorageError::Constraint(
+                    "delegation completion is not decrypted".into(),
+                ));
+            }
+            let body: Value = serde_json::from_str(delegation.body.as_str().ok_or_else(|| {
+                StorageError::Constraint("invalid delegation completion body".into())
+            })?)?;
+            let id = body
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty() && id.len() <= 256)
+                .ok_or_else(|| {
+                    StorageError::Constraint("invalid delegation completion identity".into())
+                })?;
+            if !context.data.is_object() {
+                context.data = serde_json::json!({});
+            }
+            let delegations = context
+                .data
+                .as_object_mut()
+                .expect("object initialized")
+                .entry("delegations")
+                .or_insert_with(|| serde_json::json!({}));
+            if !delegations.is_object() {
+                *delegations = serde_json::json!({});
+            }
+            delegations
+                .as_object_mut()
+                .expect("object initialized")
+                .insert(id.to_owned(), body["result"].clone());
         }
         let within_context_limit = context.check_size(max_context_bytes).is_ok();
         let Some(invocation) = accepted.invocation.as_ref() else {

@@ -253,7 +253,7 @@ async fn apply_on(
     }
     let paused = instance.state == InstanceState::Paused;
     sqlx::query("UPDATE task_instances SET context=$1,state=$2,next_fire_at=$3,updated_at=$4,claimed_at=NULL WHERE id=$5 AND tenant_id=$6")
-        .bind(serde_json::to_value(&integration.context)?)
+        .bind(super::json_encoding::encode_context(&integration.context)?)
         .bind(if paused { "paused" } else { "scheduled" })
         .bind((!paused).then(chrono::Utc::now))
         .bind(chrono::Utc::now())
@@ -391,6 +391,9 @@ async fn matches_accepted_on(
     )?;
     // Only the wrapper may transform the body; every immutable identity stays equal.
     accepted.output = expected.output.clone();
+    if let (Some(stored), Some(logical)) = (&mut accepted.delegation, &expected.delegation) {
+        stored.body = logical.body.clone();
+    }
     Ok(accepted == *expected)
 }
 

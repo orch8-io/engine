@@ -89,7 +89,7 @@ pub(super) async fn create(
     store: &PostgresStorage,
     inst: &TaskInstance,
 ) -> Result<(), StorageError> {
-    let context = serde_json::to_value(&inst.context)?;
+    let context = super::json_encoding::encode_context(&inst.context)?;
     bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), inst, &context)
         .execute(&store.pool)
         .await?;
@@ -128,7 +128,7 @@ pub(super) async fn create_admitted(
             "active-instance entitlement exhausted".into(),
         ));
     }
-    let context = serde_json::to_value(&inst.context)?;
+    let context = super::json_encoding::encode_context(&inst.context)?;
     bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), inst, &context)
         .execute(&mut *transaction)
         .await?;
@@ -193,7 +193,7 @@ async fn insert_batch_tx(
             .iter()
             .map(|inst| {
                 Ok::<_, StorageError>({
-                    let context = serde_json::to_value(&inst.context)?;
+                    let context = super::json_encoding::encode_context(&inst.context)?;
                     let budget = inst.budget.as_ref().map(serde_json::to_value).transpose()?;
                     (context, budget)
                 })
@@ -729,7 +729,7 @@ pub(super) async fn update_context(
     id: InstanceId,
     context: &orch8_types::context::ExecutionContext,
 ) -> Result<(), StorageError> {
-    let ctx_json = serde_json::to_value(context)?;
+    let ctx_json = super::json_encoding::encode_context(context)?;
     sqlx::query("UPDATE task_instances SET context = $2, updated_at = NOW() WHERE id = $1")
         .bind(id.into_uuid())
         .bind(&ctx_json)
@@ -754,7 +754,7 @@ pub(super) async fn update_context_cas_on(
     context: &orch8_types::context::ExecutionContext,
     expected_updated_at: DateTime<Utc>,
 ) -> Result<bool, StorageError> {
-    let ctx_json = serde_json::to_value(context)?;
+    let ctx_json = super::json_encoding::encode_context(context)?;
     let result = sqlx::query(
         "UPDATE task_instances SET context = $2, updated_at = NOW() WHERE id = $1 AND updated_at = $3",
     )
@@ -910,7 +910,7 @@ pub(super) async fn update_context_externalized(
         &id.to_string(),
         threshold_bytes,
     );
-    let ctx_json = serde_json::to_value(&ctx_clone)?;
+    let ctx_json = super::json_encoding::encode_context(&ctx_clone)?;
 
     let mut tx = store.pool.begin().await?;
 
@@ -946,7 +946,7 @@ pub(super) async fn create_externalized(
         &instance.id.into_uuid().to_string(),
         threshold_bytes,
     );
-    let context_json = serde_json::to_value(&inst_clone.context)?;
+    let context_json = super::json_encoding::encode_context(&inst_clone.context)?;
 
     let mut tx = store.pool.begin().await?;
 
@@ -993,7 +993,7 @@ pub(super) async fn create_batch_externalized(
             &inst.id.into_uuid().to_string(),
             threshold_bytes,
         );
-        serialized_contexts.push(serde_json::to_value(&c.context)?);
+        serialized_contexts.push(super::json_encoding::encode_context(&c.context)?);
         serialized_budgets.push(c.budget.as_ref().map(serde_json::to_value).transpose()?);
         prepared.push((c, refs));
     }
@@ -1137,8 +1137,10 @@ pub(super) async fn merge_context_data(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    let mut conn = store.pool.acquire().await?;
-    merge_context_data_on(&mut conn, id, key, value).await
+    let mut tx = store.pool.begin().await?;
+    merge_context_data_on(&mut tx, id, key, value).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(super) async fn merge_context_data_on(
@@ -1147,30 +1149,28 @@ pub(super) async fn merge_context_data_on(
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
-    // `jsonb_set` with `create_missing=true` creates a missing *leaf* key but
-    // cannot descend into a null/non-object parent. Instances are created
-    // with `context.data = null` by default, so calling `jsonb_set(ctx,
-    // '{data,foo}', …, true)` on that silently no-ops. Guard by ensuring
-    // `data` is an object first, then set the key inside it.
-    sqlx::query(
-        r"UPDATE task_instances
-          SET context = jsonb_set(
-                CASE
-                    WHEN jsonb_typeof(context->'data') = 'object' THEN context
-                    ELSE jsonb_set(context, ARRAY['data'], '{}'::jsonb, true)
-                END,
-                ARRAY['data', $2],
-                $3,
-                true
-              ),
-              updated_at = NOW()
-          WHERE id = $1",
-    )
-    .bind(id.into_uuid())
-    .bind(key)
-    .bind(value)
-    .execute(&mut *conn)
-    .await?;
+    // Decode application sections under the row lock before merging. Runtime
+    // predicates keep their structured JSONB form; application JSON stays exact.
+    let raw: Option<serde_json::Value> =
+        sqlx::query_scalar("SELECT context FROM task_instances WHERE id=$1 FOR UPDATE")
+            .bind(id.into_uuid())
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(raw) = raw else { return Ok(()) };
+    let mut context = super::json_encoding::decode_context(raw)?;
+    if !context.data.is_object() {
+        context.data = serde_json::json!({});
+    }
+    context
+        .data
+        .as_object_mut()
+        .expect("object initialized")
+        .insert(key.to_owned(), value.clone());
+    sqlx::query("UPDATE task_instances SET context=$2,updated_at=NOW() WHERE id=$1")
+        .bind(id.into_uuid())
+        .bind(super::json_encoding::encode_context(&context)?)
+        .execute(&mut *conn)
+        .await?;
     Ok(())
 }
 

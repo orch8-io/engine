@@ -91,6 +91,7 @@ mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
 mod worker_outcome;
+mod worker_resolution;
 mod worker_version_pins;
 mod workers;
 
@@ -599,6 +600,12 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
         }
+        sqlx::raw_sql(include_str!("worker_resolution.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(68)")
+            .execute(&mut *retirement)
+            .await?;
         sqlx::raw_sql(include_str!("worker_admissions.sql"))
             .execute(&mut *retirement)
             .await?;
@@ -2368,11 +2375,20 @@ impl crate::WorkerStore for SqliteStorage {
         workers::finalize_stranded_dispatch(self, task_id, attempt, effect, continuity_epoch).await
     }
 
-    async fn resolve_worker_task(
+    async fn resolve_worker_task_with_evidence(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
-        workers::resolve(self, resolution).await
+        workers::resolve(self, resolution, evidence).await
+    }
+    async fn get_worker_resolution_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: Option<&WorkerClaim>,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get(self, tenant_id, task_id, claim).await
     }
 
     async fn cancel_worker_tasks_for_block(

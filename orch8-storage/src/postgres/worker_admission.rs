@@ -279,9 +279,12 @@ async fn store_payload_on(
     reserved: bool,
 ) -> Result<bool, StorageError> {
     if reserved {
-        Ok(sqlx::query("UPDATE worker_tasks SET tenant_id=(SELECT native.tenant_id FROM task_instances native WHERE native.id=worker_tasks.instance_id),handler_name=$2,queue_name=$3,requirements=$4,params=$5,context=$6,timeout_ms=$7,carries_credentials=$8,effect_id=$9,continuity_epoch=$10,created_at=$11,awaiting_dispatch=FALSE WHERE id=$1 AND state='pending' AND awaiting_dispatch AND attempt=$12")
-            .bind(task.id).bind(&task.handler_name).bind(&task.queue_name).bind(serde_json::to_value(&task.requirements)?).bind(serde_json::to_value(&task.params)?).bind(serde_json::to_value(&task.context)?)
+        let params = super::json_encoding::encode(&task.params)?;
+        let context = super::json_encoding::encode(&task.context)?;
+        Ok(sqlx::query("UPDATE worker_tasks SET tenant_id=(SELECT native.tenant_id FROM task_instances native WHERE native.id=worker_tasks.instance_id),handler_name=$2,queue_name=$3,requirements=$4,params=$5,context=$6,timeout_ms=$7,carries_credentials=$8,effect_id=$9,continuity_epoch=$10,created_at=$11,awaiting_dispatch=FALSE,params_encoding=$13,context_encoding=$14 WHERE id=$1 AND state='pending' AND awaiting_dispatch AND attempt=$12")
+            .bind(task.id).bind(&task.handler_name).bind(&task.queue_name).bind(serde_json::to_value(&task.requirements)?).bind(params.value).bind(context.value)
             .bind(task.timeout_ms).bind(task.carries_credentials).bind(task.effect_id.map(orch8_types::continuity::EffectId::into_uuid)).bind(task.continuity_epoch.map(i64::try_from).transpose().map_err(|_|invalid())?).bind(task.created_at).bind(i16::try_from(task.attempt).map_err(|_| invalid())?)
+            .bind(params.encoding).bind(context.encoding)
             .execute(&mut *conn).await?.rows_affected()==1)
     } else {
         let Some(row) = super::workers::insert_task_query(task, false)?
@@ -299,9 +302,17 @@ pub(super) async fn matches_hot_on(
     admission: &WorkerDispatchAdmission,
 ) -> Result<bool, StorageError> {
     let task_id = admission.invocation.task_id;
-    let value:Option<serde_json::Value>=sqlx::query_scalar("SELECT jsonb_build_object('handler',handler_name,'queue',queue_name,'requirements',requirements,'params',params,'context',context,'attempt',attempt,'timeout_ms',timeout_ms,'carries_credentials',carries_credentials) FROM worker_tasks WHERE id=$1")
+    let row=sqlx::query("SELECT params_encoding,context_encoding,jsonb_build_object('handler',handler_name,'queue',queue_name,'requirements',requirements,'params',params,'context',context,'attempt',attempt,'timeout_ms',timeout_ms,'carries_credentials',carries_credentials) AS spec FROM worker_tasks WHERE id=$1")
         .bind(task_id).fetch_optional(&mut *conn).await?;
-    let Some(value) = value else { return Ok(false) };
-    let value: serde_json::Value = value;
+    let Some(row) = row else { return Ok(false) };
+    let mut value: serde_json::Value = row.get("spec");
+    value["params"] = super::json_encoding::decode(
+        value["params"].take(),
+        row.get::<Option<String>, _>("params_encoding").as_deref(),
+    )?;
+    value["context"] = super::json_encoding::decode(
+        value["context"].take(),
+        row.get::<Option<String>, _>("context_encoding").as_deref(),
+    )?;
     Ok(crate::worker_admission::digest(&value) == admission.stored_spec_sha256)
 }

@@ -35,7 +35,7 @@ async fn write_on(
         "{} ON CONFLICT (id) DO NOTHING",
         super::instances::INSTANCE_INSERT_SQL
     );
-    let context = serde_json::to_value(&snapshot.instance.context)?;
+    let context = super::json_encoding::encode_context(&snapshot.instance.context)?;
     let inserted = super::instances::bind_instance_insert(
         sqlx::query(sqlx::AssertSqlSafe(insert.as_str())),
         &snapshot.instance,

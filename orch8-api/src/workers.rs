@@ -1445,6 +1445,20 @@ pub(crate) async fn fail_task(
     Json(req): Json<FailRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    let report_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    if let Some(report) = state
+        .storage
+        .get_worker_resolution_outcome(
+            tenant_ctx.as_ref().map(|ctx| &ctx.tenant_id),
+            task_id,
+            Some(&report_claim),
+        )
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+        && report.event == orch8_types::worker::WorkerAttemptEventKind::Failed
+    {
+        return Ok(StatusCode::OK);
+    }
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
         .storage
@@ -1482,8 +1496,8 @@ pub(crate) async fn fail_task(
     enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "fail").await?;
 
     // Fenced task/native resolution (shared with the reaper, timeouts and release).
-    // Failure effect settlement still precedes that transaction; the durable
-    // failure-outcome protocol must close this separate crash gap.
+    // The original uncertainty receipt and retained report commit with the
+    // task/native action, including when a retry removes the hot task row.
     // The task fails and the instance advances per
     // the step's retry policy — or only the task fails for a delegation or a
     // terminal/paused instance. A racing lease change applies nothing.

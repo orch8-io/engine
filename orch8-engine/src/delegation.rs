@@ -24,7 +24,6 @@ use chrono::Utc;
 use orch8_storage::StorageBackend;
 use orch8_types::continuity::ContinuityExecution;
 use orch8_types::continuity_advanced::DeviceDelegation;
-use orch8_types::execution::NodeState;
 use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::{InstanceState, TaskInstance};
 use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
@@ -338,8 +337,9 @@ pub async fn integrate_delegation_outcome(
 /// The local step was dispatched as a local worker task (placed off this
 /// runtime) that the runtime's delegation pump claimed as `claim`. `Ok`
 /// durably accepts it like a worker completion (effect receipt, original
-/// result and task state in one transaction). Block output, context, node and
-/// native transition integration currently follow separately;
+/// result, delegation data and task state in one transaction). The same atomic
+/// application protocol used by scheduler recovery saves output, context, node
+/// and native transition exactly once;
 /// `Err((message, retryable))` fails it
 /// through the fenced failure resolution (retry policy or fail the step).
 /// `delegation_result` is merged at `context.data.delegations.<id>`, like a
@@ -381,13 +381,34 @@ pub async fn resume_local_parent(
         }
         Ok(output) => {
             if task.state == WorkerTaskState::Claimed {
-                if !storage.complete_worker_task(task.id, claim, output).await? {
+                let completion =
+                    orch8_storage::worker_outcome::WorkerCompletion::for_local_delegation(
+                        output.clone(),
+                        delegation_id,
+                        delegation_result,
+                    )?;
+                if !storage
+                    .accept_worker_completion(task.id, claim, &completion)
+                    .await?
+                    && storage
+                        .get_worker_accepted_outcome(Some(&instance.tenant_id), task.id, claim)
+                        .await?
+                        .is_none()
+                {
                     return Ok(false);
                 }
             } else if task.state != WorkerTaskState::Completed {
                 return Ok(false);
             }
-            finish_local_completion(storage, &task, delegation_id, delegation_result, output).await
+            let application = orch8_storage::worker_outcome::integrate_worker_outcome(
+                storage,
+                &instance.tenant_id,
+                task.id,
+                claim,
+                orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES,
+            )
+            .await?;
+            Ok(application == orch8_storage::worker_outcome::WorkerOutcomeApplication::Applied)
         }
     }
 }
@@ -412,99 +433,4 @@ async fn merge_delegation_result(
         .merge_context_data(instance.id, "delegations", &delegations)
         .await?;
     Ok(())
-}
-
-/// The transition half of a local completion: runs only while the step is
-/// still pending (tree: its node is live; flat: the instance still waits on
-/// it), so a repeated call never saves a second output.
-async fn finish_local_completion(
-    storage: &dyn StorageBackend,
-    task: &WorkerTask,
-    delegation_id: &str,
-    delegation_result: &Value,
-    output: &Value,
-) -> Result<bool, EngineError> {
-    let Some(mut instance) = storage.get_instance(task.instance_id).await? else {
-        return Ok(false);
-    };
-    if instance.state.is_terminal() || instance.state == InstanceState::Paused {
-        return Ok(false);
-    }
-    let tree = storage.get_execution_tree(task.instance_id).await?;
-    let node = tree.iter().find(|node| {
-        node.block_id == task.block_id
-            && matches!(node.state, NodeState::Running | NodeState::Waiting)
-    });
-    let pending = if tree.is_empty() {
-        instance.state == InstanceState::Waiting
-            && instance
-                .context
-                .runtime
-                .current_step
-                .as_ref()
-                .is_none_or(|step| *step == task.block_id)
-    } else {
-        node.is_some()
-    };
-    if !pending {
-        return Ok(false);
-    }
-    if !instance.context.data.is_object() {
-        instance.context.data = json!({});
-    }
-    if let Some(data) = instance.context.data.as_object_mut() {
-        if let Some(fields) = output.as_object() {
-            for (key, value) in fields {
-                data.insert(key.clone(), value.clone());
-            }
-        }
-        let delegations = data.entry("delegations").or_insert_with(|| json!({}));
-        if !delegations.is_object() {
-            *delegations = json!({});
-        }
-        if let Some(map) = delegations.as_object_mut() {
-            map.insert(delegation_id.to_owned(), delegation_result.clone());
-        }
-    }
-    let block_output = orch8_types::output::BlockOutput {
-        id: uuid::Uuid::now_v7(),
-        instance_id: task.instance_id,
-        block_id: task.block_id.clone(),
-        output: output.clone(),
-        output_ref: None,
-        output_size: serde_json::to_vec(output)
-            .map_or(0, |bytes| u32::try_from(bytes.len()).unwrap_or(u32::MAX)),
-        attempt: task.attempt,
-        created_at: Utc::now(),
-    };
-    let result = match node {
-        Some(node) => {
-            storage
-                .save_output_complete_node_merge_context_and_transition(
-                    &block_output,
-                    node.id,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(Utc::now()),
-                )
-                .await
-        }
-        None => {
-            storage
-                .save_output_merge_context_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(Utc::now()),
-                )
-                .await
-        }
-    };
-    match result {
-        Ok(()) => Ok(true),
-        Err(orch8_types::error::StorageError::TerminalTarget { .. }) => Ok(false),
-        Err(error) => Err(error.into()),
-    }
 }

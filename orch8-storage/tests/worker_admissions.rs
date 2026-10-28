@@ -255,6 +255,7 @@ orch8_storage::backend_test!(async fn fallback_admission_keeps_reservation_scope
     assert!(storage.resolve_worker_task(&WorkerTaskResolution {
         task_id:id,instance_id:task.instance_id,expected_state:held.state,expected_claim_epoch:held.claim_epoch,
         expected_worker_id:held.worker_id.clone(),holder_worker_id:held.worker_id.clone(),event:WorkerAttemptEventKind::Reclaimed,
+        effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
         reason:"not started".into(),retryable:false,action:WorkerTaskResolutionAction::Requeue,
     }).await.unwrap(),"completion/release rejected the admitted fallback handler");
 });
@@ -799,6 +800,39 @@ async fn postgres_codec_downgrade_refuses_records_requiring_the_new_reader() {
     );
 }
 
+orch8_storage::backend_test!(async fn local_delegation_application_recovers_after_hot_gc_and_retains_original_private_result(b) {
+    use orch8_storage::worker_outcome::{WorkerCompletion, integrate_worker_outcome, WorkerOutcomeApplication as A};
+    use orch8_storage::testing::backends::RawPool;
+    let storage=b.storage.as_ref();
+    let (task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","local-pump",1).await.unwrap().pop().unwrap();
+    let claim=orch8_types::worker::WorkerClaim::new("local-pump",held.claim_epoch);
+    let result=json!({"output":"DELEGATION_PRIVATE_CANARY\0λ","numeric":-0.0});
+    let completion=WorkerCompletion::for_local_delegation(json!({"answer":42}),"delegation-original",&result).unwrap();
+    assert!(storage.accept_worker_completion(id,&claim,&completion).await.unwrap());
+    let replaced=WorkerCompletion::for_local_delegation(json!({"answer":99}),"delegation-forged",&json!({"other":true})).unwrap();
+    assert!(!storage.accept_worker_completion(id,&claim,&replaced).await.unwrap());
+    storage.delete_worker_task(id).await.unwrap();
+    storage.update_instance_state(held.instance_id,InstanceState::Paused,None).await.unwrap();
+    assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,id,&claim,100_000).await.unwrap(),A::Applied);
+    assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,id,&claim,100_000).await.unwrap(),A::AlreadyApplied);
+    let instance=storage.get_instance(held.instance_id).await.unwrap().unwrap();
+    assert_eq!(instance.state,InstanceState::Paused);
+    assert_eq!(instance.context.data["delegations"]["delegation-original"],result);
+    assert!(instance.context.data["delegations"].get("delegation-forged").is_none());
+    assert_eq!(instance.context.data["answer"],42);
+    assert_eq!(storage.get_all_outputs(held.instance_id).await.unwrap().iter().filter(|o|o.block_id==held.block_id).count(),1);
+    if b.name().starts_with("encrypted") {
+        let raw:String=match &b.raw {
+            RawPool::Sqlite(pool)=>sqlx::query_scalar("SELECT record FROM worker_accepted_outcomes WHERE task_id=?1").bind(id.to_string()).fetch_one(pool).await.unwrap(),
+            #[cfg(feature="postgres")]
+            RawPool::Postgres(pool)=>sqlx::query_scalar("SELECT record::text FROM worker_accepted_outcomes WHERE task_id=$1").bind(id).fetch_one(pool).await.unwrap(),
+        };
+        assert!(!raw.contains("DELEGATION_PRIVATE_CANARY"));
+    }
+});
+
 async fn completed_for_application(
     storage: &dyn StorageBackend,
 ) -> (
@@ -1252,4 +1286,138 @@ async fn postgres_outcome_downgrade_refuses_old_transaction_snapshots() {
         );
         tx.rollback().await.unwrap();
     }
+}
+
+orch8_storage::backend_test!(async fn lossless_native_json_survives_dispatch_checkpoint_completion_and_application(b){
+    use orch8_storage::worker_outcome::{integrate_worker_outcome,WorkerOutcomeApplication as A};
+    let s=b.storage.as_ref();let(mut task,fence,_)=fixture(s).await;
+    let payload=json!({"nul\0key":"provider\0λ","negative_zero":-0.0,"float":1.0,"large_float":1e18,"literal_codec":{"codec":"json_text_v1","sections":["data"]}});
+    task.params=payload.clone();task.context["data"]=payload.clone();
+    let id=published(&s.admit_worker_dispatch(&intent(task.clone(),fence.clone())).await.unwrap());
+    let held=s.claim_worker_tasks("remote.work","lossless-worker",1).await.unwrap().pop().unwrap();
+    assert_eq!(serde_json::to_string(&held.params).unwrap(),serde_json::to_string(&payload).unwrap());
+    assert_eq!(serde_json::to_string(&held.context).unwrap(),serde_json::to_string(&task.context).unwrap());
+    let claim=orch8_types::worker::WorkerClaim::new("lossless-worker",held.claim_epoch);
+    assert_eq!(s.checkpoint_worker_task(id,&claim,0,&payload).await.unwrap(),Some(1));
+    let after=s.get_worker_task(id).await.unwrap().unwrap();
+    assert_eq!(serde_json::to_string(&after.resume_checkpoint.unwrap()).unwrap(),serde_json::to_string(&payload).unwrap());
+    assert!(s.complete_worker_task(id,&claim,&payload).await.unwrap());
+    let hot=s.get_worker_task(id).await.unwrap().unwrap();
+    assert_eq!(serde_json::to_string(&hot.output.unwrap()).unwrap(),serde_json::to_string(&payload).unwrap());
+    s.update_instance_state(held.instance_id,InstanceState::Waiting,None).await.unwrap();
+    assert_eq!(integrate_worker_outcome(s,&fence.tenant_id,id,&claim,100_000).await.unwrap(),A::Applied);
+    let parent=s.get_instance(held.instance_id).await.unwrap().unwrap();
+    let mut expected_data=payload.clone();expected_data["private"]=json!("ADMISSION_CONTEXT_CANARY");
+    assert_eq!(serde_json::to_string(&parent.context.data).unwrap(),serde_json::to_string(&expected_data).unwrap());
+    let output=s.get_block_output(held.instance_id,&held.block_id).await.unwrap().unwrap();
+    assert_eq!(serde_json::to_string(&output.output).unwrap(),serde_json::to_string(&payload).unwrap());
+    let outputs=s.get_latest_completed_outputs(held.instance_id).await.unwrap();
+    assert_eq!(outputs.len(),1);
+    assert_eq!(serde_json::to_string(&outputs[0].output).unwrap(),serde_json::to_string(&payload).unwrap());
+    s.merge_context_data(held.instance_id,"another",&json!({"new\0key":-0.0})).await.unwrap();
+    let merged=s.get_instance(held.instance_id).await.unwrap().unwrap();
+    assert_eq!(merged.context.data["nul\0key"],payload["nul\0key"]);
+    assert_eq!(serde_json::to_string(&merged.context.data["another"]).unwrap(),"{\"new\\u0000key\":-0.0}");
+});
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn native_json_encoding_guards_protect_claims_and_downgrade() {
+    use orch8_storage::testing::backends::TestBackend;
+    let Some(b) = TestBackend::postgres().await else {
+        return;
+    };
+    let down = include_str!("../../migrations/down/138_native_json_encoding.sql");
+    let up = include_str!("../../migrations/138_native_json_encoding.sql");
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+    let (mut task, fence, _) = fixture(b.storage.as_ref()).await;
+    task.params = json!({"negative_zero":-0.0,"nul":"value\0λ"});
+    let id = published(
+        &b.storage
+            .admit_worker_dispatch(&intent(task.clone(), fence))
+            .await
+            .unwrap(),
+    );
+    assert!(
+        sqlx::query("UPDATE worker_tasks SET params_encoding=NULL WHERE id=$1")
+            .bind(id)
+            .execute(b.pg_pool())
+            .await
+            .is_err()
+    );
+    assert!(sqlx::query("UPDATE task_instances SET context=jsonb_set(context,'{__orch8_context_encoding}',$2) WHERE id=$1")
+        .bind(task.instance_id.into_uuid()).bind(json!({"codec":"json_text_v1","sections":["runtime"]})).execute(b.pg_pool()).await.is_err());
+    let invalid_output=sqlx::query("INSERT INTO block_outputs(id,instance_id,block_id,output,output_encoding,output_size,attempt,created_at) VALUES($1,$2,'invalid','{}'::jsonb,'json_text_v1',0,0,NOW())")
+        .bind(Uuid::now_v7()).bind(task.instance_id.into_uuid()).execute(b.pg_pool()).await;
+    assert!(
+        invalid_output
+            .unwrap_err()
+            .to_string()
+            .contains("invalid native JSON text encoding")
+    );
+    let mut tx = b.pg_pool().begin().await.unwrap();
+    let error = sqlx::raw_sql(down).execute(&mut *tx).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("require the current encoding protocol")
+    );
+    tx.rollback().await.unwrap();
+    for sql in [
+        "UPDATE worker_tasks SET heartbeat_at=NOW() WHERE id=$1",
+        "DELETE FROM worker_tasks WHERE id=$1",
+    ] {
+        let mut legacy = b.pg_pool().begin().await.unwrap();
+        sqlx::query("SET LOCAL orch8.native_json_protocol = 'legacy'")
+            .execute(&mut *legacy)
+            .await
+            .unwrap();
+        let error = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(id)
+            .execute(&mut *legacy)
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires a current protocol reader")
+        );
+        legacy.rollback().await.unwrap();
+    }
+    let mut parent = b
+        .storage
+        .get_instance(task.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    parent.context.data = task.params.clone();
+    b.storage
+        .update_instance_context(parent.id, &parent.context)
+        .await
+        .unwrap();
+    let mut legacy = b.pg_pool().begin().await.unwrap();
+    sqlx::query("SET LOCAL orch8.native_json_protocol = 'legacy'")
+        .execute(&mut *legacy)
+        .await
+        .unwrap();
+    let error =
+        sqlx::query("UPDATE task_instances SET state='running',claimed_at=NOW() WHERE id=$1")
+            .bind(parent.id.into_uuid())
+            .execute(&mut *legacy)
+            .await
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires a current protocol reader")
+    );
+    legacy.rollback().await.unwrap();
+    let stored = b.storage.get_worker_task(id).await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_string(&stored.params).unwrap(),
+        serde_json::to_string(&task.params).unwrap()
+    );
 }

@@ -311,7 +311,7 @@ pub(super) async fn create_child(
         tx.rollback().await?;
         return Ok(false);
     }
-    let context = serde_json::to_value(&child.context)?;
+    let context = super::json_encoding::encode_context(&child.context)?;
     super::instances::bind_instance_insert(
         sqlx::query(super::instances::INSTANCE_INSERT_SQL),
         child,

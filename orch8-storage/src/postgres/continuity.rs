@@ -842,7 +842,7 @@ impl crate::ContinuityStore for PostgresStorage {
             .await?;
             return Ok(id);
         }
-        let context = serde_json::to_value(&instance.context)?;
+        let context = super::json_encoding::encode_context(&instance.context)?;
         super::instances::bind_instance_insert(
             sqlx::query(super::instances::INSTANCE_INSERT_SQL),
             instance,
@@ -851,17 +851,7 @@ impl crate::ContinuityStore for PostgresStorage {
         .execute(&mut *transaction)
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
-        sqlx::query(
-            "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
-             VALUES ($1,$2,$3,$4)",
-        )
-        .bind(checkpoint.id)
-        .bind(checkpoint.instance_id.into_uuid())
-        .bind(&checkpoint.checkpoint_data)
-        .bind(checkpoint.created_at)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
+        super::checkpoints::save_on(&mut transaction, checkpoint).await?;
         for node in nodes {
             super::execution_tree::create_node_on(&mut transaction, node).await?;
         }
@@ -2098,7 +2088,7 @@ impl crate::ContinuityStore for PostgresStorage {
              WHERE id=$5 AND tenant_id=$6 AND state=$7",
         )
         .bind(next_sequence_id.into_uuid())
-        .bind(serde_json::to_value(next_context).map_err(StorageError::Serialization)?)
+        .bind(super::json_encoding::encode_context(next_context)?)
         .bind(state_name(next_instance_state)?)
         .bind(next_execution.updated_at)
         .bind(expected_execution.current_instance_id.into_uuid())
@@ -2118,17 +2108,7 @@ impl crate::ContinuityStore for PostgresStorage {
             return Ok(false);
         }
         // In-place migration keeps native nodes and suspension identities.
-        sqlx::query(
-            "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
-             VALUES ($1,$2,$3,$4)",
-        )
-        .bind(checkpoint.id)
-        .bind(checkpoint.instance_id.into_uuid())
-        .bind(&checkpoint.checkpoint_data)
-        .bind(checkpoint.created_at)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
+        super::checkpoints::save_on(&mut tx, checkpoint).await?;
         let location = ContinuityLocation {
             continuity_id: next_execution.continuity_id,
             tenant_id: next_execution.tenant_id.clone(),

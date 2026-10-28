@@ -113,8 +113,13 @@ fn http_fail_is_one_fenced_resolution() {
         assert!(cloud.task(first.id).is_none(), "{backend}");
         assert_eq!(
             fail(&cloud, &key, &claimed, "w1", true),
+            200,
+            "{backend}: retained acknowledgement survives its retry"
+        );
+        assert_eq!(
+            fail(&cloud, &key, &claimed, "intruder", true),
             404,
-            "{backend}: superseded by its retry"
+            "{backend}: another worker cannot inherit the acknowledgement"
         );
         let retry = wait_for("re-dispatch", LONG, || {
             cloud
@@ -360,7 +365,7 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
         );
 
         // Fail (retryable, retry policy) → receipt unknown, next attempt;
-        // re-reporting against the superseded task is NotFound.
+        // the winning lease can re-report after the superseded hot task is gone.
         let handler = format!("grpc.fail.{}", Uuid::now_v7().simple());
         let (instance, first) = dispatched(&cloud, &handler, Some(2));
         let task = cloud
@@ -383,10 +388,16 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
         );
         assert!(cloud.task(first.id).is_none(), "{backend}");
         let again = cloud.block_on(async { grpc(&cloud).await.fail_task(fail(&task)).await });
+        again.expect("retained failure acknowledgement survives retry");
+        let mut other_claim = fail(&task);
+        other_claim.claim_epoch += 1;
         assert_eq!(
-            again.unwrap_err().code(),
+            cloud
+                .block_on(async { grpc(&cloud).await.fail_task(other_claim).await })
+                .unwrap_err()
+                .code(),
             tonic::Code::NotFound,
-            "{backend}"
+            "{backend}: another claim cannot inherit the acknowledgement"
         );
         let retry = wait_for("grpc retry", LONG, || {
             cloud

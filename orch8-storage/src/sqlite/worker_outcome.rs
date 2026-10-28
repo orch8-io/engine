@@ -318,5 +318,8 @@ async fn matches_accepted_on(
     )?;
     // Only the wrapper may transform the body; every immutable identity stays equal.
     accepted.output = expected.output.clone();
+    if let (Some(stored), Some(logical)) = (&mut accepted.delegation, &expected.delegation) {
+        stored.body = logical.body.clone();
+    }
     Ok(accepted == *expected)
 }

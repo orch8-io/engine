@@ -815,11 +815,14 @@ pub(super) async fn finalize_stranded_dispatch(
 pub(super) async fn resolve(
     storage: &SqliteStorage,
     resolution: &orch8_types::worker::WorkerTaskResolution,
+    evidence: &crate::worker_resolution::WorkerResolutionEvidence,
 ) -> Result<bool, StorageError> {
     use orch8_types::worker::WorkerTaskResolutionAction as Action;
+    evidence.validate(resolution)?;
 
     let now = ts(Utc::now());
-    let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
+    let expected_epoch = i64::try_from(resolution.expected_claim_epoch)
+        .map_err(|_| StorageError::Constraint("worker claim epoch out of range".into()))?;
     let fence = " WHERE id=?1 AND state=?2 AND claim_epoch=?3 AND (?4 IS NULL OR worker_id=?4)";
     let mut conn = begin_immediate(&storage.pool).await?;
     let result = async {
@@ -888,6 +891,7 @@ pub(super) async fn resolve(
         }
         Some(source)
     };
+    let report_source=super::worker_resolution::capture_on(&mut conn,resolution.task_id).await?;
     let affected = match &resolution.action {
         Action::Requeue => sqlx::query(AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, \
@@ -919,7 +923,7 @@ pub(super) async fn resolve(
             .bind(resolution.expected_state.to_string())
             .bind(expected_epoch)
             .bind(resolution.expected_worker_id.as_deref())
-            .bind(&resolution.reason)
+            .bind(crate::worker_resolution::diagnostic_reason(&resolution.reason).as_ref())
             .bind(i64::from(resolution.retryable))
             .bind(&now)
             .execute(&mut *conn)
@@ -930,6 +934,7 @@ pub(super) async fn resolve(
     if affected != 1 {
         return Ok(false);
     }
+    super::worker_resolution::record_on(&mut conn,&report_source,resolution,evidence).await?;
     let instance_id = resolution.instance_id.into_uuid().to_string();
     match &resolution.action {
         Action::Requeue | Action::FailTaskOnly => {}
@@ -978,12 +983,9 @@ pub(super) async fn resolve(
         &[transition_event(
             resolution.task_id,
             resolution.expected_claim_epoch,
-            resolution
-                .holder_worker_id
-                .clone()
-                .or_else(|| resolution.expected_worker_id.clone()),
+            report_source.worker_id.clone(),
             resolution.event,
-            Some(resolution.reason.clone()),
+            Some(crate::worker_resolution::diagnostic_reason(&resolution.reason).into_owned()),
         )],
     )
     .await?;

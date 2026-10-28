@@ -69,13 +69,21 @@ pub(super) fn insert_task_query(
     task: &WorkerTask,
     awaiting_dispatch: bool,
 ) -> Result<sqlx::query::Query<'static, Postgres, sqlx::postgres::PgArguments>, StorageError> {
+    let params = super::json_encoding::encode(&task.params)?;
+    let context = super::json_encoding::encode(&task.context)?;
+    let checkpoint = task
+        .resume_checkpoint
+        .as_ref()
+        .map(super::json_encoding::encode)
+        .transpose()?;
+    let checkpoint_encoding = checkpoint.as_ref().and_then(|value| value.encoding);
     Ok(sqlx::query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
              attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at,
-             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch, tenant_id)
+             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch, tenant_id, params_encoding, context_encoding, checkpoint_encoding)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-                  (SELECT tenant_id FROM task_instances WHERE id = $2))
+                  (SELECT tenant_id FROM task_instances WHERE id = $2),$20,$21,$22)
           ON CONFLICT (instance_id, block_id) DO UPDATE SET
               effect_id = COALESCE(worker_tasks.effect_id, EXCLUDED.effect_id),
               continuity_epoch = COALESCE(worker_tasks.continuity_epoch, EXCLUDED.continuity_epoch),
@@ -89,13 +97,13 @@ pub(super) fn insert_task_query(
     .bind(task.handler_name.clone())
     .bind(task.queue_name.clone())
     .bind(serde_json::to_value(&task.requirements)?)
-    .bind(task.params.clone())
-    .bind(task.context.clone())
+    .bind(params.value)
+    .bind(context.value)
     .bind(task.attempt as i16)
     .bind(task.timeout_ms)
     .bind(task.state.to_string())
     .bind(i64::try_from(task.claim_epoch).unwrap_or(i64::MAX))
-    .bind(task.resume_checkpoint.clone())
+    .bind(checkpoint.map(|value|value.value))
     .bind(i64::try_from(task.checkpoint_seq).unwrap_or(i64::MAX))
     .bind(task.created_at)
     .bind(
@@ -107,7 +115,10 @@ pub(super) fn insert_task_query(
             .map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)),
     )
     .bind(task.carries_credentials)
-    .bind(awaiting_dispatch))
+    .bind(awaiting_dispatch)
+    .bind(params.encoding)
+    .bind(context.encoding)
+    .bind(checkpoint_encoding))
 }
 
 pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
@@ -462,7 +473,7 @@ pub(super) async fn complete(
     completion: &crate::worker_outcome::WorkerCompletion,
 ) -> Result<bool, StorageError> {
     completion.validate_stored()?;
-    let output = &completion.output;
+    let output = super::json_encoding::encode(&completion.output)?;
     let epoch = i64::try_from(claim.claim_epoch)
         .map_err(|_| StorageError::Constraint("worker claim epoch exceeds SQL range".into()))?;
     let mut tx = store.pool.begin().await?;
@@ -470,16 +481,17 @@ pub(super) async fn complete(
         let Some((instance_id,effect_id)) = super::worker_outcome::lock_on(&mut tx,task_id).await? else { return Ok(false); };
         let row: Option<(i64,)> = sqlx::query_as(
             r"UPDATE worker_tasks
-          SET state = 'completed', output = $3, completed_at = NOW()
+          SET state = 'completed', output = $3, output_encoding=$7, completed_at = NOW()
           WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed' AND instance_id=$5 AND effect_id IS NOT DISTINCT FROM $6
           RETURNING claim_epoch",
         )
         .bind(task_id)
         .bind(&claim.worker_id)
-        .bind(output)
+        .bind(&output.value)
         .bind(epoch)
         .bind(instance_id.into_uuid())
         .bind(effect_id)
+        .bind(output.encoding)
         .fetch_optional(&mut *tx)
         .await?;
         if row.is_some() {
@@ -570,9 +582,10 @@ pub(super) async fn checkpoint(
     let next = expected
         .checked_add(1)
         .ok_or_else(|| StorageError::Query("checkpoint sequence overflow".into()))?;
+    let encoded = super::json_encoding::encode(checkpoint)?;
     let result = sqlx::query(
         "UPDATE worker_tasks
-         SET heartbeat_at = NOW(), resume_checkpoint = $5, checkpoint_seq = $6
+         SET heartbeat_at = NOW(), resume_checkpoint = $5, checkpoint_seq = $6, checkpoint_encoding=$7
          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $3
            AND state = 'claimed' AND checkpoint_seq = $4",
     )
@@ -580,8 +593,9 @@ pub(super) async fn checkpoint(
     .bind(&claim.worker_id)
     .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
     .bind(expected)
-    .bind(checkpoint)
+    .bind(encoded.value)
     .bind(next)
+    .bind(encoded.encoding)
     .execute(&store.pool)
     .await?;
     Ok((result.rows_affected() == 1).then_some(next as u64))
@@ -845,15 +859,17 @@ pub(super) async fn finalize_stranded_dispatch(
 pub(super) async fn resolve(
     store: &PostgresStorage,
     resolution: &orch8_types::worker::WorkerTaskResolution,
+    evidence: &crate::worker_resolution::WorkerResolutionEvidence,
 ) -> Result<bool, StorageError> {
     use orch8_types::worker::WorkerTaskResolutionAction as Action;
+    evidence.validate(resolution)?;
 
-    let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
+    let expected_epoch = i64::try_from(resolution.expected_claim_epoch)
+        .map_err(|_| StorageError::Constraint("worker claim epoch out of range".into()))?;
     let mut tx = store.pool.begin().await?;
     let result = async {
-    if !super::worker_invocations::lock_source_on(&mut tx, resolution.instance_id).await? {
-        return Ok(false);
-    }
+    let locked=super::worker_outcome::lock_on(&mut tx,resolution.task_id).await?;
+    if locked.is_none_or(|(instance,_)|instance!=resolution.instance_id) {return Ok(false);}
 
     let parent: Option<Uuid> = sqlx::query_scalar("SELECT ti.id FROM task_instances ti WHERE ti.id=$1 AND EXISTS(SELECT 1 FROM worker_tasks wt WHERE wt.id=$2 AND wt.instance_id=ti.id AND wt.state=$3 AND wt.claim_epoch=$4 AND ($5::text IS NULL OR wt.worker_id=$5)) FOR UPDATE OF ti")
         .bind(resolution.instance_id.into_uuid()).bind(resolution.task_id)
@@ -921,6 +937,7 @@ pub(super) async fn resolve(
         }
         Some(source)
     };
+    let report_source=super::worker_resolution::capture_on(&mut tx,resolution.task_id).await?;
     let fence = " WHERE id = $1 AND state = $2 AND claim_epoch = $3 \
                   AND ($4::text IS NULL OR worker_id = $4)";
     let affected = match &resolution.action {
@@ -954,7 +971,7 @@ pub(super) async fn resolve(
             .bind(resolution.expected_state.to_string())
             .bind(expected_epoch)
             .bind(resolution.expected_worker_id.as_deref())
-            .bind(&resolution.reason)
+            .bind(crate::worker_resolution::diagnostic_reason(&resolution.reason).as_ref())
             .bind(resolution.retryable)
             .execute(&mut *tx)
             .await?
@@ -964,6 +981,7 @@ pub(super) async fn resolve(
     if affected != 1 {
         return Ok(false);
     }
+    super::worker_resolution::record_on(&mut tx,&report_source,resolution,evidence).await?;
     let instance_id = resolution.instance_id.into_uuid();
     match &resolution.action {
         Action::Requeue | Action::FailTaskOnly => {}
@@ -1010,12 +1028,9 @@ pub(super) async fn resolve(
         &[transition_event(
             resolution.task_id,
             resolution.expected_claim_epoch,
-            resolution
-                .holder_worker_id
-                .clone()
-                .or_else(|| resolution.expected_worker_id.clone()),
+            report_source.worker_id.clone(),
             resolution.event,
-            Some(resolution.reason.clone()),
+            Some(crate::worker_resolution::diagnostic_reason(&resolution.reason).into_owned()),
         )],
     )
     .await?;

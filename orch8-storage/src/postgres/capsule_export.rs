@@ -21,7 +21,13 @@ fn cut(row: &DbRow) -> Result<CapsuleSourceCut, StorageError> {
         request: decode(row.get("request"))?,
         snapshot: row
             .try_get::<Option<serde_json::Value>, _>("snapshot")?
-            .map(decode)
+            .map(|value| {
+                super::json_encoding::decode(
+                    value,
+                    row.get::<Option<String>, _>("snapshot_encoding").as_deref(),
+                )
+                .and_then(decode)
+            })
             .transpose()?,
         manifest: row
             .try_get::<Option<serde_json::Value>, _>("manifest")?
@@ -134,11 +140,12 @@ async fn capture_on(
     let frozen = transferring(&current, request.now);
     save_owner(conn, &frozen).await?;
     sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=$1 WHERE id=$2 AND tenant_id=$3").bind(request.now).bind(current.current_instance_id.into_uuid()).bind(current.tenant_id.as_str()).execute(&mut *conn).await?;
-    let json = encode(snapshot.as_ref())?;
+    let encoded = super::json_encoding::encode_owned(encode(snapshot.as_ref())?)?;
+    let json = encoded.value;
     if serde_json::to_vec(&json)?.len() > CapsuleSourceSnapshot::MAX_CAPTURE_BYTES {
         return Err(crate::capsule_export::too_large());
     }
-    sqlx::query("INSERT INTO capsule_source_cuts(capsule_id,tenant_id,continuity_id,epoch,source_instance_id,source_runtime_id,state,request,snapshot,created_at) VALUES($1,$2,$3,$4,$5,$6,'captured',$7,$8,$9)").bind(id.into_uuid()).bind(current.tenant_id.as_str()).bind(current.continuity_id.into_uuid()).bind(i64::try_from(current.epoch.get()).map_err(|_|invalid())?).bind(current.current_instance_id.into_uuid()).bind(current.owner_runtime_id.into_uuid()).bind(encode(request)?).bind(json).bind(request.now).execute(&mut *conn).await?;
+    sqlx::query("INSERT INTO capsule_source_cuts(capsule_id,tenant_id,continuity_id,epoch,source_instance_id,source_runtime_id,state,request,snapshot,created_at,snapshot_encoding) VALUES($1,$2,$3,$4,$5,$6,'captured',$7,$8,$9,$10)").bind(id.into_uuid()).bind(current.tenant_id.as_str()).bind(current.continuity_id.into_uuid()).bind(i64::try_from(current.epoch.get()).map_err(|_|invalid())?).bind(current.current_instance_id.into_uuid()).bind(current.owner_runtime_id.into_uuid()).bind(encode(request)?).bind(json).bind(request.now).bind(encoded.encoding).execute(&mut *conn).await?;
     Ok(CapsuleCutCapture::Ready(Box::new(CapsuleSourceCut {
         id,
         request: request.clone(),
@@ -185,7 +192,7 @@ pub(super) async fn seal(
     if &saved != manifest {
         return Err(invalid());
     }
-    sqlx::query("UPDATE capsule_source_cuts SET state='sealed',snapshot=NULL,manifest=$1,sealed_payload=$2 WHERE tenant_id=$3 AND capsule_id=$4 AND state='captured'").bind(encode(manifest)?).bind(sealed).bind(tenant.as_str()).bind(id.into_uuid()).execute(&mut *tx).await?;
+    sqlx::query("UPDATE capsule_source_cuts SET state='sealed',snapshot=NULL,snapshot_encoding=NULL,manifest=$1,sealed_payload=$2 WHERE tenant_id=$3 AND capsule_id=$4 AND state='captured'").bind(encode(manifest)?).bind(sealed).bind(tenant.as_str()).bind(id.into_uuid()).execute(&mut *tx).await?;
     stored.snapshot = None;
     stored.manifest = Some(saved);
     stored.sealed_payload = Some(sealed.to_vec());
@@ -217,7 +224,7 @@ pub(super) async fn abort(
     };
     // Release the cut first inside this transaction, so the database guards
     // authorize restoration only as part of an explicit atomic abort.
-    sqlx::query("UPDATE capsule_source_cuts SET state='aborted',snapshot=NULL WHERE tenant_id=$1 AND capsule_id=$2 AND state='captured'").bind(tenant.as_str()).bind(id.into_uuid()).execute(&mut *tx).await?;
+    sqlx::query("UPDATE capsule_source_cuts SET state='aborted',snapshot=NULL,snapshot_encoding=NULL WHERE tenant_id=$1 AND capsule_id=$2 AND state='captured'").bind(tenant.as_str()).bind(id.into_uuid()).execute(&mut *tx).await?;
     save_owner(&mut tx, &restored).await?;
     sqlx::query("UPDATE task_instances SET state=$1,next_fire_at=$2,updated_at=$3 WHERE id=$4 AND tenant_id=$5 AND state='paused' AND claimed_at IS NULL AND updated_at=$6").bind(snapshot.instance.state.to_string()).bind(snapshot.instance.next_fire_at).bind(restored.updated_at).bind(restored.current_instance_id.into_uuid()).bind(tenant.as_str()).bind(stored.request.now).execute(&mut *tx).await?;
     Ok(true)
@@ -287,7 +294,7 @@ pub(super) async fn acknowledge(
     {
         return Err(invalid());
     }
-    sqlx::query("UPDATE capsule_source_cuts SET state='acknowledged',snapshot=NULL,sealed_payload=NULL,acknowledgement=$1 WHERE tenant_id=$2 AND capsule_id=$3 AND state IN ('sealed','retired')").bind(encode(accepted)?).bind(tenant.as_str()).bind(id.into_uuid()).execute(&mut *tx).await?;
+    sqlx::query("UPDATE capsule_source_cuts SET state='acknowledged',snapshot=NULL,snapshot_encoding=NULL,sealed_payload=NULL,acknowledgement=$1 WHERE tenant_id=$2 AND capsule_id=$3 AND state IN ('sealed','retired')").bind(encode(accepted)?).bind(tenant.as_str()).bind(id.into_uuid()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO capsule_artifact_retirements(artifact_key,tenant_id,capsule_id,next_sweep_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING")
         .bind(&manifest.payload_artifact.key).bind(tenant.as_str()).bind(id.into_uuid()).bind(chrono::Utc::now()).execute(&mut *tx).await?;
     Ok(CapsuleCutReceipt {

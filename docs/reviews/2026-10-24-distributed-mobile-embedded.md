@@ -6264,3 +6264,29 @@ retention and capsule-cut refusal in the database. Busy PostgreSQL authority and
 scanner locks are skipped; recovery rotation does not depend on a device clock.
 The original failure, delegation, principal, protocol, archive and SDK gates stay
 open. This checkpoint does not establish completion of the original review.
+
+## Atomic failure evidence and lossless native JSON checkpoint
+
+Worker failure/lease resolution now atomically retains its exact report, original
+effect uncertainty, claim result and native/retry action. Cold failure replay is
+tenant/holder/generation scoped after hot and native cleanup. New attempts clear
+old checkpoints; never-claimed evidence is required for abandonment. Concurrent
+PostgreSQL deletion/reinsertion cannot reuse a retained task ID. See
+[worker failure resolution](2026-10-28-worker-failure-resolution.md).
+
+Local delegation and scheduler recovery share one application receipt, retaining
+the original delegation attachment with accepted output. Context replacement
+preserves runtime authority. PostgreSQL native inputs, contexts, outputs,
+checkpoints and captured snapshots preserve NUL and number representations with
+explicit codecs and an encoded-record reader floor. See
+[native JSON encoding](2026-10-28-native-json-encoding.md).
+
+The affected checkpoint passes 4,329 distinct selected cases and strict checks
+on seven packages. Both previously failing CI scenarios are locally verified.
+The draft still requires current-head CI and the full remaining review gates:
+paused failure application, later factual outcomes and explicit reconciliation,
+issued-claim/principal lifetime, complete coordinator protocol enforcement, native
+payload compaction after acknowledgement, transported history/key/backup
+compatibility and public SDK/platform integration. The existing acknowledged
+catalog-run archive and account/catalog isolation are implemented and covered;
+the remaining compaction gate must be audited against those current APIs.

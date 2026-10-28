@@ -51,6 +51,7 @@ fn resolution(task: &WorkerTask, action: WorkerTaskResolutionAction) -> WorkerTa
         expected_worker_id: None,
         holder_worker_id: None,
         event: WorkerAttemptEventKind::TimedOut,
+        effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
         reason: "identity regression".into(),
         retryable: true,
         action,

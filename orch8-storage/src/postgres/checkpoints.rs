@@ -10,16 +10,29 @@ pub(super) async fn save(
     store: &PostgresStorage,
     cp: &orch8_types::checkpoint::Checkpoint,
 ) -> Result<(), StorageError> {
-    sqlx::query(
-        "INSERT INTO checkpoints (id, instance_id, checkpoint_data, created_at) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(cp.id)
-    .bind(cp.instance_id.into_uuid())
-    .bind(&cp.checkpoint_data)
-    .bind(cp.created_at)
-    .execute(&store.pool)
-    .await?;
+    let mut conn = store.pool.acquire().await?;
+    save_on(&mut conn, cp).await
+}
+pub(super) async fn save_on(
+    conn: &mut sqlx::PgConnection,
+    cp: &orch8_types::checkpoint::Checkpoint,
+) -> Result<(), StorageError> {
+    let encoded = super::json_encoding::encode(&cp.checkpoint_data)?;
+    sqlx::query("INSERT INTO checkpoints(id,instance_id,checkpoint_data,created_at,data_encoding) VALUES($1,$2,$3,$4,$5)")
+        .bind(cp.id).bind(cp.instance_id.into_uuid()).bind(encoded.value).bind(cp.created_at).bind(encoded.encoding)
+        .execute(&mut *conn).await?;
     Ok(())
+}
+
+type CheckpointRow = (Uuid, Uuid, serde_json::Value, DateTime<Utc>, Option<String>);
+fn decode(row: CheckpointRow) -> Result<orch8_types::checkpoint::Checkpoint, StorageError> {
+    let (id, instance, data, created_at, encoding) = row;
+    Ok(orch8_types::checkpoint::Checkpoint {
+        id,
+        instance_id: InstanceId::from_uuid(instance),
+        checkpoint_data: super::json_encoding::decode(data, encoding.as_deref())?,
+        created_at,
+    })
 }
 
 pub(super) async fn get_latest(
@@ -34,20 +47,13 @@ pub(super) async fn get_latest_on(
     conn: &mut sqlx::PgConnection,
     instance_id: InstanceId,
 ) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError> {
-    let row: Option<(Uuid, Uuid, serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
+    let row: Option<CheckpointRow> = sqlx::query_as(
+        "SELECT id, instance_id, checkpoint_data, created_at, data_encoding FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(instance_id.into_uuid())
     .fetch_optional(&mut *conn)
     .await?;
-    Ok(row.map(
-        |(id, inst_id, data, created_at)| orch8_types::checkpoint::Checkpoint {
-            id,
-            instance_id: InstanceId::from_uuid(inst_id),
-            checkpoint_data: data,
-            created_at,
-        },
-    ))
+    row.map(decode).transpose()
 }
 
 pub(super) async fn list(
@@ -55,24 +61,14 @@ pub(super) async fn list(
     instance_id: InstanceId,
     limit: u32,
 ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
-    let rows: Vec<(Uuid, Uuid, serde_json::Value, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT id, instance_id, checkpoint_data, created_at FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC LIMIT $2",
+    let rows: Vec<CheckpointRow> = sqlx::query_as(
+        "SELECT id, instance_id, checkpoint_data, created_at, data_encoding FROM checkpoints WHERE instance_id = $1 ORDER BY created_at DESC LIMIT $2",
     )
     .bind(instance_id.into_uuid())
     .bind(i64::from(limit.min(1000)))
     .fetch_all(&store.pool)
     .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(id, inst_id, data, created_at)| orch8_types::checkpoint::Checkpoint {
-                id,
-                instance_id: InstanceId::from_uuid(inst_id),
-                checkpoint_data: data,
-                created_at,
-            },
-        )
-        .collect())
+    rows.into_iter().map(decode).collect()
 }
 
 pub(super) async fn prune(

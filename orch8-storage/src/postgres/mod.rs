@@ -28,6 +28,7 @@ mod externalized;
 mod externalized_snapshot;
 mod federation;
 mod instances;
+mod json_encoding;
 mod kv_state;
 mod local_migration;
 mod misc;
@@ -61,6 +62,7 @@ mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
 mod worker_outcome;
+mod worker_resolution;
 mod worker_version_pins;
 mod workers;
 
@@ -250,6 +252,9 @@ impl PostgresStorage {
                         .execute(&mut *conn)
                         .await?;
                     sqlx::query("SET idle_in_transaction_session_timeout = '60s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("SET orch8.native_json_protocol = 'json_text_v1'")
                         .execute(&mut *conn)
                         .await?;
                     if let Some(sp) = search_path_value {
@@ -1904,11 +1909,20 @@ impl crate::WorkerStore for PostgresStorage {
         workers::finalize_stranded_dispatch(self, task_id, attempt, effect, continuity_epoch).await
     }
 
-    async fn resolve_worker_task(
+    async fn resolve_worker_task_with_evidence(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
-        workers::resolve(self, resolution).await
+        workers::resolve(self, resolution, evidence).await
+    }
+    async fn get_worker_resolution_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: Option<&WorkerClaim>,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get(self, tenant_id, task_id, claim).await
     }
 
     async fn cancel_worker_tasks_for_block(

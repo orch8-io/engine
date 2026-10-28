@@ -451,6 +451,7 @@ fn retry_resolution(
         expected_worker_id: None,
         holder_worker_id: None,
         event: WorkerAttemptEventKind::TimedOut,
+        effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
         reason: "retry binding regression".into(),
         retryable: true,
         action: WorkerTaskResolutionAction::Retry {

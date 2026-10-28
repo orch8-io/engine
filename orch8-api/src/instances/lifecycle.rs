@@ -876,28 +876,35 @@ pub async fn update_context(
 ) -> Result<impl IntoResponse, ApiError> {
     let instance_id = InstanceId::from_uuid(id);
 
-    let instance = state
-        .storage
-        .get_instance(instance_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?
-        .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
-
-    crate::auth::enforce_tenant_access(
-        &tenant_ctx,
-        &instance.tenant_id,
-        &format!("instance {id}"),
-    )?;
-
-    req.context.check_size(state.max_context_bytes)?;
-
-    state
-        .storage
-        .update_instance_context(instance_id, &req.context)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?;
-
-    Ok(StatusCode::OK)
+    for _ in 0..4 {
+        let instance = state
+            .storage
+            .get_instance(instance_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?
+            .ok_or_else(|| ApiError::NotFound(format!("instance {id}")))?;
+        crate::auth::enforce_tenant_access(
+            &tenant_ctx,
+            &instance.tenant_id,
+            &format!("instance {id}"),
+        )?;
+        // Replacing application context must not erase or forge the engine's
+        // run identity, invocation checkpoint, execution mode or loop snapshot.
+        let mut context = req.context.clone();
+        context.runtime = instance.context.runtime;
+        context.check_size(state.max_context_bytes)?;
+        if state
+            .storage
+            .update_instance_context_cas(instance_id, &context, instance.updated_at)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "instance"))?
+        {
+            return Ok(StatusCode::OK);
+        }
+    }
+    Err(ApiError::Conflict(
+        "instance context changed concurrently; retry the update".into(),
+    ))
 }
 
 /// Retry a failed instance: reset to scheduled with immediate fire time.

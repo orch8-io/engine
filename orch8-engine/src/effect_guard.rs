@@ -703,11 +703,22 @@ pub async fn settle_worker_task_effect(
 /// older node's dispatch records the receipt but cannot bind it to the row),
 /// otherwise a freshly dispatched receipt for this attempt. `None` for pure
 /// handlers, which carry no receipt.
+/// A retained binding remains authoritative when its hot copy is missing;
+/// absence of that original receipt never authorizes a replacement request.
 pub(crate) async fn stranded_attempt_effect_id(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
     task: &orch8_types::worker::WorkerTask,
+    retained_effect_id: Option<EffectId>,
 ) -> Result<Option<EffectId>, EngineError> {
+    let bound_effect_id = match (task.effect_id, retained_effect_id) {
+        (Some(hot), Some(original)) if hot != original => {
+            return Err(EngineError::EffectTransition(
+                "stranded worker effect differs from its retained invocation".into(),
+            ));
+        }
+        (hot, original) => original.or(hot),
+    };
     if orch8_types::sequence::is_pure_remote_builtin(&task.handler_name)
         || task
             .context
@@ -729,7 +740,7 @@ pub(crate) async fn stranded_attempt_effect_id(
             instance_id: task.instance_id,
         });
     }
-    let open = match task.effect_id {
+    let open = match bound_effect_id {
         Some(id) => storage.get_effect_receipt(tenant_id, id).await?,
         None => {
             storage
@@ -760,7 +771,7 @@ pub(crate) async fn stranded_attempt_effect_id(
         }
         return Ok(Some(receipt.id));
     }
-    if task.effect_id.is_some() {
+    if bound_effect_id.is_some() {
         return Err(EngineError::EffectTransition(
             "bound worker effect receipt is missing".into(),
         ));

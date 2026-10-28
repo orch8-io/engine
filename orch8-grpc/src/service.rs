@@ -2070,6 +2070,17 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
         let caller_tenant = caller_tenant(&req).cloned();
+        let report_claim =
+            WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
+        if let Some(report) = self
+            .storage
+            .get_worker_resolution_outcome(caller_tenant.as_ref(), task_id, Some(&report_claim))
+            .await
+            .map_err(storage_err)?
+            && report.event == orch8_types::worker::WorkerAttemptEventKind::Failed
+        {
+            return Ok(Response::new(proto::Empty {}));
+        }
         let (pre_task, instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();

@@ -840,4 +840,61 @@ async fn repeated_fail_by_the_same_lease_is_idempotent() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+    server.storage.delete_worker_task(task.id).await.unwrap();
+    server
+        .storage
+        .update_instance_state(
+            task.instance_id,
+            orch8_types::instance::InstanceState::Cancelled,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .storage
+            .purge_terminal_instances(&[task.instance_id])
+            .await
+            .unwrap(),
+        1
+    );
+    let replay =
+        json!({"worker_id":"phone-1","claim_epoch":1,"message":"changed report","retryable":true});
+    assert_eq!(
+        client
+            .post(&url)
+            .header("X-Tenant-Id", tenant)
+            .json(&replay)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    for (scope, worker, epoch) in [
+        (tenant, "other-worker", 1),
+        (tenant, "phone-1", 2),
+        ("other-tenant", "phone-1", 1),
+    ] {
+        let response = client
+            .post(&url)
+            .header("X-Tenant-Id", scope)
+            .json(&json!({"worker_id":worker,"claim_epoch":epoch,"message":"changed"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let report = server
+        .storage
+        .get_worker_resolution_outcome(
+            Some(&TenantId::unchecked(tenant)),
+            task.id,
+            Some(&orch8_types::worker::WorkerClaim::new("phone-1", 1)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.reason, json!("no camera"));
+    assert!(!report.retryable);
 }

@@ -502,7 +502,7 @@ pub(super) async fn create_instance_with_dedupe(
     let scope_kind = scope.kind();
     let scope_value = scope.value();
 
-    let context = serde_json::to_value(&instance.context)?;
+    let context = super::json_encoding::encode_context(&instance.context)?;
     let mut tx = store.pool.begin().await?;
 
     // Insert the child instance FIRST so the FK on emit_event_dedupe

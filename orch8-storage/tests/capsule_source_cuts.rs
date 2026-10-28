@@ -630,6 +630,9 @@ async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidenc
         include_str!("../../migrations/down/130_physical_instance_retirements.sql");
     let retirement_up = include_str!("../../migrations/130_physical_instance_retirements.sql");
     let pool = b.pg_pool();
+    let encoding_down = include_str!("../../migrations/down/138_native_json_encoding.sql");
+    let encoding_up = include_str!("../../migrations/138_native_json_encoding.sql");
+    sqlx::raw_sql(encoding_down).execute(pool).await.unwrap();
     // An empty installation can roll back and reapply without changing the
     // independent continuity schema. Reapplying is safe after an ambiguous DDL ack.
     // Roll migrations back in dependency order, then restore both layers.
@@ -643,6 +646,7 @@ async fn postgres_source_cut_downgrade_preserves_recovery_and_retirement_evidenc
     sqlx::raw_sql(up).execute(pool).await.unwrap();
     sqlx::raw_sql(retirement_up).execute(pool).await.unwrap();
     sqlx::raw_sql(captured_up).execute(pool).await.unwrap();
+    sqlx::raw_sql(encoding_up).execute(pool).await.unwrap();
     let request = fixture(b.storage.as_ref()).await;
     let cut = capture(b.storage.as_ref(), &request).await;
     assert!(sqlx::raw_sql(captured_down).execute(pool).await.is_err());
@@ -1635,6 +1639,7 @@ async fn postgres_worker_retry_and_duplicate_enqueue_keep_parent_before_worker_l
         expected_worker_id: None,
         holder_worker_id: None,
         event: WorkerAttemptEventKind::TimedOut,
+        effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
         reason: "retry pending timeout".into(),
         retryable: true,
         action: WorkerTaskResolutionAction::Retry {
@@ -2385,4 +2390,30 @@ orch8_storage::backend_test!(async fn pending_accepted_worker_result_blocks_capt
     };
     assert!(error.to_string().contains("unapplied worker outcome prevents capsule cut"),"{error}");
     assert!(storage.get_worker_accepted_outcome(Some(&request.owner.tenant_id),task.id,&claim).await.unwrap().is_some());
+});
+
+orch8_storage::backend_test!(async fn lossless_native_json_survives_checkpoint_source_capture_replay_and_abort(b){
+    let s=b.storage.as_ref();let request=fixture(s).await;
+    let payload=json!({"key\0λ":"value\0λ","float":1.0,"negative_zero":-0.0,"large_float":1e18});
+    let mut instance=s.get_instance(request.owner.current_instance_id).await.unwrap().unwrap();
+    instance.context.data=payload.clone();instance.context.config=payload.clone();
+    instance.context.audit.push(orch8_types::context::AuditEntry{timestamp:Utc::now(),event:"audit\0λ".into(),details:payload.clone()});
+    s.update_instance_context(instance.id,&instance.context).await.unwrap();
+    let checkpoint=Checkpoint{id:uuid::Uuid::now_v7(),instance_id:instance.id,checkpoint_data:payload.clone(),created_at:Utc::now()+Duration::seconds(1)};
+    s.save_checkpoint(&checkpoint).await.unwrap();
+    assert_eq!(serde_json::to_string(&s.get_latest_checkpoint(instance.id).await.unwrap().unwrap().checkpoint_data).unwrap(),serde_json::to_string(&payload).unwrap());
+    assert_eq!(serde_json::to_string(&s.list_checkpoints(instance.id,1).await.unwrap()[0].checkpoint_data).unwrap(),serde_json::to_string(&payload).unwrap());
+    s.save_block_output(&BlockOutput{id:uuid::Uuid::now_v7(),instance_id:instance.id,block_id:BlockId::new("lossless"),output:payload.clone(),output_ref:None,output_size:0,attempt:0,created_at:Utc::now()}).await.unwrap();
+    let external=orch8_types::output::ExternalizedEntry{instance_id:instance.id,ref_key:format!("inst:{}:ctx:lossless",instance.id),payload:payload.clone(),created_at:Utc::now(),expires_at:None};
+    s.restore_externalized_entry(&external).await.unwrap();
+    let first=capture(s,&request).await;
+    let snapshot=first.snapshot.as_ref().unwrap();
+    assert_eq!(serde_json::to_string(&snapshot.instance.context).unwrap(),serde_json::to_string(&instance.context).unwrap());
+    assert_eq!(serde_json::to_string(&snapshot.checkpoint.checkpoint_data).unwrap(),serde_json::to_string(&payload).unwrap());
+    assert!(snapshot.outputs.iter().any(|output|output.block_id.as_str()=="lossless" && serde_json::to_string(&output.output).unwrap()==serde_json::to_string(&payload).unwrap()));
+    assert!(snapshot.execution_state.payloads.iter().any(|entry|entry.ref_key==external.ref_key && serde_json::to_string(&entry.payload).unwrap()==serde_json::to_string(&payload).unwrap()));
+    let replay=capture(s,&request).await;
+    assert_eq!(serde_json::to_string(&replay.snapshot).unwrap(),serde_json::to_string(&first.snapshot).unwrap());
+    assert!(s.abort_preparing_capsule_cut(&request.owner.tenant_id,first.id).await.unwrap());
+    assert_eq!(serde_json::to_string(&s.get_instance(instance.id).await.unwrap().unwrap().context).unwrap(),serde_json::to_string(&instance.context).unwrap());
 });

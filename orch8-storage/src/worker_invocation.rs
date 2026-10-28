@@ -362,6 +362,8 @@ impl WorkerInvocation {
             || task.state != WorkerTaskState::Pending
             || task.worker_id.is_some()
             || task.claim_epoch != 0
+            || task.resume_checkpoint.is_some()
+            || task.checkpoint_seq != 0
             || task.effect_id.is_some()
             || task
                 .continuity_epoch

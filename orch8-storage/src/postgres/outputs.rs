@@ -41,20 +41,22 @@ pub(super) async fn save_on(
     conn: &mut sqlx::PgConnection,
     output: &BlockOutput,
 ) -> Result<(), StorageError> {
+    let encoded_output = super::json_encoding::encode(&output.output)?;
     sqlx::query(
         r"
-        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ",
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
     .bind(output.block_id.as_str())
-    .bind(&output.output)
+    .bind(&encoded_output.value)
     .bind(&output.output_ref)
     .bind(pg_output_size(output.output_size)?)
     .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
+    .bind(encoded_output.encoding)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -76,7 +78,7 @@ pub(super) async fn get(
     block_id: &BlockId,
 ) -> Result<Option<BlockOutput>, StorageError> {
     let row = sqlx::query_as::<_, BlockOutputRow>(
-        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding
            FROM block_outputs
            WHERE instance_id = $1 AND block_id = $2
            ORDER BY created_at DESC, id DESC
@@ -136,7 +138,7 @@ pub(super) async fn get_batch(
             SELECT * FROM UNNEST($1::uuid[], $2::text[])
         )
         SELECT DISTINCT ON (b.instance_id, b.block_id)
-            b.id, b.instance_id, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at
+            b.id, b.instance_id, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at, b.output_encoding
         FROM block_outputs b
         JOIN pairs p ON b.instance_id = p.instance_id AND b.block_id = p.block_id
         ORDER BY b.instance_id, b.block_id, b.created_at DESC, b.id DESC
@@ -199,7 +201,7 @@ pub(super) async fn get_all_on(
     // `build_outputs_shape`) is planner-dependent. Ids are UUIDv7
     // (time-ordered), matching the `get_page` convention.
     let rows = sqlx::query_as::<_, BlockOutputRow>(
-        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding
            FROM block_outputs WHERE instance_id = $1 ORDER BY created_at, id",
     )
     .bind(instance_id.into_uuid())
@@ -215,7 +217,7 @@ pub(super) async fn get_after_created_at(
 ) -> Result<Vec<BlockOutput>, StorageError> {
     let rows = if let Some(after) = after {
         sqlx::query_as::<_, BlockOutputRow>(
-            r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+            r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding
                FROM block_outputs WHERE instance_id = $1 AND created_at >= $2 ORDER BY created_at, id",
         )
         .bind(instance_id.into_uuid())
@@ -224,7 +226,7 @@ pub(super) async fn get_after_created_at(
         .await?
     } else {
         sqlx::query_as::<_, BlockOutputRow>(
-            r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+            r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding
                FROM block_outputs WHERE instance_id = $1 ORDER BY created_at, id",
         )
         .bind(instance_id.into_uuid())
@@ -243,7 +245,7 @@ pub(super) async fn get_page(
     offset: u64,
 ) -> Result<Vec<BlockOutput>, StorageError> {
     let rows = sqlx::query_as::<_, BlockOutputRow>(
-        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at
+        r"SELECT id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding
            FROM block_outputs WHERE instance_id = $1
            ORDER BY created_at, id
            LIMIT $2 OFFSET $3",
@@ -397,8 +399,8 @@ pub(super) async fn copy_for_blocks(
     let new_ids: Vec<uuid::Uuid> = src_ids.iter().map(|_| uuid::Uuid::now_v7()).collect();
     let result = sqlx::query(
         r"
-        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        SELECT m.new_id, $2, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
+        SELECT m.new_id, $2, b.block_id, b.output, b.output_ref, b.output_size, b.attempt, b.created_at, b.output_encoding
         FROM UNNEST($3::uuid[], $4::uuid[]) AS m(old_id, new_id)
         JOIN block_outputs b ON b.instance_id = $1 AND b.id = m.old_id
         ",
@@ -462,20 +464,22 @@ pub(super) async fn save_output_and_transition(
 ) -> Result<(), StorageError> {
     let mut tx = store.pool.begin().await?;
 
+    let encoded_output = super::json_encoding::encode(&output.output)?;
     sqlx::query(
         r"
-        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ",
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
     .bind(output.block_id.as_str())
-    .bind(&output.output)
+    .bind(&encoded_output.value)
     .bind(&output.output_ref)
     .bind(pg_output_size(output.output_size)?)
     .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
+    .bind(encoded_output.encoding)
     .execute(&mut *tx)
     .await?;
 
@@ -518,23 +522,25 @@ pub(super) async fn save_output_merge_context_and_transition(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<(), StorageError> {
-    let ctx_json = serde_json::to_value(context)?;
+    let ctx_json = super::json_encoding::encode_context(context)?;
     let mut tx = store.pool.begin().await?;
 
+    let encoded_output = super::json_encoding::encode(&output.output)?;
     sqlx::query(
         r"
-        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ",
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
     .bind(output.block_id.as_str())
-    .bind(&output.output)
+    .bind(&encoded_output.value)
     .bind(&output.output_ref)
     .bind(pg_output_size(output.output_size)?)
     .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
+    .bind(encoded_output.encoding)
     .execute(&mut *tx)
     .await?;
 
@@ -575,20 +581,22 @@ pub(super) async fn save_output_complete_node_and_transition(
 ) -> Result<(), StorageError> {
     let mut tx = store.pool.begin().await?;
 
+    let encoded_output = super::json_encoding::encode(&output.output)?;
     sqlx::query(
         r"
-        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ",
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
     .bind(output.block_id.as_str())
-    .bind(&output.output)
+    .bind(&encoded_output.value)
     .bind(&output.output_ref)
     .bind(pg_output_size(output.output_size)?)
     .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
+    .bind(encoded_output.encoding)
     .execute(&mut *tx)
     .await?;
 
@@ -633,23 +641,25 @@ pub(super) async fn save_output_complete_node_merge_context_and_transition(
     new_state: InstanceState,
     next_fire_at: Option<DateTime<Utc>>,
 ) -> Result<(), StorageError> {
-    let ctx_json = serde_json::to_value(context)?;
+    let ctx_json = super::json_encoding::encode_context(context)?;
     let mut tx = store.pool.begin().await?;
 
+    let encoded_output = super::json_encoding::encode(&output.output)?;
     sqlx::query(
         r"
-        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO block_outputs (id, instance_id, block_id, output, output_ref, output_size, attempt, created_at, output_encoding)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         ",
     )
     .bind(output.id)
     .bind(output.instance_id.into_uuid())
     .bind(output.block_id.as_str())
-    .bind(&output.output)
+    .bind(&encoded_output.value)
     .bind(&output.output_ref)
     .bind(pg_output_size(output.output_size)?)
     .bind(pg_attempt(output.attempt)?)
     .bind(output.created_at)
+    .bind(encoded_output.encoding)
     .execute(&mut *tx)
     .await?;
 
