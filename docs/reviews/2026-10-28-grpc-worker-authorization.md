@@ -75,3 +75,13 @@ complete rolling coordinator protocol enforcement, recovery disposition,
 acknowledged native payload compaction, transported history/key/backup
 compatibility, server delegation and public SDK/platform integration. PR365 stays
 draft; this checkpoint does not establish readiness to merge or publish a release.
+
+## Published-checkpoint CI follow-up
+
+The preceding schema-139 checkpoint completed 24/25 CI checks. Its unit job
+failed only `tenant_worker_claim_does_not_lock_task_instances_row`: the fixture
+manually copied a claim UPDATE without advancing claim_epoch, so the generation
+identity guard correctly refused it. The fixture now advances the generation
+while preserving its deterministic held-lock probe and the separate source-SQL
+assertion. No production identity guard was relaxed. All 44 PostgreSQL integration
+cases pass with PostgreSQL required on the exact isolated repair source.

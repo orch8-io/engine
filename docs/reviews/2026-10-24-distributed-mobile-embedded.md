@@ -6337,3 +6337,11 @@ claim binding; granting Worker all tenant artifact reads is unsafe. Restricted
 generic downloads must be followed by secure worker access to its exact admitted
 payloads, not treated as a finished replacement for that capability. All broader
 review gates listed above remain active and the draft is not ready to merge.
+
+
+The schema-139 checkpoint's final CI result was 24/25 success. The sole failure
+was an obsolete hand-written PostgreSQL locking fixture that omitted claim epoch
+advancement. The fixture now performs a valid generation transition and retains
+its original lock-scope and source-query checks. All 44 PostgreSQL integration
+cases pass on the isolated repair source; production claim fences are unchanged.
+Unfinished schema-140 issued-claim work was saved separately during verification.
