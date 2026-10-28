@@ -6540,3 +6540,21 @@ Source inspection also confirms delegation grant consumption currently precedes
 mailbox enqueue and provenance. Atomic grant/task/effect/proxy/provenance
 publication and recovery remain required; correcting the fixture does not close
 that server-delegation gate.
+
+## Scheduled lifecycle fixture and delegation publication reproduction
+
+Checkpoint 6974460e's E2E job ran 1,590 tests: 1,589 passed and the scheduled-to-paused
+lifecycle fixture lost a state comparison to the scheduler. A sleep step does
+not keep an instance scheduled; it delays completion after the scheduler claims
+the instance. This fixture now uses an explicit future `next_fire_at`, asserts
+scheduled before PATCH and exactly paused after PATCH, and waits for cancellation
+cleanup. Production state comparison remains intact. The lifecycle and continuity
+integration suites pass together: 232 tests, no failures or skips, on the real
+server with disposable PostgreSQL.
+
+Fault injection also reproduces the delegation publication defect on all four
+storage configurations: aborting task insertion leaves the single-use grant
+Consumed. The new regression additionally requires provenance insertion failure
+to roll back task/effect/grant, an identical retry to return the original task,
+and changed input to conflict. These latter assertions are requirements, not
+passing evidence yet. The transactional publication gate remains open.
