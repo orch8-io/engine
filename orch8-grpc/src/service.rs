@@ -1623,11 +1623,19 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<tonic::Streaming<proto::ArtifactTransferClient>>,
     ) -> Result<Response<Self::ArtifactTransferStream>, Status> {
         let tenant = caller_tenant(&req).cloned();
+        let principal = req
+            .extensions()
+            .get::<crate::auth::CallerPrincipal>()
+            .cloned();
         let mut inbound = req.into_inner();
-        let first = inbound
-            .message()
-            .await?
-            .ok_or_else(|| Status::invalid_argument("artifact transfer requires an open frame"))?;
+        let first = crate::auth::stream_scope::guard_operation(
+            principal.as_ref(),
+            &self.storage,
+            "/orch8.Orch8Service/ArtifactTransfer",
+            inbound.message(),
+        )
+        .await??
+        .ok_or_else(|| Status::invalid_argument("artifact transfer requires an open frame"))?;
         let Some(proto::artifact_transfer_client::Payload::Open(open)) = first.payload else {
             return Err(Status::invalid_argument(
                 "first artifact transfer frame must be open",
@@ -1661,75 +1669,89 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(|_| Status::cancelled("artifact transfer closed during handshake"))?;
 
         let shutdown = self.shutdown.clone();
+        let auth_storage = Arc::clone(&self.storage);
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
-            loop {
-                let end = offset
-                    .saturating_add(usize::try_from(chunk_bytes).unwrap_or(usize::MAX))
-                    .min(bytes.len());
-                let data = bytes[offset..end].to_vec();
-                let chunk_digest = Sha256::digest(&data).to_vec();
-                let final_chunk = end == bytes.len();
-                let chunk = proto::ArtifactTransferChunk {
-                    transfer_id: transfer_id.clone(),
-                    offset: u64::try_from(offset).unwrap_or(u64::MAX),
-                    data,
-                    sha256: chunk_digest,
-                    final_chunk,
-                };
-                let sent = tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    sent = sender.send(Ok(artifact_server_frame(
-                        proto::artifact_transfer_server::Payload::Chunk(chunk),
-                    ))) => sent,
-                };
-                if sent.is_err() {
-                    break;
-                }
-                let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
-                let next = tokio::select! {
-                    () = shutdown.cancelled() => {
-                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+            let operation = async {
+                let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
+                loop {
+                    let end = offset
+                        .saturating_add(usize::try_from(chunk_bytes).unwrap_or(usize::MAX))
+                        .min(bytes.len());
+                    let data = bytes[offset..end].to_vec();
+                    let chunk_digest = Sha256::digest(&data).to_vec();
+                    let final_chunk = end == bytes.len();
+                    let chunk = proto::ArtifactTransferChunk {
+                        transfer_id: transfer_id.clone(),
+                        offset: u64::try_from(offset).unwrap_or(u64::MAX),
+                        data,
+                        sha256: chunk_digest,
+                        final_chunk,
+                    };
+                    let sent = tokio::select! {
+                        () = shutdown.cancelled() => break,
+                        sent = sender.send(Ok(artifact_server_frame(
+                            proto::artifact_transfer_server::Payload::Chunk(chunk),
+                        ))) => sent,
+                    };
+                    if sent.is_err() {
                         break;
                     }
-                    next = tokio::time::timeout(ARTIFACT_ACK_IDLE_TIMEOUT, inbound.message()) => next,
-                };
-                let Ok(next) = next else {
-                    let _ = sender.try_send(Err(Status::deadline_exceeded(
-                        "artifact acknowledgement not received in time",
-                    )));
-                    break;
-                };
-                match next {
-                    Ok(Some(proto::ArtifactTransferClient {
-                        payload:
-                            Some(proto::artifact_transfer_client::Payload::Ack(
-                                proto::ArtifactTransferAck { next_offset },
-                            )),
-                    })) if next_offset == expected_offset => {
-                        if final_chunk {
+                    let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
+                    let next = tokio::select! {
+                        () = shutdown.cancelled() => {
+                            let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
                             break;
                         }
-                        offset = end;
-                    }
-                    Ok(Some(_)) => {
-                        let _ = sender
+                        next = tokio::time::timeout(ARTIFACT_ACK_IDLE_TIMEOUT, inbound.message()) => next,
+                    };
+                    let Ok(next) = next else {
+                        let _ = sender.try_send(Err(Status::deadline_exceeded(
+                            "artifact acknowledgement not received in time",
+                        )));
+                        break;
+                    };
+                    match next {
+                        Ok(Some(proto::ArtifactTransferClient {
+                            payload:
+                                Some(proto::artifact_transfer_client::Payload::Ack(
+                                    proto::ArtifactTransferAck { next_offset },
+                                )),
+                        })) if next_offset == expected_offset => {
+                            if final_chunk {
+                                break;
+                            }
+                            offset = end;
+                        }
+                        Ok(Some(_)) => {
+                            let _ = sender
                             .send(Err(Status::failed_precondition(
                                 "artifact acknowledgement offset is not the next chunk boundary",
                             )))
                             .await;
-                        break;
-                    }
-                    Ok(None) => break,
-                    Err(status) => {
-                        let _ = sender.send(Err(status)).await;
-                        break;
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(status) => {
+                            let _ = sender.send(Err(status)).await;
+                            break;
+                        }
                     }
                 }
-            }
+            };
+            crate::auth::stream_scope::run_stream(
+                principal.as_ref(),
+                &auth_storage,
+                "/orch8.Orch8Service/ArtifactTransfer",
+                sender.clone(),
+                terminal_sender,
+                &shutdown,
+                Box::pin(operation),
+            )
+            .await;
         });
         Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(receiver),
+            crate::auth::stream_scope::response_stream(receiver, terminal_receiver),
         )))
     }
 
@@ -1741,11 +1763,19 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<tonic::Streaming<proto::WorkerStreamClient>>,
     ) -> Result<Response<Self::WorkerStreamStream>, Status> {
         let caller_tenant = caller_tenant(&req).cloned();
+        let principal = req
+            .extensions()
+            .get::<crate::auth::CallerPrincipal>()
+            .cloned();
         let mut inbound = req.into_inner();
-        let first = inbound
-            .message()
-            .await?
-            .ok_or_else(|| Status::invalid_argument("worker stream requires an open frame"))?;
+        let first = crate::auth::stream_scope::guard_operation(
+            principal.as_ref(),
+            &self.storage,
+            "/orch8.Orch8Service/WorkerStream",
+            inbound.message(),
+        )
+        .await??
+        .ok_or_else(|| Status::invalid_argument("worker stream requires an open frame"))?;
         if prost::Message::encoded_len(&first)
             > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
         {
@@ -1840,75 +1870,98 @@ impl Orch8Service for Orch8GrpcService {
             .as_ref()
             .is_some_and(|capabilities| capabilities.draining);
         let service = self.clone();
+        let auth_storage = Arc::clone(&self.storage);
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            // Return the receiver before sending queued commands. The hello
-            // can already fill a one-frame channel; awaiting another send in
-            // the RPC handler would prevent the client from draining it.
-            if features
-                .iter()
-                .any(|feature| feature == "placement_commands")
-            {
-                match service
-                    .send_worker_commands(&open.worker_id, tenant.as_ref(), &sender)
-                    .await
+            let operation = async {
+                // Return the receiver before sending queued commands. The hello
+                // can already fill a one-frame channel; awaiting another send in
+                // the RPC handler would prevent the client from draining it.
+                if features
+                    .iter()
+                    .any(|feature| feature == "placement_commands")
                 {
-                    Ok(drain_requested) => draining |= drain_requested,
-                    Err(status) => {
-                        let _ = sender.send(Err(status)).await;
-                        return;
+                    match service
+                        .send_worker_commands(&open.worker_id, tenant.as_ref(), &sender)
+                        .await
+                    {
+                        Ok(drain_requested) => draining |= drain_requested,
+                        Err(status) => {
+                            let _ = sender.send(Err(status)).await;
+                            return;
+                        }
                     }
                 }
-            }
-            let mut outstanding = std::collections::HashSet::new();
-            if !draining
-                && let Err(status) = service
-                    .adopt_held_tasks(
-                        &open,
-                        tenant.as_ref(),
-                        max_in_flight,
-                        &mut outstanding,
-                        &sender,
-                    )
-                    .await
-            {
-                let _ = sender.send(Err(status)).await;
-                return;
-            }
-            let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
-            loop {
-                // Stop accepting frames (Demand included) on shutdown and end
-                // the response stream so graceful shutdown can complete; the
-                // worker reconnects to a live node.
-                let frame = tokio::select! {
-                    biased;
-                    () = service.shutdown.cancelled() => {
-                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+                let mut outstanding = std::collections::HashSet::new();
+                if !draining
+                    && let Err(status) = service
+                        .adopt_held_tasks(
+                            &open,
+                            tenant.as_ref(),
+                            max_in_flight,
+                            &mut outstanding,
+                            &sender,
+                        )
+                        .await
+                {
+                    let _ = sender.send(Err(status)).await;
+                    return;
+                }
+                let mut runtime_id =
+                    initial_capabilities.map(|capabilities| capabilities.runtime_id);
+                loop {
+                    // Stop accepting frames (Demand included) on shutdown and end
+                    // the response stream so graceful shutdown can complete; the
+                    // worker reconnects to a live node.
+                    let frame = tokio::select! {
+                        biased;
+                        () = service.shutdown.cancelled() => {
+                            let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+                            break;
+                        }
+                        frame = inbound.message() => frame,
+                    };
+                    let Ok(Some(frame)) = frame else { break };
+                    if let Some(principal) = &principal
+                        && let Err(status) = principal
+                            .reauthorize(&service.storage, "/orch8.Orch8Service/WorkerStream")
+                            .await
+                    {
+                        let _ = sender.send(Err(status)).await;
                         break;
                     }
-                    frame = inbound.message() => frame,
-                };
-                let Ok(Some(frame)) = frame else { break };
-                let result = service
-                    .handle_worker_stream_frame(
-                        frame,
-                        &open,
-                        tenant.as_ref(),
-                        max_in_flight,
-                        &mut outstanding,
-                        &mut runtime_id,
-                        &mut draining,
-                        &sender,
-                    )
-                    .await;
-                if let Err(status) = result {
-                    let _ = sender.send(Err(status)).await;
-                    break;
+                    let result = service
+                        .handle_worker_stream_frame(
+                            frame,
+                            &open,
+                            tenant.as_ref(),
+                            max_in_flight,
+                            &mut outstanding,
+                            &mut runtime_id,
+                            &mut draining,
+                            &sender,
+                        )
+                        .await;
+                    if let Err(status) = result {
+                        let _ = sender.send(Err(status)).await;
+                        break;
+                    }
                 }
-            }
+            };
+            crate::auth::stream_scope::run_stream(
+                principal.as_ref(),
+                &auth_storage,
+                "/orch8.Orch8Service/WorkerStream",
+                sender.clone(),
+                terminal_sender,
+                &service.shutdown,
+                Box::pin(operation),
+            )
+            .await;
         });
 
         Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(receiver),
+            crate::auth::stream_scope::response_stream(receiver, terminal_receiver),
         )))
     }
 

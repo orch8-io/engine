@@ -1066,3 +1066,6 @@ async fn grpc_compensation_fence_accepts_worker_outcome_without_forward_propagat
         fenced
     );
 }
+
+#[path = "e2e/auth_scope.rs"]
+mod auth_scope;

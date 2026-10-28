@@ -6315,3 +6315,25 @@ recovery disposition/backoff, native acknowledged payload compaction, transporte
 history/key/backup compatibility, server delegation and SDK/platform integration
 remain required. The existing catalog archive API is already implemented. This
 checkpoint does not authorize release or establish readiness to merge the draft.
+
+## gRPC authorization prerequisite for retained claim ownership
+
+The [gRPC worker authorization review](2026-10-28-grpc-worker-authorization.md)
+records a reproduced capability bypass: stored-key authentication retained only
+the tenant, so an Auditor key could reach PollTasks. The auth layer now checks
+explicit grants against the actual 37-method protobuf surface and retains the
+verified request principal. This is not yet a durable issued-claim journal.
+
+Real-transport tests also reproduced worker streams retaining expired/revoked
+keys. Worker/artifact stream guards now reauthorize through the storage-scoped
+cache while idle or backpressured, time out unavailable credential storage, and
+drop blocked work on credential loss, consumer disconnect or shutdown. A separate
+terminal channel and EOF-ordering regression prevent auth failure from being
+hidden by queued data or a channel-close race. Validation passes 178 gRPC cases.
+
+Durable original claimant identity, stable refresh scope and claim-bound artifact
+access remain required implementation work. The generic artifact RPC has no
+claim binding; granting Worker all tenant artifact reads is unsafe. Restricted
+generic downloads must be followed by secure worker access to its exact admitted
+payloads, not treated as a finished replacement for that capability. All broader
+review gates listed above remain active and the draft is not ready to merge.

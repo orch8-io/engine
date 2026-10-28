@@ -45,6 +45,100 @@ use orch8_types::ids::TenantId;
 #[derive(Clone, Debug)]
 pub struct CallerTenant(pub TenantId);
 
+/// Verified stored-key identity and grant. Retained across long-lived RPCs;
+/// this is authentication evidence, not a durable issued worker claim.
+#[derive(Clone)]
+pub struct CallerPrincipal {
+    record: orch8_types::api_key::ApiKeyRecord,
+}
+impl std::fmt::Debug for CallerPrincipal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallerPrincipal")
+            .field("key_id", &self.record.id)
+            .field("tenant_id", &self.record.tenant_id)
+            .field("capabilities", &self.record.capabilities)
+            .finish_non_exhaustive()
+    }
+}
+impl CallerPrincipal {
+    fn authorize(&self, path: &str) -> Result<(), Status> {
+        if capabilities_allow(&self.record.capabilities, path) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(
+                "RPC is not granted to this API key",
+            ))
+        }
+    }
+
+    pub async fn reauthorize(
+        &self,
+        storage: &Arc<dyn StorageBackend>,
+        path: &str,
+    ) -> Result<(), Status> {
+        let record = orch8_storage::api_key_cache::authenticate(storage, &self.record.key_hash)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "grpc API key reauthorization failed");
+                Status::internal("authentication failed")
+            })?
+            .filter(|record| {
+                record.id == self.record.id
+                    && record.tenant_id == self.record.tenant_id
+                    && record.is_active(chrono::Utc::now())
+            })
+            .ok_or_else(|| Status::unauthenticated("API key is no longer active"))?;
+        Self { record }.authorize(path)
+    }
+}
+
+/// Enumerate RPC semantics explicitly: gRPC's POST transport does not imply
+/// write access, and method-name prefixes must not grant future RPCs access.
+fn capabilities_allow(capabilities: &[orch8_types::api_key::ApiCapability], path: &str) -> bool {
+    use orch8_types::api_key::ApiCapability as C;
+    let Some(method) = path.strip_prefix("/orch8.Orch8Service/") else {
+        return false;
+    };
+    capabilities.iter().any(|capability| match capability {
+        C::Operator => true,
+        C::Worker => matches!(
+            method,
+            "Health"
+                | "PollTasks"
+                | "CompleteTask"
+                | "FailTask"
+                | "HeartbeatTask"
+                | "ReleaseTask"
+                | "WorkerStream"
+        ),
+        C::Publisher => matches!(
+            method,
+            "Health" | "CreateSequence" | "GetSequence" | "GetSequenceByName"
+        ),
+        C::Approver => matches!(method, "Health" | "SendSignal"),
+        C::Auditor => matches!(
+            method,
+            "Health"
+                | "GetSequence"
+                | "GetSequenceByName"
+                | "GetInstance"
+                | "ListInstances"
+                | "GetOutputs"
+                | "GetExecutionTree"
+                | "GetCron"
+                | "ListCron"
+                | "GetPool"
+                | "ListPools"
+                | "ListResources"
+                | "ArtifactTransfer"
+        ),
+        C::Device => method == "Health",
+        // Session capabilities are never stored-key grants. Their scoped
+        // bearer protocols are verified by the HTTP runtime-session layer.
+        C::BrowserWorker | C::DeviceNode => false,
+    })
+}
+
 /// Verified workload identity mapped from the SHA-256 fingerprint of the
 /// connection's leaf client certificate.
 #[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
@@ -245,6 +339,11 @@ where
             {
                 return Ok(status.into_http());
             }
+            if let Some(principal) = parts.extensions.get::<CallerPrincipal>()
+                && let Err(status) = principal.authorize(parts.uri.path())
+            {
+                return Ok(status.into_http());
+            }
             inner.call(http::Request::from_parts(parts, body)).await
         })
     }
@@ -335,9 +434,10 @@ async fn authenticate_request_with_workloads(
                     "x-tenant-id does not match key tenant",
                 ));
             }
-            let tenant = TenantId::new(record.tenant_id)
+            let tenant = TenantId::new(record.tenant_id.clone())
                 .map_err(|_| Status::internal("API key has an invalid tenant"))?;
             extensions.insert(CallerTenant(tenant));
+            extensions.insert(CallerPrincipal { record });
             Ok(())
         }
         Ok(_) => Err(Status::unauthenticated("invalid or missing x-api-key")),
@@ -794,3 +894,10 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Unauthenticated);
     }
 }
+
+#[cfg(test)]
+#[path = "auth_capability_tests.rs"]
+mod capability_tests;
+
+#[path = "auth_stream_scope.rs"]
+pub(crate) mod stream_scope;
