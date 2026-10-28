@@ -17,6 +17,14 @@ use serde_json::json;
 use uuid::Uuid;
 
 async fn fixture(s: &dyn StorageBackend, admitted: bool) -> WorkerTask {
+    fixture_in_queue(s, admitted, Some("queue")).await
+}
+
+async fn fixture_in_queue(
+    s: &dyn StorageBackend,
+    admitted: bool,
+    queue: Option<&str>,
+) -> WorkerTask {
     let seq = SequenceBuilder::new("issued-claims")
         .step("work", "noop")
         .build();
@@ -27,7 +35,7 @@ async fn fixture(s: &dyn StorageBackend, admitted: bool) -> WorkerTask {
     parent.context.runtime.current_step_started_at = Some(Utc::now());
     parent.context.data = json!({"private":"ISSUED_CLAIM_CONTEXT_CANARY"});
     s.create_instance(&parent).await.unwrap();
-    let task:WorkerTask=serde_json::from_value(json!({"id":Uuid::now_v7(),"instance_id":parent.id,"block_id":"work","handler_name":"noop","queue_name":"queue","params":{"private":"ISSUED_CLAIM_INPUT_CANARY"},"context":parent.context,"attempt":0,"state":"pending","created_at":Utc::now()})).unwrap();
+    let task:WorkerTask=serde_json::from_value(json!({"id":Uuid::now_v7(),"instance_id":parent.id,"block_id":"work","handler_name":"noop","queue_name":queue,"params":{"private":"ISSUED_CLAIM_INPUT_CANARY"},"context":parent.context,"attempt":0,"state":"pending","created_at":Utc::now()})).unwrap();
     if admitted {
         let parent = s
             .claim_due_instances(Utc::now() + chrono::Duration::seconds(1), 1, 0)
@@ -86,6 +94,28 @@ fn request(mode: u8) -> WorkerClaimRequest {
 fn proof(task: &WorkerTask) -> WorkerClaim {
     WorkerClaim::new(task.worker_id.clone().unwrap(), task.claim_epoch)
 }
+
+orch8_storage::backend_test!(async fn runtime_default_selector_leases_only_the_default_queue(b) {
+    use orch8_types::continuity::RuntimeKind;
+    let s=b.storage.as_ref();
+    for kind in [RuntimeKind::Browser,RuntimeKind::Mobile] {
+        let named=fixture_in_queue(s,false,Some("queue")).await;
+        let default=fixture_in_queue(s,false,None).await;
+        let mut caps=capabilities();caps.kind=kind;
+        let principal=Principal::Runtime {
+            tenant_id:TenantId::unchecked("issued-claims"),runtime_id:caps.runtime_id,
+            runtime_kind:kind,device_id:(kind==RuntimeKind::Mobile).then(||"phone-a".into()),
+        };
+        let request=WorkerClaimRequest::new(principal.clone(),"noop".into(),caps.runtime_id.to_string(),None,None,Some(caps.clone()),10).unwrap();
+        let held=s.claim_worker_tasks_with_authority(&request).await.unwrap();
+        assert_eq!(held.iter().map(|t|t.id).collect::<Vec<_>>(),vec![default.id]);
+        assert_eq!(s.get_worker_task(named.id).await.unwrap().unwrap().state,WorkerTaskState::Pending);
+        let request=WorkerClaimRequest::new(principal,"noop".into(),caps.runtime_id.to_string(),None,Some("queue".into()),Some(caps),10).unwrap();
+        let held=s.claim_worker_tasks_with_authority(&request).await.unwrap();
+        assert_eq!(held.iter().map(|t|t.id).collect::<Vec<_>>(),vec![named.id],"explicit named queue must remain usable");
+        for id in [named.id,default.id] {s.delete_worker_task(id).await.unwrap();}
+    }
+});
 
 orch8_storage::backend_test!(async fn issued_principal_and_original_admission_survive_task_and_native_gc(b) {
     let s=b.storage.as_ref();

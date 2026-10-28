@@ -6373,3 +6373,33 @@ reconciliation, the complete rolling coordinator protocol floor and functional
 claim-bound artifact access remain open. Runtime normal polling also needs a
 reproduced queue-scope bypass test and a functional fix. No original scope gate
 is closed solely by adding this table or by passing these tests.
+
+## Verified transport issuance and scoped queue grants
+
+HTTP polling and gRPC poll/stream demand now journal the verified caller's stable
+identity through the transactional selector. Private authentication markers
+distinguish verified root from unsecured mode; reusable worker labels and request
+JSON establish no ownership. Session identity retains runtime kind, runtime UUID
+and device rather than token JTI. This closes issuance wiring, not the mutation,
+reconnect, receipt replay, legacy reconciliation or artifact-authorization gates.
+
+An authenticated HTTP regression proved unqualified browser polling claimed a
+private named queue without a grant. Runtime-principal default selection now
+constrains SQL to the default queue; named polling checks explicit handler and
+queue grants. PostgreSQL also rechecks queue and tenant at its locking phase.
+Phone session minting lacked named grants, so the functional scoped path adds
+optional bounded queue allowlists and explicit named polling, with exact-grant
+checks and default-only behavior for old sessions. Existing operator/server
+selectors keep their broad queue scope. Renewed phone tokens preserve device
+identity; another device sharing a runtime UUID remains a different principal.
+
+NUL-containing names were also accepted by minting despite being rejected by
+the retained-claim contract. Mint endpoints now reject these before signing or
+device storage access. The final API run passes 412 cases, alongside 179 gRPC,
+36 four-backend issued-claim, six service/scheduler integration and two real
+executor process scenarios. Service/scheduler tests are in-process; separate
+hybrid tests launch rebuilt executor binaries and cover HTTP/gRPC pickup, drain,
+process loss and routing metadata on both SQLite and PostgreSQL. See
+`2026-10-28-worker-transport-identity.md` for the current evidence and remaining
+ownership gates. OpenAPI and the four mobile SDK integration guides reflect the
+additive queue grant; token providers still receive opaque tokens.

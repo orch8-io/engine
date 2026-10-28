@@ -65,6 +65,7 @@ impl Stream {
                 },
                 &self.open,
                 self.tenant.as_ref(),
+                &orch8_storage::worker_claim::WorkerClaimPrincipal::Unsecured {},
                 4,
                 &mut self.outstanding,
                 &mut self.runtime_id,

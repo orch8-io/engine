@@ -1095,14 +1095,19 @@ phone. The phone must not ship an operator (or any stored) API key.
   "device_id": "iphone-7F3A",
   "runtime_id": "uuid",
   "handlers": ["scan_document"],
+  "queues": ["phone-scans"],
   "ttl_secs": 3600
 }
 ```
 
-Returns `201 {token, device_id, runtime_id, expires_at, handlers}`.
+Returns `201 {token, device_id, runtime_id, expires_at, handlers, queues}`
+(`queues` is omitted when empty).
 `runtime_id` is the phone's persisted runtime id (`MobileEngine.nodeRuntimeId()`);
+`queues` is optional, with at most 16 nonblank names of at most 256 bytes each.
+Normal polling claims only the default queue. For named work use
+`POST /workers/tasks/poll/queue` with an explicitly granted `queue_name`.
 `handlers` may be empty (a delegation-only node); `ttl_secs` defaults to 3600
-(max 86400). `400` for an empty `device_id`, a blank handler, or a ttl out of
+(max 86400). `400` for an empty `device_id`, a blank handler/queue, an oversized queue allowlist, or a ttl out of
 range; `409` when the device is registered to another tenant. The `dst_…`
 token (`x-api-key` or `Authorization: Bearer`) reaches only the device's own
 `/mobile/devices/register`, `/mobile/devices/{device_id}/runtime` and
@@ -1707,7 +1712,7 @@ DELETE /webhooks/outbox/{id}             # discard a parked delivery
 
 ## Queue Dispatch Mode (poll / push)
 
-By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed **wake-up hint** to a target URL. The hint is id-only — `{"task_id": "…", "runtime_id": "…" | null, "reason": "task_available"}` — and never carries params or context; the receiver reacts by polling (`POST /workers/tasks/poll`), which claims the task under a lease and returns its payload. The durable task row is still written (completion is reported the usual way).
+By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed **wake-up hint** to a target URL. The hint is id-only — `{"task_id": "…", "runtime_id": "…" | null, "reason": "task_available"}` — and never carries params or context; the receiver polls the default queue (`POST /workers/tasks/poll`) or the explicitly granted named queue (`POST /workers/tasks/poll/queue`), which claims the task under a lease and returns its payload. The durable task row is still written (completion is reported the usual way).
 
 ```
 POST   /queues/dispatch                       # { tenant_id, queue_name, mode: "poll"|"push", push_url?, secret? }

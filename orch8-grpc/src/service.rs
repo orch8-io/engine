@@ -567,6 +567,7 @@ impl Orch8GrpcService {
         frame: proto::WorkerStreamClient,
         open: &proto::WorkerStreamOpen,
         tenant: Option<&TenantId>,
+        claim_principal: &orch8_storage::worker_claim::WorkerClaimPrincipal,
         max_in_flight: u32,
         outstanding: &mut std::collections::HashSet<Uuid>,
         runtime_id: &mut Option<RuntimeId>,
@@ -616,31 +617,21 @@ impl Orch8GrpcService {
                         break;
                     }
                     let limit = u32::try_from(remaining).unwrap_or(u32::MAX);
-                    let tasks = if let (Some(tenant), Some(capabilities)) =
-                        (tenant, advertised.as_ref())
-                    {
-                        self.storage
-                            .claim_worker_tasks_matching(
-                                handler,
-                                &open.worker_id,
-                                Some(tenant),
-                                None,
-                                capabilities,
-                                limit,
-                            )
-                            .await
-                            .map_err(storage_err)?
-                    } else if let Some(tenant) = tenant {
-                        self.storage
-                            .claim_worker_tasks_for_tenant(handler, &open.worker_id, tenant, limit)
-                            .await
-                            .map_err(storage_err)?
-                    } else {
-                        self.storage
-                            .claim_worker_tasks(handler, &open.worker_id, limit)
-                            .await
-                            .map_err(storage_err)?
-                    };
+                    let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+                        claim_principal.clone(),
+                        handler.clone(),
+                        open.worker_id.clone(),
+                        tenant.cloned(),
+                        None,
+                        advertised.clone(),
+                        limit,
+                    )
+                    .map_err(storage_err)?;
+                    let tasks = self
+                        .storage
+                        .claim_worker_tasks_with_authority(&request)
+                        .await
+                        .map_err(storage_err)?;
                     for task in tasks {
                         orch8_engine::step_placement::record_placement_claimed(
                             self.storage.as_ref(),
@@ -1763,6 +1754,7 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<tonic::Streaming<proto::WorkerStreamClient>>,
     ) -> Result<Response<Self::WorkerStreamStream>, Status> {
         let caller_tenant = caller_tenant(&req).cloned();
+        let claim_principal = crate::auth::worker_claim_principal(&req);
         let principal = req
             .extensions()
             .get::<crate::auth::CallerPrincipal>()
@@ -1935,6 +1927,7 @@ impl Orch8Service for Orch8GrpcService {
                             frame,
                             &open,
                             tenant.as_ref(),
+                            &claim_principal,
                             max_in_flight,
                             &mut outstanding,
                             &mut runtime_id,
@@ -1970,21 +1963,24 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::PollTasksRequest>,
     ) -> Result<Response<proto::PollTasksResponse>, Status> {
         let scoped = crate::auth::caller_tenant(&req).cloned();
+        let principal = crate::auth::worker_claim_principal(&req);
         let inner = req.into_inner();
         let limit = inner.limit.min(1000);
-        // Route through tenant-aware claim when caller is tenant-scoped,
-        // matching the HTTP path's isolation semantics.
-        let tasks = if let Some(ref tid) = scoped {
-            self.storage
-                .claim_worker_tasks_for_tenant(&inner.handler_name, &inner.worker_id, tid, limit)
-                .await
-                .map_err(storage_err)?
-        } else {
-            self.storage
-                .claim_worker_tasks(&inner.handler_name, &inner.worker_id, limit)
-                .await
-                .map_err(storage_err)?
-        };
+        let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+            principal,
+            inner.handler_name,
+            inner.worker_id,
+            scoped,
+            None,
+            None,
+            limit,
+        )
+        .map_err(storage_err)?;
+        let tasks = self
+            .storage
+            .claim_worker_tasks_with_authority(&request)
+            .await
+            .map_err(storage_err)?;
         let json: Result<Vec<_>, _> = tasks.iter().map(|t| to_json_string(t)).collect();
         Ok(Response::new(proto::PollTasksResponse {
             tasks_json: json?,

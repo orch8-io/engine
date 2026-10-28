@@ -895,17 +895,21 @@ fn run_device_session_scope(cloud: &Cloud, backend: &Backend) {
         &[201],
     );
 
+    // Named polling is available only with an explicit signed queue grant.
+    expect(
+        &token_a,
+        "POST",
+        "/workers/tasks/poll/queue",
+        Some(json!({"queue_name":"q","handler_name":"phone_scan","worker_id":runtime_a})),
+        &[403],
+    );
+
     // Route families outside the scope: refused before routing.
     let id = Uuid::now_v7();
     for (method, path, body) in [
         ("GET", "/workers/tasks".to_owned(), None),
         ("GET", "/workers/tasks/stats".to_owned(), None),
         ("GET", format!("/workers/tasks/{id}/attempts"), None),
-        (
-            "POST",
-            "/workers/tasks/poll/queue".to_owned(),
-            Some(json!({"queue_name": "q", "handler_name": "phone_scan", "worker_id": runtime_a})),
-        ),
         (
             "POST",
             "/workers/commands".to_owned(),

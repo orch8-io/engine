@@ -376,7 +376,6 @@
         },
         "responses": {
           "201": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -469,7 +468,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -481,9 +479,7 @@
           "403": {
             "description": "Requires the root/admin API key"
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       },
       "delete": {
@@ -513,15 +509,9 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": ""
-          },
-          "403": {
-            "description": ""
-          },
-          "404": {
-            "description": ""
-          }
+          "204": {},
+          "403": {},
+          "404": {}
         }
       }
     },
@@ -637,7 +627,6 @@
         "operationId": "list_all_breakers",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -660,7 +649,6 @@
         "operationId": "list_nodes",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -770,7 +758,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -901,7 +888,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1104,10 +1090,115 @@
         "tags": [
           "continuity"
         ],
+        "summary": "Create or recover a tenant-scoped compensation intent.",
+        "description": "Persist an optional UUID `request_id` before sending creation. The same\ntenant/continuity/request identity returns its saved plan and current progress,\nincluding terminal outcomes while the run record is retained. Distinct intents\nretain active-run conflict behavior. Tenant authorization applies to every call.",
         "operationId": "create_compensation_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateCompensationRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "default": {
-            "description": "Continuity API response"
+          "200": {
+            "description": "Persisted intent replay or recovered commit acknowledgement",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompensationRunRecord"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New compensation run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompensationRunRecord"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Tenant scope mismatch"
+          },
+          "404": {
+            "description": "Continuity execution not found in this tenant"
+          },
+          "409": {
+            "description": "Distinct active intent, no compensable effects, or unsettled admission race"
+          },
+          "422": {
+            "description": "Malformed UUID or unknown creation fields"
+          }
+        }
+      }
+    },
+    "/continuity/executions/{id}/compensations/active": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Recover the active compensation run after a lost creation response.",
+        "description": "Active states are `planned`, `running` and `awaiting_verification`. Terminal records\nremain available by known run ID and keyed creation replay while retained.\nThis tenant-authorized lookup does not create or resume execution.",
+        "operationId": "get_active_compensation_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant scope; must match caller authorization",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current active compensation run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompensationRunRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid tenant identifier"
+          },
+          "403": {
+            "description": "Tenant scope mismatch"
+          },
+          "404": {
+            "description": "No active compensation run in this scope"
           }
         }
       }
@@ -1358,7 +1449,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1623,7 +1713,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1682,7 +1771,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1705,7 +1793,6 @@
         "operationId": "list_profiles",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1749,7 +1836,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -1815,7 +1901,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -2885,7 +2970,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -2894,9 +2978,7 @@
               }
             }
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       }
     },
@@ -2908,7 +2990,6 @@
         "operationId": "get_identity",
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -2990,7 +3071,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -3021,7 +3101,6 @@
         },
         "responses": {
           "201": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -3074,7 +3153,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -3083,9 +3161,7 @@
               }
             }
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       },
       "put": {
@@ -3117,7 +3193,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -3129,9 +3204,7 @@
           "403": {
             "description": "Requires the root/admin API key"
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       },
       "delete": {
@@ -3164,15 +3237,11 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": ""
-          },
+          "204": {},
           "403": {
             "description": "Requires the root/admin API key"
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       }
     },
@@ -3201,11 +3270,14 @@
         "tags": [
           "health"
         ],
-        "summary": "Liveness probe: returns 200 if the process is running.",
+        "summary": "Liveness probe: returns 200 while the process is running, unless an engine\nruns here and its tick loop has not completed an iteration within\n`engine.liveness_stale_secs` — then 503, so the orchestrator restarts a\nwedged scheduler instead of keeping it forever (I-H11).",
         "operationId": "liveness",
         "responses": {
           "200": {
             "description": "Process is alive"
+          },
+          "503": {
+            "description": "Engine tick loop is wedged"
           }
         }
       }
@@ -3215,14 +3287,14 @@
         "tags": [
           "health"
         ],
-        "summary": "Readiness probe: returns 200 only if the database is reachable AND the\nengine tick loop is still running. A dead scheduler with a live DB must not\nreport ready — otherwise the LB keeps routing to a server that accepts work\nbut never executes it.",
+        "summary": "Readiness probe: returns 200 only if the database is reachable AND the\nengine tick loop is still running and ticking. A dead or wedged scheduler\nwith a live DB must not report ready — otherwise the LB keeps routing to a\nserver that accepts work but never executes it.",
         "operationId": "readiness",
         "responses": {
           "200": {
             "description": "Database reachable and engine running"
           },
           "503": {
-            "description": "Database unreachable or engine stopped"
+            "description": "Database unreachable or engine stopped or stalled"
           }
         }
       }
@@ -3740,7 +3812,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -4592,10 +4663,10 @@
               "schema": {
                 "oneOf": [
                   {
-                    "type": "null"
+                    "$ref": "#/components/schemas/ResumeFromRequest"
                   },
                   {
-                    "$ref": "#/components/schemas/ResumeFromRequest"
+                    "type": "null"
                   }
                 ]
               }
@@ -5236,7 +5307,7 @@
         "tags": [
           "jobs"
         ],
-        "summary": "Cancel a job. A job that has not started yet is cancelled immediately\n(200, status `cancelled`); a running job receives a cancel signal that\nthe engine applies at its next step boundary (202). Cancelling a job that\nalready finished is a 409.",
+        "summary": "Cancel a job. The cancel is a durable signal the engine applies promptly\n(202) -- saga compensations and `on_cancel` hooks run as part of it, so the\nreturned job may still show its pre-cancel status. Cancelling a job that\nalready finished is a 409.",
         "operationId": "cancel_job",
         "parameters": [
           {
@@ -5451,7 +5522,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5482,7 +5552,6 @@
         },
         "responses": {
           "201": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5513,7 +5582,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5541,9 +5609,7 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": ""
-          }
+          "204": {}
         }
       }
     },
@@ -5566,7 +5632,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5608,7 +5673,6 @@
         },
         "responses": {
           "201": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5658,7 +5722,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5695,9 +5758,7 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": ""
-          }
+          "204": {}
         }
       }
     },
@@ -5720,7 +5781,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5804,7 +5864,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5813,9 +5872,7 @@
               }
             }
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       }
     },
@@ -5857,7 +5914,6 @@
         },
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5866,12 +5922,8 @@
               }
             }
           },
-          "400": {
-            "description": ""
-          },
-          "404": {
-            "description": ""
-          }
+          "400": {},
+          "404": {}
         }
       },
       "delete": {
@@ -5909,12 +5961,8 @@
           }
         ],
         "responses": {
-          "204": {
-            "description": ""
-          },
-          "404": {
-            "description": ""
-          }
+          "204": {},
+          "404": {}
         }
       }
     },
@@ -5965,7 +6013,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -5974,9 +6021,7 @@
               }
             }
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       }
     },
@@ -6018,7 +6063,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -6027,9 +6071,7 @@
               }
             }
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       }
     },
@@ -6804,10 +6846,10 @@
               "schema": {
                 "oneOf": [
                   {
-                    "type": "null"
+                    "$ref": "#/components/schemas/ReleaseTarget"
                   },
                   {
-                    "$ref": "#/components/schemas/ReleaseTarget"
+                    "type": "null"
                   }
                 ]
               }
@@ -7094,7 +7136,7 @@
             }
           },
           "400": {
-            "description": "Invalid device_id, handlers, or ttl"
+            "description": "Invalid device_id, handlers, queues, or ttl"
           },
           "403": {
             "description": "Caller is not an operator"
@@ -7374,6 +7416,9 @@
           },
           "404": {
             "description": "Instance or sequence not found"
+          },
+          "409": {
+            "description": "Target sequence is structurally incompatible with the instance's execution state"
           }
         }
       }
@@ -7650,7 +7695,6 @@
         },
         "responses": {
           "201": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -7690,7 +7734,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -7722,7 +7765,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -7789,7 +7831,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -7988,7 +8029,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -8031,7 +8071,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -8587,6 +8626,9 @@
           "404": {
             "description": "No such parked delivery"
           },
+          "409": {
+            "description": "Delivery is pending or already claimed by the scheduler"
+          },
           "502": {
             "description": "Redelivery failed (row kept)"
           }
@@ -8931,18 +8973,6 @@
           "workers"
         ],
         "operationId": "task_stats",
-        "responses": {
-          "200": {
-            "description": "Aggregate worker task stats",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/WorkerTaskStats"
-                }
-              }
-            }
-          }
-        },
         "parameters": [
           {
             "name": "window_secs",
@@ -8955,7 +8985,19 @@
               "minimum": 0
             }
           }
-        ]
+        ],
+        "responses": {
+          "200": {
+            "description": "Aggregate worker task stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerTaskStats"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/workers/tasks/{id}/artifacts/{upload_id}": {
@@ -9082,7 +9124,6 @@
         ],
         "responses": {
           "200": {
-            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -9094,9 +9135,7 @@
               }
             }
           },
-          "404": {
-            "description": ""
-          }
+          "404": {}
         }
       }
     },
@@ -9829,11 +9868,11 @@
               "state": {
                 "oneOf": [
                   {
-                    "type": "null"
-                  },
-                  {
                     "$ref": "#/components/schemas/AlertRuleState",
                     "description": "Evaluator state (absent until first evaluation)."
+                  },
+                  {
+                    "type": "null"
                   }
                 ]
               }
@@ -10889,11 +10928,11 @@
           "classification": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DataClassification",
                 "description": "Data classification the `policy` is evaluated for (default `internal`)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -10928,10 +10967,10 @@
           "minimum_trust": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/RuntimeTrustLevel"
               },
               {
-                "$ref": "#/components/schemas/RuntimeTrustLevel"
+                "type": "null"
               }
             ]
           },
@@ -10944,22 +10983,22 @@
           "policy": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/LocalityPolicy",
                 "description": "Locality/residency policy evaluated at dispatch (recorded as a\nplacement decision) and re-evaluated against every claimant."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "prefer": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PlacementPreference",
                 "description": "Soft preference (sticky affinity / preferred labels) with a bounded\nwait. Never widens eligibility; see\n[`crate::placement::PlacementPreference`]."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -10985,11 +11024,11 @@
           "runtime_id": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RuntimeId",
                 "description": "Placement: only this runtime may claim. The task then acts as that\nnode's durable mailbox: it stays `pending` until the node polls."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -11167,11 +11206,11 @@
               "target_runtime_id": {
                 "oneOf": [
                   {
-                    "type": "null"
-                  },
-                  {
                     "$ref": "#/components/schemas/RuntimeId",
                     "description": "`$runtime.runtime_id`: the only node allowed to claim (mailbox)."
+                  },
+                  {
+                    "type": "null"
                   }
                 ]
               }
@@ -11298,6 +11337,184 @@
             ]
           }
         }
+      },
+      "CompensationExecutionStep": {
+        "type": "object",
+        "required": [
+          "plan",
+          "state",
+          "attempt",
+          "updated_at"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lease_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "lease_owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "$ref": "#/components/schemas/CompensationPlanStep"
+          },
+          "provider_receipt_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/CompensationStepState"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "CompensationPlanStep": {
+        "type": "object",
+        "required": [
+          "effect_id",
+          "effect_block_id",
+          "handler",
+          "params",
+          "idempotency_key",
+          "verification"
+        ],
+        "properties": {
+          "effect_block_id": {
+            "$ref": "#/components/schemas/BlockId"
+          },
+          "effect_id": {
+            "$ref": "#/components/schemas/EffectId"
+          },
+          "handler": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "params": {},
+          "verification": {
+            "$ref": "#/components/schemas/CompensationVerificationPolicy"
+          }
+        }
+      },
+      "CompensationRunId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "CompensationRunRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "continuity_id",
+          "source_instance_id",
+          "state",
+          "version",
+          "steps",
+          "hazards",
+          "residual_effects",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "hazards": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "$ref": "#/components/schemas/CompensationRunId"
+          },
+          "residual_effects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source_instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "state": {
+            "$ref": "#/components/schemas/CompensationRunState"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CompensationExecutionStep"
+            }
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "CompensationRunState": {
+        "type": "string",
+        "enum": [
+          "planned",
+          "running",
+          "awaiting_verification",
+          "completed",
+          "completed_with_residuals",
+          "failed"
+        ]
+      },
+      "CompensationStepState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "claimed",
+          "succeeded",
+          "verification_pending",
+          "verified",
+          "failed",
+          "unknown"
+        ]
       },
       "CompensationVerificationPolicy": {
         "type": "string",
@@ -11615,6 +11832,26 @@
           }
         }
       },
+      "CreateCompensationRequest": {
+        "type": "object",
+        "description": "A request UUID is a durable intent identifier, never an authorization token.",
+        "required": [
+          "tenant_id"
+        ],
+        "properties": {
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateCredentialRequest": {
         "type": "object",
         "required": [
@@ -11718,6 +11955,13 @@
             },
             "description": "Handlers the phone may poll and advertise. Empty = the phone only\ndelegates (it never claims tasks)."
           },
+          "queues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Up to 16 named queues the phone may explicitly poll (nonblank, at most 256 bytes each).\nUnqualified polls use the default queue."
+          },
           "runtime_id": {
             "type": "string",
             "description": "The phone's persisted runtime id (`MobileEngine.node_runtime_id()`):\nits `worker_id` for leases and the owner of executions it hosts."
@@ -11756,6 +12000,12 @@
               "type": "string"
             }
           },
+          "queues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "runtime_id": {
             "type": "string"
           },
@@ -11775,11 +12025,11 @@
           "budget": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Budget",
                 "description": "Optional resource budget (token/step caps) enforced by the scheduler.\nWhen any configured limit is exceeded the instance is paused with\n`metadata.paused_reason = \"budget_exceeded\"`. Default: no budget."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -11828,22 +12078,22 @@
           "priority": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Priority",
                 "description": "Explicit priority. When omitted, the lane decides: `priority_lane`,\nthen the sequence's `placement.priority_lane`, then the tenant plan's\n`default_priority_lane`, else `normal`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "priority_lane": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PriorityLane",
                 "description": "Priority lane (`premium` → high, `standard` → normal, `batch` → low).\nIgnored when `priority` is set."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -11911,11 +12161,11 @@
           "target": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ReleaseTarget",
+                "description": "Optional sub-tenant staged rollout: sub-tenant scoped instances are\nrouted by sub-tenant instead of per-instance cohorts; unscoped\ninstances stay on the baseline until promotion. Unknown fields in\nthe target are rejected (the persisted type itself is lenient)."
               },
               {
-                "$ref": "#/components/schemas/ReleaseTarget",
-                "description": "Optional sub-tenant staged rollout: sub-tenant scoped instances are\nrouted by sub-tenant instead of per-instance cohorts; unscoped\ninstances stay on the baseline until promotion."
+                "type": "null"
               }
             ]
           },
@@ -13087,7 +13337,7 @@
       },
       "EmbedTheme": {
         "type": "object",
-        "description": "Tenant-wide embed theme served to embed-kit components.",
+        "description": "Tenant-wide embed theme served to embed-kit components.\n\nPersisted, so unknown fields are tolerated on read (binary rollback);\nthe API decodes request bodies with [`crate::strict`] instead.",
         "properties": {
           "css_vars": {
             "type": "object",
@@ -13109,8 +13359,7 @@
               "null"
             ]
           }
-        },
-        "additionalProperties": false
+        }
       },
       "EnqueueCommandRequest": {
         "type": "object",
@@ -13190,10 +13439,10 @@
           "retry": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/JobRetry"
               },
               {
-                "$ref": "#/components/schemas/JobRetry"
+                "type": "null"
               }
             ]
           },
@@ -13569,10 +13818,10 @@
           "parent_id": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ExecutionNodeId"
               },
               {
-                "$ref": "#/components/schemas/ExecutionNodeId"
+                "type": "null"
               }
             ]
           },
@@ -13854,11 +14103,11 @@
           "resource": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ResourceRef",
                 "description": "The credential / queue / worker / plugin / breaker involved, when\napplicable. This is an identifier, never a secret."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14161,10 +14410,10 @@
           "affected_resource": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ResourceRef"
               },
               {
-                "$ref": "#/components/schemas/ResourceRef"
+                "type": "null"
               }
             ]
           },
@@ -14595,11 +14844,11 @@
           "auto_decide": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/AutoDecideDef",
                 "description": "Confidence-gated automation: ask the Jev decision model to answer the\ngate first. At or above `threshold` confidence the gate is accepted\nwithout a human (the decision, confidence and probabilities are kept\non the gate's output as evidence); below it — or when the model is\nunavailable — the step parks for a human exactly as without this\nsetting.\nBoxed: most gates don't set it, and `HumanInputDef` rides inside\nevery `StepDef` (and so inside large async state machines)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14685,11 +14934,12 @@
         "properties": {
           "duplicate": {
             "type": "boolean",
-            "description": "True when the producer id was already known — nothing changed."
+            "description": "True when the producer identity was already known. Matching can resume\nif the original event is still pending after an earlier attempt."
           },
           "event_id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "ID of the submitted envelope. A duplicate may have a different\ntransport ID from the canonical event stored in the inbox."
           },
           "matched_wait": {
             "type": [
@@ -14760,11 +15010,11 @@
           "sequence": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SequenceDefinition",
                 "description": "Draft sequence definition. Exactly one of `sequence` /\n`sequence_id` must be set."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14868,11 +15118,11 @@
           "failure": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FailureEnvelope",
                 "description": "Structured failure envelope for failed instances."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -14905,10 +15155,10 @@
           "narrative": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/LlmNarrative"
               },
               {
-                "$ref": "#/components/schemas/LlmNarrative"
+                "type": "null"
               }
             ]
           },
@@ -14963,55 +15213,55 @@
           "after_step": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InterceptorAction",
                 "description": "Called after each step completes (success or failure)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "before_step": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InterceptorAction",
                 "description": "Called before each step executes. Can modify context or skip the step."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "on_complete": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InterceptorAction",
                 "description": "Called when the instance completes."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "on_failure": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InterceptorAction",
                 "description": "Called when the instance fails."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "on_signal": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InterceptorAction",
                 "description": "Called when a signal is received."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -15418,10 +15668,10 @@
           "minimum_trust": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/RuntimeTrustLevel"
               },
               {
-                "$ref": "#/components/schemas/RuntimeTrustLevel"
+                "type": "null"
               }
             ]
           },
@@ -15718,11 +15968,11 @@
           "affinity": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Affinity",
                 "description": "`instance`: prefer the runtime that ran the previous worker step."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -15748,11 +15998,11 @@
           "priority_lane": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/PriorityLane",
                 "description": "Priority lane. Sequence-level (sets the instance priority at\ncreation); rejected on steps because priority is per instance."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -15803,10 +16053,10 @@
           "prefer": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/PolicyPreference"
               },
               {
-                "$ref": "#/components/schemas/PolicyPreference"
+                "type": "null"
               }
             ]
           },
@@ -15932,11 +16182,11 @@
           "capabilities": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RuntimeCapabilities",
                 "description": "Short-lived, fail-closed capability advertisement used for atomic\nhardware, region, browser/mobile UI, network, and trust matching."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -16122,10 +16372,10 @@
           "policy": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/LocalityPolicy"
               },
               {
-                "$ref": "#/components/schemas/LocalityPolicy"
+                "type": "null"
               }
             ]
           },
@@ -16410,10 +16660,10 @@
           "canary": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/PromptCanary"
               },
               {
-                "$ref": "#/components/schemas/PromptCanary"
+                "type": "null"
               }
             ]
           },
@@ -16815,10 +17065,10 @@
           "label": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/PromptLabel"
               },
               {
-                "$ref": "#/components/schemas/PromptLabel"
+                "type": "null"
               }
             ]
           },
@@ -16874,10 +17124,10 @@
           "capabilities": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/RuntimeCapabilities"
               },
               {
-                "$ref": "#/components/schemas/RuntimeCapabilities"
+                "type": "null"
               }
             ]
           },
@@ -17241,7 +17491,7 @@
       },
       "ReleaseTarget": {
         "type": "object",
-        "description": "Sub-tenant staged-rollout target of a release.",
+        "description": "Sub-tenant staged-rollout target of a release.\n\nPersisted, so unknown fields are tolerated on read (binary rollback);\nthe API decodes request bodies with [`crate::strict`] instead.",
         "properties": {
           "percentage": {
             "type": [
@@ -17262,8 +17512,7 @@
             },
             "description": "Sub-tenants that always receive the candidate."
           }
-        },
-        "additionalProperties": false
+        }
       },
       "Remediation": {
         "type": "object",
@@ -17275,11 +17524,11 @@
           "action": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RemediationAction",
                 "description": "Machine-applicable classification of the action, when the producer\nknows it. Consumers must use this typed field instead of parsing\n`command` strings; `None` means the action is manual."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -17776,11 +18025,11 @@
           "connectivity": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RuntimeConnectivity",
                 "description": "Current connectivity is deliberately distinct from offline capability:\na device may support offline execution while presently using Wi-Fi."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -17888,10 +18137,10 @@
           "current_step": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/BlockId"
               },
               {
-                "$ref": "#/components/schemas/BlockId"
+                "type": "null"
               }
             ]
           },
@@ -17920,10 +18169,10 @@
           "resource_key": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/ResourceKey"
               },
               {
-                "$ref": "#/components/schemas/ResourceKey"
+                "type": "null"
               }
             ]
           },
@@ -18014,11 +18263,11 @@
           "compensation": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/BlockDefinition",
                 "description": "Compensating action run (in reverse order across all completed\nsteps) if a later step's action fails. `None` means this step has\nno compensation — it is skipped during rollback."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18059,11 +18308,11 @@
           "max_severity": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DiffSeverity",
                 "description": "Worst severity present (absent for an empty diff)."
+              },
+              {
+                "type": "null"
               }
             ]
           }
@@ -18144,11 +18393,11 @@
           "embed": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SequenceEmbed",
                 "description": "Embedding opt-ins (which step outputs embedded viewers may see)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18161,11 +18410,11 @@
           "interceptors": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InterceptorDef",
                 "description": "Lifecycle interceptors (before/after step, on-signal, on-complete, on-failure)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18198,11 +18447,11 @@
           "placement": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Placement",
                 "description": "Sequence-level placement default (region, labels, residency,\naffinity, priority lane) applied to every worker-dispatched step;\nsee `docs/PLACEMENT.md`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18214,11 +18463,11 @@
           "sla": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SlaPolicy",
                 "description": "Alert-only SLA policy. When set, an instance exceeding `max_runtime`\n(or a step exceeding `max_step_runtime`) emits an `instance.sla_breached`\nwebhook and increments `orch8_sla_breached_total` — the instance is NOT\nfailed or paused."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18641,22 +18890,22 @@
           "compensation": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/StepCompensation",
                 "description": "Receipt-backed recovery action for this externally visible step."
+              },
+              {
+                "type": "null"
               }
             ]
           },
           "context_access": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ContextAccess",
                 "description": "Restrict which context sections this step can access. If omitted, all sections visible."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18672,10 +18921,10 @@
           "delay": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/DelaySpec"
               },
               {
-                "$ref": "#/components/schemas/DelaySpec"
+                "type": "null"
               }
             ]
           },
@@ -18695,11 +18944,11 @@
           "on_deadline_breach": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/EscalationDef",
                 "description": "Handler to invoke when the SLA deadline is breached.\nIf omitted but deadline is set, the step simply fails on breach."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18710,11 +18959,11 @@
           "placement": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Placement",
                 "description": "Step placement (region, labels, residency, affinity). Hard facts\nroute the step to the worker queue; see `docs/PLACEMENT.md`."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18742,21 +18991,21 @@
           "retry": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/RetryPolicy"
               },
               {
-                "$ref": "#/components/schemas/RetryPolicy"
+                "type": "null"
               }
             ]
           },
           "send_window": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/SendWindow",
                 "description": "If set, only execute during the specified time window (per instance timezone)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18771,11 +19020,11 @@
           "wait_for_input": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/HumanInputDef",
                 "description": "If set, this step pauses execution and waits for human input via a signal.\nThe signal name is `human_input:{block_id}`. Contains optional timeout."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -18865,7 +19114,7 @@
       },
       "SubTenantLimits": {
         "type": "object",
-        "description": "Per-sub-tenant caps. `None` = uncapped (the tenant pool still applies).",
+        "description": "Per-sub-tenant caps. `None` = uncapped (the tenant pool still applies).\n\nPersisted, so unknown fields are tolerated on read (binary rollback);\nthe API decodes request bodies with [`crate::strict`] instead.",
         "properties": {
           "max_concurrent": {
             "type": [
@@ -18885,8 +19134,7 @@
             "description": "Executions (top-level instances) the sub-tenant may start per\ncalendar month (UTC).",
             "minimum": 0
           }
-        },
-        "additionalProperties": false
+        }
       },
       "SubTenantLimitsResponse": {
         "type": "object",
@@ -19006,11 +19254,11 @@
           "budget": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/Budget",
                 "description": "Optional resource budget enforced by the scheduler (see [`Budget`])."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -19061,11 +19309,11 @@
           "parent_instance_id": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/InstanceId",
                 "description": "Parent instance ID (set when this instance is a sub-sequence child)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -19247,11 +19495,11 @@
           "context": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ExecutionContext",
                 "description": "Current execution context. Omitted when `include_outputs=false`\n(contexts can be as large as outputs)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -19548,10 +19796,10 @@
           "kind": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/CredentialKind"
               },
               {
-                "$ref": "#/components/schemas/CredentialKind"
+                "type": "null"
               }
             ]
           },
@@ -19601,10 +19849,10 @@
           "overlap_policy": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/OverlapPolicy"
               },
               {
-                "$ref": "#/components/schemas/OverlapPolicy"
+                "type": "null"
               }
             ]
           },
@@ -19852,10 +20100,10 @@
           "error_class": {
             "oneOf": [
               {
-                "type": "null"
+                "$ref": "#/components/schemas/DeliveryErrorClass"
               },
               {
-                "$ref": "#/components/schemas/DeliveryErrorClass"
+                "type": "null"
               }
             ]
           },
@@ -19944,11 +20192,11 @@
           "last_error_class": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/DeliveryErrorClass",
                 "description": "Error class of the final attempt when the delivery failed."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -20313,11 +20561,11 @@
           "claimed_runtime_kind": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/RuntimeKind",
                 "description": "Runtime kind of the current claimant (from its capability\nadvertisement), recorded for lease sizing, output bounds, and\nprovenance. `None` for legacy capability-less claims."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -20347,11 +20595,11 @@
           "effect_id": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/EffectId",
                 "description": "Deterministic idempotency key of this attempt's effect receipt, fixed\nat dispatch. Nodes pass it to handlers and downstream APIs as an\nidempotency key; the server settles the receipt by this stored id\n(never a recomputed one, which would miss after an ownership handoff)."
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -20632,11 +20880,11 @@
           "target": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/ReleaseTarget",
                 "description": "Optional sub-tenant staged-rollout target. When set, sub-tenant\nscoped instances are routed by sub-tenant (list membership, then a\nstable per-sub-tenant percentage bucket) instead of per-instance\ncohorts, and unscoped instances follow the default (baseline until\npromotion)."
+              },
+              {
+                "type": "null"
               }
             ]
           },

@@ -45,6 +45,31 @@ use orch8_types::ids::TenantId;
 #[derive(Clone, Debug)]
 pub struct CallerTenant(pub TenantId);
 
+#[derive(Clone, Debug)]
+struct VerifiedRoot;
+
+/// Retain authenticated identity, independently of a caller-supplied worker label.
+pub(crate) fn worker_claim_principal<T>(
+    req: &Request<T>,
+) -> orch8_storage::worker_claim::WorkerClaimPrincipal {
+    use orch8_storage::worker_claim::WorkerClaimPrincipal;
+    if let Some(key) = req.extensions().get::<CallerPrincipal>() {
+        WorkerClaimPrincipal::ApiKey {
+            tenant_id: TenantId::unchecked(&key.record.tenant_id),
+            key_id: key.record.id.clone(),
+        }
+    } else if let Some(identity) = req.extensions().get::<WorkloadIdentity>() {
+        WorkerClaimPrincipal::Workload {
+            tenant_id: TenantId::unchecked(&identity.tenant_id),
+            identity: identity.identity.clone(),
+        }
+    } else if req.extensions().get::<VerifiedRoot>().is_some() {
+        WorkerClaimPrincipal::Root {}
+    } else {
+        WorkerClaimPrincipal::Unsecured {}
+    }
+}
+
 /// Verified stored-key identity and grant. Retained across long-lived RPCs;
 /// this is authentication evidence, not a durable issued worker claim.
 #[derive(Clone)]
@@ -409,6 +434,7 @@ async fn authenticate_request_with_workloads(
         .as_ref()
         .is_some_and(|digest| orch8_types::auth::verify_secret_against_digest(provided, digest))
     {
+        extensions.insert(VerifiedRoot);
         if let Some(tenant) = tenant {
             let tenant = TenantId::new(tenant.to_owned())
                 .map_err(|message| Status::invalid_argument(message))?;
@@ -668,29 +694,37 @@ mod tests {
     #[tokio::test]
     async fn accepts_matching_api_key() {
         let storage = empty_storage().await;
+        let mut extensions = http::Extensions::new();
         authenticate_request(
             &headers(&[("x-api-key", "s3cret")]),
-            &mut http::Extensions::new(),
+            &mut extensions,
             &storage,
             Some(digest_of("s3cret")),
             false,
         )
         .await
         .unwrap();
+        let mut request = Request::new(());
+        *request.extensions_mut() = extensions;
+        assert_eq!(
+            worker_claim_principal(&request),
+            orch8_storage::worker_claim::WorkerClaimPrincipal::Root {}
+        );
     }
 
     #[tokio::test]
     async fn open_when_no_key_configured() {
         let storage = empty_storage().await;
-        authenticate_request(
-            &headers(&[]),
-            &mut http::Extensions::new(),
-            &storage,
-            None,
-            false,
-        )
-        .await
-        .unwrap();
+        let mut extensions = http::Extensions::new();
+        authenticate_request(&headers(&[]), &mut extensions, &storage, None, false)
+            .await
+            .unwrap();
+        let mut request = Request::new(());
+        *request.extensions_mut() = extensions;
+        assert_eq!(
+            worker_claim_principal(&request),
+            orch8_storage::worker_claim::WorkerClaimPrincipal::Unsecured {}
+        );
     }
 
     #[tokio::test]
@@ -841,6 +875,15 @@ mod tests {
                 .get::<CallerTenant>()
                 .map(|caller| caller.0.as_str()),
             Some("acme")
+        );
+        let mut request = Request::new(());
+        *request.extensions_mut() = extensions;
+        assert_eq!(
+            worker_claim_principal(&request),
+            orch8_storage::worker_claim::WorkerClaimPrincipal::ApiKey {
+                tenant_id: TenantId::unchecked("acme"),
+                key_id: minted.record.id,
+            }
         );
     }
 

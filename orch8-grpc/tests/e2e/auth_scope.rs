@@ -93,6 +93,131 @@ fn worker_open() -> orch8_grpc::proto::WorkerStreamClient {
         },
     ))
 }
+
+async fn pending_issuer_offer(storage: &SqliteStorage) -> WorkerTask {
+    let sequence_id = uuid::Uuid::now_v7();
+    let instance_id = InstanceId::new();
+    let sequence = serde_json::from_value(serde_json::json!({
+        "id":sequence_id,"tenant_id":"test","namespace":"default","name":"issuer",
+        "version":1,"blocks":[{"type":"step","id":"work","handler":"h","params":{}}],
+        "created_at":chrono::Utc::now()
+    }))
+    .unwrap();
+    orch8_storage::SequenceStore::create_sequence(storage, &sequence)
+        .await
+        .unwrap();
+    let instance = serde_json::from_value(serde_json::json!({
+        "id":instance_id,"sequence_id":sequence_id,"tenant_id":"test","namespace":"default",
+        "state":"scheduled","priority":"Normal","timezone":"UTC","metadata":{},"context":{},
+        "created_at":chrono::Utc::now(),"updated_at":chrono::Utc::now()
+    }))
+    .unwrap();
+    storage.create_instance(&instance).await.unwrap();
+    let task = pending_worker_task(instance_id, "work", "h", serde_json::json!({}));
+    storage.create_worker_task(&task).await.unwrap();
+    task
+}
+
+#[tokio::test]
+async fn grpc_poll_and_stream_retain_the_verified_issuer() {
+    use orch8_storage::worker_claim::WorkerClaimPrincipal;
+    use orch8_types::{ids::TenantId, worker::WorkerClaim};
+    for root in [false, true] {
+        for streaming in [false, true] {
+            let mut server = ScopedServer::new(ApiCapability::Worker, false).await;
+            let task = pending_issuer_offer(server.storage.as_ref()).await;
+            let claimed: WorkerTask = if streaming {
+                let outbound = tokio_stream::iter([
+                    worker_open(),
+                    worker_stream_frame(orch8_grpc::proto::worker_stream_client::Payload::Demand(
+                        orch8_grpc::proto::WorkerStreamDemand { capacity: 1 },
+                    )),
+                ]);
+                let mut request = server.request(outbound);
+                if root {
+                    request
+                        .metadata_mut()
+                        .insert("x-api-key", "root".parse().unwrap());
+                    request
+                        .metadata_mut()
+                        .insert("x-tenant-id", "test".parse().unwrap());
+                }
+                let mut inbound = server
+                    .client
+                    .worker_stream(request)
+                    .await
+                    .unwrap()
+                    .into_inner();
+                let hello =
+                    tokio::time::timeout(std::time::Duration::from_secs(4), inbound.message())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                assert!(matches!(
+                    hello.payload,
+                    Some(orch8_grpc::proto::worker_stream_server::Payload::Hello(_))
+                ));
+                let frame =
+                    tokio::time::timeout(std::time::Duration::from_secs(4), inbound.message())
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                let Some(orch8_grpc::proto::worker_stream_server::Payload::Task(delivered)) =
+                    frame.payload
+                else {
+                    panic!("demand must deliver a task")
+                };
+                serde_json::from_str(&delivered.task_json).unwrap()
+            } else {
+                let mut request = server.request(orch8_grpc::proto::PollTasksRequest {
+                    handler_name: "h".into(),
+                    worker_id: "worker-key-lifetime".into(),
+                    limit: 1,
+                });
+                if root {
+                    request
+                        .metadata_mut()
+                        .insert("x-api-key", "root".parse().unwrap());
+                    request
+                        .metadata_mut()
+                        .insert("x-tenant-id", "test".parse().unwrap());
+                }
+                let response = server
+                    .client
+                    .poll_tasks(request)
+                    .await
+                    .unwrap()
+                    .into_inner();
+                serde_json::from_str(&response.tasks_json[0]).unwrap()
+            };
+            assert_eq!(claimed.id, task.id);
+            let issued = server
+                .storage
+                .get_worker_issued_claim(
+                    Some(&TenantId::unchecked("test")),
+                    task.id,
+                    &WorkerClaim::new("worker-key-lifetime", claimed.claim_epoch),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let expected = if root {
+                WorkerClaimPrincipal::Root {}
+            } else {
+                WorkerClaimPrincipal::ApiKey {
+                    tenant_id: TenantId::unchecked("test"),
+                    key_id: server.key.record.id.clone(),
+                }
+            };
+            assert_eq!(
+                issued.principal, expected,
+                "streaming={streaming}, root={root}"
+            );
+        }
+    }
+}
 async fn assert_idle_worker_stream_loses_inactive_key(expire: bool) {
     let mut server = ScopedServer::new(ApiCapability::Worker, expire).await;
     let outbound = tokio_stream::StreamExt::chain(

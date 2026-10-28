@@ -190,10 +190,15 @@ app.post("/orch8/device-session", requireUser, async (req, res) => {
 });
 ```
 
+App backends may include optional `queues` in the device-session mint request
+to grant explicit `/workers/tasks/poll/queue` access (at most 16 named queues).
+Normal polls use the default queue; a named poll must match a signed queue grant.
+The SDK token provider continues returning the opaque session token.
+
 The raw call is `POST /api/v1/runtimes/device-sessions` with
-`{"device_id", "runtime_id", "handlers", "ttl_secs"}` and the operator key in
+`{"device_id", "runtime_id", "handlers", "queues", "ttl_secs"}` and the operator key in
 `x-api-key`; it answers `{"token", "device_id", "runtime_id", "expires_at",
-"handlers"}`. A rejected or empty refresh leaves the request failed (401); the
+"handlers", "queues"}` (`queues` is omitted when empty). A rejected or empty refresh leaves the request failed (401); the
 native side waits for your function up to `handlerTimeoutMs`.
 
 `syncApiKey` in `initialize` is the **legacy** path and not for production

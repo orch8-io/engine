@@ -10,7 +10,7 @@
 //! root-key derivation):
 //!
 //! * bound to one tenant, `kind = mobile`, one `device_id`, one `runtime_id`,
-//!   and a handler allowlist;
+//!   and handler/named-queue allowlists;
 //! * usable only on the routes [`route_allowed`] lists (denied by default):
 //!   the device's own mobile register / sync / runtime advertisement, the
 //!   worker lease protocol, and the continuity delegation calls — each
@@ -65,6 +65,7 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
         ["mobile", "sync"]
         | ["mobile", "devices", "register"]
         | ["workers", "tasks", "poll"]
+        | ["workers", "tasks", "poll", "queue"]
         | ["continuity", "executions" | "grants"]
         | ["continuity", "delegations", "claim"] => true,
         ["mobile", "devices", device_id, "runtime"] => !device_id.is_empty(),
@@ -197,6 +198,10 @@ pub(crate) struct CreateDeviceSessionRequest {
     /// delegates (it never claims tasks).
     #[serde(default)]
     handlers: Vec<String>,
+    /// Up to 16 named queues the phone may explicitly poll (nonblank, at most 256 bytes each).
+    /// Unqualified polls use the default queue.
+    #[serde(default)]
+    queues: Vec<String>,
     /// Token lifetime in seconds (default 3600, max 86400).
     #[serde(default)]
     ttl_secs: Option<u32>,
@@ -210,6 +215,8 @@ pub(crate) struct CreateDeviceSessionResponse {
     runtime_id: RuntimeId,
     expires_at: DateTime<Utc>,
     handlers: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    queues: Vec<String>,
 }
 
 /// Mint a device-session token. Operator/Admin only — called by the
@@ -218,7 +225,7 @@ pub(crate) struct CreateDeviceSessionResponse {
     request_body = CreateDeviceSessionRequest,
     responses(
         (status = 201, description = "Scoped device-session token", body = CreateDeviceSessionResponse),
-        (status = 400, description = "Invalid device_id, handlers, or ttl"),
+        (status = 400, description = "Invalid device_id, handlers, queues, or ttl"),
         (status = 403, description = "Caller is not an operator"),
         (status = 409, description = "The device is registered to another tenant"),
     )
@@ -239,12 +246,16 @@ pub(crate) async fn create_device_session(
     if principal.is_none() && admin.is_none() {
         return Err(ApiError::Unauthorized);
     }
-    if body.device_id.trim().is_empty() || body.device_id.len() > MAX_NAME_BYTES {
+    if body.device_id.trim().is_empty()
+        || body.device_id.len() > MAX_NAME_BYTES
+        || body.device_id.contains('\0')
+    {
         return Err(ApiError::InvalidArgument(format!(
-            "device_id must be non-empty and at most {MAX_NAME_BYTES} bytes"
+            "device_id must be nonblank, NUL-free and at most {MAX_NAME_BYTES} bytes"
         )));
     }
     validate_names("handlers", &body.handlers, MAX_HANDLERS)?;
+    validate_names("queues", &body.queues, crate::browser_sessions::MAX_QUEUES)?;
     let ttl = body.ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
     if ttl == 0 || ttl > MAX_TTL_SECS {
         return Err(ApiError::InvalidArgument(format!(
@@ -270,13 +281,16 @@ pub(crate) async fn create_device_session(
     let mut handlers = body.handlers;
     handlers.sort();
     handlers.dedup();
+    let mut queues = body.queues;
+    queues.sort();
+    queues.dedup();
     let claims = Claims {
         v: 1,
         jti: uuid::Uuid::now_v7(),
         tenant_id: tenant_id.as_str().to_owned(),
         runtime_id: body.runtime_id,
         handlers: handlers.clone(),
-        queues: Vec::new(),
+        queues: queues.clone(),
         kind: Some(RuntimeKind::Mobile),
         device_id: Some(body.device_id.clone()),
         iat: now.timestamp(),
@@ -299,6 +313,7 @@ pub(crate) async fn create_device_session(
             runtime_id: body.runtime_id,
             expires_at: DateTime::from_timestamp(claims.exp, 0).unwrap_or(expires_at),
             handlers,
+            queues,
         }),
     ))
 }
@@ -422,6 +437,7 @@ mod tests {
             (&post, "/api/v1/mobile/devices/register".to_owned()),
             (&post, "/api/v1/mobile/devices/phone-1/runtime".to_owned()),
             (&post, "/api/v1/workers/tasks/poll".to_owned()),
+            (&post, "/api/v1/workers/tasks/poll/queue".to_owned()),
             (&post, format!("/api/v1/workers/tasks/{id}/complete")),
             (&post, format!("/api/v1/workers/tasks/{id}/fail")),
             (&post, format!("/api/v1/workers/tasks/{id}/heartbeat")),
@@ -437,7 +453,6 @@ mod tests {
         for (method, denied) in [
             (&get, "/api/v1/workers/tasks".to_owned()),
             (&get, "/api/v1/workers/tasks/stats".to_owned()),
-            (&post, "/api/v1/workers/tasks/poll/queue".to_owned()),
             (&post, format!("/api/v1/workers/tasks/{id}/artifacts/{id}")),
             (&post, "/api/v1/workers/commands".to_owned()),
             (&post, "/api/v1/runtimes/browser-sessions".to_owned()),

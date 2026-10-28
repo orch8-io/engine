@@ -634,6 +634,7 @@ pub(crate) fn poll_limit(
 )]
 pub(crate) async fn poll_tasks(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Json(mut req): Json<PollRequest>,
@@ -685,32 +686,21 @@ pub(crate) async fn poll_tasks(
     // with this worker_id, drop it from the response, and leave a ghost
     // `claimed` row invisible to its owning tenant until the stale-task
     // reaper reset it.
-    let tasks = if let Some(capabilities) = req.capabilities.as_ref() {
-        state
-            .storage
-            .claim_worker_tasks_matching(
-                &req.handler_name,
-                &req.worker_id,
-                scoped.as_ref(),
-                None,
-                capabilities,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else if let Some(ref tid) = scoped {
-        state
-            .storage
-            .claim_worker_tasks_for_tenant(&req.handler_name, &req.worker_id, tid, limit)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else {
-        state
-            .storage
-            .claim_worker_tasks(&req.handler_name, &req.worker_id, limit)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    };
+    let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+        caller.0,
+        req.handler_name.clone(),
+        req.worker_id.clone(),
+        scoped.clone(),
+        None,
+        req.capabilities.take(),
+        limit,
+    )
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    let tasks = state
+        .storage
+        .claim_worker_tasks_with_authority(&request)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
 
     record_registration(
         &state,
@@ -746,6 +736,7 @@ pub(crate) struct QueuePollRequest {
 )]
 pub(crate) async fn poll_tasks_from_queue(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Json(mut req): Json<QueuePollRequest>,
@@ -790,43 +781,21 @@ pub(crate) async fn poll_tasks_from_queue(
         return Ok(poll_response(&state, Vec::new()));
     }
 
-    let tasks = if let Some(capabilities) = req.capabilities.as_ref() {
-        state
-            .storage
-            .claim_worker_tasks_matching(
-                &req.handler_name,
-                &req.worker_id,
-                scoped.as_ref(),
-                Some(&req.queue_name),
-                capabilities,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else if let Some(ref tid) = scoped {
-        state
-            .storage
-            .claim_worker_tasks_from_queue_for_tenant(
-                &req.queue_name,
-                &req.handler_name,
-                &req.worker_id,
-                tid,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else {
-        state
-            .storage
-            .claim_worker_tasks_from_queue(
-                &req.queue_name,
-                &req.handler_name,
-                &req.worker_id,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    };
+    let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+        caller.0,
+        req.handler_name.clone(),
+        req.worker_id.clone(),
+        scoped.clone(),
+        Some(req.queue_name.clone()),
+        req.capabilities.take(),
+        limit,
+    )
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    let tasks = state
+        .storage
+        .claim_worker_tasks_with_authority(&request)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
 
     record_registration(
         &state,

@@ -316,6 +316,13 @@ pub(super) async fn claim_matching(
         capabilities,
         principal,
     } = runtime;
+    // An unqualified session poll grants the default queue only. Named queues
+    // require the transport's explicit allowlist check and named-queue selector.
+    let default_queue_only = queue_name.is_none()
+        && matches!(
+            principal,
+            Some(crate::worker_claim::WorkerClaimPrincipal::Runtime { .. })
+        );
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -385,6 +392,8 @@ pub(super) async fn claim_matching(
         }
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name = ").push_bind(queue);
+        } else if default_queue_only {
+            query.push(" AND wt.queue_name IS NULL");
         }
         if let Some(tenant) = tenant_id {
             // Denormalised tenant (L4-03): no per-row instance join, so the
@@ -438,7 +447,7 @@ pub(super) async fn claim_matching(
              lease_secs=$4, claimed_runtime_kind=$5
            WHERE id IN (
              SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND state = 'pending' AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
+             WHERE id = ANY($2) AND ($6::text IS NULL OR queue_name=$6) AND (NOT $7 OR queue_name IS NULL) AND ($8::text IS NULL OR tenant_id=$8) AND state = 'pending' AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
              ORDER BY created_at, id
              LIMIT $3
              FOR UPDATE SKIP LOCKED
@@ -456,6 +465,9 @@ pub(super) async fn claim_matching(
             .map(|secs| secs as i32),
     )
     .bind(capabilities.kind.as_str())
+    .bind(queue_name)
+    .bind(default_queue_only)
+    .bind(tenant_id.map(orch8_types::TenantId::as_str))
     .fetch_all(&mut *tx)
     .await?;
     let tasks = rows

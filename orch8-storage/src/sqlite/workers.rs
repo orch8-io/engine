@@ -337,6 +337,13 @@ pub(super) async fn claim_matching(
         capabilities,
         principal,
     } = runtime;
+    // An unqualified session poll grants the default queue only. Named queues
+    // require the transport's explicit allowlist check and named-queue selector.
+    let default_queue_only = queue_name.is_none()
+        && matches!(
+            principal,
+            Some(crate::worker_claim::WorkerClaimPrincipal::Runtime { .. })
+        );
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -392,6 +399,8 @@ pub(super) async fn claim_matching(
             .push(")");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name=").push_bind(queue);
+        } else if default_queue_only {
+            query.push(" AND wt.queue_name IS NULL");
         }
         if let Some(tenant) = tenant_id {
             query.push(" AND ti.tenant_id=").push_bind(tenant.as_str());

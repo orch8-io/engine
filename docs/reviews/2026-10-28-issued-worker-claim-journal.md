@@ -56,12 +56,12 @@ tenant with the indexed SQL tenant. This lookup itself grants no authority.
 
 ## Required continuation
 
-HTTP/gRPC poll adapters still call the legacy primitives at this checkpoint.
-Authenticated transport principals must be wired to the authorized selector,
-then checked before every mutation, reconnect adoption and receipt replay.
+HTTP/gRPC issuance now uses the authorized selector in the follow-up
+`2026-10-28-worker-transport-identity.md`. The persisted principal still must be
+checked before every mutation, reconnect adoption and receipt replay.
 Legacy/missing ownership requires an explicit reconciliation policy rather than
-silently assigning a new principal. Actual root credentials must be distinguished
-from insecure mode, which existing HTTP AdminContext currently conflates.
+silently assigning a new principal. The follow-up distinguishes verified root
+authentication from insecure admin permissions with a private request marker.
 
 Old coordinator writers can still omit this Rust-level journal. A rolling
 protocol floor and database enforcement remain required before ownership can be
@@ -73,9 +73,8 @@ Worker payload retrieval also remains required. Generic artifact download has
 no issued-claim/object grant. The eventual worker path must authorize its exact
 admitted objects under the retained claimant; generic tenant-wide artifact read
 is not a substitute. Review runtime queue permissions during adapter wiring:
-normal poll currently has no queue predicate, while named queue poll checks an
-explicit session allowlist. That suspected bypass needs a reproduced test and a
-functional scoped fix. The separate pending-offer/paused-parent behavior also
+the follow-up reproduces and fixes normal session polling across ungranted
+named queues, while preserving explicit named-queue access. The separate pending-offer/paused-parent behavior also
 needs its actual contract and database guards checked before changing semantics.
 
 Strict all-target Clippy passes on the final principal format and lookup API
