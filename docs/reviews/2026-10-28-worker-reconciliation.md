@@ -52,3 +52,11 @@ facts after approver-key retirement, approved continuing handoff/revocation, com
 write enforcement and functional claim-bound artifacts remain open alongside
 all original distributed/mobile/embedded review requirements. This work does
 not authorize merging the draft or publishing a release.
+
+The adjacent CI correction changes the delegation provenance fixture to a stable
+waiting parent instead of a noop that can still be scheduler-owned. It retains
+the original parent-chain/epoch/owner assertions and changes no production
+fence. The full real-server continuity integration/isolation suite passes all
+221 cases on disposable PostgreSQL; TypeScript typechecking passes. Server
+side grant consumption still precedes mailbox/provenance publication and remains
+an explicit atomic-publication review gate.

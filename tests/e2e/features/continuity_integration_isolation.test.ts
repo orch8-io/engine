@@ -941,7 +941,12 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
   describe("A. device delegation records a boundary on the parent chain", () => {
     it("a claimed delegation appends device_delegation to the parent's chain, not a new one", async () => {
       const tenantId = tid("int-deleg");
-      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      // Mailbox publication is unclaimed work. A fresh noop can still be
+      // scheduler-owned; keep this provenance fixture at a stable waiting gate.
+      const { execution, runtimeId: sourceRuntimeId } = await pausedContinuityFixture(
+        tenantId,
+        "int-deleg-parent",
+      );
       await registerRuntime(tenantId, sourceRuntimeId);
       const destRuntime = uuid();
       await registerRuntime(tenantId, destRuntime);

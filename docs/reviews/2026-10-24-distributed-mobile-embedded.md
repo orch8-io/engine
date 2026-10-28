@@ -6525,3 +6525,18 @@ Unattributed callback compatibility remains, as do failures/late reports without
 a held task, independent review/read of already accepted history after approver
 key retirement, continuing handoff/revocation, the complete coordinator/database
 write floor, functional claim-bound artifacts and all original review gates.
+
+## Published CI delegation fixture race
+
+The published 61321bbc checkpoint completed 24/25 CI checks. Its sole failed E2E
+case requested delegation from a newly created noop parent while a scheduler
+could still own that parent. The unclaimed mailbox effect fence correctly
+refused the request. The provenance fixture now uses the existing waiting human
+review parent, preserving the epoch/owner and parent-chain assertions. It does
+not weaken the production fence. The full corrected suite passes 221 cases with no skips against a freshly built
+server and disposable PostgreSQL. TypeScript typechecking also passes.
+
+Source inspection also confirms delegation grant consumption currently precedes
+mailbox enqueue and provenance. Atomic grant/task/effect/proxy/provenance
+publication and recovery remain required; correcting the fixture does not close
+that server-delegation gate.
