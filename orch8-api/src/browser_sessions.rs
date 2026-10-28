@@ -358,7 +358,13 @@ impl BrowserSessionSigner {
         // A device session is always bound to one device; a browser session
         // never is.
         let device_id = match (kind, claims.device_id) {
-            (RuntimeKind::Mobile, Some(device_id)) if !device_id.is_empty() => Some(device_id),
+            (RuntimeKind::Mobile, Some(device_id))
+                if !device_id.trim().is_empty()
+                    && device_id.len() <= MAX_NAME_BYTES
+                    && !device_id.contains('\0') =>
+            {
+                Some(device_id)
+            }
             (RuntimeKind::Browser, None) => None,
             _ => return None,
         };

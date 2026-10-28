@@ -6445,3 +6445,20 @@ Explicit durable backend/operator reconciliation, approved handoff/revocation,
 the complete coordinator/database write floor, functional claim-bound artifact
 reads and all other original ledger gates remain unfinished. This checkpoint
 is not completion of the review or permission to merge the draft.
+
+
+## Previously signed device identity validation
+
+The minting endpoint already rejected blank, NUL-containing and over-256-byte
+device IDs, but the verifier accepted correctly signed historical tokens with
+those values. A regression reproduced acceptance of a blank device identity.
+Verification now applies the same device-ID contract before constructing an
+authenticated runtime binding; the auth middleware returns Unauthorized when
+verification fails. Tests also reject NUL/oversized IDs and preserve a valid
+256-byte multibyte ID. This change does not add account/catalog identity to
+runtime tokens or close session-versioning, enrollment or legacy-reconciliation
+gates.
+
+Verification passes 368 API unit cases, nine browser-session transport cases and
+four device-session transport cases with PostgreSQL required. The regression
+failed before the verifier repair and passes after it.

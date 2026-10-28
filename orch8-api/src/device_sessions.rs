@@ -388,6 +388,33 @@ mod tests {
     }
 
     #[test]
+    fn signed_device_tokens_reject_invalid_device_identity() {
+        let signer = BrowserSessionSigner::for_root(Some([5; 32]));
+        let now = Utc::now();
+        for device in [" ".to_owned(), "phone\0other".to_owned(), "x".repeat(257)] {
+            // Older signers could mint these. A valid signature must not turn
+            // an invalid stored-claim identity into an authenticated caller.
+            let token = signer
+                .mint(&claims(
+                    Some(RuntimeKind::Mobile),
+                    Some(&device),
+                    now.timestamp() + 60,
+                ))
+                .unwrap();
+            assert!(signer.verify(&token, now).is_none(), "accepted {device:?}");
+        }
+        let device = "é".repeat(128);
+        let token = signer
+            .mint(&claims(
+                Some(RuntimeKind::Mobile),
+                Some(&device),
+                now.timestamp() + 60,
+            ))
+            .unwrap();
+        assert_eq!(signer.verify(&token, now).unwrap().device_id, Some(device));
+    }
+
+    #[test]
     fn device_advertisements_are_clamped_to_the_binding() {
         let now = Utc::now();
         let binding = RuntimeBinding {
