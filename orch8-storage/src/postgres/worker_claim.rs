@@ -18,7 +18,7 @@ pub(super) async fn record_on(
         let tasks: std::collections::HashMap<_, _> =
             batch.iter().map(|task| (task.id, task)).collect();
         let ids: Vec<_> = batch.iter().map(|task| task.id).collect();
-        let rows=sqlx::query("SELECT t.id,n.tenant_id,n.id AS native_id,v.tenant_id AS invocation_tenant,v.instance_id AS invocation_instance,v.record AS invocation,a.tenant_id AS admission_tenant,a.instance_id AS admission_instance,a.invocation_key,a.record AS admission FROM worker_tasks t JOIN task_instances n ON n.id=t.instance_id LEFT JOIN worker_task_invocations v ON v.task_id=t.id LEFT JOIN worker_task_admissions a ON a.task_id=t.id WHERE t.id=ANY($1)").bind(&ids).fetch_all(&mut *conn).await?;
+        let rows=sqlx::query("SELECT t.id,n.tenant_id,n.id AS native_id,v.tenant_id AS invocation_tenant,v.instance_id AS invocation_instance,v.record AS invocation,a.tenant_id AS admission_tenant,a.instance_id AS admission_instance,a.invocation_key,a.record AS admission,p.tenant_id AS publication_tenant,p.instance_id AS publication_instance,p.delegation_id AS publication_id,p.grant_id AS publication_grant,p.record AS publication FROM worker_tasks t JOIN task_instances n ON n.id=t.instance_id LEFT JOIN worker_task_invocations v ON v.task_id=t.id LEFT JOIN worker_task_admissions a ON a.task_id=t.id LEFT JOIN delegation_publications p ON p.task_id=t.id WHERE t.id=ANY($1)").bind(&ids).fetch_all(&mut *conn).await?;
         if rows.len() != batch.len() {
             return Err(invalid());
         }
@@ -57,6 +57,36 @@ pub(super) async fn record_on(
                 Some(a.invocation_key.as_str())
                     != row.get::<Option<String>, _>("invocation_key").as_deref()
             }) {
+                return Err(invalid());
+            }
+            let publication: Option<crate::delegation_publication::DelegationPublication> = row
+                .get::<Option<serde_json::Value>, _>("publication")
+                .map(serde_json::from_value)
+                .transpose()?;
+            let required=legacy.as_ref().is_some_and(|source|matches!(&source.target,crate::worker_invocation::WorkerInvocationTarget::Unbound{reason} if reason==crate::delegation_publication::INVOCATION_REASON));
+            if required && publication.is_none() {
+                return Err(invalid());
+            }
+            if let Some(publication) = publication
+                && (row
+                    .get::<Option<String>, _>("publication_tenant")
+                    .as_deref()
+                    != Some(tenant.as_str())
+                    || row
+                        .get::<Option<Uuid>, _>("publication_instance")
+                        .map(|id| id.to_string())
+                        != Some(publication.instance_id.to_string())
+                    || row
+                        .get::<Option<Uuid>, _>("publication_id")
+                        .map(|id| id.to_string())
+                        != Some(publication.delegation.id.to_string())
+                    || row
+                        .get::<Option<Uuid>, _>("publication_grant")
+                        .map(|id| id.to_string())
+                        != Some(publication.delegation.grant_id.to_string())
+                    || publication.delegation.tenant_id != tenant
+                    || !publication.matches_hot(task)?)
+            {
                 return Err(invalid());
             }
             let source = admission.as_ref().map(|a| a.invocation.clone()).or(legacy);

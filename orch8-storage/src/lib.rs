@@ -5,6 +5,7 @@ mod child_lookup;
 mod compensation_start;
 mod compensation_update;
 mod current_outputs;
+pub mod delegation_publication;
 mod effect_attempt;
 pub mod effect_resolution;
 pub mod local_migration;
@@ -97,7 +98,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 141;
+pub const STORAGE_SCHEMA_VERSION: u32 = 142;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -4185,6 +4186,16 @@ pub trait MobileSyncStore: Send + Sync + 'static {
 /// supported way to advance ownership, handoff, and effect state.
 #[async_trait]
 pub trait ContinuityStore: Send + Sync + 'static {
+    async fn get_delegation_publication(
+        &self,
+        tenant: &TenantId,
+        id: uuid::Uuid,
+    ) -> Result<Option<delegation_publication::DelegationPublication>, StorageError>;
+    async fn publish_delegation(
+        &self,
+        intent: &delegation_publication::DelegationPublishIntent,
+    ) -> Result<delegation_publication::DelegationPublishResult, StorageError>;
+
     /// Permanent, globally unique physical identity fence, independent of tenant
     /// and continuity history GC. This does not authorize resource reads or
     /// establish that an offline owner has stopped. Use it before admitting

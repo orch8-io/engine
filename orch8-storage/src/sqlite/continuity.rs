@@ -99,6 +99,20 @@ pub(super) async fn delete_receipts_for_blocks_on(
 
 #[async_trait]
 impl crate::ContinuityStore for SqliteStorage {
+    async fn get_delegation_publication(
+        &self,
+        tenant: &TenantId,
+        id: uuid::Uuid,
+    ) -> Result<Option<crate::delegation_publication::DelegationPublication>, StorageError> {
+        super::delegation_publication::get(self, tenant, id).await
+    }
+    async fn publish_delegation(
+        &self,
+        intent: &crate::delegation_publication::DelegationPublishIntent,
+    ) -> Result<crate::delegation_publication::DelegationPublishResult, StorageError> {
+        super::delegation_publication::publish(self, intent).await
+    }
+
     async fn is_physical_instance_retired(
         &self,
         instance_id: InstanceId,

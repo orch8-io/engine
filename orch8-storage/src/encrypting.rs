@@ -818,6 +818,13 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::ContinuityStore for EncryptingStorage {
+    async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
+    async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>{
+        let task=self.encrypt_worker_task(&intent.task)?.into_owned();
+        let parent=self.encrypt_instance(&intent.parent)?.into_owned();
+        self.inner.publish_delegation(&intent.clone().sealed(task,parent)?).await
+    }
+
         async fn is_physical_instance_retired(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn create_continuity_execution(&self, execution: &orch8_types::continuity::ContinuityExecution) -> Result<(), StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;

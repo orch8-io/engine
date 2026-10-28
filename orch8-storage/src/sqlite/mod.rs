@@ -45,6 +45,7 @@ mod cluster;
 mod continuity;
 mod credentials;
 mod cron;
+mod delegation_publication;
 mod effect_attempt;
 mod effect_dispatch;
 mod effect_receipts;
@@ -657,6 +658,12 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
         }
+        sqlx::raw_sql(include_str!("delegation_publications.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(72)")
+            .execute(&mut *retirement)
+            .await?;
         let reconciliation_schema: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=71)")
                 .fetch_one(&mut *retirement)

@@ -107,10 +107,16 @@ async fn initial_owner_on(
     conn: &mut sqlx::PgConnection,
     intent: &WorkerDispatchIntent,
 ) -> Result<bool, StorageError> {
-    use orch8_types::continuity::{ContinuityExecution, ContinuityLocation, OwnershipState};
     let Some(owner) = &intent.initial_owner else {
         return Ok(true);
     };
+    ensure_initial_owner_on(conn, owner).await
+}
+pub(super) async fn ensure_initial_owner_on(
+    conn: &mut sqlx::PgConnection,
+    owner: &orch8_types::continuity::ContinuityExecution,
+) -> Result<bool, StorageError> {
+    use orch8_types::continuity::{ContinuityExecution, ContinuityLocation, OwnershipState};
     super::portable_effects::lock_instance_on(conn, &owner.tenant_id, owner.current_instance_id)
         .await?;
     let existing:Option<serde_json::Value>=sqlx::query_scalar("SELECT record FROM continuity_executions WHERE tenant_id=$1 AND record->>'current_instance_id'=$2 FOR UPDATE")

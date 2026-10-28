@@ -18,6 +18,7 @@ mod compensation_start;
 mod continuity;
 mod credentials;
 mod cron;
+mod delegation_publication;
 mod effect_attempt;
 mod effect_dispatch;
 mod effect_receipts;

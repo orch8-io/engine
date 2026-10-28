@@ -478,6 +478,9 @@ fault_impl! {
 
 fault_impl! {
     [CONTINUITY_STORE_METHODS] impl ContinuityStore {
+    async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
+    async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>;
+
         async fn is_physical_instance_retired(&self, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn create_continuity_execution(&self, execution: &ContinuityExecution) -> Result<(), StorageError>;
         async fn ensure_continuity_execution(&self, candidate: &ContinuityExecution) -> Result<ContinuityExecution, StorageError>;

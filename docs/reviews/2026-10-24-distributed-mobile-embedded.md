@@ -6603,3 +6603,36 @@ snapshot/callback/deadline/preflight tests pass, as do strict all-target checks
 across eight consumers and standalone mobile library compilation. See
 `2026-10-28-sqlite-ownership-locks.md` for evidence and the remaining original
 gates. Atomic server delegation publication and integration are still open.
+
+## Atomic grant-authorized delegation publication
+
+The four-backend grant-spending failure is repaired. Claim publication now commits
+the grant, optional inline definition, proxy/initial owner, effect, mailbox task,
+invocation, signed parent provenance and immutable publication receipt together.
+Fresh ownership, grant/index, stored-key and runtime checks occur under locks;
+deadlines are rechecked after later waits. A real PostgreSQL grant-row wait proves
+expired delegation/Operator authority cannot publish. Provenance races roll back
+the whole transaction before retrying only the signed entry.
+
+The receipt retains request/caller identity, original task/effect mapping, owner,
+definition fingerprint and logical/stored task hashes without raw input or token.
+Identical concurrent/lost-response/cold retries acknowledge that same publication.
+Changed input or caller conflicts. New publication invocations require their
+receipts at delivery. Hot params tampering was reproduced on all four backends;
+the shared batched claim journal now refuses it without leaving a partial lease.
+
+PostgreSQL 142 / SQLite 72 require immutable, versioned, scope-consistent receipts.
+Downgrade refuses retained records. File-backed upgrade/reopen and native cleanup
+retain acknowledgement without recreating work. The HTTP tenant guard preserves
+the existing anti-enumeration 404 response; real E2E caught and corrected its
+initial status regression without weakening tests.
+
+Verification passes 993 selected Rust cases and 232 fresh-server E2E cases, strict
+all-target checks across eight consumers, standalone mobile compilation and
+formatting/diff checks. See `2026-10-28-atomic-delegation-publication.md`.
+
+This closes publication atomicity only. Server outcome integration, a frozen
+verified remote-definition SDK contract, tenant/scoped proxy quota integration,
+complete writer enforcement, legacy attribution retirement, continuing
+handoff/revocation, acknowledged compaction, transported history and all original
+ledger gates remain required. The overall review objective is not complete.

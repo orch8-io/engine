@@ -38,6 +38,7 @@ base64.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 # Direct database fixtures verify transport behavior after continuity history GC.
 sqlx.workspace = true
 tokio = { workspace = true, features = ["full"] }

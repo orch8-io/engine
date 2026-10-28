@@ -108,11 +108,16 @@ async fn initial_owner_on(
     conn: &mut sqlx::SqliteConnection,
     intent: &WorkerDispatchIntent,
 ) -> Result<bool, StorageError> {
-    use orch8_types::continuity::{ContinuityExecution, ContinuityLocation, OwnershipState};
     let Some(owner) = &intent.initial_owner else {
         return Ok(true);
     };
-
+    ensure_initial_owner_on(conn, owner).await
+}
+pub(super) async fn ensure_initial_owner_on(
+    conn: &mut sqlx::SqliteConnection,
+    owner: &orch8_types::continuity::ContinuityExecution,
+) -> Result<bool, StorageError> {
+    use orch8_types::continuity::{ContinuityExecution, ContinuityLocation, OwnershipState};
     let existing:Option<String>=sqlx::query_scalar("SELECT record FROM continuity_executions WHERE tenant_id=?1 AND json_extract(record,'$.current_instance_id')=?2")
         .bind(owner.tenant_id.as_str()).bind(owner.current_instance_id.to_string()).fetch_optional(&mut *conn).await?;
     if let Some(value) = existing {

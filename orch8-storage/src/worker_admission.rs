@@ -287,7 +287,7 @@ fn invalid() -> StorageError {
     )
 }
 
-fn task_spec(task: &WorkerTask) -> String {
+pub(crate) fn task_spec(task: &WorkerTask) -> String {
     digest(&json!({
         "handler":task.handler_name,"queue":task.queue_name,"requirements":task.requirements,
         "params":task.params,"context":task.context,"attempt":task.attempt,

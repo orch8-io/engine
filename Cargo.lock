@@ -3159,6 +3159,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",

@@ -8,7 +8,7 @@ use super::rows::SequenceRow;
 /// Insert a sequence row using an already-open connection/transaction.
 /// Shared by [`create`] (its own transaction) and [`replace`] (same
 /// transaction as the preceding delete, for atomicity).
-async fn create_on(
+pub(super) async fn create_on(
     conn: &mut sqlx::PgConnection,
     seq: &SequenceDefinition,
 ) -> Result<(), StorageError> {

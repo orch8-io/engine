@@ -163,3 +163,12 @@ CONCURRENTLY IF NOT EXISTS` statement from the migration header online, outside
 a transaction, before upgrading large installations. The normal migration then
 reuses that index. It changes no stored workflow columns or activation values.
 SQLite adds the equivalent index through idempotent schema setup.
+
+## Delegation publication receipts (142)
+
+Migration 142 adds an initially empty metadata table for atomic delegation
+publication. Receipts survive hot/native cleanup and cannot be updated or
+deleted; rollback refuses a nonempty receipt table. SQLite schema 72 creates
+the equivalent table during upgrade. No historical publication or caller is
+backfilled. Deploy a compatible coordinator cohort before activating new
+publication traffic; mixed older writers remain a separate enforcement gate.
