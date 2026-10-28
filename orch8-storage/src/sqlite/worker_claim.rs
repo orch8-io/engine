@@ -101,19 +101,86 @@ pub(super) async fn get(
     let Ok(epoch) = i64::try_from(claim.claim_epoch) else {
         return Ok(None);
     };
-    let row=sqlx::query("SELECT tenant_id,instance_id,record FROM worker_issued_claims WHERE task_id=?1 AND claim_epoch=?2 AND (?3 IS NULL OR tenant_id=?3) AND worker_id=?4")
-        .bind(task_id.to_string()).bind(epoch).bind(tenant.map(TenantId::as_str)).bind(&claim.worker_id).fetch_optional(&store.pool).await?;
+    let row=sqlx::query("SELECT tenant_id,instance_id,worker_id,record FROM worker_issued_claims WHERE task_id=?1 AND claim_epoch=?2 AND (?3 IS NULL OR tenant_id=?3)")
+        .bind(task_id.to_string()).bind(epoch).bind(tenant.map(TenantId::as_str)).fetch_optional(&store.pool).await?;
     let Some(row) = row else {
         return Ok(None);
     };
     let value: WorkerIssuedClaim = serde_json::from_str(&row.get::<String, _>("record"))?;
     value.validate()?;
     if value.task_id != task_id
-        || value.claim != *claim
+        || value.claim.claim_epoch != claim.claim_epoch
+        || value.claim.worker_id != row.get::<String, _>("worker_id")
         || value.tenant_id.as_str() != row.get::<String, _>("tenant_id")
         || row.get::<String, _>("instance_id") != value.instance_id.to_string()
     {
         return Err(invalid());
     }
-    Ok(Some(value))
+    Ok((value.claim == *claim).then_some(value))
+}
+
+pub(super) async fn reconnect(
+    store: &super::SqliteStorage,
+    request: &crate::worker_claim::WorkerReconnectRequest,
+) -> Result<Vec<WorkerTask>, StorageError> {
+    request.validate()?;
+    if request.limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT wt.*,ti.tenant_id AS actual_tenant,c.record AS issued_record FROM worker_tasks wt JOIN task_instances ti ON ti.id=wt.instance_id LEFT JOIN worker_issued_claims c ON c.task_id=wt.id AND c.claim_epoch=wt.claim_epoch WHERE wt.state='claimed' AND wt.worker_id=",
+    );
+    query.push_bind(&request.worker_id);
+    if let Some(tenant) = &request.tenant_id {
+        query.push(" AND ti.tenant_id=").push_bind(tenant.as_str());
+    }
+    query.push(" AND wt.handler_name IN (");
+    let mut handlers = query.separated(",");
+    for handler in &request.handlers {
+        handlers.push_bind(handler);
+    }
+    handlers.push_unseparated(")");
+    query.push(" AND (c.task_id IS NULL OR (c.tenant_id=ti.tenant_id AND c.instance_id=wt.instance_id AND c.worker_id=wt.worker_id AND (");
+    // Compare decoded key/type/value sets, not JSON text order. Restored or
+    // reserialized metadata may reorder fields without changing its principal.
+    let (principal, optional_device) = request.lookup_principal()?;
+    let principal = serde_json::to_string(&principal)?;
+    let source = if optional_device {
+        "SELECT key,type,atom FROM json_each(c.record,'$.principal') WHERE NOT (key='device_id' AND type='null')"
+    } else {
+        "SELECT key,type,atom FROM json_each(c.record,'$.principal')"
+    };
+    query
+        .push("json_extract(c.record,'$.principal.kind')='legacy' OR (NOT EXISTS (")
+        .push(source)
+        .push(" EXCEPT SELECT key,type,atom FROM json_each(")
+        .push_bind(principal.clone())
+        .push(")) AND NOT EXISTS (SELECT key,type,atom FROM json_each(")
+        .push_bind(principal)
+        .push(") EXCEPT ")
+        .push(source)
+        .push("))");
+    query
+        .push("))) ORDER BY wt.created_at,wt.id LIMIT ")
+        .push_bind(i64::from(request.limit));
+    let rows = query.build().fetch_all(&store.pool).await?;
+    let mut tasks = Vec::with_capacity(rows.len());
+    for row in rows {
+        let task = super::helpers::row_to_worker_task(&row)?;
+        let tenant = TenantId::unchecked(row.get::<String, _>("actual_tenant"));
+        let issued: Option<WorkerIssuedClaim> = row
+            .get::<Option<String>, _>("issued_record")
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
+        if let Some(issued) = issued {
+            issued.validate_task_scope(&tenant, &task)?;
+            if !matches!(issued.principal, WorkerClaimPrincipal::Legacy {})
+                && issued.principal != request.principal
+            {
+                return Err(invalid());
+            }
+        }
+        tasks.push(task);
+    }
+    Ok(tasks)
 }

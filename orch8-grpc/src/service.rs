@@ -305,6 +305,45 @@ fn stream_request<T>(payload: T, tenant: Option<&TenantId>) -> Request<T> {
     request
 }
 
+fn worker_frame_request<T>(
+    payload: T,
+    tenant: Option<&TenantId>,
+    principal: &orch8_storage::worker_claim::WorkerClaimPrincipal,
+) -> Request<T> {
+    let mut request = stream_request(payload, tenant);
+    request
+        .extensions_mut()
+        .insert(crate::auth::WorkerFramePrincipal(principal.clone()));
+    request
+}
+
+async fn ensure_recorded_reporter<T>(
+    storage: &Arc<dyn StorageBackend>,
+    request: &Request<T>,
+    task_id: Uuid,
+    worker_id: &str,
+    epoch: u64,
+) -> Result<(), Status> {
+    let principal = crate::auth::worker_claim_principal(request);
+    let attribution = orch8_storage::worker_claim::recorded_reporter(
+        storage.as_ref(),
+        caller_tenant(request),
+        task_id,
+        &WorkerClaim::new(worker_id, epoch),
+        &principal,
+    )
+    .await
+    .map_err(storage_err)?;
+    if attribution == orch8_storage::worker_claim::RecordedReporter::Different {
+        return Err(Status::permission_denied(
+            "worker claim belongs to a different authenticated reporter",
+        ));
+    }
+    // Unattributed history remains on the legacy path until explicit durable
+    // reconciliation and the coordinator write floor replace that compatibility.
+    Ok(())
+}
+
 fn worker_server_frame(payload: proto::worker_stream_server::Payload) -> proto::WorkerStreamServer {
     proto::WorkerStreamServer {
         payload: Some(payload),
@@ -516,24 +555,22 @@ impl Orch8GrpcService {
         &self,
         open: &proto::WorkerStreamOpen,
         tenant: Option<&TenantId>,
+        principal: &orch8_storage::worker_claim::WorkerClaimPrincipal,
         max_in_flight: u32,
         outstanding: &mut std::collections::HashSet<Uuid>,
         sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
     ) -> Result<(), Status> {
-        let filter = orch8_types::worker_filter::WorkerTaskFilter {
-            tenant_id: tenant.cloned(),
-            states: Some(vec![WorkerTaskState::Claimed]),
-            worker_id: Some(open.worker_id.clone()),
-            ..Default::default()
-        };
-        let pagination = orch8_types::filter::Pagination {
-            offset: 0,
-            limit: max_in_flight,
-            sort_ascending: true,
-        };
+        let request = orch8_storage::worker_claim::WorkerReconnectRequest::new(
+            principal.clone(),
+            tenant.cloned(),
+            open.worker_id.clone(),
+            open.handler_names.clone(),
+            max_in_flight,
+        )
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let held = self
             .storage
-            .list_worker_tasks(&filter, &pagination)
+            .held_worker_tasks_for_reporter(&request)
             .await
             .map_err(storage_err)?;
         for task in held {
@@ -720,7 +757,10 @@ impl Orch8GrpcService {
                         "completion does not belong to this worker session",
                     ));
                 }
-                if let Err(status) = self.complete_task(stream_request(complete, tenant)).await {
+                if let Err(status) = self
+                    .complete_task(worker_frame_request(complete, tenant, claim_principal))
+                    .await
+                {
                     return self
                         .reject_task_frame(status, task_id, "completion", outstanding, sender)
                         .await;
@@ -746,7 +786,10 @@ impl Orch8GrpcService {
                         "failure does not belong to this worker session",
                     ));
                 }
-                if let Err(status) = self.fail_task(stream_request(failure, tenant)).await {
+                if let Err(status) = self
+                    .fail_task(worker_frame_request(failure, tenant, claim_principal))
+                    .await
+                {
                     return self
                         .reject_task_frame(status, task_id, "failure", outstanding, sender)
                         .await;
@@ -772,7 +815,10 @@ impl Orch8GrpcService {
                         "heartbeat does not belong to this worker session",
                     ));
                 }
-                match self.heartbeat_task(stream_request(heartbeat, tenant)).await {
+                match self
+                    .heartbeat_task(worker_frame_request(heartbeat, tenant, claim_principal))
+                    .await
+                {
                     Ok(_) => sender
                         .send(Ok(worker_server_frame(
                             proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
@@ -1890,6 +1936,7 @@ impl Orch8Service for Orch8GrpcService {
                         .adopt_held_tasks(
                             &open,
                             tenant.as_ref(),
+                            &claim_principal,
                             max_in_flight,
                             &mut outstanding,
                             &sender,
@@ -1993,6 +2040,14 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::CompleteTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
         let replay_claim =
             WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
@@ -2118,6 +2173,14 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::FailTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
         let report_claim =
             WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
@@ -2165,6 +2228,14 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::ReleaseTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
         let (task, instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
@@ -2191,6 +2262,14 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::HeartbeatTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
         let (task, _instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;

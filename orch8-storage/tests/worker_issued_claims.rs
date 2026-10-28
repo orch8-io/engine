@@ -25,8 +25,17 @@ async fn fixture_in_queue(
     admitted: bool,
     queue: Option<&str>,
 ) -> WorkerTask {
+    fixture_for_handler(s, admitted, queue, "noop").await
+}
+
+async fn fixture_for_handler(
+    s: &dyn StorageBackend,
+    admitted: bool,
+    queue: Option<&str>,
+    handler: &str,
+) -> WorkerTask {
     let seq = SequenceBuilder::new("issued-claims")
-        .step("work", "noop")
+        .step("work", handler)
         .build();
     s.create_sequence(&seq).await.unwrap();
     let mut parent = InstanceBuilder::for_sequence(&seq).due_now().build();
@@ -35,7 +44,7 @@ async fn fixture_in_queue(
     parent.context.runtime.current_step_started_at = Some(Utc::now());
     parent.context.data = json!({"private":"ISSUED_CLAIM_CONTEXT_CANARY"});
     s.create_instance(&parent).await.unwrap();
-    let task:WorkerTask=serde_json::from_value(json!({"id":Uuid::now_v7(),"instance_id":parent.id,"block_id":"work","handler_name":"noop","queue_name":queue,"params":{"private":"ISSUED_CLAIM_INPUT_CANARY"},"context":parent.context,"attempt":0,"state":"pending","created_at":Utc::now()})).unwrap();
+    let task:WorkerTask=serde_json::from_value(json!({"id":Uuid::now_v7(),"instance_id":parent.id,"block_id":"work","handler_name":handler,"queue_name":queue,"params":{"private":"ISSUED_CLAIM_INPUT_CANARY"},"context":parent.context,"attempt":0,"state":"pending","created_at":Utc::now()})).unwrap();
     if admitted {
         let parent = s
             .claim_due_instances(Utc::now() + chrono::Duration::seconds(1), 1, 0)
@@ -513,4 +522,109 @@ orch8_storage::backend_test!(async fn recorded_reporter_distinguishes_ownership_
     assert_eq!(recorded_reporter(s,Some(&tenant),held.id,&proof(&held),&Principal::Unsecured {}).await.unwrap(),RecordedReporter::Matches);
     assert_eq!(recorded_reporter(s,Some(&tenant),held.id,&proof(&held),&original).await.unwrap(),RecordedReporter::Different);
 
+});
+
+orch8_storage::backend_test!(async fn reconnect_filters_principal_and_handler_before_limit(b) {
+    use orch8_storage::worker_claim::WorkerReconnectRequest;
+    let s=b.storage.as_ref();let tenant=TenantId::unchecked("issued-claims");
+    let key_a=Principal::ApiKey{tenant_id:tenant.clone(),key_id:"key-a".into()};
+    let key_b=Principal::ApiKey{tenant_id:tenant.clone(),key_id:"key-b".into()};
+    let other=fixture_for_handler(s,false,None,"other").await;
+    let request=WorkerClaimRequest::new(key_b.clone(),"other".into(),"shared-worker".into(),None,None,None,1).unwrap();
+    assert_eq!(s.claim_worker_tasks_with_authority(&request).await.unwrap()[0].id,other.id);
+    for _ in 0..3 {
+        let task=fixture(s,false).await;
+        let request=WorkerClaimRequest::new(key_a.clone(),"noop".into(),"shared-worker".into(),None,None,None,1).unwrap();
+        assert_eq!(s.claim_worker_tasks_with_authority(&request).await.unwrap()[0].id,task.id);
+    }
+    let own=fixture(s,false).await;
+    let request=WorkerClaimRequest::new(key_b.clone(),"noop".into(),"shared-worker".into(),None,None,None,1).unwrap();
+    assert_eq!(s.claim_worker_tasks_with_authority(&request).await.unwrap()[0].id,own.id);
+    // Logical export/import can reorder JSON keys. Identity is structural.
+    if let orch8_storage::testing::backends::RawPool::Sqlite(pool)=&b.raw {
+        let record:String=sqlx::query_scalar("SELECT record FROM worker_issued_claims WHERE task_id=?1").bind(own.id.to_string()).fetch_one(pool).await.unwrap();
+        let original=serde_json::to_string(&key_b).unwrap();
+        assert!(record.contains(&original));
+        let reordered=record.replace(&original,r#"{"key_id":"key-b","tenant_id":"issued-claims","kind":"api_key"}"#);
+        assert_ne!(record,reordered);
+        sqlx::raw_sql("DROP TRIGGER worker_issued_claim_update").execute(pool).await.unwrap();
+        sqlx::query("UPDATE worker_issued_claims SET record=?1 WHERE task_id=?2").bind(reordered).bind(own.id.to_string()).execute(pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../src/sqlite/worker_claims.sql")).execute(pool).await.unwrap();
+    }
+    let reconnect=WorkerReconnectRequest::new(key_b.clone(),None,"shared-worker".into(),vec!["noop".into()],1).unwrap();
+    let held=s.held_worker_tasks_for_reporter(&reconnect).await.unwrap();
+    assert_eq!(held.iter().map(|t|t.id).collect::<Vec<_>>(),vec![own.id],"another issuer/handler consumed the reconnect window");
+    assert_eq!(held[0].params,json!({"private":"ISSUED_CLAIM_INPUT_CANARY"}),"encrypted wrappers must decrypt only selected tasks");
+    let root=WorkerReconnectRequest::new(Principal::Root {},Some(tenant.clone()),"shared-worker".into(),vec!["noop".into()],10).unwrap();
+    assert!(s.held_worker_tasks_for_reporter(&root).await.unwrap().is_empty());
+    let wrong=WorkerReconnectRequest::new(key_b.clone(),None,"wrong-worker".into(),vec!["noop".into()],10).unwrap();
+    assert!(s.held_worker_tasks_for_reporter(&wrong).await.unwrap().is_empty());
+    assert!(WorkerReconnectRequest::new(key_b.clone(),Some(TenantId::unchecked("foreign")),"shared-worker".into(),vec!["noop".into()],1).is_err());
+    assert_eq!(s.reap_stale_worker_tasks(std::time::Duration::ZERO).await.unwrap(),5);
+    let request=WorkerClaimRequest::new(key_a.clone(),"noop".into(),"shared-worker".into(),None,None,None,10).unwrap();
+    assert_eq!(s.claim_worker_tasks_with_authority(&request).await.unwrap().len(),4);
+    assert!(s.held_worker_tasks_for_reporter(&reconnect).await.unwrap().is_empty(),"a historical generation authorized a newer lease");
+});
+
+orch8_storage::backend_test!(async fn issued_worker_index_corruption_is_not_unattributed_history(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let s=b.storage.as_ref();let task=fixture(s,false).await;
+    let held=s.claim_worker_tasks_with_authority(&request(1)).await.unwrap().pop().unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{
+            sqlx::raw_sql("DROP TRIGGER worker_issued_claim_update").execute(pool).await.unwrap();
+            sqlx::query("UPDATE worker_issued_claims SET worker_id='corrupted-index' WHERE task_id=?1").bind(task.id.to_string()).execute(pool).await.unwrap();
+        },
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{
+            sqlx::raw_sql("DROP TRIGGER worker_issued_claim_update ON worker_issued_claims").execute(pool).await.unwrap();
+            sqlx::query("UPDATE worker_issued_claims SET worker_id='corrupted-index' WHERE task_id=$1").bind(task.id).execute(pool).await.unwrap();
+        },
+    }
+    assert!(s.get_worker_issued_claim(Some(&TenantId::unchecked("issued-claims")),task.id,&proof(&held)).await.is_err(),"corrupt provenance became an unjournaled compatibility path");
+});
+
+orch8_storage::backend_test!(async fn reconnect_uses_optional_device_identity_semantics(b) {
+    use orch8_storage::{worker_claim::{WorkerReconnectRequest,recorded_reporter,RecordedReporter},testing::backends::RawPool};
+    use orch8_types::continuity::RuntimeKind;
+    let s=b.storage.as_ref();let task=fixture(s,false).await;
+    let mut caps=capabilities();caps.kind=RuntimeKind::Browser;
+    let principal=Principal::Runtime {tenant_id:TenantId::unchecked("issued-claims"),runtime_id:caps.runtime_id,runtime_kind:RuntimeKind::Browser,device_id:None};
+    let request=WorkerClaimRequest::new(principal.clone(),"noop".into(),caps.runtime_id.to_string(),None,Some("queue".into()),Some(caps.clone()),1).unwrap();
+    let held=s.claim_worker_tasks_with_authority(&request).await.unwrap().pop().unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{
+            sqlx::raw_sql("DROP TRIGGER worker_issued_claim_update").execute(pool).await.unwrap();
+            sqlx::query("UPDATE worker_issued_claims SET record=json_remove(record,'$.principal.device_id') WHERE task_id=?1").bind(task.id.to_string()).execute(pool).await.unwrap();
+            sqlx::raw_sql(include_str!("../src/sqlite/worker_claims.sql")).execute(pool).await.unwrap();
+        },
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{
+            sqlx::raw_sql("DROP TRIGGER worker_issued_claim_update ON worker_issued_claims").execute(pool).await.unwrap();
+            sqlx::query("UPDATE worker_issued_claims SET record=jsonb_set(record,'{principal}',(record->'principal')-'device_id') WHERE task_id=$1").bind(task.id).execute(pool).await.unwrap();
+        },
+    }
+    assert_eq!(recorded_reporter(s,Some(&TenantId::unchecked("issued-claims")),task.id,&proof(&held),&principal).await.unwrap(),RecordedReporter::Matches);
+    let reconnect=WorkerReconnectRequest::new(principal,None,caps.runtime_id.to_string(),vec!["noop".into()],1).unwrap();
+    let tasks=s.held_worker_tasks_for_reporter(&reconnect).await.unwrap();
+    assert_eq!(tasks.iter().map(|t|t.id).collect::<Vec<_>>(),vec![task.id],"a semantically unchanged optional device identity was lost after import");
+});
+
+orch8_storage::backend_test!(async fn reconnect_keeps_devices_distinct_for_the_same_runtime(b) {
+    use orch8_storage::worker_claim::WorkerReconnectRequest;
+    use orch8_types::continuity::RuntimeKind;
+    let s=b.storage.as_ref();let mut caps=capabilities();caps.kind=RuntimeKind::Mobile;
+    let mut claims=Vec::new();
+    for device in ["phone-a","phone-b"] {
+        let task=fixture(s,false).await;
+        let principal=Principal::Runtime{tenant_id:TenantId::unchecked("issued-claims"),runtime_id:caps.runtime_id,runtime_kind:RuntimeKind::Mobile,device_id:Some(device.into())};
+        let request=WorkerClaimRequest::new(principal.clone(),"noop".into(),caps.runtime_id.to_string(),None,Some("queue".into()),Some(caps.clone()),1).unwrap();
+        assert_eq!(s.claim_worker_tasks_with_authority(&request).await.unwrap()[0].id,task.id);
+        claims.push((principal,task.id));
+    }
+    for (principal,id) in claims {
+        let reconnect=WorkerReconnectRequest::new(principal,None,caps.runtime_id.to_string(),vec!["noop".into()],1).unwrap();
+        let tasks=s.held_worker_tasks_for_reporter(&reconnect).await.unwrap();
+        assert_eq!(tasks.iter().map(|task|task.id).collect::<Vec<_>>(),vec![id],"another device inherited this runtime's reconnect payload");
+    }
 });

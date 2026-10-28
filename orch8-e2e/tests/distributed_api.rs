@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use orch8_e2e::{Backend, Cloud, backends, wait_for};
+use orch8_e2e::{Backend, Cloud, CloudOptions, ROOT_KEY, backends, wait_for};
 use orch8_grpc::proto;
 use orch8_grpc::proto::orch8_service_client::Orch8ServiceClient;
 use orch8_types::continuity::EffectState;
@@ -263,16 +263,37 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
     }
 }
 
-async fn grpc(cloud: &Cloud) -> Orch8ServiceClient<tonic::transport::Channel> {
-    Orch8ServiceClient::connect(format!("http://{}", cloud.grpc_addr))
-        .await
-        .expect("grpc connect")
+#[derive(Clone)]
+struct GrpcKey(tonic::metadata::MetadataValue<tonic::metadata::Ascii>);
+
+impl tonic::service::Interceptor for GrpcKey {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        request.metadata_mut().insert("x-api-key", self.0.clone());
+        Ok(request)
+    }
 }
 
-async fn grpc_poll(
-    client: &mut Orch8ServiceClient<tonic::transport::Channel>,
-    handler: &str,
-) -> Vec<WorkerTask> {
+type GrpcClient = Orch8ServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, GrpcKey>,
+>;
+
+async fn grpc_with_key(cloud: &Cloud, key: &str) -> GrpcClient {
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", cloud.grpc_addr))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("grpc connect");
+    Orch8ServiceClient::with_interceptor(channel, GrpcKey(key.parse().expect("grpc key")))
+}
+
+async fn grpc(cloud: &Cloud) -> GrpcClient {
+    grpc_with_key(cloud, ROOT_KEY).await
+}
+
+async fn grpc_poll(client: &mut GrpcClient, handler: &str) -> Vec<WorkerTask> {
     client
         .poll_tasks(proto::PollTasksRequest {
             handler_name: handler.into(),
@@ -291,7 +312,14 @@ async fn grpc_poll(
 #[test]
 fn grpc_complete_fail_release_settle_effects_like_http() {
     for backend in backends() {
-        let cloud = Cloud::start(&backend, |_| {});
+        let cloud = Cloud::start_with(
+            &backend,
+            |_| {},
+            CloudOptions {
+                grpc_auth: true,
+                ..CloudOptions::default()
+            },
+        );
         let backend = cloud.backend;
 
         // Complete → receipt committed by its stored id; instance completes.
@@ -498,7 +526,7 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
             } else {
                 cloud
                     .block_on(async {
-                        grpc(&cloud)
+                        grpc_with_key(&cloud, &key)
                             .await
                             .complete_task(proto::CompleteTaskRequest {
                                 task_id: task["id"].as_str().unwrap().to_owned(),

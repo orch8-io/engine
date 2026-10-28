@@ -212,6 +212,78 @@ pub(crate) struct ClaimRuntime<'a> {
     pub principal: Option<&'a WorkerClaimPrincipal>,
 }
 
+/// Validated reconnect scope. Actor and handler filtering must precede LIMIT.
+/// Unattributed history still follows the separate legacy rollout policy.
+pub struct WorkerReconnectRequest {
+    pub(crate) principal: WorkerClaimPrincipal,
+    pub(crate) tenant_id: Option<TenantId>,
+    pub(crate) worker_id: String,
+    pub(crate) handlers: Vec<String>,
+    pub(crate) limit: u32,
+}
+impl WorkerReconnectRequest {
+    pub fn new(
+        principal: WorkerClaimPrincipal,
+        tenant_id: Option<TenantId>,
+        worker_id: String,
+        handlers: Vec<String>,
+        limit: u32,
+    ) -> Result<Self, StorageError> {
+        let tenant_id = tenant_id.or_else(|| principal.tenant_id().cloned());
+        let value = Self {
+            principal,
+            tenant_id,
+            worker_id,
+            handlers,
+            limit,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub(crate) fn lookup_principal(&self) -> Result<(serde_json::Value, bool), StorageError> {
+        let mut value = serde_json::to_value(&self.principal)?;
+        let optional_device = matches!(
+            &self.principal,
+            WorkerClaimPrincipal::Runtime {
+                runtime_kind: RuntimeKind::Browser,
+                device_id: None,
+                ..
+            }
+        );
+        if optional_device {
+            // The typed browser identity treats an absent device field as None.
+            // Never discard a mobile device, or an unknown future scope field.
+            value
+                .as_object_mut()
+                .ok_or_else(invalid)?
+                .remove("device_id");
+        }
+        Ok((value, optional_device))
+    }
+    pub(crate) fn validate(&self) -> Result<(), StorageError> {
+        self.principal.validate()?;
+        if matches!(self.principal, WorkerClaimPrincipal::Legacy {})
+            || !identifier(&self.worker_id, 128)
+            || self.handlers.is_empty()
+            || self.handlers.len() > 64
+            || self.handlers.iter().any(|name| !identifier(name, 256))
+            || self.limit > 1000
+            || self
+                .tenant_id
+                .as_ref()
+                .is_some_and(|id| !identifier(id.as_str(), 128))
+            || self
+                .principal
+                .tenant_id()
+                .is_some_and(|id| Some(id) != self.tenant_id.as_ref())
+            || matches!(&self.principal, WorkerClaimPrincipal::Runtime { runtime_id, .. } if runtime_id.to_string() != self.worker_id)
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+}
+
 /// Contains no params, application context, checkpoint or credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,6 +303,26 @@ pub struct WorkerIssuedClaim {
     pub issued_at: chrono::DateTime<chrono::Utc>,
 }
 impl WorkerIssuedClaim {
+    pub(crate) fn validate_task_scope(
+        &self,
+        tenant: &TenantId,
+        task: &WorkerTask,
+    ) -> Result<(), StorageError> {
+        self.validate()?;
+        if self.tenant_id != *tenant
+            || self.task_id != task.id
+            || self.instance_id != task.instance_id
+            || self.block_id != task.block_id
+            || self.handler_name != task.handler_name
+            || self.queue_name != task.queue_name
+            || self.attempt != task.attempt
+            || self.claim.claim_epoch != task.claim_epoch
+            || task.worker_id.as_deref() != Some(self.claim.worker_id.as_str())
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
     pub(crate) fn new(
         task: &WorkerTask,
         tenant_id: TenantId,

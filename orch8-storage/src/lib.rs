@@ -2342,6 +2342,13 @@ pub trait WorkerStore: Send + Sync + 'static {
         claim_token: DateTime<Utc>,
     ) -> Result<Option<u64>, StorageError>;
 
+    /// Filter recorded issuer, tenant, worker and handlers before the delivery limit.
+    /// Legacy unattributed rows retain the pre-journal rollout behavior.
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+
     /// List worker tasks with optional filtering and pagination.
     async fn list_worker_tasks(
         &self,

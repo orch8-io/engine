@@ -2383,6 +2383,15 @@ passthrough_impl! {
     async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
 
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
+        let mut tasks = self.inner.held_worker_tasks_for_reporter(request).await?;
+        for task in &mut tasks { self.decrypt_worker_task(task)?; }
+        Ok(tasks)
+    }
+
     async fn list_worker_tasks(
         &self,
         filter: &orch8_types::worker_filter::WorkerTaskFilter,

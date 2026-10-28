@@ -119,6 +119,201 @@ async fn pending_issuer_offer(storage: &SqliteStorage) -> WorkerTask {
 }
 
 #[tokio::test]
+async fn grpc_reconnect_filters_before_limit_and_preserves_frame_actor() {
+    use orch8_grpc::proto::worker_stream_client::Payload as ClientPayload;
+    use orch8_grpc::proto::worker_stream_server::Payload as ServerPayload;
+    let mut server = ScopedServer::new(ApiCapability::Worker, false).await;
+    let other = mint_scoped("test", "reconnect", None, vec![ApiCapability::Worker]);
+    orch8_storage::AdminStore::create_api_key(server.storage.as_ref(), &other.record)
+        .await
+        .unwrap();
+    let foreign = pending_issuer_offer(server.storage.as_ref()).await;
+    let request = server.request(orch8_grpc::proto::PollTasksRequest {
+        handler_name: "h".into(),
+        worker_id: "worker-key-lifetime".into(),
+        limit: 1,
+    });
+    server.client.poll_tasks(request).await.unwrap();
+    let own = pending_issuer_offer(server.storage.as_ref()).await;
+    let mut request = server.request(orch8_grpc::proto::PollTasksRequest {
+        handler_name: "h".into(),
+        worker_id: "worker-key-lifetime".into(),
+        limit: 1,
+    });
+    request
+        .metadata_mut()
+        .insert("x-api-key", other.secret.parse().unwrap());
+    server.client.poll_tasks(request).await.unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let mut open = worker_open();
+    let Some(ClientPayload::Open(ref mut config)) = open.payload else {
+        panic!("fixture must open a worker stream")
+    };
+    config.supported_features.push("completion".into());
+    sender.send(open).await.unwrap();
+    let mut request = server.request(tokio_stream::wrappers::ReceiverStream::new(receiver));
+    request
+        .metadata_mut()
+        .insert("x-api-key", other.secret.parse().unwrap());
+    let mut inbound = server
+        .client
+        .worker_stream(request)
+        .await
+        .unwrap()
+        .into_inner();
+    let hello = tokio::time::timeout(std::time::Duration::from_secs(4), inbound.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(hello.payload, Some(ServerPayload::Hello(_))));
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(4), inbound.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let Some(ServerPayload::Task(delivery)) = frame.payload else {
+        panic!("reconnect must deliver its own held task")
+    };
+    let held: WorkerTask = serde_json::from_str(&delivery.task_json).unwrap();
+    assert_eq!(
+        held.id, own.id,
+        "an older foreign lease consumed max_in_flight=1 or leaked its payload"
+    );
+    sender
+        .send(worker_stream_frame(ClientPayload::Complete(
+            orch8_grpc::proto::CompleteTaskRequest {
+                task_id: held.id.to_string(),
+                worker_id: "worker-key-lifetime".into(),
+                claim_epoch: held.claim_epoch,
+                output_json: "{}".into(),
+            },
+        )))
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(4), inbound.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(frame.payload,Some(ServerPayload::Ack(ref ack)) if ack.operation=="complete" && ack.task_id==own.id.to_string()),
+        "stream completion lost the authenticated actor: {frame:?}"
+    );
+    assert_eq!(
+        server
+            .storage
+            .get_worker_task(foreign.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        WorkerTaskState::Claimed
+    );
+}
+
+#[tokio::test]
+async fn grpc_another_key_cannot_mutate_or_replay_a_recorded_lease() {
+    let mut server = ScopedServer::new(ApiCapability::Worker, false).await;
+    let other = mint_scoped("test", "replacement", None, vec![ApiCapability::Worker]);
+    orch8_storage::AdminStore::create_api_key(server.storage.as_ref(), &other.record)
+        .await
+        .unwrap();
+    let task = pending_issuer_offer(server.storage.as_ref()).await;
+    let request = server.request(orch8_grpc::proto::PollTasksRequest {
+        handler_name: "h".into(),
+        worker_id: "shared-label".into(),
+        limit: 1,
+    });
+    let claimed: WorkerTask = serde_json::from_str(
+        &server
+            .client
+            .poll_tasks(request)
+            .await
+            .unwrap()
+            .into_inner()
+            .tasks_json[0],
+    )
+    .unwrap();
+    let mut request = server.request(orch8_grpc::proto::HeartbeatTaskRequest {
+        task_id: task.id.to_string(),
+        worker_id: "shared-label".into(),
+        claim_epoch: claimed.claim_epoch,
+    });
+    request
+        .metadata_mut()
+        .insert("x-api-key", other.secret.parse().unwrap());
+    assert!(
+        matches!(server.client.heartbeat_task(request).await,Err(status) if status.code()==tonic::Code::PermissionDenied),
+        "replacement key inherited the original lease"
+    );
+    let mut request = server.request(orch8_grpc::proto::CompleteTaskRequest {
+        task_id: task.id.to_string(),
+        worker_id: "shared-label".into(),
+        claim_epoch: claimed.claim_epoch,
+        output_json: "{}".into(),
+    });
+    request
+        .metadata_mut()
+        .insert("x-api-key", other.secret.parse().unwrap());
+    assert!(
+        matches!(server.client.complete_task(request).await,Err(status) if status.code()==tonic::Code::PermissionDenied)
+    );
+    let mut request = server.request(orch8_grpc::proto::FailTaskRequest {
+        task_id: task.id.to_string(),
+        worker_id: "shared-label".into(),
+        claim_epoch: claimed.claim_epoch,
+        message: "foreign".into(),
+        retryable: false,
+    });
+    request
+        .metadata_mut()
+        .insert("x-api-key", other.secret.parse().unwrap());
+    assert!(
+        matches!(server.client.fail_task(request).await,Err(status) if status.code()==tonic::Code::PermissionDenied)
+    );
+    let mut request = server.request(orch8_grpc::proto::ReleaseTaskRequest {
+        task_id: task.id.to_string(),
+        worker_id: "shared-label".into(),
+        claim_epoch: claimed.claim_epoch,
+        started: false,
+    });
+    request
+        .metadata_mut()
+        .insert("x-api-key", other.secret.parse().unwrap());
+    assert!(
+        matches!(server.client.release_task(request).await,Err(status) if status.code()==tonic::Code::PermissionDenied)
+    );
+    let request = server.request(orch8_grpc::proto::CompleteTaskRequest {
+        task_id: task.id.to_string(),
+        worker_id: "shared-label".into(),
+        claim_epoch: claimed.claim_epoch,
+        output_json: "{\"value\":7}".into(),
+    });
+    server.client.complete_task(request).await.unwrap();
+    server.storage.delete_worker_task(task.id).await.unwrap();
+    for foreign in [true, false] {
+        let mut request = server.request(orch8_grpc::proto::CompleteTaskRequest {
+            task_id: task.id.to_string(),
+            worker_id: "shared-label".into(),
+            claim_epoch: claimed.claim_epoch,
+            output_json: "{\"ignored\":true}".into(),
+        });
+        if foreign {
+            request
+                .metadata_mut()
+                .insert("x-api-key", other.secret.parse().unwrap());
+        }
+        let response = server.client.complete_task(request).await;
+        if foreign {
+            assert!(matches!(response,Err(status) if status.code()==tonic::Code::PermissionDenied));
+        } else {
+            response.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn grpc_poll_and_stream_retain_the_verified_issuer() {
     use orch8_storage::worker_claim::WorkerClaimPrincipal;
     use orch8_types::{ids::TenantId, worker::WorkerClaim};

@@ -2053,6 +2053,13 @@ impl crate::WorkerStore for PostgresStorage {
         workers::cancel_for_blocks(self, instance_id, block_ids).await
     }
 
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        worker_claim::reconnect(self, request).await
+    }
+
     async fn list_worker_tasks(
         &self,
         filter: &orch8_types::worker_filter::WorkerTaskFilter,

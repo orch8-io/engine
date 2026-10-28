@@ -27,11 +27,9 @@ replace that compatibility gap without permanently stranding offline reporters.
 It must preserve original unknown provenance and retain approval/revocation
 receipts independently of hot/native history.
 
-gRPC unary and streaming mutations and reconnect payload adoption still need
-the same original reporter enforcement; stream-generated internal requests must
-retain the authenticated actor rather than default to unsecured identity.
-Reconnect selection must avoid another principal's old rows consuming the
-adoption window or disclosing payloads. Claim-bound artifact downloads and the
+The follow-up `2026-10-28-grpc-reporter-reconnect.md` now applies recorded
+reporter checks to gRPC unary/streaming mutations and selects reconnect tasks
+by issuer before LIMIT. Internal frame requests retain the authenticated actor. Claim-bound artifact downloads and the
 full database/coordinator write floor remain required. Older writers can still
 omit issuance evidence; schema140 alone cannot complete rolling authorization.
 

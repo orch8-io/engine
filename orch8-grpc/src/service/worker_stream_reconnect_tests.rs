@@ -80,6 +80,7 @@ impl Stream {
             .adopt_held_tasks(
                 &self.open,
                 self.tenant.as_ref(),
+                &orch8_storage::worker_claim::WorkerClaimPrincipal::Unsecured {},
                 4,
                 &mut self.outstanding,
                 &self.sender,

@@ -48,12 +48,20 @@ pub struct CallerTenant(pub TenantId);
 #[derive(Clone, Debug)]
 struct VerifiedRoot;
 
+/// Private context for calls forwarded by an already-authenticated worker stream.
+#[derive(Clone)]
+pub(crate) struct WorkerFramePrincipal(
+    pub(crate) orch8_storage::worker_claim::WorkerClaimPrincipal,
+);
+
 /// Retain authenticated identity, independently of a caller-supplied worker label.
 pub(crate) fn worker_claim_principal<T>(
     req: &Request<T>,
 ) -> orch8_storage::worker_claim::WorkerClaimPrincipal {
     use orch8_storage::worker_claim::WorkerClaimPrincipal;
-    if let Some(key) = req.extensions().get::<CallerPrincipal>() {
+    if let Some(frame) = req.extensions().get::<WorkerFramePrincipal>() {
+        frame.0.clone()
+    } else if let Some(key) = req.extensions().get::<CallerPrincipal>() {
         WorkerClaimPrincipal::ApiKey {
             tenant_id: TenantId::unchecked(&key.record.tenant_id),
             key_id: key.record.id.clone(),

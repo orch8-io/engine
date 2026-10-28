@@ -6421,3 +6421,27 @@ context. Unattributed history still uses the old transport behavior; explicit
 durable backend/operator approval, revocation and reconciliation must replace
 that gap before a write floor can safely remove legacy compatibility. Claim-bound
 artifact reads and all original scope gates remain required.
+
+
+## Recorded gRPC reporters and owner-aware reconnect
+
+Unary gRPC complete/fail/heartbeat/release now reject a different recorded actor
+before mutation or retained receipt replay. Stream frame dispatch preserves the
+verified actor in a private extension. Reconnect selectors filter tenant, worker,
+handler and current-generation actor before LIMIT, then validate the immutable
+record against the actual held task. Encrypted wrappers decrypt selected work.
+The four-backend matrix covers JSON field ordering, optional browser device
+semantics, distinct mobile devices sharing a runtime and corrupt worker indices.
+
+Validation passes 56 issued-claim matrix cases, 413 related HTTP cases and
+159 gRPC unit plus 22 real transport cases. Six service/scheduler integrations
+and two rebuilt executor-process scenarios also pass on SQLite and PostgreSQL.
+A cross-transport fixture was corrected to use the same authenticated stored
+key for HTTP claim and gRPC reporting; second-key rejection tests remain.
+See `2026-10-28-grpc-reporter-reconnect.md` for evidence and limits.
+
+These guards still allow unattributed historical claims on the old protocol.
+Explicit durable backend/operator reconciliation, approved handoff/revocation,
+the complete coordinator/database write floor, functional claim-bound artifact
+reads and all other original ledger gates remain unfinished. This checkpoint
+is not completion of the review or permission to merge the draft.
