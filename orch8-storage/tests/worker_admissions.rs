@@ -509,6 +509,12 @@ async fn postgres_outcome_downgrade_preserves_accepted_evidence() {
     let up = include_str!("../../migrations/134_worker_accepted_outcomes.sql");
     let mut tx = b.pg_pool().begin().await.unwrap();
     sqlx::raw_sql(include_str!(
+        "../../migrations/down/136_worker_outcome_integrations.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../../migrations/down/135_worker_outcome_encoding.sql"
     ))
     .execute(&mut *tx)
@@ -518,6 +524,12 @@ async fn postgres_outcome_downgrade_preserves_accepted_evidence() {
     sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/135_worker_outcome_encoding.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/136_worker_outcome_integrations.sql"
     ))
     .execute(&mut *tx)
     .await
@@ -544,6 +556,35 @@ async fn postgres_outcome_downgrade_preserves_accepted_evidence() {
             .await
             .unwrap()
     );
+    for apply in [false, true] {
+        if apply {
+            b.storage
+                .update_instance_state(held.instance_id, InstanceState::Waiting, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                orch8_storage::worker_outcome::integrate_worker_outcome(
+                    b.storage.as_ref(),
+                    &fence.tenant_id,
+                    id,
+                    &claim,
+                    100_000
+                )
+                .await
+                .unwrap(),
+                orch8_storage::worker_outcome::WorkerOutcomeApplication::Applied
+            );
+        }
+        let mut tx = b.pg_pool().begin().await.unwrap();
+        let error = sqlx::raw_sql(include_str!(
+            "../../migrations/down/136_worker_outcome_integrations.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("current application protocol"));
+        tx.rollback().await.unwrap();
+    }
     let mut tx = b.pg_pool().begin().await.unwrap();
     let error = sqlx::raw_sql(down).execute(&mut *tx).await.unwrap_err();
     assert!(error.to_string().contains("outcomes must be retained"));
@@ -756,4 +797,459 @@ async fn postgres_codec_downgrade_refuses_records_requiring_the_new_reader() {
             .output,
         json!({"value":1e18})
     );
+}
+
+async fn completed_for_application(
+    storage: &dyn StorageBackend,
+) -> (
+    WorkerTask,
+    WorkerDispatchFence,
+    ExecutionNodeId,
+    orch8_types::worker::WorkerClaim,
+) {
+    let (task, fence, node) = fixture(storage).await;
+    let id = published(
+        &storage
+            .admit_worker_dispatch(&intent(task, fence.clone()))
+            .await
+            .unwrap(),
+    );
+    let held = storage
+        .claim_worker_tasks("remote.work", "worker", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let claim = orch8_types::worker::WorkerClaim::new("worker", held.claim_epoch);
+    assert!(
+        storage
+            .complete_worker_task(id, &claim, &json!({"result":"APPLICATION_PRIVATE_CANARY"}))
+            .await
+            .unwrap()
+    );
+    (held, fence, node, claim)
+}
+
+orch8_storage::backend_test!(async fn accepted_result_applies_after_hot_gc_keeps_pause_and_is_idempotent(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    use orch8_storage::testing::backends::RawPool;
+    let storage = b.storage.as_ref();
+    let (held, fence, node, claim) = completed_for_application(storage).await;
+    storage.update_instance_state(held.instance_id, InstanceState::Paused, None).await.unwrap();
+    storage.merge_context_data(held.instance_id, "concurrent", &json!(42)).await.unwrap();
+    storage.delete_worker_task(held.id).await.unwrap();
+    assert_eq!(integrate_worker_outcome(storage, &fence.tenant_id, held.id, &claim, 100_000).await.unwrap(), A::Applied);
+    let parent = storage.get_instance(held.instance_id).await.unwrap().unwrap();
+    assert_eq!(parent.state, InstanceState::Paused);
+    assert!(parent.next_fire_at.is_none());
+    assert_eq!(parent.context.data["concurrent"], 42);
+    assert_eq!(parent.context.data["result"], "APPLICATION_PRIVATE_CANARY");
+    assert_eq!(storage.get_execution_tree(held.instance_id).await.unwrap().iter().find(|n|n.id==node).unwrap().state, NodeState::Completed);
+    assert_eq!(integrate_worker_outcome(storage, &fence.tenant_id, held.id, &claim, 100_000).await.unwrap(), A::AlreadyApplied);
+    let outputs = storage.get_all_outputs(held.instance_id).await.unwrap();
+    assert_eq!(outputs.iter().filter(|o|o.block_id == held.block_id && o.output_ref.is_none()).count(), 1);
+    if b.name().starts_with("encrypted") {
+        let raw = match &b.raw {
+            RawPool::Sqlite(pool) => sqlx::query_scalar::<_,String>("SELECT context FROM task_instances WHERE id=?1").bind(held.instance_id.to_string()).fetch_one(pool).await.unwrap(),
+            #[cfg(feature="postgres")]
+            RawPool::Postgres(pool) => sqlx::query_scalar::<_,String>("SELECT context::text FROM task_instances WHERE id=$1").bind(held.instance_id.into_uuid()).fetch_one(pool).await.unwrap(),
+        };
+        assert!(!raw.contains("APPLICATION_PRIVATE_CANARY"));
+    }
+});
+
+orch8_storage::backend_test!(async fn active_scheduler_claim_defers_result_without_losing_acceptance(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    let storage = b.storage.as_ref(); let (held, fence, _, claim) = completed_for_application(storage).await;
+    assert_eq!(integrate_worker_outcome(storage, &fence.tenant_id, held.id, &claim, 100_000).await.unwrap(), A::Deferred);
+    assert!(storage.get_block_output(held.instance_id, &held.block_id).await.unwrap().is_none());
+    storage.update_instance_state(held.instance_id, InstanceState::Waiting, None).await.unwrap();
+    assert_eq!(integrate_worker_outcome(storage, &fence.tenant_id, held.id, &claim, 100_000).await.unwrap(), A::Applied);
+    assert_eq!(storage.get_instance(held.instance_id).await.unwrap().unwrap().state, InstanceState::Scheduled);
+});
+
+orch8_storage::backend_test!(async fn result_application_refuses_reused_activation_or_run_or_mode(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    let storage=b.storage.as_ref();
+    for variant in 0..3 {
+        let (held, fence, node, claim) = completed_for_application(storage).await;
+        storage.update_instance_state(held.instance_id, InstanceState::Waiting, None).await.unwrap();
+        if variant == 0 {
+            storage.update_node_state(node, NodeState::Pending).await.unwrap();
+            storage.update_node_state(node, NodeState::Running).await.unwrap();
+        } else {
+            let mut parent=storage.get_instance(held.instance_id).await.unwrap().unwrap();
+            if variant == 1 {
+                parent.context.runtime.run_id=Some(Uuid::now_v7().to_string());
+            } else {
+                parent.context.runtime.dry_run=true;
+            }
+            storage.update_instance_context(held.instance_id,&parent.context).await.unwrap();
+        }
+        assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,held.id,&claim,100_000).await.unwrap(),A::ReconciliationRequired);
+        assert!(storage.get_block_output(held.instance_id,&held.block_id).await.unwrap().is_none());
+        assert_ne!(storage.get_execution_tree(held.instance_id).await.unwrap().iter().find(|n|n.id==node).unwrap().state,NodeState::Completed);
+    }
+});
+
+orch8_storage::backend_test!(async fn integration_receipt_failure_rolls_back_every_native_write(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    use orch8_storage::testing::backends::RawPool;
+    let storage=b.storage.as_ref();let(held,fence,node,claim)=completed_for_application(storage).await;
+    storage.update_instance_state(held.instance_id,InstanceState::Waiting,None).await.unwrap();
+    let before=storage.get_instance(held.instance_id).await.unwrap().unwrap();
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::raw_sql("CREATE TRIGGER reject_integration_test BEFORE INSERT ON worker_outcome_integrations BEGIN SELECT RAISE(ABORT,'injected integration failure'); END;").execute(pool).await.unwrap();},
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("CREATE FUNCTION reject_integration_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected integration failure'; END $$; CREATE TRIGGER reject_integration_test BEFORE INSERT ON worker_outcome_integrations FOR EACH ROW EXECUTE FUNCTION reject_integration_test();").execute(pool).await.unwrap();},
+    }
+    assert!(integrate_worker_outcome(storage,&fence.tenant_id,held.id,&claim,100_000).await.is_err());
+    let after=storage.get_instance(held.instance_id).await.unwrap().unwrap();
+    assert_eq!(serde_json::to_value(&before.context).unwrap(),serde_json::to_value(&after.context).unwrap());assert_eq!(after.state,InstanceState::Waiting);
+    assert!(storage.get_block_output(held.instance_id,&held.block_id).await.unwrap().is_none());
+    assert_eq!(storage.get_execution_tree(held.instance_id).await.unwrap().iter().find(|n|n.id==node).unwrap().state,NodeState::Waiting);
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::raw_sql("DROP TRIGGER reject_integration_test;").execute(pool).await.unwrap();},
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::raw_sql("DROP TRIGGER reject_integration_test ON worker_outcome_integrations; DROP FUNCTION reject_integration_test();").execute(pool).await.unwrap();},
+    }
+    assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,held.id,&claim,100_000).await.unwrap(),A::Applied);
+});
+
+orch8_storage::backend_test!(async fn quota_defers_application_and_recovery_scan_is_fair(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    let storage=b.storage.as_ref();let(a,af,_,ac)=completed_for_application(storage).await;
+    storage.update_instance_state(a.instance_id,InstanceState::Waiting,None).await.unwrap();
+    assert_eq!(integrate_worker_outcome(storage,&af.tenant_id,a.id,&ac,1).await.unwrap(),A::Deferred);
+    assert!(storage.get_block_output(a.instance_id,&a.block_id).await.unwrap().is_none());
+    let (other,bf,_,bc)=completed_for_application(storage).await;
+    storage.update_instance_state(other.instance_id,InstanceState::Waiting,None).await.unwrap();
+    let first=storage.claim_worker_outcome_recovery_page(1).await.unwrap();assert_eq!(first.len(),1);
+    let second=storage.claim_worker_outcome_recovery_page(1).await.unwrap();assert_eq!(second.len(),1);
+    assert_ne!(first[0].task_id,second[0].task_id,"a deferred outcome starved later work");
+    assert_eq!(integrate_worker_outcome(storage,&bf.tenant_id,other.id,&bc,100_000).await.unwrap(),A::Applied);
+    assert_eq!(storage.claim_worker_outcome_recovery_page(10).await.unwrap().iter().map(|x|x.task_id).collect::<Vec<_>>(),vec![a.id]);
+});
+
+orch8_storage::backend_test!(async fn pending_application_retains_native_history_after_effect_settlement(b) {
+    let storage=b.storage.as_ref();let(held,fence,_,claim)=completed_for_application(storage).await;
+    storage.update_instance_state(held.instance_id,InstanceState::Cancelled,None).await.unwrap();
+    assert_eq!(storage.purge_terminal_instances(&[held.instance_id]).await.unwrap(),0);
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),held.id,&claim).await.unwrap().is_some());
+});
+
+orch8_storage::backend_test!(async fn concurrent_sibling_results_merge_against_latest_context(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();let(task,fence,node)=fixture(storage).await;
+    let first=published(&storage.admit_worker_dispatch(&intent(task.clone(),fence.clone())).await.unwrap());
+    let other_node=ExecutionNode{id:ExecutionNodeId::new(),block_id:BlockId::new("other"),..storage.get_execution_tree(task.instance_id).await.unwrap().into_iter().find(|n|n.id==node).unwrap()};
+    storage.create_execution_node(&other_node).await.unwrap();
+    let parent=storage.get_instance(task.instance_id).await.unwrap().unwrap();
+    let other_fence=storage.prepare_worker_dispatch(&parent,&other_node.block_id,&WorkerDispatchSelection::Tree{node_id:other_node.id}).await.unwrap().unwrap();
+    let other=WorkerTask{id:Uuid::now_v7(),block_id:other_node.block_id.clone(),continuity_epoch:other_fence.continuity.as_ref().map(|x|x.epoch),..task.clone()};
+    let second=published(&storage.admit_worker_dispatch(&intent(other,other_fence)).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",2).await.unwrap();assert_eq!(held.len(),2);
+    let ac=WorkerClaim::new("worker",held.iter().find(|t|t.id==first).unwrap().claim_epoch);
+    let bc=WorkerClaim::new("worker",held.iter().find(|t|t.id==second).unwrap().claim_epoch);
+    assert!(storage.complete_worker_task(first,&ac,&json!({"left":1})).await.unwrap());
+    assert!(storage.complete_worker_task(second,&bc,&json!({"right":2})).await.unwrap());
+    storage.update_instance_state(task.instance_id,InstanceState::Waiting,None).await.unwrap();
+    let (a,b)=tokio::join!(integrate_worker_outcome(storage,&fence.tenant_id,first,&ac,100_000),integrate_worker_outcome(storage,&fence.tenant_id,second,&bc,100_000));
+    assert!(matches!(a.unwrap(),A::Applied|A::Deferred));
+    assert!(matches!(b.unwrap(),A::Applied|A::Deferred));
+    for candidate in storage.claim_worker_outcome_recovery_page(10).await.unwrap() {
+        assert_eq!(integrate_worker_outcome(storage,&candidate.tenant_id,candidate.task_id,&candidate.claim,100_000).await.unwrap(),A::Applied);
+    }
+
+    let parent=storage.get_instance(task.instance_id).await.unwrap().unwrap();
+    assert_eq!(parent.context.data["left"],1);assert_eq!(parent.context.data["right"],2);
+});
+
+orch8_storage::backend_test!(async fn application_refuses_changed_owner_epoch_and_preserves_fact(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    let storage=b.storage.as_ref();let(held,fence,_,claim)=completed_for_application(storage).await;
+    storage.update_instance_state(held.instance_id,InstanceState::Waiting,None).await.unwrap();
+    let mut owner=storage.get_continuity_execution_by_instance(&fence.tenant_id,held.instance_id).await.unwrap().unwrap();
+    let old=owner.epoch;owner.epoch=ExecutionEpoch::from_u64(old.get()+1);
+    assert!(storage.cas_continuity_owner(&fence.tenant_id,owner.continuity_id,old,owner.owner_runtime_id,&owner).await.unwrap());
+    assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,held.id,&claim,100_000).await.unwrap(),A::ReconciliationRequired);
+    assert!(storage.get_block_output(held.instance_id,&held.block_id).await.unwrap().is_none());
+    assert!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),held.id,&claim).await.unwrap().is_some());
+});
+
+orch8_storage::backend_test!(async fn integration_preserves_application_ciphertext_as_opaque_output(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    use orch8_types::{encryption::FieldEncryptor,worker::WorkerClaim};
+    let storage=b.storage.as_ref();let(task,fence,_)=fixture(storage).await;
+    let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+    let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    let encryptor=FieldEncryptor::from_hex_key(orch8_storage::testing::backends::TEST_ENCRYPTION_KEY_HEX).unwrap();
+    let opaque=encryptor.encrypt_value(&json!({"app_secret":"must remain opaque"})).unwrap();
+    assert!(storage.complete_worker_task(id,&claim,&opaque).await.unwrap());
+    storage.update_instance_state(held.instance_id,InstanceState::Waiting,None).await.unwrap();
+    assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,id,&claim,100_000).await.unwrap(),A::Applied);
+    assert_eq!(storage.get_block_output(held.instance_id,&held.block_id).await.unwrap().unwrap().output,opaque);
+});
+
+orch8_storage::backend_test!(async fn flat_application_requires_original_step_timeout_baseline(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    use orch8_types::worker::WorkerClaim;
+    let storage=b.storage.as_ref();
+    for changed in [false,true] {
+        let seq=SequenceBuilder::new("flat-apply").name(&Uuid::now_v7().to_string()).step("work","remote.work").build();
+        storage.create_sequence(&seq).await.unwrap();
+        let mut instance=InstanceBuilder::for_sequence(&seq).due_now().build();
+        let started=Utc::now();instance.context.runtime.run_id=Some(Uuid::now_v7().to_string());
+        instance.context.runtime.current_step=Some(BlockId::new("work"));instance.context.runtime.current_step_started_at=Some(started);
+        storage.create_instance(&instance).await.unwrap();
+        let parent=storage.claim_due_instances(Utc::now()+chrono::Duration::seconds(1),1,0).await.unwrap().pop().unwrap();assert_eq!(parent.id,instance.id);
+        let fence=storage.prepare_worker_dispatch(&parent,&BlockId::new("work"),&WorkerDispatchSelection::Flat{step_started_at:started}).await.unwrap().unwrap();
+        let task:WorkerTask=serde_json::from_value(json!({"id":Uuid::now_v7(),"instance_id":parent.id,"block_id":"work","handler_name":"remote.work","attempt":0,"params":{},"context":parent.context,"state":"pending","created_at":Utc::now()})).unwrap();
+        let id=published(&storage.admit_worker_dispatch(&intent(task,fence.clone())).await.unwrap());
+        let held=storage.claim_worker_tasks("remote.work","worker",1).await.unwrap().pop().unwrap();let claim=WorkerClaim::new("worker",held.claim_epoch);
+        assert!(storage.complete_worker_task(id,&claim,&json!({"flat":true})).await.unwrap());
+        storage.update_instance_state(parent.id,InstanceState::Paused,None).await.unwrap();
+        if changed {let mut native=storage.get_instance(parent.id).await.unwrap().unwrap();native.context.runtime.current_step_started_at=Some(started+chrono::Duration::seconds(1));storage.update_instance_context(parent.id,&native.context).await.unwrap();}
+        assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,id,&claim,100_000).await.unwrap(),if changed{A::ReconciliationRequired}else{A::Applied});
+        assert_eq!(storage.get_block_output(parent.id,&BlockId::new("work")).await.unwrap().is_some(),!changed);
+        assert_eq!(storage.get_instance(parent.id).await.unwrap().unwrap().state,InstanceState::Paused);
+    }
+});
+
+orch8_storage::backend_test!(async fn applied_receipt_survives_native_gc_without_requeueing_the_result(b) {
+    use orch8_storage::worker_outcome::{integrate_worker_outcome, WorkerOutcomeApplication as A};
+    let storage=b.storage.as_ref();let(held,fence,_,claim)=completed_for_application(storage).await;
+    storage.update_instance_state(held.instance_id,InstanceState::Waiting,None).await.unwrap();
+    assert_eq!(integrate_worker_outcome(storage,&fence.tenant_id,held.id,&claim,100_000).await.unwrap(),A::Applied);
+    storage.update_instance_state(held.instance_id,InstanceState::Cancelled,None).await.unwrap();
+    assert_eq!(storage.purge_terminal_instances(&[held.instance_id]).await.unwrap(),1);
+    assert!(storage.get_instance(held.instance_id).await.unwrap().is_none());
+    assert_eq!(storage.get_worker_accepted_outcome(Some(&fence.tenant_id),held.id,&claim).await.unwrap().unwrap().output,json!({"result":"APPLICATION_PRIVATE_CANARY"}));
+    assert!(storage.claim_worker_outcome_recovery_page(64).await.unwrap().is_empty());
+});
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn durable_recovery_skips_busy_postgres_authority_and_nodes() {
+    use orch8_storage::worker_outcome::{WorkerOutcomeApplication as A, integrate_worker_outcome};
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let storage = b.storage.as_ref();
+    for domain in ["namespace", "owner", "native", "node", "queue"] {
+        let (blocked, fence, node, claim) = completed_for_application(storage).await;
+        storage
+            .update_instance_state(blocked.instance_id, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        let (healthy, hf, _, hc) = completed_for_application(storage).await;
+        storage
+            .update_instance_state(healthy.instance_id, InstanceState::Waiting, None)
+            .await
+            .unwrap();
+        let mut held = b.pg_pool().begin().await.unwrap();
+        match domain {
+            "namespace" => {
+                let key = serde_json::to_string(&(
+                    "orch8-continuity-instance",
+                    fence.tenant_id.as_str(),
+                    blocked.instance_id,
+                ))
+                .unwrap();
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+                    .bind(key)
+                    .execute(&mut *held)
+                    .await
+                    .unwrap();
+            }
+            "owner" => {
+                sqlx::query("SELECT continuity_id FROM continuity_executions WHERE tenant_id=$1 AND record->>'current_instance_id'=$2 FOR UPDATE").bind(fence.tenant_id.as_str()).bind(blocked.instance_id.to_string()).execute(&mut *held).await.unwrap();
+            }
+            "native" => {
+                sqlx::query("SELECT id FROM task_instances WHERE id=$1 FOR UPDATE")
+                    .bind(blocked.instance_id.into_uuid())
+                    .execute(&mut *held)
+                    .await
+                    .unwrap();
+            }
+            "queue" => {
+                sqlx::query(
+                    "SELECT task_id FROM worker_outcome_recovery WHERE task_id=$1 FOR UPDATE",
+                )
+                .bind(blocked.id)
+                .execute(&mut *held)
+                .await
+                .unwrap();
+            }
+            _ => {
+                sqlx::query("SELECT id FROM execution_tree WHERE id=$1 FOR UPDATE")
+                    .bind(node.into_uuid())
+                    .execute(&mut *held)
+                    .await
+                    .unwrap();
+            }
+        }
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            integrate_worker_outcome(storage, &fence.tenant_id, blocked.id, &claim, 100_000),
+        )
+        .await;
+        assert!(result.is_ok(), "recovery stalled behind the {domain} lock");
+        assert_eq!(result.unwrap().unwrap(), A::Deferred, "{domain}");
+        assert_eq!(
+            integrate_worker_outcome(storage, &hf.tenant_id, healthy.id, &hc, 100_000)
+                .await
+                .unwrap(),
+            A::Applied
+        );
+        held.rollback().await.unwrap();
+        storage
+            .update_instance_state(blocked.instance_id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+        storage
+            .update_instance_state(healthy.instance_id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+    }
+    let mut held = b.pg_pool().begin().await.unwrap();
+    sqlx::query("SELECT singleton FROM worker_outcome_recovery_clock WHERE singleton=1 FOR UPDATE")
+        .execute(&mut *held)
+        .await
+        .unwrap();
+    let page = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        storage.claim_worker_outcome_recovery_page(10),
+    )
+    .await;
+    assert!(page.is_ok(), "recovery scan stalled behind another scanner");
+    assert!(page.unwrap().unwrap().is_empty());
+    held.rollback().await.unwrap();
+}
+
+orch8_storage::backend_test!(async fn durable_recovery_guards_legacy_native_delete(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let storage=b.storage.as_ref();let(held,_,_,_)=completed_for_application(storage).await;
+    storage.update_instance_state(held.instance_id,InstanceState::Cancelled,None).await.unwrap();
+    let error=match &b.raw {
+        RawPool::Sqlite(pool)=>sqlx::query("DELETE FROM task_instances WHERE id=?1").bind(held.instance_id.to_string()).execute(pool).await.unwrap_err(),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>sqlx::query("DELETE FROM task_instances WHERE id=$1").bind(held.instance_id.into_uuid()).execute(pool).await.unwrap_err(),
+    };
+    assert!(error.to_string().contains("unapplied worker outcome"),"{error}");
+    assert!(storage.get_instance(held.instance_id).await.unwrap().is_some());
+});
+
+orch8_storage::backend_test!(async fn durable_recovery_queues_legacy_writers_and_skips_malformed_claims(b) {
+    use orch8_storage::testing::backends::RawPool;
+    let storage=b.storage.as_ref();let(held,fence,_,_)=completed_for_application(storage).await;
+    let mut raw:serde_json::Value=match &b.raw {
+        RawPool::Sqlite(pool)=>serde_json::from_str(&sqlx::query_scalar::<_,String>("SELECT record FROM worker_accepted_outcomes WHERE task_id=?1").bind(held.id.to_string()).fetch_one(pool).await.unwrap()).unwrap(),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>sqlx::query_scalar("SELECT record FROM worker_accepted_outcomes WHERE task_id=$1").bind(held.id).fetch_one(pool).await.unwrap(),
+    };
+    let candidate=Uuid::now_v7();
+    raw["task_id"]=json!(candidate);raw["invocation"]["task_id"]=json!(candidate);raw["claim"]=serde_json::Value::Null;
+    match &b.raw {
+        RawPool::Sqlite(pool)=>{sqlx::query("INSERT INTO worker_accepted_outcomes(task_id,tenant_id,instance_id,record) VALUES(?1,?2,?3,?4)").bind(candidate.to_string()).bind(fence.tenant_id.as_str()).bind(held.instance_id.to_string()).bind(raw.to_string()).execute(pool).await.unwrap();},
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>{sqlx::query("INSERT INTO worker_accepted_outcomes(task_id,tenant_id,instance_id,record) VALUES($1,$2,$3,$4)").bind(candidate).bind(fence.tenant_id.as_str()).bind(held.instance_id.into_uuid()).bind(raw).execute(pool).await.unwrap();},
+    }
+    // Even an old writer that knows nothing about the recovery queue cannot omit it.
+    let queued:bool=match &b.raw {
+        RawPool::Sqlite(pool)=>sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_outcome_recovery WHERE task_id=?1)").bind(candidate.to_string()).fetch_one(pool).await.unwrap(),
+        #[cfg(feature="postgres")]
+        RawPool::Postgres(pool)=>sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_outcome_recovery WHERE task_id=$1)").bind(candidate).fetch_one(pool).await.unwrap(),
+    };assert!(queued,"legacy insert bypassed recovery enqueue");
+    let page=storage.claim_worker_outcome_recovery_page(10).await.unwrap();
+    assert!(page.iter().any(|x|x.task_id==held.id));assert!(!page.iter().any(|x|x.task_id==candidate));
+});
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_downgrade_rechecks_outcome_that_commits_while_waiting() {
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    let mut downgrade = b.pg_pool().begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *downgrade)
+        .await
+        .unwrap();
+    let task = Uuid::now_v7();
+    let mut acceptance = b.pg_pool().begin().await.unwrap();
+    sqlx::query("INSERT INTO worker_accepted_outcomes(task_id,tenant_id,instance_id,record) VALUES($1,'downgrade-race',$2,$3)")
+        .bind(task).bind(Uuid::now_v7()).bind(json!({"output_encoding":"json_text_v1","output":"null"}))
+        .execute(&mut *acceptance).await.unwrap();
+    let rollback = tokio::spawn(async move {
+        let result = sqlx::raw_sql(include_str!(
+            "../../migrations/down/136_worker_outcome_integrations.sql"
+        ))
+        .execute(&mut *downgrade)
+        .await;
+        match result {
+            Ok(_) => downgrade.commit().await,
+            Err(error) => {
+                downgrade.rollback().await.unwrap();
+                Err(error)
+            }
+        }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND relation='worker_accepted_outcomes'::regclass AND NOT granted)")
+                .bind(pid).fetch_one(b.pg_pool()).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("downgrade reached the concurrent acceptance lock");
+    acceptance.commit().await.unwrap();
+    let error = rollback
+        .await
+        .unwrap()
+        .expect_err("downgrade discarded a concurrently committed recovery entry");
+    assert!(
+        error.to_string().contains("current application protocol"),
+        "{error}"
+    );
+    let retained: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_outcome_recovery WHERE task_id=$1)")
+            .bind(task)
+            .fetch_one(b.pg_pool())
+            .await
+            .unwrap();
+    assert!(retained);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_outcome_downgrade_refuses_old_transaction_snapshots() {
+    let Some(b) = orch8_storage::testing::backends::TestBackend::postgres().await else {
+        return;
+    };
+    for isolation in [
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
+        "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+    ] {
+        let mut tx = b.pg_pool().begin().await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(isolation))
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let error = sqlx::raw_sql(include_str!(
+            "../../migrations/down/136_worker_outcome_integrations.sql"
+        ))
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires read committed isolation"),
+            "{error}"
+        );
+        tx.rollback().await.unwrap();
+    }
 }

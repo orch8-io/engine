@@ -1210,6 +1210,7 @@ async fn completed_outcome_replay_after_hot_gc_keeps_original_payload_while_paus
         .unwrap();
     assert_eq!(accepted.output, serde_json::json!({"result":"original"}));
     assert_eq!(parent.state, InstanceState::Paused);
+    assert_eq!(parent.context.data["result"], "original");
     assert_ne!(
         parent.context.data.get("result"),
         Some(&serde_json::json!("changed"))

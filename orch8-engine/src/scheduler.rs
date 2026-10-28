@@ -74,6 +74,7 @@ pub(crate) struct TickContext<'a> {
     pub batch_size: u32,
     pub max_per_tenant: u32,
     pub externalize_threshold: u32,
+    pub max_context_bytes: u32,
     pub counters: Option<Arc<TickCounters>>,
     /// Time source for all scheduling decisions made during this tick
     /// (claiming, deferrals, deadline/timeout checks). Defaults to the
@@ -115,6 +116,7 @@ pub async fn tick_once(
         batch_size: config.batch_size,
         max_per_tenant: config.max_instances_per_tenant,
         externalize_threshold: config.externalize_output_threshold,
+        max_context_bytes: config.max_context_bytes,
         counters: Some(Arc::clone(&counters)),
         clock: &config.clock,
         stale_instance_threshold_secs: config.stale_instance_threshold_secs,
@@ -304,6 +306,7 @@ pub async fn run_tick_loop_with_liveness(
                     batch_size,
                     max_per_tenant: config.max_instances_per_tenant,
                     externalize_threshold,
+                    max_context_bytes: config.max_context_bytes,
                     // The tick loop does not need per-tick counters — pass None.
                     counters: None,
                     clock: &config.clock,
@@ -442,6 +445,32 @@ async fn wait_for_drain(semaphore: &Semaphore, max_permits: usize) {
 #[tracing::instrument(skip_all, fields(batch_size = ctx.batch_size, claimed = tracing::field::Empty))]
 async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
+
+    // Cold accepted results recover even without a worker retry, including on
+    // mobile tick_once. Rotate candidates before application so a poisoned or
+    // actively claimed invocation cannot starve younger results.
+    match ctx
+        .storage
+        .claim_worker_outcome_recovery_page(ctx.batch_size.min(64))
+        .await
+    {
+        Ok(page) => {
+            for candidate in page {
+                if let Err(error) = orch8_storage::worker_outcome::integrate_worker_outcome(
+                    ctx.storage.as_ref(),
+                    &candidate.tenant_id,
+                    candidate.task_id,
+                    &candidate.claim,
+                    ctx.max_context_bytes,
+                )
+                .await
+                {
+                    tracing::warn!(task_id = %candidate.task_id, %error, "worker result integration deferred");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "worker result recovery scan failed"),
+    }
 
     let available = ctx.semaphore.available_permits();
     if available == 0 {

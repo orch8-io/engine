@@ -265,3 +265,127 @@ mod tests {
         assert!(decode_record(malformed).is_err());
     }
 }
+
+/// Result acceptance and native application are separate durable facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerOutcomeApplication {
+    Applied,
+    AlreadyApplied,
+    Deferred,
+    /// The context snapshot changed; reload and merge before retrying.
+    ContextChanged,
+    ReconciliationRequired,
+}
+
+/// Prepared only from durable accepted evidence and a fresh native snapshot.
+/// Private fields prevent callers substituting an output or execution target.
+#[derive(Clone)]
+pub struct WorkerOutcomeIntegration {
+    pub(crate) accepted: WorkerAcceptedOutcome,
+    pub(crate) expected_context: orch8_types::context::ExecutionContext,
+    pub(crate) context: orch8_types::context::ExecutionContext,
+    pub(crate) output: orch8_types::output::BlockOutput,
+    pub(crate) within_context_limit: bool,
+}
+
+/// Recover application independently of the hot task or the reporting worker.
+/// A bounded retry reloads and remerges concurrent context changes.
+pub async fn integrate_worker_outcome(
+    storage: &dyn crate::StorageBackend,
+    tenant: &TenantId,
+    task: Uuid,
+    claim: &WorkerClaim,
+    max_context_bytes: u32,
+) -> Result<WorkerOutcomeApplication, StorageError> {
+    use WorkerOutcomeApplication::{ContextChanged, Deferred, ReconciliationRequired};
+    for _ in 0..3 {
+        let Some(accepted) = storage
+            .get_worker_accepted_outcome(Some(tenant), task, claim)
+            .await?
+        else {
+            return Ok(ReconciliationRequired);
+        };
+        let Some(instance) = storage.get_instance(accepted.instance_id).await? else {
+            return Ok(Deferred);
+        };
+        if instance.tenant_id != *tenant {
+            return Ok(ReconciliationRequired);
+        }
+        let mut context = instance.context.clone();
+        if let Some(fields) = accepted.output.as_object() {
+            if !context.data.is_object() {
+                context.data = serde_json::json!({});
+            }
+            context
+                .data
+                .as_object_mut()
+                .expect("object initialized")
+                .extend(fields.clone());
+        }
+        let within_context_limit = context.check_size(max_context_bytes).is_ok();
+        let Some(invocation) = accepted.invocation.as_ref() else {
+            return Ok(ReconciliationRequired);
+        };
+        let output = orch8_types::output::BlockOutput {
+            id: Uuid::now_v7(),
+            instance_id: accepted.instance_id,
+            block_id: invocation.block_id.clone(),
+            output: accepted.output.clone(),
+            output_ref: None,
+            output_size: u32::try_from(serde_json::to_vec(&accepted.output)?.len())
+                .map_err(|_| StorageError::Constraint("worker output too large".into()))?,
+            attempt: invocation.attempt,
+            created_at: Utc::now(),
+        };
+        let integration = WorkerOutcomeIntegration {
+            accepted,
+            expected_context: instance.context,
+            context,
+            output,
+            within_context_limit,
+        };
+        let result = storage
+            .apply_worker_outcome_integration(&integration)
+            .await?;
+        if result != ContextChanged {
+            return Ok(result);
+        }
+    }
+    Ok(Deferred)
+}
+
+/// Runtime fields are unsealed. Compare the full invocation, never a block alias.
+pub(crate) fn integration_source_matches(
+    invocation: &WorkerInvocation,
+    instance: &orch8_types::instance::TaskInstance,
+    owner: Option<&orch8_types::continuity::ContinuityExecution>,
+) -> bool {
+    use orch8_types::continuity::OwnershipState;
+    invocation.instance_id == instance.id
+        && invocation.tenant_id == instance.tenant_id
+        && invocation.sequence_id == instance.sequence_id
+        && invocation.run_id.as_ref().is_some_and(|id| !id.is_empty())
+        && invocation.run_id == instance.context.runtime.run_id
+        && invocation.dry_run == instance.context.runtime.dry_run
+        && match (&invocation.continuity, owner) {
+            (None, None) => invocation.continuity_epoch.is_none(),
+            (Some(expected), Some(actual)) => {
+                actual.state == OwnershipState::Owned
+                    && actual.tenant_id == invocation.tenant_id
+                    && actual.current_instance_id == invocation.instance_id
+                    && actual.continuity_id == expected.continuity_id
+                    && actual.epoch.get() == expected.epoch
+                    && invocation.continuity_epoch == Some(expected.epoch)
+                    && actual.owner_runtime_id == expected.owner_runtime_id
+            }
+            _ => false,
+        }
+}
+
+/// Small recovery identity: no provider output is loaded during queue scans.
+#[derive(Debug, Clone)]
+pub struct WorkerOutcomeRecovery {
+    pub task_id: Uuid,
+    pub tenant_id: TenantId,
+    pub claim: WorkerClaim,
+}

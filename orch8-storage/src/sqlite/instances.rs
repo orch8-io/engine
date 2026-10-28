@@ -1300,6 +1300,7 @@ pub(super) async fn list_artifact_gc_candidates(
          WHERE state IN ('completed','failed','cancelled') \
            AND updated_at < ?1 \
            AND json_extract(metadata, '$._artifacts_gced') IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM worker_accepted_outcomes accepted WHERE accepted.tenant_id=task_instances.tenant_id AND accepted.instance_id=task_instances.id AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations applied WHERE applied.task_id=accepted.task_id)) \
            AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=task_instances.tenant_id AND cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=task_instances.tenant_id AND json_extract(ce.record, '$.current_instance_id')=task_instances.id AND cut.state IN ('captured','sealed')) \
          ORDER BY updated_at ASC LIMIT ?2",
@@ -1339,6 +1340,7 @@ pub(super) async fn list_instance_gc_candidates(
            AND NOT EXISTS ( \
                SELECT 1 FROM task_instances c \
                WHERE c.parent_instance_id = t.id) \
+           AND NOT EXISTS (SELECT 1 FROM worker_accepted_outcomes accepted WHERE accepted.tenant_id=t.tenant_id AND accepted.instance_id=t.id AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations applied WHERE applied.task_id=accepted.task_id)) \
            AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=t.tenant_id AND cut.source_instance_id=t.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=t.tenant_id AND json_extract(ce.record, '$.current_instance_id') = t.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS ( \
@@ -1422,6 +1424,7 @@ pub(super) async fn purge_terminal_instances(
                SELECT 1 FROM task_instances p \
                WHERE p.id = t.parent_instance_id \
                  AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
+           AND NOT EXISTS (SELECT 1 FROM worker_accepted_outcomes accepted WHERE accepted.tenant_id=t.tenant_id AND accepted.instance_id=t.id AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations applied WHERE applied.task_id=accepted.task_id)) \
            AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=t.tenant_id AND cut.source_instance_id=t.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=t.tenant_id AND json_extract(ce.record, '$.current_instance_id') = t.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS ( \

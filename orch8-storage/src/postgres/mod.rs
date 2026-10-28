@@ -1781,6 +1781,18 @@ impl crate::WorkerStore for PostgresStorage {
     ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
         worker_outcome::get(self, tenant_id, task_id, claim).await
     }
+    async fn claim_worker_outcome_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError> {
+        worker_outcome::recovery_page(self, limit).await
+    }
+    async fn apply_worker_outcome_integration(
+        &self,
+        integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+        worker_outcome::apply(self, integration).await
+    }
     async fn accept_worker_completion(
         &self,
         task_id: Uuid,

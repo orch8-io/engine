@@ -92,7 +92,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 135;
+pub const STORAGE_SCHEMA_VERSION: u32 = 136;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -2096,6 +2096,18 @@ pub trait WorkerStore: Send + Sync + 'static {
         task_id: Uuid,
         claim: &WorkerClaim,
     ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError>;
+
+    /// Bounded, fairly rotated recovery candidates. Reserved for trusted coordinators.
+    async fn claim_worker_outcome_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError>;
+
+    /// Apply the exact accepted invocation and record its application in one transaction.
+    async fn apply_worker_outcome_integration(
+        &self,
+        integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError>;
 
     /// Mark a claimed task as completed and journal its original output in one transaction.
     async fn complete_worker_task(

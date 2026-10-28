@@ -185,7 +185,7 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
         let bound_effect = retry.effect_id.unwrap();
 
         // The older node's re-dispatch: receipt created, row never bound.
-        cloud.strand_dispatch(retry.id, chrono::Duration::zero());
+        cloud.strand_legacy_dispatch(retry.id, chrono::Duration::zero());
         let stranded = cloud.task(retry.id).unwrap();
         assert_eq!(stranded.effect_id, None, "{backend}");
         assert!(cloud.awaiting_dispatch(retry.id), "{backend}");
@@ -207,7 +207,7 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
         assert!(cloud.awaiting_dispatch(retry.id), "{backend}");
 
         // Past the grace period, the running reaper heals it.
-        cloud.strand_dispatch(retry.id, chrono::Duration::hours(1));
+        cloud.strand_legacy_dispatch(retry.id, chrono::Duration::hours(1));
         let healed = wait_for("the reaper's finalization", LONG, || {
             cloud
                 .task(retry.id)
@@ -328,10 +328,35 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
                 })
                 .await
         });
+        late.expect("duplicate completion acknowledges the accepted result");
+        let accepted = cloud
+            .block_on(cloud.storage.get_worker_accepted_outcome(
+                Some(&orch8_types::ids::TenantId::unchecked(&cloud.tenant)),
+                task.id,
+                &orch8_types::worker::WorkerClaim::new("grpc-worker", task.claim_epoch),
+            ))
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            late.unwrap_err().code(),
+            accepted.output,
+            json!({"ok":true}),
+            "{backend}: replay replaced the first result"
+        );
+        let stale = cloud.block_on(async {
+            grpc(&cloud)
+                .await
+                .complete_task(proto::CompleteTaskRequest {
+                    task_id: task.id.to_string(),
+                    worker_id: "grpc-worker".into(),
+                    output_json: "{}".into(),
+                    claim_epoch: task.claim_epoch + 1,
+                })
+                .await
+        });
+        assert_eq!(
+            stale.unwrap_err().code(),
             tonic::Code::FailedPrecondition,
-            "{backend}: fenced"
+            "{backend}: another claim cannot inherit the acknowledgement"
         );
 
         // Fail (retryable, retry policy) → receipt unknown, next attempt;

@@ -2364,3 +2364,25 @@ async fn postgres_downgrade_dependencies_are_scoped_to_the_source_cut_schema() {
         "downgrade consulted or changed an unrelated schema: {result:?}"
     );
 }
+
+orch8_storage::backend_test!(async fn pending_accepted_worker_result_blocks_capture_after_hot_gc(b) {
+    use orch8_types::worker::{WorkerClaim, WorkerTask};
+    use orch8_storage::capsule_export::CapsuleCutRefusal;
+    let storage=b.storage.as_ref();let request=fixture(storage).await;
+    let task:WorkerTask=serde_json::from_value(json!({"id":uuid::Uuid::now_v7(),"instance_id":request.owner.current_instance_id,"block_id":"charge","handler_name":"remote.capture-test","attempt":0,"params":{},"context":{},"state":"pending","created_at":Utc::now()})).unwrap();
+    storage.create_worker_task(&task).await.unwrap();
+    let held=storage.claim_worker_tasks(&task.handler_name,"worker",1).await.unwrap().pop().unwrap();
+    let claim=WorkerClaim::new("worker",held.claim_epoch);
+    assert!(storage.complete_worker_task(task.id,&claim,&json!({"accepted":true})).await.unwrap());
+    storage.delete_worker_task(task.id).await.unwrap();
+    assert!(matches!(storage.capture_capsule_cut(&request).await.unwrap(),CapsuleCutCapture::Refused(CapsuleCutRefusal::UnsafeBoundary)));
+    let error = match &b.raw {
+        orch8_storage::testing::backends::RawPool::Sqlite(pool) => sqlx::query("INSERT INTO capsule_source_cuts(source_instance_id,state) VALUES(?1,'captured')")
+            .bind(task.instance_id.to_string()).execute(pool).await.unwrap_err(),
+        #[cfg(feature="postgres")]
+        orch8_storage::testing::backends::RawPool::Postgres(pool) => sqlx::query("INSERT INTO capsule_source_cuts(source_instance_id,state) VALUES($1,'captured')")
+            .bind(task.instance_id.into_uuid()).execute(pool).await.unwrap_err(),
+    };
+    assert!(error.to_string().contains("unapplied worker outcome prevents capsule cut"),"{error}");
+    assert!(storage.get_worker_accepted_outcome(Some(&request.owner.tenant_id),task.id,&claim).await.unwrap().is_some());
+});

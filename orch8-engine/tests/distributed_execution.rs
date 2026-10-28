@@ -1977,3 +1977,101 @@ async fn retry_admission_uses_the_rendered_payload_for_the_actual_reserved_task(
         assert_eq!(claim(&storage, &retry).await.params, retry.params);
     }
 }
+
+#[tokio::test]
+async fn mobile_tick_recovers_cold_accepted_result_while_preserving_pause() {
+    for test_backend in backends().await {
+        let storage = Arc::clone(&test_backend.storage);
+        let handler = unique_handler("ext.cold-result");
+        let (_, instance) = start(&storage, vec![mk_step("remote", &handler)]).await;
+        let task = only_task(&storage, instance.id).await;
+        let held = claim(&storage, &task).await;
+        let claim = orch8_types::worker::WorkerClaim::new("worker-a", held.claim_epoch);
+        assert!(
+            storage
+                .complete_worker_task(held.id, &claim, &json!({"recovered":true}))
+                .await
+                .unwrap()
+        );
+        storage
+            .update_instance_state(instance.id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+        storage.delete_worker_task(held.id).await.unwrap();
+        let handlers = Arc::new(registry());
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let cache = Arc::new(orch8_engine::sequence_cache::SequenceCache::new(
+            16,
+            Duration::from_secs(60),
+        ));
+        let cancel = tokio_util::sync::CancellationToken::new();
+        orch8_engine::scheduler::tick_once(
+            &storage,
+            &handlers,
+            &semaphore,
+            &common::default_config(),
+            &cache,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        let parent = storage.get_instance(instance.id).await.unwrap().unwrap();
+        assert_eq!(
+            parent.state,
+            InstanceState::Paused,
+            "{}",
+            test_backend.name()
+        );
+        assert_eq!(
+            parent.context.data["recovered"],
+            true,
+            "{}",
+            test_backend.name()
+        );
+        assert!(
+            storage
+                .claim_worker_outcome_recovery_page(64)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .get_block_output(instance.id, &held.block_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .output,
+            json!({"recovered":true})
+        );
+        storage
+            .update_instance_state(instance.id, InstanceState::Scheduled, Some(Utc::now()))
+            .await
+            .unwrap();
+        orch8_engine::scheduler::tick_once(
+            &storage,
+            &handlers,
+            &semaphore,
+            &common::default_config(),
+            &cache,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            storage
+                .get_instance(instance.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            InstanceState::Completed,
+            "{}",
+            test_backend.name()
+        );
+        assert!(
+            tasks_of(&storage, instance.id).await.is_empty(),
+            "resuming an integrated result dispatched provider work again"
+        );
+    }
+}

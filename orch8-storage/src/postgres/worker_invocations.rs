@@ -257,9 +257,31 @@ pub(super) async fn recovery_source_on(
     effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
     epoch: Option<u64>,
 ) -> Result<Option<WorkerInvocation>, StorageError> {
-    let Some(source) = source_on(conn, task_id).await? else {
+    // Only recovery may preview a missing hot effect ID. It must still match
+    // the retained invocation and the original receipt proof below. Ordinary
+    // source mutations continue to use source_on's strict hot-field checks.
+    let mut current = read_on(conn, task_id, None).await?;
+    let Some(original) = get_on(conn, &current.tenant_id, task_id).await? else {
         return Ok(None);
     };
+    let source = if let Some(admission) =
+        super::worker_admission::get_on(conn, &current.tenant_id, task_id).await?
+    {
+        if !original.same_invocation_scope(&admission.invocation)
+            || !super::worker_admission::matches_hot_on(conn, &admission).await?
+        {
+            return Ok(None);
+        }
+        admission.invocation
+    } else {
+        original
+    };
+    if current.effect_id.is_none() {
+        current.effect_id = effect.map(|proof| proof.effect_id);
+    }
+    if !source.matches_source(&current) {
+        return Ok(None);
+    }
     if let crate::worker_invocation::WorkerInvocationTarget::Tree { node_id, .. } = source.target {
         let waiting: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM execution_tree WHERE id=$1 AND state='waiting')",

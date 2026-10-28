@@ -164,54 +164,6 @@ impl Orch8GrpcService {
 
         Ok(())
     }
-
-    /// Atomically save worker output, mark the execution node Completed, and
-    /// transition the instance state. The instance UPDATE is CAS-guarded: if
-    /// the instance became terminal/paused after our read, the tx rolls back
-    /// and we return `Ok(())` (the late completion is harmlessly dropped).
-    async fn atomically_complete_node(
-        &self,
-        task: &orch8_types::worker::WorkerTask,
-        block_output: &orch8_types::output::BlockOutput,
-        node_id: orch8_types::ids::ExecutionNodeId,
-        merged_context: bool,
-        context: &orch8_types::context::ExecutionContext,
-    ) -> Result<(), Status> {
-        let result = if merged_context {
-            self.storage
-                .save_output_complete_node_merge_context_and_transition(
-                    block_output,
-                    node_id,
-                    task.instance_id,
-                    context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        } else {
-            self.storage
-                .save_output_complete_node_and_transition(
-                    block_output,
-                    node_id,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        };
-        match result {
-            Ok(()) => Ok(()),
-            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => {
-                tracing::info!(
-                    instance_id = %task.instance_id,
-                    block_id = %task.block_id.as_str(),
-                    "gRPC worker completion CAS failed — instance became terminal/paused after read"
-                );
-                Ok(())
-            }
-            Err(e) => Err(storage_err(e)),
-        }
-    }
 }
 
 const WORKER_STREAM_MAX_IN_FLIGHT: u32 = 256;
@@ -1997,13 +1949,34 @@ impl Orch8Service for Orch8GrpcService {
             WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
         // Acceptance is independent of hot history and current workflow ownership.
         // Replaying an acknowledgement never applies caller-supplied output again.
-        if self
+        if let Some(receipt) = self
             .storage
             .get_worker_accepted_outcome(caller_tenant.as_ref(), task_id, &replay_claim)
             .await
             .map_err(storage_err)?
-            .is_some()
         {
+            let hot = self
+                .storage
+                .get_worker_task(task_id)
+                .await
+                .map_err(storage_err)?;
+            if hot
+                .as_ref()
+                .is_none_or(|task| !orch8_engine::delegation::is_delegation_task(task))
+            {
+                orch8_storage::worker_outcome::integrate_worker_outcome(
+                    self.storage.as_ref(),
+                    &receipt.tenant_id,
+                    task_id,
+                    &replay_claim,
+                    self.max_context_bytes,
+                )
+                .await
+                .map_err(storage_err)?;
+                return Ok(Response::new(proto::Empty {}));
+            }
+            // Mailbox application has its own protocol; acknowledgement still
+            // refers to the durable first result, regardless of the hot lease.
             return Ok(Response::new(proto::Empty {}));
         }
         let (pre_task, pre_instance) =
@@ -2063,12 +2036,7 @@ impl Orch8Service for Orch8GrpcService {
         )
         .await;
 
-        let task = self
-            .storage
-            .get_worker_task(task_id)
-            .await
-            .map_err(storage_err)?
-            .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
+        let task = pre_task;
 
         // Device-mesh delegation: integrate the result into the parent
         // instead of treating the mailbox task as one of its steps.
@@ -2083,143 +2051,15 @@ impl Orch8Service for Orch8GrpcService {
             return Ok(Response::new(proto::Empty {}));
         }
 
-        let Some(mut instance) = self
-            .storage
-            .get_instance(task.instance_id)
-            .await
-            .map_err(storage_err)?
-        else {
-            return Ok(Response::new(proto::Empty {}));
-        };
-        if instance.state.is_terminal()
-            || instance.state == InstanceState::Paused
-            || orch8_engine::ownership::local_ownership(
-                self.storage.as_ref(),
-                &instance.tenant_id,
-                instance.id,
-            )
-            .await
-            .map_err(engine_err)?
-                != orch8_engine::ownership::LocalOwnership::Owned
-        {
-            tracing::info!(
-                instance_id = %task.instance_id,
-                state = %instance.state,
-                "gRPC worker completion for terminal/paused instance; task accepted, transition skipped"
-            );
-            return Ok(Response::new(proto::Empty {}));
-        }
-
-        let mut merged_context = false;
-        if let Some(obj) = output.as_object() {
-            if instance.context.data.is_null() || !instance.context.data.is_object() {
-                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-            }
-            if let Some(data_obj) = instance.context.data.as_object_mut() {
-                for (k, v) in obj {
-                    data_obj.insert(k.clone(), v.clone());
-                }
-                merged_context = true;
-            }
-        }
-        // A worker's output is merged into context.data; a large output would
-        // otherwise grow the instance context past the configured cap and ride
-        // along on every scheduler claim. Validate the merged size before it is
-        // persisted (the HTTP worker path is bounded by the request body limit).
-        if merged_context {
-            instance
-                .context
-                .check_size(self.max_context_bytes)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        }
-
-        // `Value` implements `Display` via infallible serialization, so the
-        // size estimate needs no error fallback.
-        let output_size = u32::try_from(output.to_string().len()).unwrap_or(u32::MAX);
-        let block_output = orch8_types::output::BlockOutput {
-            id: Uuid::now_v7(),
-            instance_id: task.instance_id,
-            block_id: task.block_id.clone(),
-            output,
-            output_ref: None,
-            output_size,
-            attempt: task.attempt,
-            created_at: chrono::Utc::now(),
-        };
-
-        // Atomic: save output + complete node + transition instance in one tx.
-        let tree = self
-            .storage
-            .get_execution_tree(task.instance_id)
-            .await
-            .map_err(storage_err)?;
-        if let Some(node) = tree.iter().find(|n| {
-            n.block_id == task.block_id
-                && matches!(
-                    n.state,
-                    orch8_types::execution::NodeState::Running
-                        | orch8_types::execution::NodeState::Waiting
-                )
-        }) {
-            self.atomically_complete_node(
-                &task,
-                &block_output,
-                node.id,
-                merged_context,
-                &instance.context,
-            )
-            .await?;
-        } else {
-            // No live node: expected for flat (step-only) instances, which run
-            // on the scheduler fast path without an execution tree (see the
-            // HTTP twin); unexpected only when a tree exists.
-            if tree.is_empty() {
-                tracing::debug!(
-                    instance_id = %task.instance_id,
-                    block_id = %task.block_id,
-                    "gRPC worker completion for a flat (tree-less) instance"
-                );
-            } else {
-                tracing::warn!(
-                    instance_id = %task.instance_id,
-                    block_id = %task.block_id,
-                    "gRPC worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
-                );
-            }
-            let result = if merged_context {
-                self.storage
-                    .save_output_merge_context_and_transition(
-                        &block_output,
-                        task.instance_id,
-                        &instance.context,
-                        InstanceState::Scheduled,
-                        Some(chrono::Utc::now()),
-                    )
-                    .await
-            } else {
-                self.storage
-                    .save_output_and_transition(
-                        &block_output,
-                        task.instance_id,
-                        InstanceState::Scheduled,
-                        Some(chrono::Utc::now()),
-                    )
-                    .await
-            };
-            match result {
-                Ok(()) => {}
-                // Lost the race to a cancel/pause: the terminal state stands
-                // (mirrors the HTTP completion path).
-                Err(orch8_types::error::StorageError::TerminalTarget { .. }) => {
-                    tracing::info!(
-                        instance_id = %task.instance_id,
-                        block_id = %task.block_id.as_str(),
-                        "gRPC worker completion CAS failed — instance became terminal/paused after read"
-                    );
-                }
-                Err(e) => return Err(storage_err(e)),
-            }
-        }
+        orch8_storage::worker_outcome::integrate_worker_outcome(
+            self.storage.as_ref(),
+            &pre_instance.tenant_id,
+            task_id,
+            &claim,
+            self.max_context_bytes,
+        )
+        .await
+        .map_err(storage_err)?;
 
         Ok(Response::new(proto::Empty {}))
     }

@@ -587,6 +587,18 @@ impl SqliteStorage {
         sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(66)")
             .execute(&mut *retirement)
             .await?;
+        let integrated_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=67)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !integrated_schema {
+            sqlx::raw_sql(include_str!("worker_outcome_integrations.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(67)")
+                .execute(&mut *retirement)
+                .await?;
+        }
         sqlx::raw_sql(include_str!("worker_admissions.sql"))
             .execute(&mut *retirement)
             .await?;
@@ -2178,6 +2190,18 @@ impl crate::WorkerStore for SqliteStorage {
         claim: &WorkerClaim,
     ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
         worker_outcome::get(self, tenant_id, task_id, claim).await
+    }
+    async fn claim_worker_outcome_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError> {
+        worker_outcome::recovery_page(self, limit).await
+    }
+    async fn apply_worker_outcome_integration(
+        &self,
+        integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+        worker_outcome::apply(self, integration).await
     }
     async fn accept_worker_completion(
         &self,

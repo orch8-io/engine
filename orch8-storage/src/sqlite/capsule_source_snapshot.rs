@@ -131,6 +131,12 @@ pub(super) async fn read(
     ) {
         return Ok(Read::Refused(CapsuleCutRefusal::UnsafeBoundary));
     }
+    let unapplied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_accepted_outcomes a WHERE a.tenant_id=?1 AND a.instance_id=?2 AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations i WHERE i.task_id=a.task_id))")
+        .bind(owner.tenant_id.as_str()).bind(owner.current_instance_id.to_string())
+        .fetch_one(&mut *conn).await?;
+    if unapplied {
+        return Ok(Read::Refused(CapsuleCutRefusal::UnsafeBoundary));
+    }
     let workers: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM worker_tasks WHERE instance_id=?1 AND state IN ('pending','claimed')",
     )

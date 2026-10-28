@@ -6252,3 +6252,15 @@ This format floor is narrower than the full coordinator/worker protocol floor,
 which remains open. After these final persistence changes, all 89 admission/outcome
 cases, 177 source-cut cases, 15 migration cases, 149 gRPC cases and the 134 API
 completion cases pass, along with strict all-target checks for six Rust packages.
+
+## Atomic accepted-result application and independent recovery
+
+The [worker result application review](2026-10-28-worker-result-application.md)
+records the next checkpoint: shared HTTP/gRPC native application, exact original
+invocation fencing, context CAS/quota, immutable application receipts, paused-state
+preservation and durable recovery on continuous and explicit mobile ticks.
+Migration 136 / SQLite schema 67 enforce queue insertion, pending-result native
+retention and capsule-cut refusal in the database. Busy PostgreSQL authority and
+scanner locks are skipped; recovery rotation does not depend on a device clock.
+The original failure, delegation, principal, protocol, archive and SDK gates stay
+open. This checkpoint does not establish completion of the original review.

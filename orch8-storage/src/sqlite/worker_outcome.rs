@@ -136,3 +136,187 @@ pub(super) async fn settle_on(
     }
     Ok(())
 }
+
+/// All native writes and the application receipt share this transaction.
+pub(super) async fn apply(
+    store: &super::SqliteStorage,
+    integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let result = apply_on(&mut tx, integration).await;
+    super::finish_transaction(tx, result).await
+}
+
+async fn apply_on(
+    conn: &mut sqlx::SqliteConnection,
+    integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+    use crate::worker_invocation::WorkerInvocationTarget;
+    use crate::worker_outcome::WorkerOutcomeApplication::{
+        AlreadyApplied, Applied, ContextChanged, Deferred, ReconciliationRequired,
+    };
+    use orch8_types::instance::InstanceState;
+    let expected = &integration.accepted;
+    if !matches_accepted_on(conn, expected).await? {
+        return Ok(ReconciliationRequired);
+    }
+    let applied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_outcome_integrations WHERE task_id=?1 AND tenant_id=?2 AND instance_id=?3)")
+        .bind(expected.task_id.to_string()).bind(expected.tenant_id.as_str()).bind(expected.instance_id.to_string())
+        .fetch_one(&mut *conn).await?;
+    if applied {
+        return Ok(AlreadyApplied);
+    }
+    if !integration.within_context_limit {
+        return Ok(Deferred);
+    }
+    let Some(instance) = super::instances::get_on(conn, expected.instance_id).await? else {
+        return Ok(Deferred);
+    };
+    if instance.state.is_terminal() || instance.state == InstanceState::Running {
+        return Ok(Deferred);
+    }
+    let frozen: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM physical_instance_retirements WHERE instance_id=?1) OR EXISTS(SELECT 1 FROM capsule_source_cuts WHERE source_instance_id=?1 AND state IN ('captured','sealed'))")
+        .bind(expected.instance_id.to_string()).fetch_one(&mut *conn).await?;
+    if frozen {
+        return Ok(Deferred);
+    }
+    let owner: Option<String> = sqlx::query_scalar("SELECT record FROM continuity_executions WHERE tenant_id=?1 AND json_extract(record,'$.current_instance_id')=?2")
+        .bind(expected.tenant_id.as_str()).bind(expected.instance_id.to_string()).fetch_optional(&mut *conn).await?;
+    let owner: Option<orch8_types::continuity::ContinuityExecution> = owner
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+    let Some(invocation) = expected.invocation.as_ref() else {
+        return Ok(ReconciliationRequired);
+    };
+    if !crate::worker_outcome::integration_source_matches(invocation, &instance, owner.as_ref()) {
+        return Ok(ReconciliationRequired);
+    }
+    if serde_json::to_value(&instance.context)?
+        != serde_json::to_value(&integration.expected_context)?
+    {
+        return Ok(ContextChanged);
+    }
+    if !target_is_current_on(conn, &instance, invocation).await? {
+        return Ok(ReconciliationRequired);
+    }
+    super::outputs::save_on(conn, &integration.output).await?;
+    if let WorkerInvocationTarget::Tree {
+        node_id,
+        activation_id,
+    } = invocation.target
+    {
+        let changed = sqlx::query("UPDATE execution_tree SET state='completed',completed_at=?1 WHERE id=?2 AND instance_id=?3 AND replace(lower(activation_id),'-','')=?4 AND state IN ('running','waiting')")
+            .bind(super::helpers::ts(chrono::Utc::now())).bind(node_id.to_string())
+            .bind(expected.instance_id.to_string()).bind(activation_id.simple().to_string()).execute(&mut *conn).await?.rows_affected();
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "worker outcome activation changed".into(),
+            ));
+        }
+    }
+    let paused = instance.state == InstanceState::Paused;
+    sqlx::query("UPDATE task_instances SET context=?1,state=?2,next_fire_at=?3,updated_at=?4,claimed_at=NULL WHERE id=?5 AND tenant_id=?6")
+        .bind(serde_json::to_string(&integration.context)?)
+        .bind(if paused { "paused" } else { "scheduled" })
+        .bind((!paused).then(|| super::helpers::ts(chrono::Utc::now())))
+        .bind(super::helpers::ts(chrono::Utc::now()))
+        .bind(expected.instance_id.to_string()).bind(expected.tenant_id.as_str()).execute(&mut *conn).await?;
+    sqlx::query("INSERT INTO worker_outcome_integrations(task_id,tenant_id,instance_id,output_id,applied_at) VALUES(?1,?2,?3,?4,?5)")
+        .bind(expected.task_id.to_string()).bind(expected.tenant_id.as_str()).bind(expected.instance_id.to_string())
+        .bind(integration.output.id.to_string()).bind(super::helpers::ts(chrono::Utc::now())).execute(&mut *conn).await?;
+    sqlx::query("DELETE FROM worker_outcome_recovery WHERE task_id=?1")
+        .bind(expected.task_id.to_string())
+        .execute(&mut *conn)
+        .await?;
+    Ok(Applied)
+}
+
+pub(super) async fn recovery_page(
+    store: &super::SqliteStorage,
+    limit: u32,
+) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError> {
+    let mut tx = super::helpers::begin_immediate(&store.pool).await?;
+    let result = recovery_page_on(&mut tx, limit).await;
+    super::finish_transaction(tx, result).await
+}
+async fn recovery_page_on(
+    conn: &mut sqlx::SqliteConnection,
+    limit: u32,
+) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError> {
+    let turn: i64 = sqlx::query_scalar("UPDATE worker_outcome_recovery_clock SET turn=turn+1 WHERE singleton=1 AND turn < 9223372036854775807 RETURNING turn")
+        .fetch_optional(&mut *conn).await?.ok_or_else(|| StorageError::Constraint("worker recovery clock exhausted".into()))?;
+    let rows = sqlx::query("SELECT a.task_id,a.tenant_id,json_extract(a.record,'$.claim') AS claim FROM worker_outcome_recovery r JOIN worker_accepted_outcomes a ON a.task_id=r.task_id ORDER BY r.turn,r.task_id LIMIT ?1").bind(i64::from(limit.min(256))).fetch_all(&mut *conn).await?;
+    let mut page = Vec::with_capacity(rows.len());
+    for row in rows {
+        let task_id = Uuid::parse_str(&row.get::<String, _>("task_id"))
+            .map_err(|e| StorageError::Constraint(e.to_string()))?;
+        sqlx::query("INSERT INTO worker_outcome_recovery(task_id,turn) VALUES(?1,?2) ON CONFLICT(task_id) DO UPDATE SET turn=excluded.turn")
+            .bind(task_id.to_string()).bind(turn).execute(&mut *conn).await?;
+        let Some(claim) = row
+            .get::<Option<String>, _>("claim")
+            .and_then(|value| serde_json::from_str(&value).ok())
+        else {
+            tracing::warn!(%task_id, "accepted worker claim requires reconciliation");
+            continue;
+        };
+        page.push(crate::worker_outcome::WorkerOutcomeRecovery {
+            task_id,
+            tenant_id: TenantId::unchecked(row.get::<String, _>("tenant_id")),
+            claim,
+        });
+    }
+    Ok(page)
+}
+
+/// Validate the original activation without consulting any reusable hot task alias.
+async fn target_is_current_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance: &orch8_types::instance::TaskInstance,
+    invocation: &crate::worker_invocation::WorkerInvocation,
+) -> Result<bool, StorageError> {
+    use crate::worker_invocation::WorkerInvocationTarget;
+    match invocation.target {
+        WorkerInvocationTarget::Tree { node_id, activation_id } => {
+            Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_tree WHERE id=?1 AND instance_id=?2 AND block_id=?3 AND replace(lower(activation_id),'-','')=?4 AND state IN ('running','waiting'))")
+                .bind(node_id.to_string())
+                .bind(instance.id.to_string())
+                .bind(invocation.block_id.as_str())
+                .bind(activation_id.simple().to_string())
+                .fetch_one(&mut *conn).await?)
+        }
+        WorkerInvocationTarget::Flat { step_started_at } => {
+            let has_tree: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_tree WHERE instance_id=?1)")
+                .bind(instance.id.to_string()).fetch_one(&mut *conn).await?;
+            Ok(!has_tree && instance.context.runtime.current_step.as_ref() == Some(&invocation.block_id)
+                && instance.context.runtime.current_step_started_at == Some(step_started_at))
+        }
+        WorkerInvocationTarget::Unbound { .. } => Ok(false),
+    }
+}
+
+/// Validate indexed immutable evidence before trusting a privately prepared plan.
+async fn matches_accepted_on(
+    conn: &mut sqlx::SqliteConnection,
+    expected: &WorkerAcceptedOutcome,
+) -> Result<bool, StorageError> {
+    let row = sqlx::query("SELECT tenant_id,instance_id,record FROM worker_accepted_outcomes WHERE task_id=?1 AND tenant_id=?2")
+        .bind(expected.task_id.to_string()).bind(expected.tenant_id.as_str())
+        .fetch_optional(&mut *conn).await?;
+    let Some(row) = row else {
+        return Ok(false);
+    };
+    let mut accepted = crate::worker_outcome::decode_record(serde_json::from_str(
+        &row.get::<String, _>("record"),
+    )?)?;
+    accepted.validate(
+        &TenantId::unchecked(row.get::<String, _>("tenant_id")),
+        expected.task_id,
+        InstanceId::from_uuid(
+            Uuid::parse_str(&row.get::<String, _>("instance_id"))
+                .map_err(|e| StorageError::Constraint(e.to_string()))?,
+        ),
+    )?;
+    // Only the wrapper may transform the body; every immutable identity stays equal.
+    accepted.output = expected.output.clone();
+    Ok(accepted == *expected)
+}

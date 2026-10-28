@@ -8,14 +8,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::filter::Pagination;
-use orch8_types::instance::InstanceState;
-use orch8_types::output::BlockOutput;
 use orch8_types::worker::{
     WorkerAttemptEventKind, WorkerClaim, WorkerTaskAttemptEvent, WorkerTaskState,
 };
 use orch8_types::worker_filter::WorkerTaskFilter;
-
-use orch8_types::execution::NodeState;
 
 use crate::AppState;
 use crate::auth::OptionalAdmin;
@@ -1217,17 +1213,27 @@ pub(crate) async fn complete_task(
         )
         .await
         .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
-    // Keep the existing hot-history integration retry. After GC the receipt
-    // still acknowledges acceptance; durable native reconciliation is separate.
-    if accepted.is_some()
-        && state
+    if let Some(receipt) = &accepted {
+        let hot = state
             .storage
             .get_worker_task(task_id)
             .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-            .is_none()
-    {
-        return Ok(StatusCode::OK);
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+        if hot
+            .as_ref()
+            .is_none_or(|task| !orch8_engine::delegation::is_delegation_task(task))
+        {
+            orch8_storage::worker_outcome::integrate_worker_outcome(
+                state.storage.as_ref(),
+                &receipt.tenant_id,
+                task_id,
+                &replay_claim,
+                state.max_context_bytes,
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+            return Ok(StatusCode::OK);
+        }
     }
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
@@ -1360,12 +1366,7 @@ pub(crate) async fn complete_task(
         .await;
     }
 
-    let task = state
-        .storage
-        .get_worker_task(task_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-        .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    let task = pre_task;
 
     // Device-mesh delegation: integrate the result into the parent (block
     // output + `context.data.delegations.<id>` + wake) instead of treating
@@ -1393,202 +1394,15 @@ pub(crate) async fn complete_task(
         return Ok(StatusCode::OK);
     }
 
-    let output_json = serde_json::to_string(&req.output).map_err(|e| {
-        ApiError::InvalidArgument(format!("failed to serialize worker output: {e}"))
-    })?;
-    let task_block_id = task.block_id.clone();
-    let block_output = BlockOutput {
-        id: Uuid::now_v7(),
-        instance_id: task.instance_id,
-        block_id: task.block_id,
-        output: req.output,
-        output_ref: None,
-        output_size: u32::try_from(output_json.len()).unwrap_or(u32::MAX),
-        attempt: task.attempt,
-        created_at: chrono::Utc::now(),
-    };
-
-    // Re-read instance state before propagating. Between task-claim and
-    // completion a cancel/admin-fail could have terminated the instance.
-    let Some(mut instance) = state
-        .storage
-        .get_instance(task.instance_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?
-    else {
-        return Ok(StatusCode::OK);
-    };
-    if instance.state.is_terminal()
-        || instance.state == InstanceState::Paused
-        || orch8_engine::ownership::local_ownership(
-            state.storage.as_ref(),
-            &instance.tenant_id,
-            instance.id,
-        )
-        .await
-        .map_err(|error| ApiError::Conflict(error.to_string()))?
-            != orch8_engine::ownership::LocalOwnership::Owned
-    {
-        tracing::info!(
-            instance_id = %task.instance_id,
-            state = %instance.state,
-            block_id = %task_block_id,
-            "external worker completion arrived for terminal/paused instance — task accepted, transition skipped"
-        );
-        // Still roll the external work into the breaker — the handler's
-        // dependency did succeed, and withholding the signal would leave
-        // a spurious failure in the breaker window.
-        if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
-            && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
-        {
-            cb.record_success(tenant, &task.handler_name);
-        }
-        return Ok(StatusCode::OK);
-    }
-
-    // Merge step output into context.data BEFORE the atomic write.
-    let merged_context = if let Some(obj) = block_output.output.as_object() {
-        if instance.context.data.is_null() || !instance.context.data.is_object() {
-            instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-        }
-        if let Some(data_obj) = instance.context.data.as_object_mut() {
-            for (k, v) in obj {
-                data_obj.insert(k.clone(), v.clone());
-            }
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // Find the execution node that this worker task corresponds to.
-    // We do this BEFORE the atomic write so we can include the node
-    // completion in the same transaction, closing the race where the
-    // scheduler claims the instance between output-save and node-complete.
-    let tree = state
-        .storage
-        .get_execution_tree(task.instance_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
-    let node = tree.iter().find(|n| {
-        n.block_id == task_block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
-    });
-
-    // On a completion retry, only finish a transition that demonstrably did
-    // not happen yet: the step's node is still live (tree path), or — flat
-    // path, no tree — the instance is still Waiting on this very step.
-    // Otherwise the first attempt already transitioned; re-running the
-    // non-atomic fallback would save a duplicate output and re-schedule.
-    if completion_retry {
-        let pending = if tree.is_empty() {
-            instance.state == InstanceState::Waiting
-                && instance
-                    .context
-                    .runtime
-                    .current_step
-                    .as_ref()
-                    .is_none_or(|step| *step == task_block_id)
-        } else {
-            node.is_some()
-        };
-        if !pending {
-            return Ok(StatusCode::OK);
-        }
-        tracing::info!(
-            task_id = %task_id,
-            instance_id = %task.instance_id,
-            block_id = %task_block_id,
-            "worker completion retry: task already completed, finishing the instance transition"
-        );
-    }
-
-    let cas_err = if let Some(node) = node {
-        let result = if merged_context {
-            state
-                .storage
-                .save_output_complete_node_merge_context_and_transition(
-                    &block_output,
-                    node.id,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        } else {
-            state
-                .storage
-                .save_output_complete_node_and_transition(
-                    &block_output,
-                    node.id,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        };
-        match result {
-            Ok(()) => false,
-            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => true,
-            Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
-        }
-    } else {
-        // No live node. Flat (step-only) sequences run on the scheduler's
-        // fast path and never build an execution tree: saving the output and
-        // re-scheduling the instance *is* their completion path. Only a tree
-        // instance without a live node for this step is unexpected (the node
-        // was cancelled or already settled concurrently).
-        if tree.is_empty() {
-            tracing::debug!(
-                instance_id = %task.instance_id,
-                block_id = %task_block_id,
-                "worker completion for a flat (tree-less) instance"
-            );
-        } else {
-            tracing::warn!(
-                instance_id = %task.instance_id,
-                block_id = %task_block_id,
-                "worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
-            );
-        }
-        let result = if merged_context {
-            state
-                .storage
-                .save_output_merge_context_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        } else {
-            state
-                .storage
-                .save_output_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        };
-        match result {
-            Ok(()) => false,
-            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => true,
-            Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
-        }
-    };
-
-    if cas_err {
-        tracing::info!(
-            instance_id = %task.instance_id,
-            block_id = %task_block_id,
-            "worker completion CAS failed — instance became terminal/paused after read"
-        );
-    }
+    orch8_storage::worker_outcome::integrate_worker_outcome(
+        state.storage.as_ref(),
+        &tenant_id,
+        task_id,
+        &claim,
+        state.max_context_bytes,
+    )
+    .await
+    .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
 
     // Roll external-worker success into the same breaker registry the
     // in-process step-exec path uses. Skip-listed handlers (pure control-flow

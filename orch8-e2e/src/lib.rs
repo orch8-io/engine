@@ -481,37 +481,40 @@ impl Cloud {
 }
 
 impl Cloud {
-    /// Put a dispatched retry row into the state a pre-`awaiting_dispatch`
-    /// node's re-dispatch leaves behind in a mixed-version fleet: the
-    /// attempt's receipt exists, but the row was never bound (its insert was
-    /// `ON CONFLICT DO NOTHING`), so `effect_id` / `continuity_epoch` are
-    /// unset and the row is still `awaiting_dispatch`. `age` backdates the
-    /// row's creation.
-    pub fn strand_dispatch(&self, task: Uuid, age: chrono::Duration) {
+    /// Model a historical pre-admission dispatch in this scratch database.
+    /// Such a writer retained its bound invocation but never created an immutable
+    /// admission certificate. Restore all guards before exposing the fixture.
+    pub fn strand_legacy_dispatch(&self, task: Uuid, age: chrono::Duration) {
         let created = chrono::Utc::now() - age;
         self.rt.block_on(async {
             match &self.raw {
                 RawPool::Postgres(pool) => {
-                    sqlx::query(
-                        "UPDATE worker_tasks SET effect_id = NULL, continuity_epoch = NULL, \
-                         awaiting_dispatch = TRUE, created_at = $2 WHERE id = $1",
-                    )
-                    .bind(task)
-                    .bind(created)
-                    .execute(pool)
-                    .await
-                    .expect("strand dispatch");
+                    let mut tx = pool.begin().await.expect("legacy snapshot transaction");
+                    sqlx::raw_sql("ALTER TABLE worker_task_invocations DISABLE TRIGGER worker_invocation_update; ALTER TABLE worker_task_admissions DISABLE TRIGGER worker_admission_delete;")
+                        .execute(&mut *tx).await.expect("prepare legacy fixture");
+                    sqlx::query("UPDATE worker_task_invocations SET record=(SELECT record->'invocation' FROM worker_task_admissions WHERE task_id=$1) WHERE task_id=$1 AND EXISTS(SELECT 1 FROM worker_task_admissions WHERE task_id=$1)")
+                        .bind(task).execute(&mut *tx).await.expect("retain original bound invocation");
+                    sqlx::query("DELETE FROM worker_task_admissions WHERE task_id=$1").bind(task).execute(&mut *tx).await.expect("model pre-admission history");
+                    sqlx::raw_sql("ALTER TABLE worker_task_invocations ENABLE TRIGGER worker_invocation_update; ALTER TABLE worker_task_admissions ENABLE TRIGGER worker_admission_delete;")
+                        .execute(&mut *tx).await.expect("restore immutable evidence guards");
+                    sqlx::query("UPDATE worker_tasks SET effect_id=NULL,continuity_epoch=NULL,awaiting_dispatch=TRUE,created_at=$2 WHERE id=$1")
+                        .bind(task).bind(created).execute(&mut *tx).await.expect("strand legacy dispatch");
+                    tx.commit().await.expect("commit legacy snapshot");
                 }
                 RawPool::Sqlite(pool) => {
-                    sqlx::query(
-                        "UPDATE worker_tasks SET effect_id = NULL, continuity_epoch = NULL, \
-                         awaiting_dispatch = 1, created_at = ?2 WHERE id = ?1",
-                    )
-                    .bind(task.to_string())
-                    .bind(created.to_rfc3339())
-                    .execute(pool)
-                    .await
-                    .expect("strand dispatch");
+                    let mut tx = pool.begin_with("BEGIN IMMEDIATE").await.expect("legacy snapshot transaction");
+                    sqlx::raw_sql("DROP TRIGGER worker_invocation_update; DROP TRIGGER worker_admission_delete;")
+                        .execute(&mut *tx).await.expect("prepare legacy fixture");
+                    sqlx::query("UPDATE worker_task_invocations SET record=(SELECT json_extract(record,'$.invocation') FROM worker_task_admissions WHERE task_id=?1) WHERE task_id=?1 AND EXISTS(SELECT 1 FROM worker_task_admissions WHERE task_id=?1)")
+                        .bind(task.to_string()).execute(&mut *tx).await.expect("retain original bound invocation");
+                    sqlx::query("DELETE FROM worker_task_admissions WHERE task_id=?1").bind(task.to_string()).execute(&mut *tx).await.expect("model pre-admission history");
+                    sqlx::raw_sql(include_str!("../../orch8-storage/src/sqlite/worker_invocations.sql"))
+                        .execute(&mut *tx).await.expect("restore invocation guards");
+                    sqlx::raw_sql(include_str!("../../orch8-storage/src/sqlite/worker_admissions.sql"))
+                        .execute(&mut *tx).await.expect("restore admission guards");
+                    sqlx::query("UPDATE worker_tasks SET effect_id=NULL,continuity_epoch=NULL,awaiting_dispatch=1,created_at=?2 WHERE id=?1")
+                        .bind(task.to_string()).bind(created.to_rfc3339()).execute(&mut *tx).await.expect("strand legacy dispatch");
+                    tx.commit().await.expect("commit legacy snapshot");
                 }
             }
         });

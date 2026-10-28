@@ -2176,6 +2176,28 @@ passthrough_impl! {
     ) -> Result<bool, StorageError> {
         self.accept_worker_completion(task_id, claim, &crate::worker_outcome::WorkerCompletion::new(output.clone())).await
     }
+    async fn claim_worker_outcome_recovery_page(&self, limit: u32) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError>;
+    async fn apply_worker_outcome_integration(
+        &self, integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+        let Some(raw) = self.inner.get_instance(integration.accepted.instance_id).await? else {
+            return Ok(crate::worker_outcome::WorkerOutcomeApplication::Deferred);
+        };
+        let mut logical = raw.clone();
+        self.decrypt_instance(&mut logical)?;
+        if serde_json::to_value(&logical.context)? != serde_json::to_value(&integration.expected_context)? {
+            return Ok(crate::worker_outcome::WorkerOutcomeApplication::ContextChanged);
+        }
+        let mut sealed = integration.clone();
+        sealed.expected_context = raw.context;
+        // These are logical application values, even if they resemble authentic ciphertext.
+        sealed.output.output = self.encryptor.encrypt_value(&integration.output.output)
+            .map_err(|error| StorageError::Encryption(error.to_string()))?;
+        sealed.context.data = self.encryptor.encrypt_value_with_aad(
+            &integration.context.data, &Self::instance_aad(integration.accepted.instance_id))
+            .map_err(|error| StorageError::Encryption(error.to_string()))?;
+        self.inner.apply_worker_outcome_integration(&sealed).await
+    }
     async fn accept_worker_completion(
         &self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim,
         completion: &crate::worker_outcome::WorkerCompletion,
