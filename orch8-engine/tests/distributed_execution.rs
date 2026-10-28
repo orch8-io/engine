@@ -1192,7 +1192,7 @@ fn delegation_for(
         tenant_id: parent.tenant_id.clone(),
         parent_continuity_id: execution.continuity_id,
         parent_epoch: execution.epoch,
-        source_runtime_id: RuntimeId::new(),
+        source_runtime_id: execution.owner_runtime_id,
         destination_runtime_id: destination,
         sub_sequence_id: sub_sequence,
         grant_id: orch8_types::continuity::ContinuationGrantId::new(),

@@ -6558,3 +6558,24 @@ Consumed. The new regression additionally requires provenance insertion failure
 to roll back task/effect/grant, an identical retry to return the original task,
 and changed input to conflict. These latter assertions are requirements, not
 passing evidence yet. The transactional publication gate remains open.
+
+## Delegation proxy identity binding
+
+A four-backend regression reproduced proxy aliasing: `ensure_delegation_proxy`
+accepted the same delegation UUID with a different destination. It now requires
+the entire stored delegation, physical parent, sequence, tenant and namespace
+to match. The supplied parent ownership and sequence snapshots must also match
+the delegation scope. An identical retry can still read a completed proxy;
+mutable state is excluded from the identity comparison.
+
+The regression passes on PostgreSQL, SQLite and both encrypted variants,
+including changed grant, source/destination, parent continuity/epoch, expiry,
+sequence, physical parent and namespace. All 40 distributed execution tests and
+strict all-target lints across engine/API/gRPC/mobile/server/facade pass. This
+does not provide transactional ownership revalidation, cold publication replay,
+grant rollback or atomic outcome integration; those remain required.
+
+The next published CI checkpoint, e7354152, also exposed a Python native snapshot
+test failure: corrupting the current diagnostic did not make `engine.get` raise
+the expected serialization error. The job log is retained for investigation;
+this gate is unresolved, not classified as an infrastructure failure.

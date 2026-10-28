@@ -95,11 +95,34 @@ pub async fn ensure_delegation_proxy(
     delegation: &DeviceDelegation,
     sub_sequence: &orch8_types::sequence::SequenceDefinition,
 ) -> Result<TaskInstance, EngineError> {
+    if execution.tenant_id != delegation.tenant_id
+        || execution.continuity_id != delegation.parent_continuity_id
+        || execution.epoch != delegation.parent_epoch
+        || execution.owner_runtime_id != delegation.source_runtime_id
+        || execution.state != orch8_types::continuity::OwnershipState::Owned
+        || sub_sequence.tenant_id != delegation.tenant_id
+        || sub_sequence.id != delegation.sub_sequence_id
+    {
+        return Err(EngineError::InvalidConfig(
+            "delegation proxy scope does not match its parent and sub-sequence".into(),
+        ));
+    }
     let id = InstanceId::from_uuid(delegation.id.into_uuid());
     if let Some(existing) = storage.get_instance(id).await? {
+        let marker = &existing.metadata[DELEGATION_PROXY_KEY];
+        // The UUID is a durable publication identity, not permission to reuse
+        // a proxy created for a different grant, destination or physical parent.
+        // Mutable execution state is deliberately excluded: a completed proxy
+        // must remain discoverable by the original caller's identical retry.
         let same = existing.tenant_id == delegation.tenant_id
-            && existing.metadata[DELEGATION_PROXY_KEY]["delegation"]["id"]
-                == serde_json::to_value(delegation.id).unwrap_or(Value::Null);
+            && existing.sequence_id == sub_sequence.id
+            && existing.namespace == sub_sequence.namespace
+            && serde_json::from_value::<DeviceDelegation>(marker["delegation"].clone())
+                .ok()
+                .as_ref()
+                == Some(delegation)
+            && serde_json::from_value::<InstanceId>(marker["parent_instance_id"].clone()).ok()
+                == Some(execution.current_instance_id);
         return if same {
             Ok(existing)
         } else {
