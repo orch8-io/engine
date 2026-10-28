@@ -140,7 +140,7 @@ notify = { version = "8", features = ["serde"] }
 # Preserve Wasmtime's runtime/compiler defaults except its unused disk cache.
 # wasm_plugin builds Config::new() with cache=None and keeps its own bounded
 # module cache. Wasmtime's optional disk-cache feature pulls vulnerable zstd 0.13.
-wasmtime = { version = "49.0.4", default-features = false, features = [
+wasmtime = { version = "50.0.0", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null",
     "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator",
     "demangle", "addr2line", "coredump", "debug-builtins", "runtime",
