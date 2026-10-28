@@ -1,7 +1,7 @@
 //! Durable mailbox results across storage backends and worker transports.
 use super::*;
 
-async fn held_mailbox(
+pub(super) async fn held_mailbox(
     b: &TestBackend,
     server: &BackendTestServer,
     mode: Mode,
@@ -382,14 +382,25 @@ async fn proxy_metadata_cannot_turn_mailbox_into_native_work(b: TestBackend) {
             .await
             .unwrap()
     );
-    sql(
-        &b,
-        &format!(
-            "UPDATE task_instances SET metadata='{{}}' WHERE id='{}'",
-            f.anchor()
-        ),
-    )
-    .await;
+    let error = match &b.raw {
+        RawPool::Sqlite(pool) => sqlx::query("UPDATE task_instances SET metadata='{}' WHERE id=?1")
+            .bind(f.anchor().to_string())
+            .execute(pool)
+            .await
+            .unwrap_err(),
+        RawPool::Postgres(pool) => {
+            sqlx::query("UPDATE task_instances SET metadata='{}' WHERE id=$1")
+                .bind(f.anchor().into_uuid())
+                .execute(pool)
+                .await
+                .unwrap_err()
+        }
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("delegation relay identity is immutable")
+    );
     let result = orch8_storage::worker_outcome::integrate_worker_outcome(
         b.storage.as_ref(),
         &f.owner.tenant_id,
@@ -397,23 +408,20 @@ async fn proxy_metadata_cannot_turn_mailbox_into_native_work(b: TestBackend) {
         &claim,
         16 * 1024 * 1024,
     )
-    .await;
-    assert!(
-        result.is_err(),
-        "editable metadata reclassified the published proxy"
+    .await
+    .unwrap();
+    assert_eq!(
+        result,
+        orch8_storage::worker_outcome::WorkerOutcomeApplication::Applied
     );
-    let parent = b.storage.get_instance(f.anchor()).await.unwrap().unwrap();
-    assert_eq!(parent.state, InstanceState::Waiting);
-    assert!(parent.context.data.get("delegations").is_none());
-    assert!(
+    assert_eq!(
         b.storage
-            .get_block_output(
-                f.anchor(),
-                &orch8_types::ids::BlockId::new(format!("delegation-{}", f.delegation_id()))
-            )
+            .get_instance(f.anchor())
             .await
             .unwrap()
-            .is_none()
+            .unwrap()
+            .state,
+        InstanceState::Completed
     );
 }
 orch8_storage::backend_test!(async fn proxy_classification_requires_immutable_publication_evidence(b){proxy_metadata_cannot_turn_mailbox_into_native_work(b).await;});

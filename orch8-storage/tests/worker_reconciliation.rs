@@ -91,7 +91,15 @@ async fn sqlite_legacy_schema_upgrade_and_reopen_retain_the_explicit_decision() 
             .fetch_one(storage.pool())
             .await
             .unwrap(),
-        71
+        orch8_storage::sqlite::BUNDLED_SCHEMA_VERSION
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=71)"
+        )
+        .fetch_one(storage.pool())
+        .await
+        .unwrap()
     );
     assert!(
         sqlx::query("DELETE FROM worker_accepted_outcomes WHERE task_id=?1")

@@ -96,6 +96,11 @@ pub async fn create_instance(
     sub_header: crate::sub_tenants::SubTenantHeader,
     Json(req): Json<CreateInstanceRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if req.metadata.get("orch8_delegation_proxy").is_some() {
+        return Err(ApiError::InvalidArgument(
+            "delegation relay metadata is reserved".into(),
+        ));
+    }
     // Ref#5: delegate header/body tenant reconciliation to the shared helper
     // instead of re-implementing the rule inline (the inline copy drifted from
     // `enforce_tenant_create` once already).
@@ -364,6 +369,15 @@ pub async fn create_instances_batch(
     sub_header: crate::sub_tenants::SubTenantHeader,
     Json(req): Json<BatchCreateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    if req
+        .instances
+        .iter()
+        .any(|item| item.metadata.get("orch8_delegation_proxy").is_some())
+    {
+        return Err(ApiError::InvalidArgument(
+            "delegation relay metadata is reserved".into(),
+        ));
+    }
     // Empty batch is a no-op — return success with count=0 so callers
     // can pass through dynamically-computed batches without special-casing
     // the zero-length path.
@@ -1115,6 +1129,13 @@ pub async fn resume_from_block(
         &instance.tenant_id,
         &format!("instance {id}"),
     )?;
+
+    orch8_storage::delegation_publication::ensure_native_instance(
+        state.storage.as_ref(),
+        instance_id,
+    )
+    .await
+    .map_err(|e| ApiError::from_storage(e, "instance"))?;
 
     // Only quiescent instances can be operated on. Running/Scheduled/Waiting
     // instances must be paused or cancelled first — wiping outputs under a

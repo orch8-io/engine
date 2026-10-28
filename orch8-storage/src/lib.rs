@@ -98,7 +98,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 142;
+pub const STORAGE_SCHEMA_VERSION: u32 = 143;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -4186,6 +4186,13 @@ pub trait MobileSyncStore: Send + Sync + 'static {
 /// supported way to advance ownership, handoff, and effect state.
 #[async_trait]
 pub trait ContinuityStore: Send + Sync + 'static {
+    /// Permanent compact evidence that a relay ran on the wrong runtime.
+    /// Physical identity is globally unique; this fact survives hot/native GC.
+    /// It prevents automatic resume and new destination dispatch, not access checks.
+    async fn is_delegation_proxy_quarantined(
+        &self,
+        instance_id: orch8_types::ids::InstanceId,
+    ) -> Result<bool, StorageError>;
     async fn get_delegation_publication(
         &self,
         tenant: &TenantId,

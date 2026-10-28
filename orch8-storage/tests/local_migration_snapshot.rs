@@ -18,14 +18,21 @@ use orch8_types::{
 use serde_json::json;
 
 async fn fixture(s: &dyn StorageBackend) -> LocalMigrationSnapshotRequest {
+    fixture_with_relay(s, false).await
+}
+
+async fn fixture_with_relay(s: &dyn StorageBackend, relay: bool) -> LocalMigrationSnapshotRequest {
     let sequence = SequenceBuilder::new("local-migration")
         .step("wait", "noop")
         .build();
     s.create_sequence(&sequence).await.unwrap();
-    let instance = InstanceBuilder::for_sequence(&sequence)
+    let mut instance = InstanceBuilder::for_sequence(&sequence)
         .state(InstanceState::Waiting)
         .data(json!({"secret":"local-recovery-only"}))
         .build();
+    if relay {
+        instance.metadata = json!({"orch8_delegation_proxy":{"legacy":true}});
+    }
     s.create_instance(&instance).await.unwrap();
     let owner = ContinuityExecution {
         continuity_id: ContinuityId::new(),
@@ -301,3 +308,15 @@ mod definition_races {
         );
     }
 }
+
+orch8_storage::backend_test!(async fn relay_records_cannot_be_exported_or_migrated_as_native_workflows(b) {
+    use orch8_storage::capsule_export::{CapsuleCutCapture,CapsuleCutRefusal,CapsuleCutRequest};
+    let request=fixture_with_relay(b.storage.as_ref(),true).await;
+    let before=b.storage.get_instance(request.execution.current_instance_id).await.unwrap().unwrap();
+    assert!(matches!(b.storage.prepare_local_migration_snapshot(&request).await.unwrap(),Capture::Refused(CapsuleCutRefusal::UnsafeBoundary)));
+    let cut=CapsuleCutRequest{owner:request.execution.clone(),destination_runtime_id:Some(RuntimeId::new()),options_sha256:"a".repeat(64),mobile_access:None,now:Utc::now(),expires_at:Utc::now()+Duration::minutes(5)};
+    assert!(matches!(b.storage.capture_capsule_cut(&cut).await.unwrap(),CapsuleCutCapture::Refused(CapsuleCutRefusal::UnsafeBoundary)));
+    assert_eq!(serde_json::to_value(b.storage.get_instance(before.id).await.unwrap().unwrap()).unwrap(),serde_json::to_value(before).unwrap());
+    assert_eq!(b.storage.get_continuity_execution(&request.execution.tenant_id,request.execution.continuity_id).await.unwrap().unwrap(),request.execution);
+    assert_eq!(b.raw.count("capsule_source_cuts","source_instance_id",&request.execution.current_instance_id.to_string()).await,0);
+});

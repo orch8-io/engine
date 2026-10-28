@@ -116,6 +116,15 @@ pub(super) async fn read(
     conn: &mut sqlx::SqliteConnection,
     owner: &ContinuityExecution,
 ) -> Result<Read, StorageError> {
+    let relay: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM delegation_proxy_instances WHERE instance_id=?1)",
+    )
+    .bind(owner.current_instance_id.to_string())
+    .fetch_one(&mut *conn)
+    .await?;
+    if relay {
+        return Ok(Read::Refused(CapsuleCutRefusal::UnsafeBoundary));
+    }
     if !bounded(conn, owner).await? {
         return Ok(Read::Refused(CapsuleCutRefusal::PayloadTooLarge));
     }
@@ -131,22 +140,8 @@ pub(super) async fn read(
     ) {
         return Ok(Read::Refused(CapsuleCutRefusal::UnsafeBoundary));
     }
-    let unapplied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_accepted_outcomes a WHERE a.tenant_id=?1 AND a.instance_id=?2 AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations i WHERE i.task_id=a.task_id)) OR EXISTS(SELECT 1 FROM worker_resolution_outcomes r JOIN worker_resolution_recovery q ON q.outcome_id=r.id WHERE r.tenant_id=?1 AND r.instance_id=?2)")
-        .bind(owner.tenant_id.as_str()).bind(owner.current_instance_id.to_string())
-        .fetch_one(&mut *conn).await?;
-    if unapplied {
-        return Ok(Read::Refused(CapsuleCutRefusal::UnsafeBoundary));
-    }
-    let workers: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM worker_tasks WHERE instance_id=?1 AND state IN ('pending','claimed')",
-    )
-    .bind(owner.current_instance_id.to_string())
-    .fetch_one(&mut *conn)
-    .await?;
-    if workers > 0 {
-        return Ok(Read::Refused(CapsuleCutRefusal::WorkerTasksInFlight(
-            usize::try_from(workers).map_err(|_| too_large())?,
-        )));
+    if let Some(reason) = worker_boundary_refusal(conn, owner).await? {
+        return Ok(Read::Refused(reason));
     }
     let Some(checkpoint) = super::checkpoints::get_latest_on(conn, instance.id).await? else {
         return Ok(Read::Refused(CapsuleCutRefusal::MissingCheckpoint));
@@ -284,4 +279,28 @@ async fn externalized_on(
         }
     }
     Ok(Some(payloads))
+}
+
+async fn worker_boundary_refusal(
+    conn: &mut sqlx::SqliteConnection,
+    owner: &ContinuityExecution,
+) -> Result<Option<CapsuleCutRefusal>, StorageError> {
+    let unapplied: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM worker_accepted_outcomes a WHERE a.tenant_id=?1 AND a.instance_id=?2 AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations i WHERE i.task_id=a.task_id)) OR EXISTS(SELECT 1 FROM worker_resolution_outcomes r JOIN worker_resolution_recovery q ON q.outcome_id=r.id WHERE r.tenant_id=?1 AND r.instance_id=?2)")
+        .bind(owner.tenant_id.as_str()).bind(owner.current_instance_id.to_string())
+        .fetch_one(&mut *conn).await?;
+    if unapplied {
+        return Ok(Some(CapsuleCutRefusal::UnsafeBoundary));
+    }
+    let workers: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM worker_tasks WHERE instance_id=?1 AND state IN ('pending','claimed')",
+    )
+    .bind(owner.current_instance_id.to_string())
+    .fetch_one(&mut *conn)
+    .await?;
+    if workers > 0 {
+        return Ok(Some(CapsuleCutRefusal::WorkerTasksInFlight(
+            usize::try_from(workers).map_err(|_| too_large())?,
+        )));
+    }
+    Ok(None)
 }

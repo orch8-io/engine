@@ -323,24 +323,9 @@ pub async fn integrate_delegation_outcome(
         } else {
             InstanceState::Failed
         };
-        if storage
-            .conditional_update_instance_state(
-                parent.id,
-                InstanceState::Waiting,
-                InstanceState::Running,
-                None,
-            )
-            .await?
-        {
-            let _ = storage
-                .conditional_update_instance_state(
-                    parent.id,
-                    InstanceState::Running,
-                    terminal,
-                    None,
-                )
-                .await?;
-        }
+        let _ = storage
+            .conditional_update_instance_state(parent.id, InstanceState::Waiting, terminal, None)
+            .await?;
     } else if parent.state == InstanceState::Waiting {
         let _ = storage
             .conditional_update_instance_state(

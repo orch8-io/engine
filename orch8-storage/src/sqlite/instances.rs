@@ -20,7 +20,7 @@ pub(super) async fn has_due_higher_priority(
     let exists: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(
             SELECT 1 FROM task_instances
-            WHERE state = 'scheduled' AND {scope}
+            WHERE state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope}
               AND (next_fire_at IS NULL OR next_fire_at <= ?1)
               AND priority > ?2
         )",
@@ -321,7 +321,7 @@ async fn claim_due_inner(
             "WITH candidates AS (
                 SELECT id, tenant_id, priority, next_fire_at
                 FROM task_instances
-                WHERE state='scheduled' AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+                WHERE state='scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1)
                 ORDER BY priority DESC, next_fire_at ASC
                 LIMIT ?4
             ), ranked AS (
@@ -352,7 +352,7 @@ async fn claim_due_inner(
         .await?
     } else {
         // No per-tenant cap — original fast path.
-        sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM task_instances WHERE state='scheduled' AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2", scope = super::mobile_execution::ALLOWED)))
+        sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM task_instances WHERE state='scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2", scope = super::mobile_execution::ALLOWED)))
         .bind(now_s)
         .bind(i64::from(limit))
         .fetch_all(&mut *conn)

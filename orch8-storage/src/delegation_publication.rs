@@ -507,7 +507,9 @@ fn validate_parent(plan: &DelegationPlan) -> Result<(), StorageError> {
     let d = &plan.request.delegation;
     let owner = &plan.parent_owner;
     if plan.proxy {
-        if plan.parent.id.into_uuid() != d.id.into_uuid()
+        if plan.parent.id == owner.current_instance_id
+            || plan.task_owner.continuity_id == owner.continuity_id
+            || plan.parent.id.into_uuid() != d.id.into_uuid()
             || plan.parent.sequence_id != plan.sequence.id
             || serde_json::from_value::<DeviceDelegation>(
                 plan.parent.metadata["orch8_delegation_proxy"]["delegation"].clone(),
@@ -525,7 +527,10 @@ fn validate_parent(plan: &DelegationPlan) -> Result<(), StorageError> {
         {
             return Err(conflict());
         }
-    } else if plan.parent.id != owner.current_instance_id || plan.task_owner != *owner {
+    } else if plan.parent.metadata.get("orch8_delegation_proxy").is_some()
+        || plan.parent.id != owner.current_instance_id
+        || plan.task_owner != *owner
+    {
         return Err(conflict());
     }
 
@@ -601,4 +606,72 @@ impl DelegationPublication {
             _ => Err(conflict()),
         }
     }
+}
+
+/// Relays are control-plane records, not runnable instances. Metadata identifies
+/// historical relays; immutable publication ownership survives a missing label.
+pub async fn is_proxy_instance<S: crate::StorageBackend + ?Sized>(
+    storage: &S,
+    id: orch8_types::ids::InstanceId,
+) -> Result<bool, StorageError> {
+    let Some(instance) = storage.get_instance(id).await? else {
+        return Ok(false);
+    };
+    is_proxy_record(storage, &instance).await
+}
+
+/// Classify an already loaded record without turning its sequence into authority.
+pub async fn is_proxy_record<S: crate::StorageBackend + ?Sized>(
+    storage: &S,
+    instance: &TaskInstance,
+) -> Result<bool, StorageError> {
+    let id = instance.id;
+    if storage.is_delegation_proxy_quarantined(instance.id).await?
+        || instance.metadata.get("orch8_delegation_proxy").is_some()
+    {
+        return Ok(true);
+    }
+    let Some(publication) = storage
+        .get_delegation_publication(&instance.tenant_id, id.into_uuid())
+        .await?
+    else {
+        return Ok(false);
+    };
+    Ok(publication.instance_id == id
+        && publication.task_owner.continuity_id != publication.delegation.parent_continuity_id)
+}
+
+/// Native retry/fork/resume-from operations cannot repurpose a relay.
+pub async fn ensure_native_instance<S: crate::StorageBackend + ?Sized>(
+    storage: &S,
+    id: orch8_types::ids::InstanceId,
+) -> Result<(), StorageError> {
+    if is_proxy_instance(storage, id).await? {
+        return Err(StorageError::Conflict(
+            "delegation relay is not a native workflow".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// A relay must never have a native run or execution tree. Keep pre-upgrade
+/// evidence quarantined rather than dispatching the same work on another runtime.
+pub async fn proxy_has_native_history<S: crate::StorageBackend + ?Sized>(
+    storage: &S,
+    id: orch8_types::ids::InstanceId,
+) -> Result<bool, StorageError> {
+    if storage.is_delegation_proxy_quarantined(id).await? {
+        return Ok(true);
+    }
+    let Some(instance) = storage.get_instance(id).await? else {
+        return Ok(false);
+    };
+    if !is_proxy_record(storage, &instance).await? {
+        return Ok(false);
+    }
+    Ok(instance.context.runtime.run_id.is_some()
+        || instance.context.runtime.started_at.is_some()
+        || instance.context.runtime.current_step.is_some()
+        || instance.context.runtime.current_step_started_at.is_some()
+        || !storage.get_execution_tree(id).await?.is_empty())
 }

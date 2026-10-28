@@ -6687,3 +6687,10 @@ publication replay. It now checks the original acknowledgement and preserves
 All 18 cases, including federation/runtime trust rejection, pass on the fresh
 server; TypeScript checking passes. Current selected validation totals 1,385
 Rust/integration cases. Production trust policy was not relaxed.
+
+
+## Delegation relay execution follow-up (2026-10-28)
+
+The [relay execution fence review](2026-10-28-delegation-relay-execution-fence.md) records reproduced wrong-runtime execution through proxy resume/native admission, quarantine loss through hot cleanup and cold restore, and relay acceptance as a native migration snapshot. Migration 143 / SQLite schema 73 exclude relays from native execution, preserve compact immutable quarantine and protect ownership through cleanup. Capsule/local-migration readers reject relays; logical instance backup refuses relay state it cannot restore, while configuration export remains usable.
+
+Validation passed 1,471 distinct Rust tests, 34 freshly rebuilt Node/Python native tests, both actual SDK schema-72-to-73 reopen probes, and 250 fresh-server end-to-end cases with zero failures or skips. Strict lint passed across nine crates, plus mobile/SQLite-only builds and formatting. The published-base CI unit failure was a stale SQLite schema-version assertion; its repaired reconciliation test passed locally while retaining decision immutability checks. The focused report and validation manifest distinguish the full matrix from affected-case reruns. Original open gates remain open; PR #365 remains a draft.

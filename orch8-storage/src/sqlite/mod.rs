@@ -664,6 +664,14 @@ impl SqliteStorage {
         sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(72)")
             .execute(&mut *retirement)
             .await?;
+        sqlx::raw_sql(include_str!("delegation_proxy_execution.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("UPDATE task_instances SET state=CASE WHEN state='running' OR EXISTS(SELECT 1 FROM delegation_proxy_native_history history WHERE history.instance_id=task_instances.id) THEN 'paused' ELSE 'waiting' END,claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('running','scheduled') AND EXISTS(SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id)")
+            .execute(&mut *retirement).await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(73)")
+            .execute(&mut *retirement)
+            .await?;
         let reconciliation_schema: bool =
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=71)")
                 .fetch_one(&mut *retirement)
@@ -1517,7 +1525,7 @@ impl crate::InstanceStore for SqliteStorage {
         claimed_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
         sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=?1 AND tenant_id=?2 AND state='running' AND claimed_at=?3 AND {scope})",
+            "SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=?1 AND tenant_id=?2 AND state='running' AND claimed_at=?3 AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope})",
             scope = mobile_execution::ALLOWED
         )))
         .bind(instance_id.to_string()).bind(tenant_id.as_str()).bind(claimed_at.to_rfc3339())

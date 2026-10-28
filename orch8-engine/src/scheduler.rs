@@ -1390,6 +1390,21 @@ async fn process_one_signalled_instance(
     current_state: InstanceState,
     signals: Vec<Signal>,
 ) -> Result<(), EngineError> {
+    let relay =
+        orch8_storage::delegation_publication::is_proxy_instance(storage.as_ref(), instance_id)
+            .await?;
+    if relay && current_state == InstanceState::Scheduled {
+        // Older resumes may have armed a relay. Its signals still need to be
+        // consumed even though native candidate selection correctly skips it.
+        storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Scheduled,
+                InstanceState::Waiting,
+                None,
+            )
+            .await?;
+    }
     // Scheduled instances with a pending *control* signal just need a
     // wake-up so the normal tick processes it immediately. Skip the full
     // signal processor to avoid invalid state transitions.
@@ -1401,7 +1416,7 @@ async fn process_one_signalled_instance(
     // re-armed a parked instance on every sweep, which together with a
     // step delay was a livelock (ENG-R-N1). Storage already filters
     // these rows; this is the backend-independent guard.
-    if current_state == InstanceState::Scheduled {
+    if current_state == InstanceState::Scheduled && !relay {
         if !signals
             .iter()
             .any(|s| wakes_scheduled_instance(&s.signal_type))
@@ -1471,6 +1486,8 @@ async fn process_one_signalled_instance(
         if current_state != InstanceState::Cancelled
             && let Ok(Some(inst)) = storage.get_instance(instance_id).await
             && inst.state == InstanceState::Cancelled
+            && !orch8_storage::delegation_publication::is_proxy_record(storage.as_ref(), &inst)
+                .await?
             && let Ok(seq) = sequence_cache
                 .get_by_id_owned(storage, inst.sequence_id)
                 .await

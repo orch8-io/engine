@@ -38,6 +38,7 @@ base64.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+orch8-engine = { path = "../orch8-engine", default-features = false, features = ["test-util"] }
 # Exercise identical durable results across the HTTP and gRPC transports.
 orch8-grpc = { path = "../orch8-grpc" }
 tonic.workspace = true

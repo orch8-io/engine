@@ -86,6 +86,17 @@ pub(super) async fn delete_receipts_for_blocks_on(
 
 #[async_trait]
 impl crate::ContinuityStore for PostgresStorage {
+    async fn is_delegation_proxy_quarantined(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM delegation_proxy_quarantines WHERE instance_id=$1)",
+        )
+        .bind(instance_id.into_uuid())
+        .fetch_one(&self.pool)
+        .await?)
+    }
     async fn get_delegation_publication(
         &self,
         tenant: &TenantId,

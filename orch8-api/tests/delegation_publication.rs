@@ -50,6 +50,14 @@ impl Fixture {
     }
 }
 async fn fixture(s: &dyn StorageBackend, server: &BackendTestServer, mode: Mode) -> Fixture {
+    fixture_with_hooks(s, server, mode, false).await
+}
+async fn fixture_with_hooks(
+    s: &dyn StorageBackend,
+    server: &BackendTestServer,
+    mode: Mode,
+    hooks: bool,
+) -> Fixture {
     let sequence = SequenceBuilder::new(&format!("delegate-publication-{}", Uuid::now_v7()))
         .step("gate", "noop")
         .build();
@@ -79,9 +87,23 @@ async fn fixture(s: &dyn StorageBackend, server: &BackendTestServer, mode: Mode)
             .await
             .unwrap();
     }
-    let sub = SequenceBuilder::new(owner.tenant_id.as_str())
+    let mut sub = SequenceBuilder::new(owner.tenant_id.as_str())
         .step("work", "noop")
         .build();
+    if hooks {
+        sub.on_cancel = Some(vec![orch8_types::sequence::BlockDefinition::Step(
+            Box::new(orch8_storage::testing::fixtures::step(
+                "relay-cleanup",
+                "noop",
+            )),
+        )]);
+        sub.interceptors = Some(
+            serde_json::from_value(
+                json!({"on_signal":{"handler":"noop","params":{"wrong_runtime":true}}}),
+            )
+            .unwrap(),
+        );
+    }
     let sub_id = if mode == Mode::Inline {
         SequenceId::from_uuid(orch8_engine::delegation::step_sequence_id(
             owner.tenant_id.as_str(),
@@ -649,23 +671,39 @@ async fn tampered_payload(b: TestBackend) {
 }
 orch8_storage::backend_test!(async fn published_mailbox_payload_cannot_change_before_delivery(b){tampered_payload(b).await;});
 
+async fn empty_postgres_publication_migrations_round_trip(pool: &sqlx::PgPool) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/143_delegation_proxy_execution_fence.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/142_delegation_publications.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/142_delegation_publications.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/143_delegation_proxy_execution_fence.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn receipt_integrity(b: TestBackend) {
     let server = spawn_test_server_on(b.storage.clone(), Some(ROOT)).await;
     if let RawPool::Postgres(pool) = &b.raw {
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../migrations/down/142_delegation_publications.sql"
-        ))
-        .execute(&mut *tx)
-        .await
-        .unwrap();
-        tx.commit().await.unwrap();
-        sqlx::raw_sql(include_str!(
-            "../../migrations/142_delegation_publications.sql"
-        ))
-        .execute(pool)
-        .await
-        .unwrap();
+        empty_postgres_publication_migrations_round_trip(pool).await;
     }
     let f = fixture(b.storage.as_ref(), &server, Mode::Remote).await;
     accepted(&server, &f.request).await;
@@ -757,6 +795,10 @@ async fn sqlite_71_upgrade_and_reopen_retains_the_publication_receipt() {
     let path = directory.path().join("publication.db");
     let path = path.to_str().unwrap();
     let old = SqliteStorage::file(path).await.unwrap();
+    sqlx::raw_sql(proxy_lifecycle::DROP_SQLITE_FENCE)
+        .execute(old.pool())
+        .await
+        .unwrap();
     sqlx::raw_sql(
         "DROP TABLE delegation_publications; DELETE FROM schema_versions WHERE version=72;",
     )
@@ -825,3 +867,6 @@ async fn cross_tenant_grant(b: TestBackend) {
     assert!(b.storage.get_sequence(sequence).await.unwrap().is_none());
 }
 orch8_storage::backend_test!(async fn a_cross_tenant_grant_is_hidden_before_any_inline_publication(b){cross_tenant_grant(b).await;});
+
+#[path = "delegation_publication/proxy_lifecycle.rs"]
+mod proxy_lifecycle;

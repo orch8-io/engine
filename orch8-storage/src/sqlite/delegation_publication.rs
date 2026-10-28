@@ -228,6 +228,17 @@ async fn parent_on(
     conn: &mut sqlx::SqliteConnection,
     intent: &DelegationPublishIntent,
 ) -> Result<(), StorageError> {
+    if !intent.proxy {
+        let relay: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM delegation_proxy_instances WHERE instance_id=$1)",
+        )
+        .bind(intent.parent.id.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+        if relay {
+            return Err(conflict());
+        }
+    }
     if intent.proxy {
         // Do not silently replace a newly hosted native parent or a prior proxy
         // lacking its durable publication receipt.

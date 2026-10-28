@@ -818,6 +818,7 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::ContinuityStore for EncryptingStorage {
+    async fn is_delegation_proxy_quarantined(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
     async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
     async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>{
         let task=self.encrypt_worker_task(&intent.task)?.into_owned();

@@ -148,6 +148,12 @@ impl Orch8GrpcService {
             return Err(Status::not_found("sequence not found"));
         }
 
+        if instance.metadata.get("orch8_delegation_proxy").is_some() {
+            return Err(Status::invalid_argument(
+                "delegation relay metadata is reserved",
+            ));
+        }
+
         // Enforce the same context-size cap as the HTTP path.
         instance
             .context

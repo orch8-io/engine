@@ -18,7 +18,7 @@ pub(super) async fn has_due_higher_priority(
     sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM task_instances
-            WHERE state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
+            WHERE state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
               AND (next_fire_at IS NULL OR next_fire_at <= $1)
               AND priority > $2
         )",
@@ -343,7 +343,7 @@ pub(super) async fn claim_due(
                 SELECT id, tenant_id, priority, next_fire_at
                 FROM task_instances
                 WHERE (next_fire_at IS NULL OR next_fire_at <= $1)
-                  AND state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
+                  AND state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
                 ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
                 LIMIT $4
                 FOR UPDATE SKIP LOCKED
@@ -379,7 +379,7 @@ pub(super) async fn claim_due(
             r"
             SELECT * FROM task_instances
             WHERE (next_fire_at IS NULL OR next_fire_at <= $1)
-              AND state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
+              AND state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))
             ORDER BY priority DESC, next_fire_at ASC NULLS FIRST
             LIMIT $2
             FOR UPDATE SKIP LOCKED
