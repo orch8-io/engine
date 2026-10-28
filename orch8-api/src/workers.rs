@@ -1316,22 +1316,18 @@ pub(crate) async fn complete_task(
         req.output = stored;
     }
 
-    // Enforce `max_context_bytes` on the post-merge context BEFORE anything
-    // is committed. Every other context writer (create, patch, fork) checks
-    // it; the worker merge bypassed it, so one oversized worker output could
-    // grow `context.data` without bound.
-    if let Some(obj) = req.output.as_object() {
-        let mut projected = inst.context.clone();
-        if !projected.data.is_object() {
-            projected.data = serde_json::Value::Object(serde_json::Map::new());
-        }
-        if let Some(data_obj) = projected.data.as_object_mut() {
-            for (k, v) in obj {
-                data_obj.insert(k.clone(), v.clone());
-            }
-        }
-        projected.check_size(state.max_context_bytes)?;
-    }
+    // Admission and durable recovery must measure the same context, including
+    // wrapped mailbox output and replacement of an existing delegation entry.
+    let projected = orch8_storage::worker_outcome::project_worker_completion_context(
+        state.storage.as_ref(),
+        &inst,
+        &pre_task,
+        &claim,
+        &req.output,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    projected.check_size(state.max_context_bytes)?;
 
     let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);

@@ -6663,3 +6663,27 @@ fresh-server lifecycle/continuity cases, strict all-target checks across eight
 consumers and standalone mobile compilation. The focused review lists the tested
 scopes and the historical compatibility boundary; these results do not close the
 remaining original review gates.
+
+## 2026-10-28: exact first-report completion context limits
+
+The published mailbox recovery transaction correctly deferred oversized context,
+but first-report HTTP/gRPC admission measured a different, ordinary merge. Actual
+boundary tests reproduced acknowledgement and effect settlement for an oversized
+wrapped result on all four backends; a smaller retry could not replace that
+accepted body. Both paths now preview the same wrapped/ordinary context that
+recovery writes, without creating acceptance evidence. Rejection preserves the
+held claim and dispatched effect for correction. Replacement, scalar, Unicode,
+NUL and numeric boundary cases are covered in
+[the focused review](2026-10-28-worker-completion-context-limits.md).
+
+Final context-admission validation passes 1,135 selected Rust cases plus 232
+fresh-server integration cases, strict checks across eight consumers and
+standalone mobile compilation. Proxy scheduling/lifecycle, historical/failure
+reconciliation and all other original open gates remain in scope.
+
+CI's portable-continuity failure was a stale assertion rejecting an identical
+publication replay. It now checks the original acknowledgement and preserves
+409 assertions for changed input and grant reuse by a different delegation.
+All 18 cases, including federation/runtime trust rejection, pass on the fresh
+server; TypeScript checking passes. Current selected validation totals 1,385
+Rust/integration cases. Production trust policy was not relaxed.

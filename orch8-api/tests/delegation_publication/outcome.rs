@@ -424,6 +424,9 @@ struct GrpcWorker {
     server: tokio::task::JoinHandle<()>,
 }
 async fn grpc_worker(b: &TestBackend) -> GrpcWorker {
+    grpc_worker_with_limit(b, orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES).await
+}
+async fn grpc_worker_with_limit(b: &TestBackend, max_context_bytes: u32) -> GrpcWorker {
     use orch8_grpc::{
         Orch8ServiceServer, proto::orch8_service_client::Orch8ServiceClient,
         service::Orch8GrpcService,
@@ -441,7 +444,9 @@ async fn grpc_worker(b: &TestBackend) -> GrpcWorker {
         );
         tonic::transport::Server::builder()
             .layer(auth)
-            .add_service(Orch8ServiceServer::new(Orch8GrpcService::new(storage)))
+            .add_service(Orch8ServiceServer::new(
+                Orch8GrpcService::with_max_context_bytes(storage, max_context_bytes),
+            ))
             .serve_with_incoming_shutdown(
                 tokio_stream::wrappers::TcpListenerStream::new(listener),
                 stopping.cancelled_owned(),
@@ -591,3 +596,6 @@ async fn historical_hot_completion_without_acceptance(b: TestBackend) {
     );
 }
 orch8_storage::backend_test!(async fn historical_completed_mailboxes_retry_without_inventing_acceptance(b){historical_hot_completion_without_acceptance(b).await;});
+
+#[path = "limits.rs"]
+mod limits;

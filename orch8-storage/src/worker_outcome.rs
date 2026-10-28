@@ -539,7 +539,9 @@ pub async fn integrate_worker_outcome(
     Ok(Deferred)
 }
 
-fn merge_delegation(context: &mut orch8_types::context::ExecutionContext, id: &str, result: Value) {
+fn delegation_fields(
+    context: &mut orch8_types::context::ExecutionContext,
+) -> &mut serde_json::Map<String, Value> {
     if !context.data.is_object() {
         context.data = serde_json::json!({});
     }
@@ -552,29 +554,32 @@ fn merge_delegation(context: &mut orch8_types::context::ExecutionContext, id: &s
     if !delegations.is_object() {
         *delegations = serde_json::json!({});
     }
-    delegations
-        .as_object_mut()
-        .expect("object initialized")
-        .insert(id.to_owned(), result);
+    delegations.as_object_mut().expect("object initialized")
 }
-
-fn application_values(
-    accepted: &WorkerAcceptedOutcome,
+fn merge_delegation(context: &mut orch8_types::context::ExecutionContext, id: &str, result: Value) {
+    delegation_fields(context).insert(id.to_owned(), result);
+}
+fn mailbox_values(
     context: &orch8_types::context::ExecutionContext,
-    mailbox: Option<&crate::delegation_publication::DelegationPublication>,
-) -> Result<(orch8_types::context::ExecutionContext, Value), StorageError> {
+    id: &Value,
+    worker: &str,
+    output: &Value,
+) -> (orch8_types::context::ExecutionContext, Value) {
+    let result = serde_json::json!({"status":"completed","delegation_id":id,
+        "runtime_id":worker,"output":output});
     let mut context = context.clone();
-    if let Some(publication) = mailbox {
-        let result = serde_json::json!({"status":"completed","delegation_id":publication.delegation.id,
-            "runtime_id":accepted.claim.worker_id,"output":accepted.output});
-        merge_delegation(
-            &mut context,
-            &publication.delegation.id.to_string(),
-            result.clone(),
-        );
-        return Ok((context, result));
+    let fields = delegation_fields(&mut context);
+    if let Some(key) = id.as_str() {
+        fields.insert(key.to_owned(), result.clone());
     }
-    if let Some(fields) = accepted.output.as_object() {
+    (context, result)
+}
+fn ordinary_context(
+    context: &orch8_types::context::ExecutionContext,
+    output: &Value,
+) -> orch8_types::context::ExecutionContext {
+    let mut context = context.clone();
+    if let Some(fields) = output.as_object() {
         if !context.data.is_object() {
             context.data = serde_json::json!({});
         }
@@ -584,6 +589,79 @@ fn application_values(
             .expect("object initialized")
             .extend(fields.clone());
     }
+    context
+}
+
+/// Preview the exact context written by a worker result, without accepting it.
+/// The caller must validate its reporter/claim and check the returned size before
+/// acceptance. Durable application still checks a fresh context under its lock.
+pub async fn project_worker_completion_context(
+    storage: &dyn crate::StorageBackend,
+    instance: &orch8_types::instance::TaskInstance,
+    task: &orch8_types::worker::WorkerTask,
+    claim: &WorkerClaim,
+    output: &Value,
+) -> Result<orch8_types::context::ExecutionContext, StorageError> {
+    let invalid = || StorageError::Conflict("worker completion projection scope changed".into());
+    if task.instance_id != instance.id
+        || task.worker_id.as_deref() != Some(claim.worker_id.as_str())
+        || task.claim_epoch != claim.claim_epoch
+    {
+        return Err(invalid());
+    }
+    let invocation = storage
+        .get_worker_invocation(&instance.tenant_id, task.id)
+        .await?;
+    if let Some(invocation) = &invocation
+        && let Some(id) = crate::delegation_publication::mailbox_id(invocation)?
+    {
+        let publication = storage
+            .get_delegation_publication(&instance.tenant_id, id)
+            .await?
+            .ok_or_else(invalid)?;
+        if invocation.task_id != task.id
+            || invocation.instance_id != instance.id
+            || invocation.tenant_id != instance.tenant_id
+            || !publication.matches_invocation(invocation, claim)?
+        {
+            return Err(invalid());
+        }
+        return Ok(mailbox_values(
+            &instance.context,
+            &serde_json::json!(publication.delegation.id),
+            &claim.worker_id,
+            output,
+        )
+        .0);
+    }
+    if task.handler_name == "orch8.delegation" {
+        // Historical mailbox projection has the same wrapping shape, but is
+        // not granted publication evidence or a new acceptance receipt here.
+        return Ok(mailbox_values(
+            &instance.context,
+            task.params.get("delegation_id").unwrap_or(&Value::Null),
+            &claim.worker_id,
+            output,
+        )
+        .0);
+    }
+    Ok(ordinary_context(&instance.context, output))
+}
+
+fn application_values(
+    accepted: &WorkerAcceptedOutcome,
+    context: &orch8_types::context::ExecutionContext,
+    mailbox: Option<&crate::delegation_publication::DelegationPublication>,
+) -> Result<(orch8_types::context::ExecutionContext, Value), StorageError> {
+    if let Some(publication) = mailbox {
+        return Ok(mailbox_values(
+            context,
+            &serde_json::json!(publication.delegation.id),
+            &accepted.claim.worker_id,
+            &accepted.output,
+        ));
+    }
+    let mut context = ordinary_context(context, &accepted.output);
     if let Some(delegation) = &accepted.delegation {
         if !delegation.is_logical() {
             return Err(StorageError::Constraint(

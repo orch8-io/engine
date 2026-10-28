@@ -552,15 +552,23 @@ impl DelegationPublication {
         &self,
         accepted: &crate::worker_outcome::WorkerAcceptedOutcome,
     ) -> Result<bool, StorageError> {
-        self.validate()?;
         let Some(invocation) = &accepted.invocation else {
             return Ok(false);
         };
+        Ok(self.task_id == accepted.task_id
+            && self.instance_id == accepted.instance_id
+            && self.delegation.tenant_id == accepted.tenant_id
+            && self.matches_invocation(invocation, &accepted.claim)?)
+    }
+    pub(crate) fn matches_invocation(
+        &self,
+        invocation: &crate::worker_invocation::WorkerInvocation,
+        claim: &orch8_types::worker::WorkerClaim,
+    ) -> Result<bool, StorageError> {
+        self.validate()?;
         Ok(
             mailbox_id(invocation)? == Some(self.delegation.id.into_uuid())
-                && self.task_id == accepted.task_id
-                && self.instance_id == accepted.instance_id
-                && self.delegation.tenant_id == accepted.tenant_id
+                && invocation.block_id.as_str() == format!("delegation-{}", self.delegation.id)
                 && invocation.task_id == self.task_id
                 && invocation.instance_id == self.instance_id
                 && invocation.tenant_id == self.delegation.tenant_id
@@ -569,7 +577,7 @@ impl DelegationPublication {
                 && invocation.effect_id == Some(self.effect_id)
                 && invocation.continuity.as_ref() == Some(&self.task_owner)
                 && invocation.continuity_epoch == Some(self.task_owner.epoch)
-                && accepted.claim.worker_id == self.delegation.destination_runtime_id.to_string(),
+                && claim.worker_id == self.delegation.destination_runtime_id.to_string(),
         )
     }
     pub(crate) fn is_proxy(&self, instance: &TaskInstance) -> Result<bool, StorageError> {

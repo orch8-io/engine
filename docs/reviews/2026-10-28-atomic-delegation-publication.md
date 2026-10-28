@@ -85,3 +85,10 @@ revocation, complete coordinator/database enforcement, legacy attribution,
 acknowledged compaction, transported history/key/backup compatibility, poisoned
 recovery handling and all remaining original review gates remain open. Proxy
 and inline admission also need integration with tenant/scoped quota policy.
+
+The portable-continuity CI fixture now checks this durable replay contract:
+identical intent returns the exact original acknowledgement; changed input or
+a new delegation ID using the consumed grant still conflicts. The former
+blanket duplicate-rejection assertion was stale. All 18 portable-continuity
+cases pass on the fresh server, including the remaining federation and runtime
+trust assertions, with TypeScript checking passing.
