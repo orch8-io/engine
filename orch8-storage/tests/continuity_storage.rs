@@ -1,6 +1,9 @@
 use chrono::{Duration, Utc};
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_storage::{ContinuityStore, InstanceStore, InvariantStore, LiveMigrationTransition};
+use orch8_storage::{
+    ContinuityStore, InstanceStore, InvariantStore, LiveMigrationTransition, ResourceStore,
+    SequenceStore,
+};
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::{
@@ -752,8 +755,16 @@ async fn what_if_summaries_are_durable_and_tenant_scoped() {
 async fn live_migration_transition_atomically_advances_and_rolls_back() {
     let storage = SqliteStorage::in_memory().await.unwrap();
     let tenant_id = tenant("tenant-migration");
-    let source_sequence = SequenceId::new();
-    let target_sequence = SequenceId::new();
+    let source_def = orch8_storage::testing::fixtures::SequenceBuilder::new(tenant_id.as_str())
+        .step("wait", "noop")
+        .build();
+    let mut target_def = source_def.clone();
+    target_def.id = SequenceId::new();
+    target_def.version = 2;
+    storage.create_sequence(&source_def).await.unwrap();
+    storage.create_sequence(&target_def).await.unwrap();
+    let source_sequence = source_def.id;
+    let target_sequence = target_def.id;
     let instance_id = InstanceId::new();
     let continuity_id = ContinuityId::new();
     let runtime_id = RuntimeId::new();
@@ -832,6 +843,7 @@ async fn live_migration_transition_atomically_advances_and_rolls_back() {
         applied_at: None,
         rolled_back_at: None,
     };
+    storage.save_checkpoint(&source_checkpoint).await.unwrap();
     storage.save_live_migration(&record).await.unwrap();
     let mut applied_execution = execution.clone();
     applied_execution.epoch = execution.epoch.checked_next().unwrap();
@@ -851,7 +863,18 @@ async fn live_migration_transition_atomically_advances_and_rolls_back() {
                 expected_execution: &execution,
                 next_execution: &applied_execution,
                 expected_instance_state: InstanceState::Waiting,
+                expected_instance_updated_at: now,
+                expected_checkpoint_id: source_checkpoint.id,
+                expected_target_sequence: &target_def,
+                expected_source_fingerprint: &local_transition_fingerprint(
+                    &storage,
+                    &execution,
+                    record.plan.id,
+                    now
+                )
+                .await,
                 next_instance_state: InstanceState::Paused,
+                next_fire_at: None,
                 next_sequence_id: target_sequence,
                 next_context: &target_context,
                 checkpoint: &Checkpoint {
@@ -903,7 +926,23 @@ async fn live_migration_transition_atomically_advances_and_rolls_back() {
                 expected_execution: &applied_execution,
                 next_execution: &rolled_execution,
                 expected_instance_state: InstanceState::Paused,
+                expected_target_sequence: &source_def,
+                expected_instance_updated_at: applied_execution.updated_at,
+                expected_source_fingerprint: &local_transition_fingerprint(
+                    &storage,
+                    &applied_execution,
+                    record.plan.id,
+                    applied_execution.updated_at
+                )
+                .await,
+                expected_checkpoint_id: storage
+                    .get_latest_checkpoint(instance_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
                 next_instance_state: InstanceState::Waiting,
+                next_fire_at: None,
                 next_sequence_id: source_sequence,
                 next_context: &source_context,
                 checkpoint: &Checkpoint {
@@ -957,7 +996,23 @@ async fn live_migration_transition_atomically_advances_and_rolls_back() {
                 expected_execution: &applied_execution,
                 next_execution: &rolled_execution,
                 expected_instance_state: InstanceState::Paused,
+                expected_target_sequence: &source_def,
+                expected_instance_updated_at: applied_execution.updated_at,
+                expected_source_fingerprint: &local_transition_fingerprint(
+                    &storage,
+                    &applied_execution,
+                    record.plan.id,
+                    applied_execution.updated_at
+                )
+                .await,
+                expected_checkpoint_id: storage
+                    .get_latest_checkpoint(instance_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .id,
                 next_instance_state: InstanceState::Waiting,
+                next_fire_at: None,
                 next_sequence_id: source_sequence,
                 next_context: &source_context,
                 checkpoint: &Checkpoint {
@@ -1297,4 +1352,28 @@ async fn export_and_accept_commit_ownership_atomically() {
             .unwrap(),
         "stale resume attempts must change neither handoff nor instance"
     );
+}
+
+async fn local_transition_fingerprint(
+    storage: &SqliteStorage,
+    execution: &ContinuityExecution,
+    id: orch8_types::continuity_advanced::MigrationPlanId,
+    updated_at: chrono::DateTime<Utc>,
+) -> String {
+    let result = storage
+        .prepare_local_migration_snapshot(
+            &orch8_storage::local_migration::LocalMigrationSnapshotRequest {
+                execution: execution.clone(),
+                migration_id: id,
+                expected_instance_updated_at: updated_at,
+                mobile_access: None,
+            },
+        )
+        .await
+        .unwrap();
+    let orch8_storage::local_migration::LocalMigrationSnapshotCapture::Ready(snapshot) = result
+    else {
+        panic!("local source proof refused")
+    };
+    snapshot.fingerprint
 }

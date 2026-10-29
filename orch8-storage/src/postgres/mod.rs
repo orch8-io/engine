@@ -8,6 +8,8 @@ mod api_keys;
 mod approval_tokens;
 mod audit;
 mod capsule_activation;
+mod capsule_export;
+mod capsule_source_snapshot;
 mod checkpoints;
 mod circuit_breakers;
 mod claimed_writes;
@@ -16,9 +18,11 @@ mod compensation_start;
 mod continuity;
 mod credentials;
 mod cron;
+mod delegation_publication;
 mod effect_attempt;
 mod effect_dispatch;
 mod effect_receipts;
+mod effect_resolution;
 mod events;
 mod evidence;
 mod execution_tree;
@@ -26,7 +30,9 @@ mod externalized;
 mod externalized_snapshot;
 mod federation;
 mod instances;
+mod json_encoding;
 mod kv_state;
+mod local_migration;
 mod misc;
 mod mobile_access;
 mod mobile_sync;
@@ -53,7 +59,15 @@ mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
+mod worker_admission;
+mod worker_claim;
 mod worker_commands;
+mod worker_dispatch;
+mod worker_invocations;
+mod worker_outcome;
+mod worker_reconciliation;
+mod worker_resolution;
+mod worker_resolution_application;
 mod worker_version_pins;
 mod workers;
 
@@ -243,6 +257,9 @@ impl PostgresStorage {
                         .execute(&mut *conn)
                         .await?;
                     sqlx::query("SET idle_in_transaction_session_timeout = '60s'")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("SET orch8.native_json_protocol = 'json_text_v1'")
                         .execute(&mut *conn)
                         .await?;
                     if let Some(sp) = search_path_value {
@@ -1032,7 +1049,7 @@ impl crate::InstanceStore for PostgresStorage {
         tenant_id: &TenantId,
         claimed_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=$1 AND tenant_id=$2 AND state='running' AND claimed_at=$3)")
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=$1 AND tenant_id=$2 AND state='running' AND claimed_at=$3 AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id))")
         .bind(instance_id.into_uuid()).bind(tenant_id.as_str()).bind(claimed_at)
         .fetch_one(&self.pool).await.map_err(Into::into)
     }
@@ -1680,8 +1697,123 @@ impl crate::SignalStore for PostgresStorage {
 
 #[async_trait]
 impl crate::WorkerStore for PostgresStorage {
+    async fn claim_worker_tasks_with_authority(
+        &self,
+        request: &crate::worker_claim::WorkerClaimRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        request.validate()?;
+        let principal = Some(&request.principal);
+        if let Some(capabilities) = &request.capabilities {
+            return workers::claim_matching(
+                self,
+                &request.handler_name,
+                &request.worker_id,
+                request.tenant_id.as_ref(),
+                request.queue_name.as_deref(),
+                crate::worker_claim::ClaimRuntime {
+                    capabilities,
+                    principal,
+                },
+                request.limit,
+            )
+            .await;
+        }
+        match (request.queue_name.as_deref(), request.tenant_id.as_ref()) {
+            (Some(queue), Some(tenant)) => {
+                misc::claim_worker_tasks_from_queue_for_tenant(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (Some(queue), None) => {
+                misc::claim_worker_tasks_from_queue(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, Some(tenant)) => {
+                workers::claim_for_tenant(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, None) => {
+                workers::claim(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+        }
+    }
+    async fn get_worker_issued_claim(
+        &self,
+        tenant: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_claim::WorkerIssuedClaim>, StorageError> {
+        worker_claim::get(self, tenant, task_id, claim).await
+    }
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError> {
         workers::create(self, task).await
+    }
+
+    async fn prepare_worker_dispatch(
+        &self,
+        instance: &TaskInstance,
+        block_id: &BlockId,
+        selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
+        worker_dispatch::prepare(self, instance, block_id, selection).await
+    }
+
+    async fn admit_worker_dispatch(
+        &self,
+        intent: &crate::worker_admission::WorkerDispatchIntent,
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
+        worker_admission::create(self, intent).await
+    }
+    async fn get_worker_dispatch_admission(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_admission::WorkerDispatchAdmission>, StorageError> {
+        worker_admission::get(self, tenant_id, task_id).await
+    }
+    async fn create_worker_task_bound(
+        &self,
+        task: &WorkerTask,
+        fence: &crate::worker_invocation::WorkerDispatchFence,
+    ) -> Result<Option<Uuid>, StorageError> {
+        worker_dispatch::create(self, task, fence).await
+    }
+
+    async fn get_worker_invocation(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError> {
+        worker_invocations::get(self, tenant_id, task_id).await
     }
 
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError> {
@@ -1694,7 +1826,7 @@ impl crate::WorkerStore for PostgresStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim(self, handler_name, worker_id, limit).await
+        workers::claim(self, handler_name, worker_id, limit, None).await
     }
 
     async fn claim_worker_tasks_for_tenant(
@@ -1704,7 +1836,7 @@ impl crate::WorkerStore for PostgresStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
+        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None).await
     }
 
     async fn claim_worker_tasks_matching(
@@ -1722,19 +1854,42 @@ impl crate::WorkerStore for PostgresStorage {
             worker_id,
             tenant_id,
             queue_name,
-            capabilities,
+            crate::worker_claim::ClaimRuntime {
+                capabilities,
+                principal: None,
+            },
             limit,
         )
         .await
     }
 
-    async fn complete_worker_task(
+    async fn get_worker_accepted_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
+        worker_outcome::get(self, tenant_id, task_id, claim).await
+    }
+    async fn claim_worker_outcome_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError> {
+        worker_outcome::recovery_page(self, limit).await
+    }
+    async fn apply_worker_outcome_integration(
+        &self,
+        integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+        worker_outcome::apply(self, integration).await
+    }
+    async fn accept_worker_completion(
         &self,
         task_id: Uuid,
         claim: &WorkerClaim,
-        output: &serde_json::Value,
+        completion: &crate::worker_outcome::WorkerCompletion,
     ) -> Result<bool, StorageError> {
-        workers::complete(self, task_id, claim, output).await
+        workers::complete(self, task_id, claim, completion).await
     }
 
     async fn fail_worker_task(
@@ -1833,18 +1988,47 @@ impl crate::WorkerStore for PostgresStorage {
         &self,
         task_id: Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError> {
-        workers::finalize_stranded_dispatch(self, task_id, attempt, effect_id, continuity_epoch)
-            .await
+        workers::finalize_stranded_dispatch(self, task_id, attempt, effect, continuity_epoch).await
     }
 
-    async fn resolve_worker_task(
+    async fn resolve_worker_task_with_evidence(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
-        workers::resolve(self, resolution).await
+        workers::resolve(self, resolution, evidence).await
+    }
+    async fn get_worker_resolution_outcome_by_id(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get_by_id(self, tenant, id).await
+    }
+    async fn claim_worker_resolution_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>, StorageError>
+    {
+        worker_resolution_application::recovery_page(self, limit).await
+    }
+    async fn apply_worker_resolution_integration(
+        &self,
+        plan: &crate::worker_resolution_application::WorkerResolutionIntegration,
+    ) -> Result<crate::worker_resolution_application::WorkerResolutionApplication, StorageError>
+    {
+        worker_resolution_application::apply(self, plan).await
+    }
+    async fn get_worker_resolution_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: Option<&WorkerClaim>,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get(self, tenant_id, task_id, claim).await
     }
 
     async fn cancel_worker_tasks_for_block(
@@ -1870,6 +2054,13 @@ impl crate::WorkerStore for PostgresStorage {
         block_ids: &[String],
     ) -> Result<u64, StorageError> {
         workers::cancel_for_blocks(self, instance_id, block_ids).await
+    }
+
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        worker_claim::reconnect(self, request).await
     }
 
     async fn list_worker_tasks(
@@ -1902,7 +2093,8 @@ impl crate::WorkerStore for PostgresStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit).await
+        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit, None)
+            .await
     }
 
     async fn claim_worker_tasks_from_queue_for_tenant(
@@ -1920,6 +2112,7 @@ impl crate::WorkerStore for PostgresStorage {
             worker_id,
             tenant_id,
             limit,
+            None,
         )
         .await
     }
@@ -3291,6 +3484,23 @@ impl crate::ResourceStore for PostgresStorage {
 }
 
 // MobileSyncStore is implemented in mobile_sync.rs
+
+/// Finish before returning: dropping a transaction only queues its rollback.
+async fn finish_transaction<T>(
+    tx: sqlx::Transaction<'_, sqlx::Postgres>,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    match result {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
 
 #[cfg(test)]
 mod migration_preflight_tests {

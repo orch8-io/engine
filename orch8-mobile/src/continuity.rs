@@ -7,6 +7,7 @@ use orch8_storage::StorageBackend;
 use orch8_types::continuity::{CapsuleId, OwnershipState, RuntimeId};
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::ids::InstanceId;
+use sha2::Digest as _;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -50,7 +51,7 @@ fn parse_uuid(value: &str, field: &str) -> Result<Uuid, MobileError> {
     Uuid::parse_str(value).map_err(|error| invalid(format!("invalid {field}: {error}")))
 }
 
-fn transfer_encryptor(encoded: &str) -> Result<FieldEncryptor, MobileError> {
+fn transfer_encryptor(encoded: &str) -> Result<(FieldEncryptor, String), MobileError> {
     let decoded = Zeroizing::new(
         BASE64
             .decode(encoded)
@@ -60,7 +61,11 @@ fn transfer_encryptor(encoded: &str) -> Result<FieldEncryptor, MobileError> {
         .as_slice()
         .try_into()
         .map_err(|_| invalid("payload key must decode to exactly 32 bytes"))?;
-    Ok(FieldEncryptor::from_bytes(key))
+    let key_id = format!(
+        "destination-transfer-{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(key))
+    );
+    Ok((FieldEncryptor::from_bytes(key), key_id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -84,11 +89,20 @@ pub async fn export_capsule(
         .get_instance(instance_id)
         .await?
         .ok_or_else(|| invalid("source instance does not exist"))?;
+    if instance.tenant_id.as_str() != "mobile" {
+        return Err(invalid(
+            "legacy capsule export cannot access an account-scoped run",
+        ));
+    }
     let continuity = storage
         .get_continuity_execution_by_instance(&instance.tenant_id, instance.id)
         .await?
         .ok_or_else(|| invalid("source instance has no continuity identity"))?;
-    if continuity.state != OwnershipState::Owned || continuity.current_instance_id != instance.id {
+    if !matches!(
+        continuity.state,
+        OwnershipState::Owned | OwnershipState::Transferring
+    ) || continuity.current_instance_id != instance.id
+    {
         return Err(invalid("source runtime does not own this execution"));
     }
     let key_id = capsule_signer.key_id();
@@ -105,7 +119,7 @@ pub async fn export_capsule(
         .map_err(|_| invalid("capsule signing public key must decode to 32 bytes"))?;
     ed25519_dalek::VerifyingKey::from_bytes(&public_key_bytes)
         .map_err(|_| invalid("capsule signing public key is invalid"))?;
-    let encryptor = transfer_encryptor(payload_key_base64)?;
+    let (encryptor, encryption_key_id) = transfer_encryptor(payload_key_base64)?;
     let manifest = orch8_engine::capsule::export_paused_capsule_manifest(
         storage,
         orch8_engine::capsule::CapsuleExportRequest {
@@ -114,7 +128,7 @@ pub async fn export_capsule(
             requirements: orch8_types::continuity::CapsuleRequirements::default(),
             expires_at: Utc::now() + chrono::Duration::seconds(i64::from(expires_in_seconds)),
             signing_key_id: key_id,
-            encryption_key_id: "destination-transfer-v1".into(),
+            encryption_key_id,
         },
         &encryptor,
     )
@@ -175,7 +189,7 @@ pub async fn import_capsule(
     let sealed = BASE64
         .decode(payload_base64)
         .map_err(|_| invalid("capsule payload is not valid base64"))?;
-    let encryptor = transfer_encryptor(payload_key_base64)?;
+    let (encryptor, _) = transfer_encryptor(payload_key_base64)?;
     let runtime_id = RuntimeId::from_uuid(parse_uuid(
         destination_runtime_id,
         "destination runtime id",
@@ -590,5 +604,269 @@ mod tests {
         );
         assert_eq!(signed_return.manifest.epoch.get(), 1);
         assert!(!exported.payload_base64.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one real constructor/reopen/background/foreground lifecycle
+    fn mobile_constructor_exports_and_reopens_durable_artifacts() {
+        use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch
+            .path()
+            .join("device.sqlite")
+            .to_string_lossy()
+            .into_owned();
+        let engine =
+            crate::MobileEngine::new(path.clone(), crate::MobileEngineConfig::default()).unwrap();
+        let sequence = SequenceBuilder::new("mobile").step("done", "noop").build();
+        let instance = InstanceBuilder::for_sequence(&sequence)
+            .state(InstanceState::Paused)
+            .build();
+        engine.runtime.block_on(async {
+            engine.storage.create_sequence(&sequence).await.unwrap();
+            engine.storage.create_instance(&instance).await.unwrap();
+            engine
+                .storage
+                .save_checkpoint(&Checkpoint {
+                    id: Uuid::now_v7(),
+                    instance_id: instance.id,
+                    checkpoint_data: json!({"completed_blocks":[]}),
+                    created_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+            engine
+                .storage
+                .create_continuity_execution(&ContinuityExecution {
+                    continuity_id: ContinuityId::new(),
+                    tenant_id: instance.tenant_id.clone(),
+                    current_instance_id: instance.id,
+                    owner_runtime_id: RuntimeId::new(),
+                    epoch: ExecutionEpoch::initial(),
+                    state: OwnershipState::Owned,
+                    updated_at: Utc::now(),
+                })
+                .await
+                .unwrap();
+        });
+        let destination = RuntimeId::new().to_string();
+        let key = BASE64.encode([13; 32]);
+        let exported = engine
+            .export_continuity_capsule(
+                instance.id.to_string(),
+                destination.clone(),
+                key.clone(),
+                300,
+                Arc::new(TestSigner(SigningKey::from_bytes(&[17; 32]))),
+            )
+            .unwrap();
+        let sibling = engine
+            .runtime
+            .block_on(engine.storage.put_artifact(
+                instance.id,
+                "text/plain",
+                b"persistent output".as_slice().to_vec().into(),
+            ))
+            .unwrap();
+        engine.shutdown();
+        engine.runtime.block_on(engine.sqlite.close());
+        drop(engine);
+        let reopen_path = {
+            #[cfg(unix)]
+            {
+                let alias = scratch.path().join("device-alias.sqlite");
+                std::os::unix::fs::symlink(&path, &alias).unwrap();
+                alias.to_string_lossy().into_owned()
+            }
+            #[cfg(not(unix))]
+            {
+                path.clone()
+            }
+        };
+        let reopened =
+            crate::MobileEngine::new(reopen_path.clone(), crate::MobileEngineConfig::default())
+                .unwrap();
+        assert_eq!(
+            reopened
+                .runtime
+                .block_on(reopened.storage.get_artifact(&sibling.key))
+                .unwrap()
+                .unwrap(),
+            b"persistent output"
+        );
+        let retry = reopened
+            .export_continuity_capsule(
+                instance.id.to_string(),
+                destination.clone(),
+                key,
+                600,
+                Arc::new(TestSigner(SigningKey::from_bytes(&[17; 32]))),
+            )
+            .unwrap();
+        assert_eq!(retry.capsule_json, exported.capsule_json);
+        assert_eq!(retry.payload_base64, exported.payload_base64);
+        assert!(
+            reopened
+                .export_continuity_capsule(
+                    instance.id.to_string(),
+                    destination.clone(),
+                    BASE64.encode([14; 32]),
+                    300,
+                    Arc::new(TestSigner(SigningKey::from_bytes(&[17; 32])))
+                )
+                .is_err()
+        );
+        let signed: SignedCapsuleManifest = serde_json::from_str(&exported.capsule_json).unwrap();
+        let accepted = reopened.runtime.block_on(async {
+            let mut owner = reopened
+                .storage
+                .get_continuity_execution(&instance.tenant_id, signed.manifest.continuity_id)
+                .await
+                .unwrap()
+                .unwrap();
+            owner.epoch = owner.epoch.checked_next().unwrap();
+            owner.owner_runtime_id = RuntimeId::from_uuid(destination.parse().unwrap());
+            owner.current_instance_id = InstanceId::new();
+            owner.state = OwnershipState::Owned;
+            reopened
+                .storage
+                .acknowledge_capsule_cut(&instance.tenant_id, signed.manifest.capsule_id, &owner)
+                .await
+                .unwrap();
+            owner
+        });
+        // The real OS-background API reaches retirement maintenance even though
+        // the source remains paused and cannot execute another workflow step.
+        reopened.run_until_idle(1, 1000).unwrap();
+        assert!(
+            reopened
+                .runtime
+                .block_on(
+                    reopened
+                        .storage
+                        .get_artifact(&signed.manifest.payload_artifact.key)
+                )
+                .unwrap()
+                .is_none()
+        );
+        reopened.runtime.block_on(async {
+            reopened
+                .storage
+                .put_artifact_with_id(
+                    instance.id,
+                    signed.manifest.capsule_id.into_uuid(),
+                    "application/octet-stream",
+                    BASE64.decode(&exported.payload_base64).unwrap().into(),
+                )
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE capsule_artifact_retirements SET next_sweep_at=?1 WHERE artifact_key=?2",
+            )
+            .bind((Utc::now() - Duration::minutes(1)).to_rfc3339())
+            .bind(&signed.manifest.payload_artifact.key)
+            .execute(reopened.sqlite.pool())
+            .await
+            .unwrap();
+        });
+        reopened.shutdown();
+        reopened.runtime.block_on(reopened.sqlite.close());
+        drop(reopened);
+        let foreground =
+            crate::MobileEngine::new(reopen_path, crate::MobileEngineConfig::default()).unwrap();
+        foreground.resume();
+        let started = std::time::Instant::now();
+        while foreground
+            .runtime
+            .block_on(
+                foreground
+                    .storage
+                    .get_artifact(&signed.manifest.payload_artifact.key),
+            )
+            .unwrap()
+            .is_some()
+        {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "foreground maintenance did not retire transport"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            foreground
+                .runtime
+                .block_on(
+                    foreground
+                        .storage
+                        .get_continuity_execution(&instance.tenant_id, accepted.continuity_id)
+                )
+                .unwrap()
+                .unwrap(),
+            accepted
+        );
+        foreground.pause();
+        foreground.shutdown();
+    }
+
+    #[tokio::test]
+    async fn legacy_export_cannot_freeze_an_account_scoped_execution() {
+        use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
+        let storage = SqliteStorage::in_memory()
+            .await
+            .unwrap()
+            .with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+        let sequence = SequenceBuilder::new("private-account")
+            .step("done", "noop")
+            .build();
+        let instance = InstanceBuilder::for_sequence(&sequence)
+            .state(InstanceState::Paused)
+            .build();
+        storage.create_sequence(&sequence).await.unwrap();
+        storage.create_instance(&instance).await.unwrap();
+        storage
+            .save_checkpoint(&Checkpoint {
+                id: Uuid::now_v7(),
+                instance_id: instance.id,
+                checkpoint_data: json!({"completed_blocks":[]}),
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let owner = ContinuityExecution {
+            continuity_id: ContinuityId::new(),
+            tenant_id: instance.tenant_id.clone(),
+            current_instance_id: instance.id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: Utc::now(),
+        };
+        storage.create_continuity_execution(&owner).await.unwrap();
+        let error = export_capsule(
+            &storage,
+            &TestSigner(SigningKey::from_bytes(&[17; 32])),
+            &instance.id.to_string(),
+            &RuntimeId::new().to_string(),
+            &BASE64.encode([13; 32]),
+            300,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, MobileError::InvalidInput { detail } if detail.contains("account-scoped"))
+        );
+        assert_eq!(
+            storage
+                .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            owner
+        );
+        let cuts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capsule_source_cuts")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(cuts, 0);
     }
 }

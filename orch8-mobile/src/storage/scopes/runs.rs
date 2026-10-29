@@ -334,3 +334,6 @@ mod context_tests;
 
 #[cfg(test)]
 mod access_tests;
+
+#[cfg(test)]
+mod capsule_tests;

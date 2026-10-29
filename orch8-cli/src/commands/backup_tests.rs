@@ -1287,3 +1287,22 @@ async fn postgres_restore_dry_run_releases_its_snapshot_on_success_and_read_erro
         .expect("dry-run retained its target snapshot session after returning");
     }
 }
+
+#[tokio::test]
+async fn instance_backup_refuses_relay_state_that_the_archive_cannot_restore() {
+    let directory = tempfile::tempdir().unwrap();
+    let (path, _, id) = seeded_source(directory.path()).await;
+    let storage = SqliteStorage::file(path.to_str().unwrap()).await.unwrap();
+    let mut relay = storage.get_instance(id).await.unwrap().unwrap();
+    relay.id = InstanceId::new();
+    relay.state = InstanceState::Waiting;
+    relay.metadata = serde_json::json!({"orch8_delegation_proxy":{"legacy":true}});
+    relay.context.runtime = orch8_types::context::RuntimeContext::default();
+    storage.create_instance(&relay).await.unwrap();
+    assert!(
+        snapshot(&storage, false).await.is_ok(),
+        "configuration backup must remain usable"
+    );
+    let error = snapshot(&storage, true).await.unwrap_err();
+    assert!(error.to_string().contains("delegation relay"));
+}

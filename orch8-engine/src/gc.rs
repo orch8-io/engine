@@ -238,6 +238,7 @@ pub async fn gc_tick(
         sweep_externalized(storage),
         sweep_emit_dedupe(storage, options.dedupe_ttl, now),
         sweep_artifacts_opt(storage, options.artifact_retention, now),
+        sweep_retired_capsule_artifacts(storage, now),
         sweep_telemetry_events(storage, now),
         sweep_mobile_devices(storage),
         sweep_mobile_approvals(storage),
@@ -715,6 +716,54 @@ async fn sweep_auxiliary(storage: &dyn StorageBackend, now: chrono::DateTime<chr
             tracing::error!(error = %e, kind, "auxiliary gc sweep failed");
         }
     }
+}
+
+// Explicit acknowledgement requests deletion regardless of general retention.
+async fn sweep_retired_capsule_artifacts(
+    storage: &dyn StorageBackend,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    if let Err(error) = collect_retired_capsule_artifacts(storage, now, GC_BATCH_LIMIT).await {
+        tracing::error!(%error, "retired capsule artifact cleanup failed; durable retry retained");
+        metrics::inc_with(
+            metrics::GC_ARTIFACTS_ERRORS,
+            &[("kind", error_kind(&error))],
+        );
+    }
+}
+
+/// Process a bounded batch of explicit transport-retirement tombstones.
+/// Claims persist before external I/O; success never removes the tombstone, so
+/// late uploads and cancellation remain recoverable. Returns processed keys,
+/// including already absent objects. Hosts can use a small limit and timeout.
+pub async fn collect_retired_capsule_artifacts(
+    storage: &dyn StorageBackend,
+    now: chrono::DateTime<chrono::Utc>,
+    limit: u32,
+) -> Result<u64, StorageError> {
+    let retry_at = now
+        .checked_add_signed(chrono::Duration::minutes(5))
+        .ok_or_else(|| {
+            StorageError::Constraint("capsule retirement clock is outside supported range".into())
+        })?;
+    let keys = storage
+        .claim_retired_capsule_artifacts(now, retry_at, limit)
+        .await?;
+    let mut processed = 0;
+    let mut failure = None;
+    for key in keys {
+        match storage.delete_artifact(&key).await {
+            Ok(()) => processed += 1,
+            Err(error) => {
+                tracing::warn!(%error, artifact_key=%key, "retired capsule artifact deletion failed; durable retry retained");
+                failure.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(processed)
 }
 
 #[cfg(test)]

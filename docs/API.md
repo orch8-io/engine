@@ -935,7 +935,7 @@ POST /workers/tasks/{task_id}/complete
 | ------------- | ------- | --------------------------------------------------- |
 | `worker_id`   | string  | Must match the worker that claimed the task         |
 | `claim_epoch` | integer | Must match the claim generation returned by polling |
-| `output`      | object  | Result JSON (saved as BlockOutput)                  |
+| `output`      | JSON    | Result JSON (saved as BlockOutput)                  |
 
 **Response:** `200 OK`. A retry by the same lease holder of an already
 completed task is idempotent (`200`). `409` when the lease or the continuity
@@ -946,12 +946,28 @@ remote output is recorded as provenance (audit event
 `worker_output_provenance`, plus a `remote_step_output` continuity provenance
 entry when the instance is enrolled).
 
+Before accepting the first report, the server checks the resulting serialized
+context against `engine.max_context_bytes`. Ordinary object output merges into
+`context.data`; a delegation result is wrapped under
+`context.data.delegations.<id>`, including scalar, array and null output. Replacing
+an existing delegation entry measures its replacement, rather than retaining both
+values. Oversized context returns HTTP `413` (gRPC `InvalidArgument`), leaving the
+claim held without settling its effect, so the worker can report a bounded result
+with the same valid claim. Do not repeat the provider operation solely because
+reporting its result was rejected.
+
+Once a result is accepted, a changed retry body cannot replace it. A later context
+change may defer native application; recovery retains and uses the accepted body.
+
 **Side effects:**
 
-1. Worker task marked `completed`
-2. `BlockOutput` created with the output JSON
-3. Instance transitions `Waiting -> Scheduled` (immediate re-processing)
-4. If instance uses execution tree, corresponding node marked `Completed`
+1. Worker completion, its original accepted output and admitted effect settlement
+   commit together.
+2. Recovery atomically writes the block output, merged context, native transition
+   and application receipt when the original execution is still valid and the
+   context fits. Hosted parents become scheduled unless paused; a delegation
+   proxy becomes terminal rather than running its sequence. A paused proxy waits
+   for application to resume.
 
 ---
 
@@ -1095,14 +1111,19 @@ phone. The phone must not ship an operator (or any stored) API key.
   "device_id": "iphone-7F3A",
   "runtime_id": "uuid",
   "handlers": ["scan_document"],
+  "queues": ["phone-scans"],
   "ttl_secs": 3600
 }
 ```
 
-Returns `201 {token, device_id, runtime_id, expires_at, handlers}`.
+Returns `201 {token, device_id, runtime_id, expires_at, handlers, queues}`
+(`queues` is omitted when empty).
 `runtime_id` is the phone's persisted runtime id (`MobileEngine.nodeRuntimeId()`);
+`queues` is optional, with at most 16 nonblank names of at most 256 bytes each.
+Normal polling claims only the default queue. For named work use
+`POST /workers/tasks/poll/queue` with an explicitly granted `queue_name`.
 `handlers` may be empty (a delegation-only node); `ttl_secs` defaults to 3600
-(max 86400). `400` for an empty `device_id`, a blank handler, or a ttl out of
+(max 86400). `400` for an empty `device_id`, a blank handler/queue, an oversized queue allowlist, or a ttl out of
 range; `409` when the device is registered to another tenant. The `dst_…`
 token (`x-api-key` or `Authorization: Bearer`) reaches only the device's own
 `/mobile/devices/register`, `/mobile/devices/{device_id}/runtime` and
@@ -1707,7 +1728,7 @@ DELETE /webhooks/outbox/{id}             # discard a parked delivery
 
 ## Queue Dispatch Mode (poll / push)
 
-By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed **wake-up hint** to a target URL. The hint is id-only — `{"task_id": "…", "runtime_id": "…" | null, "reason": "task_available"}` — and never carries params or context; the receiver reacts by polling (`POST /workers/tasks/poll`), which claims the task under a lease and returns its payload. The durable task row is still written (completion is reported the usual way).
+By default workers poll queues. A queue can instead be configured for **push**: when a task is enqueued to it, the engine POSTs a signed **wake-up hint** to a target URL. The hint is id-only — `{"task_id": "…", "runtime_id": "…" | null, "reason": "task_available"}` — and never carries params or context; the receiver polls the default queue (`POST /workers/tasks/poll`) or the explicitly granted named queue (`POST /workers/tasks/poll/queue`), which claims the task under a lease and returns its payload. The durable task row is still written (completion is reported the usual way).
 
 ```
 POST   /queues/dispatch                       # { tenant_id, queue_name, mode: "poll"|"push", push_url?, secret? }

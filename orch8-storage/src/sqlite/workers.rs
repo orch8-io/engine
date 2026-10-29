@@ -1,5 +1,5 @@
 use chrono::Utc;
-use sqlx::AssertSqlSafe;
+use sqlx::{AssertSqlSafe, Row as _};
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::instrument;
@@ -23,7 +23,7 @@ pub(super) async fn insert_task(
     conn: &mut sqlx::SqliteConnection,
     t: &WorkerTask,
     awaiting_dispatch: bool,
-) -> Result<(), StorageError> {
+) -> Result<Option<String>, StorageError> {
     let scoped: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE id=?1) OR EXISTS(SELECT 1 FROM task_instances i JOIN mobile_accounts a ON i.tenant_id='mobile-account-' || a.id WHERE i.id=?1)"
     ).bind(t.instance_id.to_string()).fetch_one(&mut *conn).await?;
@@ -32,7 +32,7 @@ pub(super) async fn insert_task(
             "catalog worker dispatch needs scoped worker provenance".into(),
         ));
     }
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO worker_tasks (id,instance_id,block_id,handler_name,params,context,state,worker_id,queue_name,requirements,output,error_message,error_retryable,attempt,timeout_ms,claimed_at,heartbeat_at,claim_epoch,resume_checkpoint,checkpoint_seq,completed_at,created_at,effect_id,continuity_epoch,lease_secs,carries_credentials,claimed_runtime_kind,awaiting_dispatch,tenant_id) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,(SELECT tenant_id FROM task_instances WHERE id = ?2)) \
          ON CONFLICT(instance_id,block_id) DO UPDATE SET \
@@ -40,7 +40,7 @@ pub(super) async fn insert_task(
              continuity_epoch = COALESCE(worker_tasks.continuity_epoch, excluded.continuity_epoch), \
              carries_credentials = MAX(worker_tasks.carries_credentials, excluded.carries_credentials), \
              awaiting_dispatch = excluded.awaiting_dispatch \
-         WHERE worker_tasks.state = 'pending' AND worker_tasks.attempt = excluded.attempt"
+         WHERE worker_tasks.state = 'pending' AND worker_tasks.attempt = excluded.attempt RETURNING id"
     )
     .bind(t.id.to_string())
     .bind(t.instance_id.into_uuid().to_string())
@@ -75,15 +75,22 @@ pub(super) async fn insert_task(
     .bind(i64::from(t.carries_credentials))
     .bind(t.claimed_runtime_kind.map(orch8_types::continuity::RuntimeKind::as_str))
     .bind(i64::from(awaiting_dispatch))
-    .execute(conn)
+    .fetch_optional(&mut *conn)
     .await?;
-    Ok(())
+    Ok(inserted.map(|row| row.get::<String, _>("id")))
 }
 
 #[instrument(skip(storage, t), fields(task_id = %t.id, handler = %t.handler_name))]
 pub(super) async fn create(storage: &SqliteStorage, t: &WorkerTask) -> Result<(), StorageError> {
-    let mut conn = storage.pool.acquire().await?;
-    insert_task(&mut conn, t, false).await
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let result = async {
+        if let Some(id) = insert_task(&mut tx, t, false).await? {
+            super::worker_invocations::capture(&mut tx, &id, None).await?;
+        }
+        Ok(())
+    }
+    .await;
+    super::finish_transaction(tx, result).await
 }
 
 pub(super) fn transition_event(
@@ -144,6 +151,7 @@ pub(super) async fn claim(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(Utc::now());
 
@@ -158,10 +166,11 @@ pub(super) async fn claim(
     // Keep transaction ownership in SQLx so errors and cancelled futures
     // roll back before the connection is reused.
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result=async {
 
     let select_res = sqlx::query(
         "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
-         AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND json_extract(ce.record,'$.current_instance_id')=worker_tasks.instance_id) \
+         AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND json_extract(ce.record,'$.current_instance_id')=worker_tasks.instance_id) \
          ORDER BY created_at ASC LIMIT ?2",
     )
     .bind(handler_name)
@@ -217,11 +226,13 @@ pub(super) async fn claim(
                 )
             })
             .collect();
-        insert_attempt_events(&mut conn, &events).await?;
+        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+    insert_attempt_events(&mut conn, &events).await?;
     }
 
-    conn.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
 /// Tenant-scoped variant of [`claim`]. The tenant predicate is evaluated
@@ -235,15 +246,17 @@ pub(super) async fn claim_for_tenant(
     worker_id: &str,
     tenant_id: &orch8_types::TenantId,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(Utc::now());
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result=async {
 
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
          WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?4 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND ti.tenant_id=?3
-           AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)
+           AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)
          ORDER BY wt.created_at ASC
          LIMIT ?2",
     )
@@ -299,11 +312,13 @@ pub(super) async fn claim_for_tenant(
                 )
             })
             .collect();
-        insert_attempt_events(&mut conn, &events).await?;
+        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+    insert_attempt_events(&mut conn, &events).await?;
     }
 
-    conn.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
 /// Upper bound on pending rows one `claim_matching` poll inspects.
@@ -315,14 +330,26 @@ pub(super) async fn claim_matching(
     worker_id: &str,
     tenant_id: Option<&orch8_types::TenantId>,
     queue_name: Option<&str>,
-    capabilities: &orch8_types::continuity::RuntimeCapabilities,
+    runtime: crate::worker_claim::ClaimRuntime<'_>,
     limit: u32,
 ) -> Result<Vec<WorkerTask>, StorageError> {
+    let crate::worker_claim::ClaimRuntime {
+        capabilities,
+        principal,
+    } = runtime;
+    // An unqualified session poll grants the default queue only. Named queues
+    // require the transport's explicit allowlist check and named-queue selector.
+    let default_queue_only = queue_name.is_none()
+        && matches!(
+            principal,
+            Some(crate::worker_claim::WorkerClaimPrincipal::Runtime { .. })
+        );
     if limit == 0 {
         return Ok(Vec::new());
     }
     let now_text = ts(Utc::now());
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result=async {
 
     let now = Utc::now();
     let mut tasks = Vec::with_capacity(limit as usize);
@@ -342,7 +369,7 @@ pub(super) async fn claim_matching(
         // Retry rows wait for their re-dispatch to bind the effect id.
         query.push(" AND wt.state='pending' AND wt.awaiting_dispatch=0");
         // See the Postgres twin: no work for terminal/cancelled instances.
-        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)");
+        query.push(" AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = wt.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)");
         // Same SQL pushdown as the Postgres twin (strict supersets of
         // `claim_allowed`; the Rust check stays authoritative) so rows this
         // claimant can never take do not fill the scan window.
@@ -372,6 +399,8 @@ pub(super) async fn claim_matching(
             .push(")");
         if let Some(queue) = queue_name {
             query.push(" AND wt.queue_name=").push_bind(queue);
+        } else if default_queue_only {
+            query.push(" AND wt.queue_name IS NULL");
         }
         if let Some(tenant) = tenant_id {
             query.push(" AND ti.tenant_id=").push_bind(tenant.as_str());
@@ -448,31 +477,40 @@ pub(super) async fn claim_matching(
                 )
             })
             .collect::<Vec<_>>();
-        insert_attempt_events(&mut conn, &events).await?;
+        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+    insert_attempt_events(&mut conn, &events).await?;
     }
-    conn.commit().await?;
     Ok(tasks)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
-#[instrument(skip(storage, output), fields(%task_id, worker_id))]
+#[instrument(skip(storage, completion), fields(%task_id, worker_id))]
 pub(super) async fn complete(
     storage: &SqliteStorage,
     task_id: Uuid,
     claim: &WorkerClaim,
-    output: &serde_json::Value,
+    completion: &crate::worker_outcome::WorkerCompletion,
 ) -> Result<bool, StorageError> {
-    let mut tx = storage.pool.begin().await?;
+    completion.validate_stored()?;
+    let output = &completion.output;
+    let epoch = i64::try_from(claim.claim_epoch)
+        .map_err(|_| StorageError::Constraint("worker claim epoch exceeds SQL range".into()))?;
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let result = async {
     let result = sqlx::query("UPDATE worker_tasks SET state='completed', output=?3, completed_at=?4 WHERE id=?1 AND worker_id=?2 AND state='claimed' AND claim_epoch=?5")
         .bind(task_id.to_string())
         .bind(&claim.worker_id)
         .bind(serde_json::to_string(output)?)
         .bind(ts(Utc::now()))
-        .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+        .bind(epoch)
         .execute(&mut *tx)
         .await
         ?;
     let changed = result.rows_affected() > 0;
     if changed {
+        super::worker_outcome::settle_on(&mut tx, task_id, completion).await?;
+            super::worker_outcome::insert_on(&mut tx, task_id, claim, completion).await?;
         insert_attempt_events(
             &mut tx,
             &[transition_event(
@@ -485,8 +523,9 @@ pub(super) async fn complete(
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(changed)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 #[instrument(skip(storage), fields(%task_id, worker_id, retryable))]
@@ -773,22 +812,26 @@ pub(super) async fn finalize_stranded_dispatch(
     storage: &SqliteStorage,
     task_id: Uuid,
     attempt: u16,
-    effect_id: Option<orch8_types::continuity::EffectId>,
+    effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
     continuity_epoch: Option<u64>,
 ) -> Result<bool, StorageError> {
-    let affected = sqlx::query(
-        "UPDATE worker_tasks SET effect_id=COALESCE(effect_id, ?3), \
-             continuity_epoch=COALESCE(continuity_epoch, ?4), awaiting_dispatch=0 \
-         WHERE id=?1 AND attempt=?2 AND state='pending' AND awaiting_dispatch=1",
-    )
-    .bind(task_id.to_string())
-    .bind(i64::from(attempt))
-    .bind(effect_id.map(|id| id.to_string()))
-    .bind(continuity_epoch.map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)))
-    .execute(&storage.pool)
-    .await?
-    .rows_affected();
-    Ok(affected == 1)
+    let effect_id = effect.map(|proof| proof.effect_id);
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let result=async {
+        let held:Option<(String,Option<String>)>=sqlx::query_as("SELECT instance_id,effect_id FROM worker_tasks WHERE id=?1 AND attempt=?2 AND state='pending' AND awaiting_dispatch=1")
+            .bind(task_id.to_string()).bind(i64::from(attempt)).fetch_optional(&mut *tx).await?;
+        let Some((instance,existing))=held else {return Ok(false)};
+        if existing.is_some() && existing != effect_id.map(|id|id.to_string()) {return Ok(false)}
+        let waiting:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=?1 AND state='waiting')")
+            .bind(&instance).fetch_one(&mut *tx).await?;
+        if !waiting {return Ok(false)}
+        let Some(source)=super::worker_invocations::recovery_source_on(&mut tx,&task_id.to_string(),effect,continuity_epoch).await? else {return Ok(false)};
+        let epoch=source.continuity_epoch.map(i64::try_from).transpose().map_err(|_|StorageError::Constraint("worker epoch out of range".into()))?;
+        let affected=sqlx::query("UPDATE worker_tasks SET effect_id=COALESCE(effect_id,?2),continuity_epoch=COALESCE(continuity_epoch,?3),awaiting_dispatch=0 WHERE id=?1 AND state='pending' AND awaiting_dispatch=1")
+            .bind(task_id.to_string()).bind(effect_id.map(|id|id.to_string())).bind(epoch).execute(&mut *tx).await?.rows_affected();
+        Ok(affected==1)
+    }.await;
+    super::finish_transaction(tx, result).await
 }
 
 /// Apply one fenced worker-task resolution atomically (see
@@ -796,13 +839,83 @@ pub(super) async fn finalize_stranded_dispatch(
 pub(super) async fn resolve(
     storage: &SqliteStorage,
     resolution: &orch8_types::worker::WorkerTaskResolution,
+    evidence: &crate::worker_resolution::WorkerResolutionEvidence,
 ) -> Result<bool, StorageError> {
     use orch8_types::worker::WorkerTaskResolutionAction as Action;
+    evidence.validate(resolution)?;
 
     let now = ts(Utc::now());
-    let expected_epoch = i64::try_from(resolution.expected_claim_epoch).unwrap_or(i64::MAX);
+    let expected_epoch = i64::try_from(resolution.expected_claim_epoch)
+        .map_err(|_| StorageError::Constraint("worker claim epoch out of range".into()))?;
     let fence = " WHERE id=?1 AND state=?2 AND claim_epoch=?3 AND (?4 IS NULL OR worker_id=?4)";
     let mut conn = begin_immediate(&storage.pool).await?;
+    let result = async {
+    // Validate the complete dispatch identity before mutating any task, node,
+    // instance or attempt evidence. The writer lock keeps these reads stable.
+    let block: Option<String> = sqlx::query_scalar(
+        "SELECT block_id FROM worker_tasks WHERE id=?1 AND instance_id=?2 AND state=?3 AND claim_epoch=?4 AND (?5 IS NULL OR worker_id=?5)",
+    )
+    .bind(resolution.task_id.to_string())
+    .bind(resolution.instance_id.to_string())
+    .bind(resolution.expected_state.to_string())
+    .bind(expected_epoch)
+    .bind(resolution.expected_worker_id.as_deref())
+    .fetch_optional(&mut *conn).await?;
+    let Some(block) = block else {
+        return Ok(false);
+    };
+    let node_id = match &resolution.action {
+        Action::Retry {
+            retry_task,
+            node_id,
+            ..
+        } => {
+            if retry_task.instance_id != resolution.instance_id
+                || retry_task.block_id.as_str() != block
+            {
+                return Ok(false);
+            }
+            *node_id
+        }
+        Action::FailNode { node_id, .. } => *node_id,
+        _ => None,
+    };
+    if let Some(node_id) = node_id {
+        let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_tree WHERE id=?1 AND instance_id=?2 AND block_id=?3)")
+            .bind(node_id.to_string()).bind(resolution.instance_id.to_string()).bind(&block)
+            .fetch_one(&mut *conn).await?;
+        if !valid {
+            return Ok(false);
+        }
+    }
+    let source = if matches!(&resolution.action, Action::FailTaskOnly) {
+        None
+    } else {
+        let Some(source) =
+            super::worker_invocations::source_on(&mut conn, &resolution.task_id.to_string())
+                .await?
+        else {
+            return Ok(false);
+        };
+        if matches!(
+            &resolution.action,
+            Action::Retry { .. } | Action::FailNode { .. }
+        ) && !source.accepts_node(node_id)
+        {
+            return Ok(false);
+        }
+        if let Action::Retry {
+            retry_task,
+            retry_output,
+            ..
+        } = &resolution.action
+        {
+            source.validate_retry_task(retry_task)?;
+            source.validate_retry_output(retry_output.as_deref())?;
+        }
+        Some(source)
+    };
+    let report_source=super::worker_resolution::capture_on(&mut conn,resolution.task_id).await?;
     let affected = match &resolution.action {
         Action::Requeue => sqlx::query(AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, \
@@ -834,7 +947,7 @@ pub(super) async fn resolve(
             .bind(resolution.expected_state.to_string())
             .bind(expected_epoch)
             .bind(resolution.expected_worker_id.as_deref())
-            .bind(&resolution.reason)
+            .bind(crate::worker_resolution::diagnostic_reason(&resolution.reason).as_ref())
             .bind(i64::from(resolution.retryable))
             .bind(&now)
             .execute(&mut *conn)
@@ -843,66 +956,24 @@ pub(super) async fn resolve(
         }
     };
     if affected != 1 {
-        conn.rollback().await?;
         return Ok(false);
     }
-    let instance_id = resolution.instance_id.into_uuid().to_string();
-    match &resolution.action {
-        Action::Requeue | Action::FailTaskOnly => {}
-        Action::Retry {
-            retry_task,
-            node_id,
-            fire_at,
-        } => {
-            insert_task(&mut conn, retry_task, true).await?;
-            if let Some(node_id) = node_id {
-                sqlx::query("UPDATE execution_tree SET state='pending' WHERE id=?1")
-                    .bind(node_id.into_uuid().to_string())
-                    .execute(&mut *conn)
-                    .await?;
-            }
-            schedule_live_instance(&mut conn, &instance_id, &ts(*fire_at), &now).await?;
-        }
-        Action::FailNode { node_id, fire_at } => {
-            if let Some(node_id) = node_id {
-                sqlx::query(
-                "UPDATE execution_tree SET state='failed', completed_at=COALESCE(completed_at, ?2) \
-                 WHERE id=?1 AND state IN ('running','waiting')",
-            )
-            .bind(node_id.into_uuid().to_string())
-            .bind(&now)
-            .execute(&mut *conn)
-            .await?;
-            }
-            schedule_live_instance(&mut conn, &instance_id, &ts(*fire_at), &now).await?;
-        }
-        Action::FailInstance => {
-            sqlx::query(
-                "UPDATE task_instances SET state='failed', next_fire_at=NULL, updated_at=?2 \
-                 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",
-            )
-            .bind(&instance_id)
-            .bind(&now)
-            .execute(&mut *conn)
-            .await?;
-        }
-    }
+    super::worker_resolution::record_on(&mut conn,&report_source,resolution,evidence).await?;
+    apply_resolution_action_on(&mut conn,resolution.instance_id,&resolution.action,source.as_ref()).await?;
     insert_attempt_events(
         &mut conn,
         &[transition_event(
             resolution.task_id,
             resolution.expected_claim_epoch,
-            resolution
-                .holder_worker_id
-                .clone()
-                .or_else(|| resolution.expected_worker_id.clone()),
+            report_source.worker_id.clone(),
             resolution.event,
-            Some(resolution.reason.clone()),
+            Some(crate::worker_resolution::diagnostic_reason(&resolution.reason).into_owned()),
         )],
     )
     .await?;
-    conn.commit().await?;
     Ok(true)
+    }.await;
+    super::finish_transaction(conn, result).await
 }
 
 /// Wake a non-terminal, non-paused instance (see the Postgres twin).
@@ -1226,4 +1297,57 @@ pub(super) async fn claimed_counts_by_worker(
         .await?
     };
     Ok(rows)
+}
+
+pub(super) async fn apply_resolution_action_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance: orch8_types::ids::InstanceId,
+    action: &orch8_types::worker::WorkerTaskResolutionAction,
+    source: Option<&crate::worker_invocation::WorkerInvocation>,
+) -> Result<(), StorageError> {
+    use orch8_types::worker::WorkerTaskResolutionAction as Action;
+    let now = ts(Utc::now());
+    let instance_id = instance.to_string();
+    match action {
+        Action::Requeue | Action::FailTaskOnly => {}
+        Action::Retry {
+            retry_task,
+            retry_output,
+            node_id,
+            fire_at,
+        } => {
+            let source =
+                source.ok_or_else(|| StorageError::Constraint("missing retry source".into()))?;
+            super::worker_invocations::reserve_retry_on(&mut *conn, source, retry_task, *node_id)
+                .await?;
+            if let Some(output) = retry_output.as_deref() {
+                super::outputs::save_on(&mut *conn, output).await?;
+            }
+            schedule_live_instance(&mut *conn, &instance_id, &ts(*fire_at), &now).await?;
+        }
+        Action::FailNode { node_id, fire_at } => {
+            if let Some(node_id) = node_id {
+                sqlx::query(
+                "UPDATE execution_tree SET state='failed', completed_at=COALESCE(completed_at, ?2) \
+                 WHERE id=?1 AND state IN ('running','waiting')",
+            )
+            .bind(node_id.into_uuid().to_string())
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+            }
+            schedule_live_instance(&mut *conn, &instance_id, &ts(*fire_at), &now).await?;
+        }
+        Action::FailInstance => {
+            sqlx::query(
+                "UPDATE task_instances SET state='failed', next_fire_at=NULL, updated_at=?2 \
+                 WHERE id=?1 AND state NOT IN ('completed','failed','cancelled')",
+            )
+            .bind(&instance_id)
+            .bind(&now)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    Ok(())
 }

@@ -52,7 +52,7 @@ pub const TOKEN_PREFIX: &str = "bst_";
 pub const DEFAULT_TTL_SECS: u32 = 900;
 pub const MAX_TTL_SECS: u32 = 3_600;
 pub(crate) const MAX_HANDLERS: usize = 64;
-const MAX_QUEUES: usize = 16;
+pub(crate) const MAX_QUEUES: usize = 16;
 pub(crate) const MAX_NAME_BYTES: usize = 256;
 /// Shared browser-session signing secret (all replicas, ≥ 32 bytes).
 pub const SECRET_ENV: &str = "ORCH8_BROWSER_SESSION_SECRET";
@@ -358,7 +358,13 @@ impl BrowserSessionSigner {
         // A device session is always bound to one device; a browser session
         // never is.
         let device_id = match (kind, claims.device_id) {
-            (RuntimeKind::Mobile, Some(device_id)) if !device_id.is_empty() => Some(device_id),
+            (RuntimeKind::Mobile, Some(device_id))
+                if !device_id.trim().is_empty()
+                    && device_id.len() <= MAX_NAME_BYTES
+                    && !device_id.contains('\0') =>
+            {
+                Some(device_id)
+            }
             (RuntimeKind::Browser, None) => None,
             _ => return None,
         };
@@ -434,10 +440,10 @@ pub(crate) fn validate_names(label: &str, names: &[String], max: usize) -> Resul
     }
     if names
         .iter()
-        .any(|name| name.trim().is_empty() || name.len() > MAX_NAME_BYTES)
+        .any(|name| name.trim().is_empty() || name.len() > MAX_NAME_BYTES || name.contains('\0'))
     {
         return Err(ApiError::InvalidArgument(format!(
-            "{label} must be non-empty and at most {MAX_NAME_BYTES} bytes"
+            "{label} must be nonblank, NUL-free and at most {MAX_NAME_BYTES} bytes"
         )));
     }
     Ok(())

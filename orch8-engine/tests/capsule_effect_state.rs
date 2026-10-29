@@ -127,10 +127,21 @@ async fn assert_no_unclaimed_entry(
     instance: &TaskInstance,
     original: &ContinuityExecution,
 ) {
-    storage
-        .update_instance_state(instance.id, InstanceState::Running, None)
+    let retired = storage
+        .is_physical_instance_retired(instance.id)
         .await
         .unwrap();
+    let running = storage
+        .update_instance_state(instance.id, InstanceState::Running, None)
+        .await;
+    if retired {
+        assert!(
+            running.is_err(),
+            "retired source accepted a forward state write"
+        );
+    } else {
+        running.unwrap();
+    }
     let scope = orch8_engine::effect_guard::ensure_effect_scope(
         storage.as_ref(),
         &instance.tenant_id,
@@ -151,10 +162,12 @@ async fn assert_no_unclaimed_entry(
         result,
         Err(orch8_engine::error::EngineError::ClaimLost { .. })
     ));
-    storage
-        .update_instance_state(instance.id, InstanceState::Paused, None)
-        .await
-        .unwrap();
+    if !retired {
+        storage
+            .update_instance_state(instance.id, InstanceState::Paused, None)
+            .await
+            .unwrap();
+    }
 }
 
 async fn seed_guard(
@@ -385,20 +398,18 @@ async fn transfer(destination: Option<Arc<dyn StorageBackend>>, scenario: Scenar
         .await
         .unwrap()
         .unwrap();
-    let transferring = ContinuityExecution {
-        state: OwnershipState::Transferring,
-        updated_at: Utc::now(),
-        ..owner.clone()
-    };
+    // Export owns the source transition: callers must never repeat or undo it.
+    let transferring = source
+        .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(transferring.state, OwnershipState::Transferring);
+    assert_eq!(transferring.epoch, owner.epoch);
+    assert_eq!(transferring.current_instance_id, instance.id);
     assert!(
         source
-            .cas_continuity_owner(
-                &instance.tenant_id,
-                owner.continuity_id,
-                owner.epoch,
-                owner.owner_runtime_id,
-                &transferring
-            )
+            .is_physical_instance_retired(instance.id)
             .await
             .unwrap()
     );

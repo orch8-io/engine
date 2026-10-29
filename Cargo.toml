@@ -112,7 +112,7 @@ jsonschema = { version = "0.60", default-features = false }
 
 # Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
 # 0.14.2 includes the quick-xml 0.41 fix and a backend HTTP-500 panic fix.
-object_store = { version = "0.14.2", features = ["aws"] }
+object_store = { version = "0.14.2", default-features = false, features = ["fs"] }
 futures = "0.3"
 bytes = "1"
 
@@ -140,7 +140,7 @@ notify = { version = "8", features = ["serde"] }
 # Preserve Wasmtime's runtime/compiler defaults except its unused disk cache.
 # wasm_plugin builds Config::new() with cache=None and keeps its own bounded
 # module cache. Wasmtime's optional disk-cache feature pulls vulnerable zstd 0.13.
-wasmtime = { version = "49.0.4", default-features = false, features = [
+wasmtime = { version = "50.0.0", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null",
     "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator",
     "demangle", "addr2line", "coredump", "debug-builtins", "runtime",

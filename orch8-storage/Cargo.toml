@@ -32,7 +32,7 @@ zstd = { version = "0.14", optional = true }
 # already in the workspace graph; no new crates.
 aes-gcm = { workspace = true, optional = true }
 hmac = { workspace = true, optional = true }
-sha2 = { workspace = true, optional = true }
+sha2.workspace = true
 base64 = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
@@ -45,13 +45,15 @@ default = ["compression", "postgres", "artifacts", "byok"]
 compression = ["dep:zstd"]
 # Postgres backend (`postgres` module, tenant partitioning) + sqlx TLS.
 postgres = ["sqlx/postgres", "sqlx/tls-rustls-ring-webpki", "artifacts"]
-# Object-store backed artifact store (local FS / S3 / in-memory).
-artifacts = ["dep:object_store"]
+# Local files / in-memory artifacts for on-device and embedded runtimes.
+artifacts-local = ["dep:object_store"]
+# Server feature retains S3 alongside local/in-memory backends.
+artifacts = ["artifacts-local", "object_store/aws"]
 # Customer-owned payload vault with envelope encryption (AWS KMS / static key).
 # Test infrastructure (`orch8_storage::testing`): fault-injecting storage,
 # fixtures, backend matrix. Enabled only by dev-dependencies.
 test-util = []
-byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:sha2", "dep:base64", "dep:zeroize", "dep:reqwest"]
+byok = ["artifacts", "dep:aes-gcm", "dep:hmac", "dep:base64", "dep:zeroize", "dep:reqwest"]
 
 [dev-dependencies]
 # Integration tests in `tests/` use `orch8_storage::testing`.
