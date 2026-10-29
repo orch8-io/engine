@@ -2528,15 +2528,15 @@ async fn named_queue_skips_frozen_source(
     assert_eq!(retained.claim_epoch, 0);
 }
 
-orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_claim_skips_captured_source_before_limit(b) {
+orch8_storage::backend_test!(async fn named_queue_claim_skips_captured_source_before_limit(b) {
     named_queue_skips_frozen_source(&b,false,false).await;
 });
-orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_tenant_claim_skips_captured_source_before_limit(b) {
+orch8_storage::backend_test!(async fn named_queue_tenant_claim_skips_captured_source_before_limit(b) {
     named_queue_skips_frozen_source(&b,false,true).await;
 });
-orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_claim_skips_retired_source_after_history_gc(b) {
+orch8_storage::backend_test!(async fn named_queue_claim_skips_retired_source_after_history_gc(b) {
     named_queue_skips_frozen_source(&b,true,false).await;
 });
-orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_tenant_claim_skips_retired_source_after_history_gc(b) {
+orch8_storage::backend_test!(async fn named_queue_tenant_claim_skips_retired_source_after_history_gc(b) {
     named_queue_skips_frozen_source(&b,true,true).await;
 });
