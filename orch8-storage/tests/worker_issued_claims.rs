@@ -912,3 +912,6 @@ orch8_storage::backend_test!(async fn named_queue_claim_skips_quarantined_native
 orch8_storage::backend_test!(async fn named_queue_tenant_claim_skips_quarantined_native_relay(b) {
     named_queue_skips_quarantined_relay(&b,3).await;
 });
+
+#[path = "worker_issued_claims/reconnect_guards.rs"]
+mod reconnect_guards;

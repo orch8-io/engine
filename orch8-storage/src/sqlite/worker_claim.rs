@@ -158,6 +158,7 @@ pub(super) async fn reconnect(
     if let Some(tenant) = &request.tenant_id {
         query.push(" AND ti.tenant_id=").push_bind(tenant.as_str());
     }
+    query.push(RECONNECT_FORWARD_GUARDS);
     query.push(" AND wt.handler_name IN (");
     let mut handlers = query.separated(",");
     for handler in &request.handlers {
@@ -208,3 +209,12 @@ pub(super) async fn reconnect(
     }
     Ok(tasks)
 }
+
+// Screening a held row is not lease renewal or provider admission.
+// NULL legacy leases still require the caller's separate confirmation policy.
+const RECONNECT_FORWARD_GUARDS: &str = concat!(
+    " AND ti.state NOT IN ('completed','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM delegation_proxy_native_history h WHERE h.instance_id=wt.instance_id) AND NOT EXISTS(SELECT 1 FROM physical_instance_retirements r WHERE r.instance_id=wt.instance_id) AND NOT EXISTS(SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed'))",
+    " AND NOT EXISTS(SELECT 1 FROM continuity_executions ce WHERE ce.tenant_id=ti.tenant_id AND ce.state='compensating' AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)",
+    " AND (wt.lease_secs IS NULL OR (wt.lease_secs>0 AND julianday(COALESCE(wt.heartbeat_at,wt.claimed_at))+wt.lease_secs/86400.0>julianday('now')))",
+    " AND (wt.timeout_ms IS NULL OR (wt.timeout_ms>0 AND julianday(wt.created_at)+wt.timeout_ms/86400000.0>julianday('now')))",
+);

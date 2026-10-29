@@ -2540,3 +2540,6 @@ orch8_storage::backend_test!(async fn named_queue_claim_skips_retired_source_aft
 orch8_storage::backend_test!(async fn named_queue_tenant_claim_skips_retired_source_after_history_gc(b) {
     named_queue_skips_frozen_source(&b,true,true).await;
 });
+
+#[path = "capsule_source_cuts/reconnect_guards.rs"]
+mod reconnect_guards;
