@@ -2460,3 +2460,83 @@ orch8_storage::backend_test!(async fn pending_reported_worker_failure_blocks_cap
     assert!(error.to_string().contains("unapplied worker failure prevents capsule cut"),"{error}");
     assert!(storage.get_worker_resolution_outcome(Some(&request.owner.tenant_id),task.id,Some(&claim)).await.unwrap().is_some());
 });
+
+async fn named_queue_skips_frozen_source(
+    backend: &orch8_storage::testing::backends::TestBackend,
+    retired: bool,
+    tenant_scoped: bool,
+) {
+    let (request, pending) = if retired {
+        legacy_retired_source(backend).await
+    } else {
+        let (request, _, pending) = captured_source_with_late_queue(backend).await;
+        (request, pending)
+    };
+    let storage = backend.storage.as_ref();
+    let queue = format!("frozen-source-{}", uuid::Uuid::new_v4());
+    let mut blocked = pending;
+    blocked.id = uuid::Uuid::new_v4();
+    blocked.block_id = BlockId::new(format!("named-{}", blocked.id));
+    blocked.queue_name = Some(queue.clone());
+    insert_pre_guard_pending(backend, &blocked).await;
+    assert_eq!(
+        storage
+            .get_worker_task(blocked.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .queue_name,
+        Some(queue.clone()),
+    );
+    let mut healthy = storage
+        .get_instance(request.owner.current_instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    healthy.id = InstanceId::new();
+    storage.create_instance(&healthy).await.unwrap();
+    let mut control = blocked.clone();
+    control.id = uuid::Uuid::new_v4();
+    control.instance_id = healthy.id;
+    control.created_at = blocked.created_at + Duration::seconds(1);
+    storage.create_worker_task(&control).await.unwrap();
+    let result = if tenant_scoped {
+        storage
+            .claim_worker_tasks_from_queue_for_tenant(
+                &queue,
+                &blocked.handler_name,
+                "queue-worker",
+                &request.owner.tenant_id,
+                1,
+            )
+            .await
+    } else {
+        storage
+            .claim_worker_tasks_from_queue(&queue, &blocked.handler_name, "queue-worker", 1)
+            .await
+    };
+    let claimed = result.expect("a frozen source must not poison a named-queue poll");
+    assert_eq!(
+        claimed.iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec![control.id]
+    );
+    let retained = storage.get_worker_task(blocked.id).await.unwrap().unwrap();
+    assert_eq!(
+        retained.state,
+        orch8_types::worker::WorkerTaskState::Pending
+    );
+    assert_eq!(retained.claim_epoch, 0);
+}
+
+orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_claim_skips_captured_source_before_limit(b) {
+    named_queue_skips_frozen_source(&b,false,false).await;
+});
+orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_tenant_claim_skips_captured_source_before_limit(b) {
+    named_queue_skips_frozen_source(&b,false,true).await;
+});
+orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_claim_skips_retired_source_after_history_gc(b) {
+    named_queue_skips_frozen_source(&b,true,false).await;
+});
+orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_tenant_claim_skips_retired_source_after_history_gc(b) {
+    named_queue_skips_frozen_source(&b,true,true).await;
+});
