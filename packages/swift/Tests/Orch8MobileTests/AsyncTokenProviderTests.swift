@@ -137,14 +137,15 @@ final class AsyncTokenProviderTests: XCTestCase {
         let budget = TokenFetchBudget(capacity: 1)
         var provider: AsyncTokenProvider? = AsyncTokenProvider(initialToken: "dst_first", timeout: 30, budget: budget, clock: clock) { await gate.fetch() }
         weak var retired = provider
-        let initial = Task { [weak provider] in
+        var initial: Task<Bool, Never>? = Task { [provider] in
             guard let provider else { return false }
             do { _ = try await provider.fetchInitialToken(); return false }
             catch { return String(describing: error).contains("token provider timed out") }
         }
         await fulfillment(of: [entered, armed], timeout: 30)
         clock.expire()
-        let expired = await initial.value
+        let expired = await initial!.value
+        initial = nil
         XCTAssertTrue(expired, "retire the logical waiter while host work remains blocked")
         XCTAssertEqual(gate.calls(), 1, "retirement must be tested with physical host work in flight")
         provider = nil
