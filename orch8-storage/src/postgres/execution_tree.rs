@@ -80,12 +80,20 @@ pub(super) async fn get_tree(
     store: &PostgresStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<ExecutionNode>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    get_tree_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn get_tree_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+) -> Result<Vec<ExecutionNode>, StorageError> {
     let rows = sqlx::query_as::<_, ExecutionNodeRow>(
         r"SELECT id, instance_id, block_id, parent_id, block_type, branch_index, state, started_at, completed_at
            FROM execution_tree WHERE instance_id = $1 ORDER BY id",
     )
     .bind(instance_id.into_uuid())
-    .fetch_all(&store.pool)
+    .fetch_all(&mut *conn)
     .await?;
     rows.into_iter().map(ExecutionNodeRow::into_node).collect()
 }

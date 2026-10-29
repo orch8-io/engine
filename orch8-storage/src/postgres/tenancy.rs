@@ -94,7 +94,7 @@ impl crate::TenancyStore for PostgresStorage {
         }
         let mut count = 0u64;
         for instance in instances {
-            let context = serde_json::to_value(&instance.context)?;
+            let context = super::json_encoding::encode_context(&instance.context)?;
             let result = bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), instance, &context)
                 .execute(&mut *tx)
                 .await?;

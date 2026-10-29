@@ -27,6 +27,50 @@ async fn read(client: &reqwest::Client, base: &str, id: &str) -> Value {
         .unwrap()
 }
 #[tokio::test]
+async fn context_replacement_preserves_the_engine_run_and_rejects_runtime_forgery() {
+    use orch8_storage::InstanceStore;
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let id = create(&client, &server.base_url, json!({"old":"data"})).await;
+    let instance_id = orch8_types::ids::InstanceId::from_uuid(uuid::Uuid::parse_str(&id).unwrap());
+    let mut instance = server
+        .storage
+        .get_instance(instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    instance.context.runtime.run_id = Some("original-run".into());
+    instance.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+    instance.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    instance.context.runtime.dry_run = true;
+    server
+        .storage
+        .update_instance_context(instance_id, &instance.context)
+        .await
+        .unwrap();
+    let original = read(&client, &server.base_url, &id).await["context"]["runtime"].clone();
+    for runtime in [
+        None,
+        Some(json!({"run_id":"forged-run","dry_run":false,"total_steps_executed":0})),
+    ] {
+        let mut context = json!({"data":{"replacement":true}});
+        if let Some(runtime) = runtime {
+            context["runtime"] = runtime;
+        }
+        let response = client
+            .patch(format!("{}/instances/{id}/context", server.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({"context":context}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = read(&client, &server.base_url, &id).await;
+        assert_eq!(after["context"]["runtime"], original);
+        assert_eq!(after["context"]["data"], json!({"replacement":true}));
+    }
+}
+#[tokio::test]
 async fn data_patch_preserves_other_fields_and_context_sections() {
     let server = spawn_test_server().await;
     let client = reqwest::Client::new();

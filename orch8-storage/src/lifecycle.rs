@@ -48,6 +48,7 @@ pub async fn retry_failed_instance<S>(
 where
     S: StorageBackend + ?Sized,
 {
+    crate::delegation_publication::ensure_native_instance(storage, id).await?;
     if !storage
         .conditional_update_instance_state(id, InstanceState::Failed, InstanceState::Paused, None)
         .await?

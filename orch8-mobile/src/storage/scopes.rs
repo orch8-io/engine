@@ -242,6 +242,11 @@ impl MobileStorage {
         // evidence. Already-running host code retains its physical permit.
         sqlx::query("UPDATE task_instances SET state='cancelled',next_fire_at=NULL,claimed_at=NULL,updated_at=?3 WHERE id IN (SELECT id FROM mobile_catalog_run_requests WHERE account_id=?1 AND owner_epoch=?2) AND state IN ('scheduled','running','waiting','paused') AND EXISTS(SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=task_instances.id AND task_instances.tenant_id='mobile-account-' || r.account_id AND task_instances.namespace='catalog-' || r.catalog_id AND task_instances.sequence_id=r.selected_sequence_id)")
             .bind(&account.id).bind(account.epoch).bind(chrono::Utc::now().to_rfc3339()).execute(&mut *tx).await?;
+        orch8_storage::sqlite::SqliteStorage::retire_mobile_capsule_cuts_in_transaction(
+            &mut tx,
+            &account.id,
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }

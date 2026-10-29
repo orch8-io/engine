@@ -92,6 +92,12 @@ isolated in-memory dry run of built-in handlers) are still exported.
   Close releases the lock after its SQLite pool closes. Dropping an engine with
   a live owned pass retains authority until that pass ends. In-memory engines
   are independent. Use `orch8-server` with Postgres for shared execution.
+- Database paths are literal filenames; `%`, `?` and `#` do not introduce URI
+  options. `:memory:` selects an independent in-memory engine.
+- Use a dedicated engine database. Close the engine before opening its file
+  through another SQLite binding in the same process: separate SQLite copies
+  can interfere with each other's file locks. See
+  [SQLite's explanation](https://www.sqlite.org/howtocorrupt.html#multiple_copies_of_sqlite_linked_into_the_same_application).
 - A persistent zero-byte `.orch8-owner` companion file holds the advisory lock.
   Keep it beside the database and do not delete, replace or rename either file
   while an engine is live. Symlink paths resolve to the same companion; Unix

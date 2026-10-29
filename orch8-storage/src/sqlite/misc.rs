@@ -250,24 +250,24 @@ pub(super) async fn claim_worker_tasks_from_queue(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     // `BEGIN IMMEDIATE` (not sqlx's default DEFERRED) — the SELECT and UPDATE
     // form a read-then-write claim; under DEFERRED two concurrent pollers can
     // both SELECT the same pending rows before either UPDATE runs and claim
     // the same task twice. Same convention as `workers::claim`.
     let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
-    let result =
-        claim_from_queue_inner(&mut conn, queue_name, handler_name, worker_id, None, limit).await;
-    match result {
-        Ok(tasks) => {
-            conn.commit().await?;
-            Ok(tasks)
-        }
-        Err(e) => {
-            let _ = conn.rollback().await;
-            Err(e)
-        }
-    }
+    let result = claim_from_queue_inner(
+        &mut conn,
+        queue_name,
+        handler_name,
+        worker_id,
+        None,
+        limit,
+        principal,
+    )
+    .await;
+    super::finish_transaction(conn, result).await
 }
 
 /// Shared SELECT + UPDATE claim body for the queue-routing claims. When
@@ -280,6 +280,7 @@ async fn claim_from_queue_inner(
     worker_id: &str,
     tenant_id: Option<&TenantId>,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     let now = ts(chrono::Utc::now());
     let rows = if let Some(tenant) = tenant_id {
@@ -351,6 +352,7 @@ async fn claim_from_queue_inner(
                 )
             })
             .collect();
+        super::worker_claim::record_on(conn, &tasks, principal).await?;
         super::workers::insert_attempt_events(conn, &events).await?;
     }
     Ok(tasks)
@@ -367,6 +369,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     worker_id: &str,
     tenant_id: &TenantId,
     limit: u32,
+    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
     // BEGIN IMMEDIATE for the same double-claim reason as
     // `claim_worker_tasks_from_queue` above.
@@ -378,18 +381,10 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
         worker_id,
         Some(tenant_id),
         limit,
+        principal,
     )
     .await;
-    match result {
-        Ok(tasks) => {
-            conn.commit().await?;
-            Ok(tasks)
-        }
-        Err(e) => {
-            let _ = conn.rollback().await;
-            Err(e)
-        }
-    }
+    super::finish_transaction(conn, result).await
 }
 
 // === Dynamic Step Injection ===

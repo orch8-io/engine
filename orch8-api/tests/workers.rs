@@ -1,7 +1,7 @@
 //! E2E tests for the Workers API.
 
 use orch8_api::test_harness::spawn_test_server;
-use orch8_storage::WorkerStore;
+use orch8_storage::{InstanceStore, WorkerStore};
 use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
@@ -73,6 +73,24 @@ async fn create_instance(client: &reqwest::Client, base_url: &str, seq_id: Uuid)
 /// without spinning up the full engine scheduler.
 async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id: Uuid) -> Uuid {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
+    let native_id = orch8_types::ids::InstanceId::from_uuid(instance_id);
+    let mut parent = srv.storage.get_instance(native_id).await.unwrap().unwrap();
+    // Queue a real flat-step identity: a bare task cannot advance an unknown run.
+    parent.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    parent.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+    parent.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    srv.storage
+        .update_instance_context(native_id, &parent.context)
+        .await
+        .unwrap();
+    srv.storage
+        .update_instance_state(
+            native_id,
+            orch8_types::instance::InstanceState::Waiting,
+            None,
+        )
+        .await
+        .unwrap();
     let task = WorkerTask {
         id: Uuid::now_v7(),
         instance_id: orch8_types::ids::InstanceId::from_uuid(instance_id),
@@ -81,7 +99,7 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         queue_name: Some("q1".into()),
         requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
-        context: json!({}),
+        context: serde_json::to_value(&parent.context).unwrap(),
         attempt: 0,
         timeout_ms: None,
         state: WorkerTaskState::Pending,

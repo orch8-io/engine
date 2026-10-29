@@ -143,6 +143,8 @@ pub struct TestServerOptions {
     pub mobile_sync_enabled: bool,
     /// `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS`.
     pub mobile_sync_resolve_credentials: bool,
+    /// Serialized context ceiling; zero disables it for fixtures.
+    pub max_context_bytes: u32,
     /// Embedded runtime (embed signer, license); `None` = disabled.
     pub embedded: Option<Arc<crate::embed::EmbeddedRuntime>>,
 }
@@ -165,7 +167,7 @@ pub async fn spawn_test_server_with(
         storage.clone(),
         shutdown.clone(),
         options.mobile_sync_enabled,
-        0,
+        options.max_context_bytes,
         root_key_digest,
     );
     state.mobile_sync_resolve_credentials = options.mobile_sync_resolve_credentials;

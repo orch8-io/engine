@@ -225,6 +225,14 @@ async fn create_seq_and_instance(
     seq_id: &str,
     inst_id: &str,
 ) {
+    create_seq_and_instance_with_handler(client, seq_id, inst_id, "noop").await;
+}
+async fn create_seq_and_instance_with_handler(
+    client: &mut Orch8ServiceClient<tonic::transport::Channel>,
+    seq_id: &str,
+    inst_id: &str,
+    handler: &str,
+) {
     let seq_def = serde_json::json!({
         "id": seq_id,
         "tenant_id": "test",
@@ -236,7 +244,7 @@ async fn create_seq_and_instance(
             {
                 "type": "step",
                 "id": "step_1",
-                "handler": "noop",
+                "handler": handler,
                 "params": {},
                 "cancellable": true
             }
@@ -406,44 +414,104 @@ fn pending_worker_task(
     }
 }
 
-fn dispatched_worker_effect(
-    instance: &orch8_types::instance::TaskInstance,
+async fn admitted_worker_effect(
+    storage: &dyn orch8_storage::StorageBackend,
+    id: InstanceId,
 ) -> (
     orch8_types::continuity::ContinuityExecution,
     orch8_types::continuity::EffectReceipt,
+    WorkerTask,
 ) {
-    use orch8_types::continuity::{
-        ContinuityExecution, ContinuityId, EffectId, EffectKind, EffectReceipt, EffectState,
-        ExecutionEpoch, OwnershipState, RuntimeId,
+    use orch8_storage::worker_admission::{
+        WorkerDispatchIntent, WorkerDispatchPublication, WorkerEffectPlan, dispatch_effect,
     };
+    use orch8_types::continuity::{
+        ContinuityExecution, ContinuityId, EffectId, EffectReceipt, EffectState, ExecutionEpoch,
+        OwnershipState, RuntimeId,
+    };
+    let mut instance = storage.get_instance(id).await.unwrap().unwrap();
+    let block = orch8_types::ids::BlockId::new("step_1");
+    instance.context.runtime.run_id = Some(uuid::Uuid::now_v7().to_string());
+    instance.context.runtime.current_step = Some(block.clone());
+    instance.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    storage
+        .update_instance_context(id, &instance.context)
+        .await
+        .unwrap();
+    let instance = storage
+        .claim_due_instances(chrono::Utc::now() + chrono::Duration::seconds(1), 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
     let now = chrono::Utc::now();
     let owner = ContinuityExecution {
         continuity_id: ContinuityId::new(),
         tenant_id: instance.tenant_id.clone(),
-        current_instance_id: instance.id,
+        current_instance_id: id,
         owner_runtime_id: RuntimeId::new(),
         epoch: ExecutionEpoch::initial(),
         state: OwnershipState::Owned,
         updated_at: now,
     };
-    let effect = EffectReceipt {
-        id: EffectId::new(),
+    storage.create_continuity_execution(&owner).await.unwrap();
+    let fence = storage
+        .prepare_worker_dispatch(
+            &instance,
+            &block,
+            &orch8_storage::worker_invocation::WorkerDispatchSelection::Flat {
+                step_started_at: instance.context.runtime.current_step_started_at.unwrap(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut task = pending_worker_task(id, block.as_str(), "payments", serde_json::json!({}));
+    task.context = serde_json::to_value(&instance.context).unwrap();
+    task.continuity_epoch = Some(owner.epoch.get());
+    let proof = dispatch_effect(&task, EffectId::new());
+    let receipt = EffectReceipt {
+        id: proof.effect_id,
         tenant_id: owner.tenant_id.clone(),
         continuity_id: owner.continuity_id,
         epoch: owner.epoch,
-        instance_id: instance.id,
-        block_id: orch8_types::ids::BlockId::new("step_1"),
-        kind: EffectKind::Worker,
-        state: EffectState::Dispatched,
-        destination_fingerprint: "grpc-provider".into(),
+        instance_id: id,
+        block_id: block,
+        kind: proof.kind,
+        state: EffectState::Planned,
+        destination_fingerprint: proof.destination_fingerprint,
         idempotency_key: None,
-        request_sha256: "a".repeat(64),
+        request_sha256: proof.request_sha256,
         provider_receipt_id: None,
         attempt: 0,
         created_at: now,
         updated_at: now,
     };
-    (owner, effect)
+    let intent = WorkerDispatchIntent::new(
+        task.clone(),
+        fence,
+        Some(WorkerEffectPlan::new(receipt, false)),
+    )
+    .unwrap();
+    let WorkerDispatchPublication::Published {
+        task_id,
+        receipt: Some(receipt),
+    } = storage.admit_worker_dispatch(&intent).await.unwrap()
+    else {
+        panic!("expected admitted payment dispatch")
+    };
+    assert_eq!(task_id, task.id);
+    storage
+        .update_instance_state(id, InstanceState::Waiting, None)
+        .await
+        .unwrap();
+    let claimed = storage
+        .claim_worker_tasks("payments", "already-running", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    (owner, *receipt, claimed)
 }
 
 fn worker_stream_frame(
@@ -933,32 +1001,11 @@ async fn grpc_compensation_fence_accepts_worker_outcome_without_forward_propagat
         .unwrap();
     let sequence_id = uuid::Uuid::new_v4().to_string();
     let instance_id = uuid::Uuid::new_v4().to_string();
-    create_seq_and_instance(&mut client, &sequence_id, &instance_id).await;
+    create_seq_and_instance_with_handler(&mut client, &sequence_id, &instance_id, "payments").await;
     let id = InstanceId::from_uuid(uuid::Uuid::parse_str(&instance_id).unwrap());
-    storage
-        .update_instance_state(id, InstanceState::Waiting, None)
-        .await
-        .unwrap();
+    let (owner, effect, claimed) = admitted_worker_effect(storage.as_ref(), id).await;
+    let task = claimed.clone();
     let instance = storage.get_instance(id).await.unwrap().unwrap();
-    let (owner, effect) = dispatched_worker_effect(&instance);
-    storage.create_continuity_execution(&owner).await.unwrap();
-    storage.create_effect_receipt(&effect).await.unwrap();
-    let mut task = pending_worker_task(
-        id,
-        effect.block_id.as_str(),
-        "payments",
-        serde_json::json!({}),
-    );
-    task.effect_id = Some(effect.id);
-    task.continuity_epoch = Some(owner.epoch.get());
-    task.created_at = effect.created_at;
-    storage.create_worker_task(&task).await.unwrap();
-    let claimed = storage
-        .claim_worker_tasks("payments", "already-running", 1)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap();
     let fenced = ContinuityExecution {
         state: OwnershipState::Compensating,
         ..owner.clone()
@@ -1019,3 +1066,6 @@ async fn grpc_compensation_fence_accepts_worker_outcome_without_forward_propagat
         fenced
     );
 }
+
+#[path = "e2e/auth_scope.rs"]
+mod auth_scope;

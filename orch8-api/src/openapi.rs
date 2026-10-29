@@ -581,6 +581,7 @@ impl Modify for EmbedSecurity {
         crate::workers::poll_tasks,
         crate::workers::poll_tasks_from_queue,
         crate::workers::complete_task,
+        crate::workers::reconciliation::reconcile_completion,
         crate::workers::upload_task_artifact,
         crate::workers::fail_task,
         crate::workers::heartbeat_task,

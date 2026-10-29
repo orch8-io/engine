@@ -1,6 +1,6 @@
 use chrono::Utc;
 use orch8_api::test_harness::{TestServer, spawn_test_server_with_artifacts};
-use orch8_storage::{ContinuityStore, OutputStore, ResourceStore, WorkerStore};
+use orch8_storage::{ContinuityStore, InstanceStore, OutputStore, ResourceStore, WorkerStore};
 use orch8_types::continuity::CapsuleRequirements;
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
 use orch8_types::worker::{WorkerTask, WorkerTaskState};
@@ -137,7 +137,33 @@ async fn seed_claimed_task(
     claim_epoch: u64,
 ) -> WorkerTask {
     let instance = create_instance(server, client, tenant).await;
-    let task = worker_task(
+    // Model a dispatched flat activity, including the durable identity used
+    // by failure/release fencing rather than an unidentified synthetic row.
+    let native_id = InstanceId::from_uuid(instance);
+    let mut parent = server
+        .storage
+        .get_instance(native_id)
+        .await
+        .unwrap()
+        .unwrap();
+    parent.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    parent.context.runtime.current_step = Some(BlockId::new("device-file"));
+    parent.context.runtime.current_step_started_at = Some(Utc::now());
+    server
+        .storage
+        .update_instance_context(native_id, &parent.context)
+        .await
+        .unwrap();
+    server
+        .storage
+        .update_instance_state(
+            native_id,
+            orch8_types::instance::InstanceState::Waiting,
+            None,
+        )
+        .await
+        .unwrap();
+    let mut task = worker_task(
         instance,
         "device-file",
         CapsuleRequirements::default(),
@@ -146,6 +172,7 @@ async fn seed_claimed_task(
         Some(worker_id),
         claim_epoch,
     );
+    task.context = serde_json::to_value(&parent.context).unwrap();
     server.storage.create_worker_task(&task).await.unwrap();
     task
 }
@@ -813,4 +840,61 @@ async fn repeated_fail_by_the_same_lease_is_idempotent() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
     }
+    server.storage.delete_worker_task(task.id).await.unwrap();
+    server
+        .storage
+        .update_instance_state(
+            task.instance_id,
+            orch8_types::instance::InstanceState::Cancelled,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        server
+            .storage
+            .purge_terminal_instances(&[task.instance_id])
+            .await
+            .unwrap(),
+        1
+    );
+    let replay =
+        json!({"worker_id":"phone-1","claim_epoch":1,"message":"changed report","retryable":true});
+    assert_eq!(
+        client
+            .post(&url)
+            .header("X-Tenant-Id", tenant)
+            .json(&replay)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    for (scope, worker, epoch) in [
+        (tenant, "other-worker", 1),
+        (tenant, "phone-1", 2),
+        ("other-tenant", "phone-1", 1),
+    ] {
+        let response = client
+            .post(&url)
+            .header("X-Tenant-Id", scope)
+            .json(&json!({"worker_id":worker,"claim_epoch":epoch,"message":"changed"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+    let report = server
+        .storage
+        .get_worker_resolution_outcome(
+            Some(&TenantId::unchecked(tenant)),
+            task.id,
+            Some(&orch8_types::worker::WorkerClaim::new("phone-1", 1)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.reason, json!("no camera"));
+    assert!(!report.retryable);
 }

@@ -391,6 +391,13 @@ pub async fn snapshot(storage: &dyn StorageBackend, include_instances: bool) -> 
                 .context("list instances")?;
             let n = page.len();
             for instance in page {
+                if orch8_storage::delegation_publication::is_proxy_record(storage, &instance)
+                    .await?
+                {
+                    bail!(
+                        "instance backup cannot preserve delegation relay authority; use a full database backup for relay state"
+                    );
+                }
                 for node in storage.get_execution_tree(instance.id).await? {
                     tree.push(serde_json::to_value(&node)?);
                 }

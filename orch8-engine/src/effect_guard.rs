@@ -575,7 +575,9 @@ pub enum WorkerEffectSettlement {
     Abandoned,
 }
 
-/// Commit the receipt created when an external worker task was dispatched.
+/// Reconcile a legacy external worker receipt independently of task acceptance.
+/// Production completions use `StorageBackend::complete_worker_task` so the
+/// receipt, original result and task state commit together.
 /// Legacy and non-continuity tasks are intentionally a no-op.
 pub async fn commit_external_worker_effect(
     storage: &dyn StorageBackend,
@@ -701,26 +703,78 @@ pub async fn settle_worker_task_effect(
 /// older node's dispatch records the receipt but cannot bind it to the row),
 /// otherwise a freshly dispatched receipt for this attempt. `None` for pure
 /// handlers, which carry no receipt.
+/// A retained binding remains authoritative when its hot copy is missing;
+/// absence of that original receipt never authorizes a replacement request.
 pub(crate) async fn stranded_attempt_effect_id(
     storage: &dyn StorageBackend,
     tenant_id: &TenantId,
     task: &orch8_types::worker::WorkerTask,
+    retained_effect_id: Option<EffectId>,
 ) -> Result<Option<EffectId>, EngineError> {
-    if !crate::release_diff::handler_has_side_effects(&task.handler_name) {
+    let bound_effect_id = match (task.effect_id, retained_effect_id) {
+        (Some(hot), Some(original)) if hot != original => {
+            return Err(EngineError::EffectTransition(
+                "stranded worker effect differs from its retained invocation".into(),
+            ));
+        }
+        (hot, original) => original.or(hot),
+    };
+    if orch8_types::sequence::is_pure_remote_builtin(&task.handler_name)
+        || task
+            .context
+            .pointer("/runtime/dry_run")
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
         return Ok(None);
     }
+    if orch8_types::sequence::is_engine_only_builtin(&task.handler_name) {
+        return Err(EngineError::InvalidConfig(
+            "engine-only handler cannot be recovered as remote work".into(),
+        ));
+    }
     let execution = ensure_effect_scope(storage, tenant_id, task.instance_id).await?;
-    if let Some(open) = storage
-        .find_unresolved_effect_receipt(
-            tenant_id,
-            execution.continuity_id,
-            task.instance_id,
-            &task.block_id,
-            u32::from(task.attempt),
-        )
-        .await?
+    if execution.current_instance_id != task.instance_id || execution.state != OwnershipState::Owned
     {
-        return Ok(Some(open.id));
+        return Err(EngineError::ClaimLost {
+            instance_id: task.instance_id,
+        });
+    }
+    let open = match bound_effect_id {
+        Some(id) => storage.get_effect_receipt(tenant_id, id).await?,
+        None => {
+            storage
+                .find_unresolved_effect_receipt(
+                    tenant_id,
+                    execution.continuity_id,
+                    task.instance_id,
+                    &task.block_id,
+                    u32::from(task.attempt),
+                )
+                .await?
+        }
+    };
+    if let Some(receipt) = open {
+        if receipt.tenant_id != *tenant_id
+            || receipt.continuity_id != execution.continuity_id
+            || receipt.epoch != execution.epoch
+            || receipt.instance_id != task.instance_id
+            || receipt.block_id != task.block_id
+            || receipt.attempt != u32::from(task.attempt)
+            || receipt.kind != effect_kind(&task.handler_name)
+            || receipt.state != EffectState::Dispatched
+            || receipt.request_sha256 != request_hash(&task.handler_name, &task.params)?
+            || receipt.destination_fingerprint
+                != destination_fingerprint(&task.handler_name, &task.params)?
+        {
+            return Err(blocked(&receipt));
+        }
+        return Ok(Some(receipt.id));
+    }
+    if bound_effect_id.is_some() {
+        return Err(EngineError::EffectTransition(
+            "bound worker effect receipt is missing".into(),
+        ));
     }
     Ok(EffectGuard::begin(
         storage,
@@ -734,6 +788,122 @@ pub(crate) async fn stranded_attempt_effect_id(
     .await?
     .as_ref()
     .map(EffectGuard::effect_id))
+}
+
+/// Construct receipt intent without making it visible before queue admission.
+fn worker_effect_plan(
+    task: &orch8_types::worker::WorkerTask,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
+) -> Result<Option<orch8_storage::worker_admission::WorkerEffectPlan>, EngineError> {
+    if fence.dry_run || orch8_types::sequence::is_pure_remote_builtin(&task.handler_name) {
+        return Ok(None);
+    }
+    let scope = orch8_storage::worker_admission::dispatch_scope(fence);
+    let id = EffectId::new();
+    let proof = worker_dispatch_effect(task, id)?;
+    let now = Utc::now();
+    let epoch = ExecutionEpoch::from_u64(scope.epoch);
+    Ok(Some(
+        orch8_storage::worker_admission::WorkerEffectPlan::new(
+            EffectReceipt {
+                id,
+                tenant_id: fence.tenant_id.clone(),
+                continuity_id: scope.continuity_id,
+                epoch,
+                instance_id: fence.instance_id,
+                block_id: fence.block_id.clone(),
+                kind: proof.kind,
+                state: EffectState::Planned,
+                request_sha256: proof.request_sha256,
+                destination_fingerprint: proof.destination_fingerprint,
+                idempotency_key: task
+                    .params
+                    .get("idempotency_key")
+                    .and_then(Value::as_str)
+                    .filter(|key| key.len() <= 256)
+                    .map(ToOwned::to_owned),
+                provider_receipt_id: None,
+                attempt: u32::from(task.attempt),
+                created_at: now,
+                updated_at: now,
+            },
+            false,
+        ),
+    ))
+}
+
+pub(crate) async fn publish_worker_dispatch(
+    storage: &dyn StorageBackend,
+    task: orch8_types::worker::WorkerTask,
+    fence: &orch8_storage::worker_invocation::WorkerDispatchFence,
+) -> Result<Uuid, EngineError> {
+    use orch8_storage::worker_admission::{WorkerDispatchIntent, WorkerDispatchPublication};
+    let mut plan = worker_effect_plan(&task, fence)?;
+    let guards = if let Some(plan) = &plan {
+        load_effect_commit_guards(storage, &plan.receipt, fence.instance_id).await?
+    } else {
+        Vec::new()
+    };
+    if let Some(plan) = &mut plan {
+        plan.guarded = !guards.is_empty();
+    }
+    let intent = WorkerDispatchIntent::new(task, fence.clone(), plan)?;
+    match storage.admit_worker_dispatch(&intent).await? {
+        WorkerDispatchPublication::Published { task_id, receipt } => {
+            if let Some(receipt) = receipt
+                && !guards.is_empty()
+            {
+                record_effect_guard_results(
+                    storage,
+                    &guards,
+                    &receipt,
+                    ExecutionEpoch::from_u64(
+                        orch8_storage::worker_admission::dispatch_scope(fence).epoch,
+                    ),
+                    false,
+                )
+                .await?;
+            }
+            Ok(task_id)
+        }
+        WorkerDispatchPublication::Duplicate(receipt) => {
+            let Some(guard) = guards.first() else {
+                return Err(EngineError::InvalidConfig(
+                    "unguarded worker admission returned duplicate".into(),
+                ));
+            };
+            record_effect_guard_results(
+                storage,
+                &guards,
+                &receipt,
+                ExecutionEpoch::from_u64(
+                    orch8_storage::worker_admission::dispatch_scope(fence).epoch,
+                ),
+                true,
+            )
+            .await?;
+            Err(EngineError::InvariantViolation {
+                invariant_id: guard.id,
+                block_id: receipt.block_id.clone(),
+            })
+        }
+        WorkerDispatchPublication::EffectBlocked(receipt) => Err(blocked(&receipt)),
+        WorkerDispatchPublication::Stale => Err(EngineError::ClaimLost {
+            instance_id: fence.instance_id,
+        }),
+    }
+}
+
+pub(crate) fn worker_dispatch_effect(
+    task: &orch8_types::worker::WorkerTask,
+    effect_id: EffectId,
+) -> Result<orch8_storage::worker_invocation::WorkerDispatchEffect, EngineError> {
+    Ok(orch8_storage::worker_invocation::WorkerDispatchEffect {
+        effect_id,
+        request_sha256: request_hash(&task.handler_name, &task.params)?,
+        destination_fingerprint: destination_fingerprint(&task.handler_name, &task.params)?,
+        kind: effect_kind(&task.handler_name),
+    })
 }
 
 /// Whether a worker task's effect may already have happened: it has a

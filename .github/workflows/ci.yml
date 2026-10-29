@@ -135,7 +135,9 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    # Cold run 40794849657 spent 35 minutes building before the full suite;
+    # tests were still progressing without assertion failures at the 70m cutoff.
+    timeout-minutes: 100
     services:
       postgres:
         image: postgres:16
@@ -158,15 +160,12 @@ jobs:
       DATABASE_URL: postgres://orch8:orch8@localhost:5432/orch8_test
       # Limit link parallelism to avoid OOM / bus-error on 2-core runners.
       CARGO_BUILD_JOBS: 2
-      # Shrink on-disk artifacts — the default debug info for tests has
-      # exhausted the runner's 14GB root disk during `cargo test
-      # --workspace`. Line-tables-only keeps backtraces usable while
-      # cutting test-binary size roughly in half, and disabling
-      # incremental prevents the duplicate object-file growth that
-      # compounds across crates.
+      # Align server and test dependency debug settings so a cold run does not
+      # compile duplicate dependency artifacts for two debug profiles. Disable
+      # incremental compilation to keep the workspace test build within disk.
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
-      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Frees ~30GB by removing preinstalled .NET / Android / Haskell /

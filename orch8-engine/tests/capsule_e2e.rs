@@ -126,6 +126,27 @@ async fn encrypted_capsule_roundtrips_between_backends_into_paused_quarantine() 
         .await
         .unwrap()
         .unwrap();
+    // A remote database must not admit a second physical execution under the
+    // source UUID, even though that UUID is absent from its own instance table.
+    assert!(matches!(
+        verify_and_import_paused_capsule_bytes(
+            isolated.as_ref(),
+            &signed,
+            &sealed,
+            CapsuleImportRequest {
+                tenant_id: &instance.tenant_id,
+                destination_runtime_id: destination_runtime,
+                destination_instance_id: Some(instance.id),
+                expected_epoch: ExecutionEpoch::initial(),
+                trusted_public_keys: &trusted,
+                now: Utc::now(),
+            },
+            &encryptor,
+        )
+        .await,
+        Err(CapsuleServiceError::PayloadIdentityMismatch)
+    ));
+    assert!(isolated.get_instance(instance.id).await.unwrap().is_none());
     // A trusted signer cannot bind this tenant's imported instance to a
     // sequence owned by another tenant, even with a matching sequence hash.
     let foreign_store: Arc<dyn StorageBackend> =
@@ -475,6 +496,11 @@ async fn export_rejects_a_running_instance_without_mutating_it() {
         state: OwnershipState::Owned,
         updated_at: Utc::now(),
     };
+
+    storage
+        .create_continuity_execution(&continuity)
+        .await
+        .unwrap();
 
     let result = export_paused_capsule(
         storage.as_ref(),

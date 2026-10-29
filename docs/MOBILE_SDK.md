@@ -35,6 +35,11 @@ unified versioning: Swift, Android, Flutter, and React Native packages at
 
 The SDK embeds the full orch8 engine compiled as a native library. Sequences are synced from your server, verified with Ed25519 signatures, stored in a local SQLite database, and executed entirely on-device.
 
+Use a dedicated engine database file. Other SQLite bindings in the app should
+use separate files; close the engine before inspecting its file through another
+binding. Separate SQLite library copies in one process can interfere with each
+other's file locks ([SQLite documentation](https://www.sqlite.org/howtocorrupt.html#multiple_copies_of_sqlite_linked_into_the_same_application)).
+
 ## 10-minute install
 
 Every channel resolves the same native engine, pinned to the same version
@@ -854,6 +859,12 @@ POST /api/v1/runtimes/device-sessions        (x-api-key: <operator key>, on your
 → 201 {"token": "dst_…", "device_id": "…", "runtime_id": "…", "expires_at": "…", "handlers": […]}
 ```
 
+App backends may include `queues` to grant explicit named-queue polling. The
+allowlist accepts at most 16 nonblank names of at most 256 bytes each. Normal
+polls claim only the default queue; `/workers/tasks/poll/queue` checks the signed
+handler and queue grants. Existing sessions without `queues` keep default-queue
+access. The token provider continues returning the opaque signed token.
+
 The app hands its backend `deviceId` and `engine.nodeRuntimeId()` (a UUID
 persisted in the engine database) after authenticating the user its own way,
 and gives the SDK a `TokenProvider` **before** `registerNode`:
@@ -952,6 +963,7 @@ handler allowlist, and reaches only:
 | `POST /mobile/devices/register`, `POST /mobile/sync`                                      | `device_id` is the session's; no credential-resolving `step_delegations` (off for stored keys too unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true`)                                                                                                                                                                     |
 | `POST /mobile/devices/{device_id}/runtime`                                                | the session's device and runtime; advertised handlers clamped to the allowlist                                                                                                                                                                                                                                             |
 | `POST /workers/tasks/poll`, `POST /workers/tasks/{id}/complete\|fail\|heartbeat\|release` | `worker_id` is the session's runtime; polled handler is in the allowlist                                                                                                                                                                                                                                                   |
+| `POST /workers/tasks/poll/queue` | Same runtime and granted handler; `queue_name` must match the signed queue allowlist |
 | `POST /continuity/executions`                                                             | `hosted_by_runtime: true` for the session's own runtime only                                                                                                                                                                                                                                                               |
 | `POST /continuity/grants`                                                                 | only `accept` grants, for executions the session's runtime owns                                                                                                                                                                                                                                                            |
 | `POST /continuity/delegations/claim`                                                      | the session's runtime is the delegation source (and owns the parent)                                                                                                                                                                                                                                                       |

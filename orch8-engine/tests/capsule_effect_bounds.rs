@@ -128,7 +128,7 @@ async fn decode_transferred_payload(
 }
 
 #[tokio::test]
-async fn export_accepts_exact_effect_limit_and_refuses_to_publish_truncated_history() {
+async fn exact_effect_limit_export_retries_its_original_frozen_history() {
     let storage = SqliteStorage::in_memory()
         .await
         .unwrap()
@@ -161,10 +161,20 @@ async fn export_accepts_exact_effect_limit_and_refuses_to_publish_truncated_hist
         .len();
     receipt.id = EffectId::new();
     storage.create_effect_receipt(&receipt).await.unwrap();
-    let overflow = export_paused_capsule_manifest(&storage, request(&owner), &encryptor).await;
-    assert!(
-        matches!(overflow, Err(CapsuleServiceError::PayloadTooLarge)),
-        "overflow silently published a partial effect ledger: {overflow:?}"
+    let retry = export_paused_capsule_manifest(&storage, request(&owner), &encryptor)
+        .await
+        .unwrap();
+    assert_eq!(
+        retry, first,
+        "retry must preserve the original frozen manifest"
+    );
+    let replayed = decode_transferred_payload(&storage, retry, &encryptor).await;
+    assert_eq!(
+        replayed
+            .effect_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>(),
+        expected
     );
     assert_eq!(
         storage
@@ -173,6 +183,49 @@ async fn export_accepts_exact_effect_limit_and_refuses_to_publish_truncated_hist
             .unwrap()
             .len(),
         artifacts,
-        "an invalid capsule must not publish an artifact"
+        "a retry must not create a second artifact"
     );
+}
+
+#[tokio::test]
+async fn first_export_over_effect_limit_refuses_before_fencing_or_publication() {
+    let storage = SqliteStorage::in_memory()
+        .await
+        .unwrap()
+        .with_artifact_store(Arc::new(ObjectArtifactStore::memory()));
+    let (owner, mut receipt) = fixture(&storage).await;
+    for _ in 0..=CapsulePayload::MAX_PENDING_ITEMS {
+        receipt.id = EffectId::new();
+        storage.create_effect_receipt(&receipt).await.unwrap();
+    }
+    let overflow = export_paused_capsule_manifest(
+        &storage,
+        request(&owner),
+        &FieldEncryptor::from_bytes(&[23; 32]),
+    )
+    .await;
+    assert!(
+        matches!(overflow, Err(CapsuleServiceError::PayloadTooLarge)),
+        "{overflow:?}"
+    );
+    assert!(
+        storage
+            .list_artifacts(owner.current_instance_id)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        storage
+            .get_continuity_execution(&owner.tenant_id, owner.continuity_id)
+            .await
+            .unwrap()
+            .unwrap(),
+        owner
+    );
+    let cuts: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM capsule_source_cuts")
+        .fetch_one(storage.pool())
+        .await
+        .unwrap();
+    assert_eq!(cuts, 0, "overflow must not retain a frozen cut");
 }
