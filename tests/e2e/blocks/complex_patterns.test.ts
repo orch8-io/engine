@@ -3,9 +3,27 @@ import assert from "node:assert/strict";
 import { Orch8Client, testSequence, step, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
-import type { Block } from "../types.ts";
+import type { Block, WorkerTask } from "../types.ts";
+import { setTimeout as delay } from "node:timers/promises";
 
 const client = new Orch8Client();
+
+// A completion can be durably accepted while native application is deferred.
+// The previous step's Waiting state is therefore not evidence that the next
+// handler task exists. Observe the task itself before settling it.
+async function waitForTasks(handler: string, instanceId: string): Promise<[WorkerTask, ...WorkerTask[]]> {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const tasks = await client.pollWorkerTasks(handler, "worker-1");
+    const [first, ...rest] = tasks;
+    if (first) {
+      for (const task of tasks) assert.equal(task.instance_id, instanceId);
+      return [first, ...rest];
+    }
+    await delay(25);
+  }
+  throw new Error(`No ${handler} task became available for ${instanceId}`);
+}
 
 describe("Complex Workflow Patterns", () => {
   let server: ServerHandle | undefined;
@@ -86,21 +104,19 @@ describe("Complex Workflow Patterns", () => {
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
 
     // Poll and complete the dynamic sequence creation task
-    const tasks = await client.pollWorkerTasks("dynamic_seq_creator", "worker-1");
-    if (tasks.length > 0) {
-      // Simulate creating a new sequence
-      const childSeq = testSequence("dynamic-child", [
-        step("child1", "noop"),
-        step("child2", "log", { message: "from dynamic sequence" }),
-      ]);
+    const tasks = await waitForTasks("dynamic_seq_creator", id);
+    // Simulate creating a new sequence
+    const childSeq = testSequence("dynamic-child", [
+      step("child1", "noop"),
+      step("child2", "log", { message: "from dynamic sequence" }),
+    ]);
 
-      // In a real scenario, the worker would call createSequence
-      // For this test, we'll just complete with success
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
-        created: true,
-        sequence_id: uuid(),
-      });
-    }
+    // In a real scenario, the worker would call createSequence
+    // For this test, we'll just complete with success
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
+      created: true,
+      sequence_id: uuid(),
+    });
 
     // Instance should complete
     const completed = await client.waitForState(id, "completed", { timeoutMs: 10_000 });
@@ -160,13 +176,11 @@ describe("Complex Workflow Patterns", () => {
 
     // The recursive handler would create new instances
     // For this test, we'll simulate it
-    const tasks = await client.pollWorkerTasks("recursive_trigger", "worker-1");
-    if (tasks.length > 0) {
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
-        triggered: true,
-        child_instances: 2, // Simulated child instances
-      });
-    }
+    const tasks = await waitForTasks("recursive_trigger", id);
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
+      triggered: true,
+      child_instances: 2, // Simulated child instances
+    });
 
     // Original instance should complete
     const completed = await client.waitForState(id, "completed", { timeoutMs: 10_000 });
@@ -202,17 +216,13 @@ describe("Complex Workflow Patterns", () => {
 
     // Primary service fails
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    let tasks = await client.pollWorkerTasks("flaky_service", "worker-1");
-    if (tasks.length > 0) {
-      await client.failWorkerTask(tasks[0]!.id, "worker-1", "service unavailable", false);
-    }
+    let tasks = await waitForTasks("flaky_service", id);
+    await client.failWorkerTask(tasks[0]!.id, "worker-1", "service unavailable", false);
 
     // Fallback service succeeds
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    tasks = await client.pollWorkerTasks("backup_service", "worker-1");
-    if (tasks.length > 0) {
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", { backup: "ok" });
-    }
+    tasks = await waitForTasks("backup_service", id);
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", { backup: "ok" });
 
     // Instance should complete
     const completed = await client.waitForState(id, "completed", { timeoutMs: 10_000 });
@@ -249,10 +259,8 @@ describe("Complex Workflow Patterns", () => {
 
     // Complete the fast service first
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    const tasks = await client.pollWorkerTasks("fast_handler", "worker-1");
-    if (tasks.length > 0) {
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", { result: "fast win" });
-    }
+    const tasks = await waitForTasks("fast_handler", id);
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", { result: "fast win" });
 
     // Instance should complete (race winner finishes)
     const completed = await client.waitForState(id, "completed", { timeoutMs: 10_000 });
@@ -283,13 +291,11 @@ describe("Complex Workflow Patterns", () => {
     const steps = ["process", "continue", "finalize"];
     for (const stepAction of steps) {
       await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-      const tasks = await client.pollWorkerTasks("stateful_handler", "worker-1");
-      if (tasks.length > 0) {
-        await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
-          completed: stepAction,
-          state: { step: steps.indexOf(stepAction) + 2 },
-        });
-      }
+      const tasks = await waitForTasks("stateful_handler", id);
+      await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
+        completed: stepAction,
+        state: { step: steps.indexOf(stepAction) + 2 },
+      });
     }
 
     // Instance should complete
@@ -331,27 +337,21 @@ describe("Complex Workflow Patterns", () => {
     const services = ["inventory_service", "payment_service", "shipping_service"];
     for (const service of services) {
       await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-      const tasks = await client.pollWorkerTasks(service, "worker-1");
-      if (tasks.length > 0) {
-        await client.completeWorkerTask(tasks[0]!.id, "worker-1", { success: true });
-      }
+      const tasks = await waitForTasks(service, id);
+      await client.completeWorkerTask(tasks[0]!.id, "worker-1", { success: true });
     }
 
     // Notification service fails, triggering compensation
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    let tasks = await client.pollWorkerTasks("notification_service", "worker-1");
-    if (tasks.length > 0) {
-      await client.failWorkerTask(tasks[0]!.id, "worker-1", "notification failed", false);
-    }
+    let tasks = await waitForTasks("notification_service", id);
+    await client.failWorkerTask(tasks[0]!.id, "worker-1", "notification failed", false);
 
     // Compensation steps should execute
     const compensateServices = ["payment_service", "inventory_service"];
     for (const service of compensateServices) {
       await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-      tasks = await client.pollWorkerTasks(service, "worker-1");
-      if (tasks.length > 0) {
-        await client.completeWorkerTask(tasks[0]!.id, "worker-1", { compensated: true });
-      }
+      tasks = await waitForTasks(service, id);
+      await client.completeWorkerTask(tasks[0]!.id, "worker-1", { compensated: true });
     }
 
     // Instance should complete (with compensation)
@@ -395,24 +395,23 @@ describe("Complex Workflow Patterns", () => {
 
     // Context analyzer sets category
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    let tasks = await client.pollWorkerTasks("context_analyzer", "worker-1");
-    if (tasks.length > 0) {
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
-        category: "A",
-        priority: "high",
-      });
-    }
+    let tasks = await waitForTasks("context_analyzer", id);
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
+      category: "A",
+      priority: "high",
+    });
 
     // Should route to handler_a
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    tasks = await client.pollWorkerTasks("handler_a", "worker-1");
-    if (tasks.length > 0) {
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", { handled: "category A" });
-    }
+    tasks = await waitForTasks("handler_a", id);
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", { handled: "category A" });
 
     // Instance should complete
     const completed = await client.waitForState(id, "completed", { timeoutMs: 10_000 });
     assert.equal(completed.state, "completed");
+    const outputs = await client.getOutputs(id);
+    assert.deepEqual(outputs.find((output) => output.block_id === "handle_a")?.output, { handled: "category A" });
+    assert.ok(!outputs.some((output) => output.block_id === "handle_b" || output.block_id === "handle_default"));
   });
 
   // --- Event-Driven Patterns ---
@@ -438,20 +437,16 @@ describe("Complex Workflow Patterns", () => {
 
     // Simulate external event (e.g., via webhook or signal)
     // For this test, we'll complete the event_waiter task
-    const tasks = await client.pollWorkerTasks("event_waiter", "worker-1");
-    if (tasks.length > 0) {
-      await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
-        event_received: true,
-        event_data: { approved: true, timestamp: new Date().toISOString() },
-      });
-    }
+    const tasks = await waitForTasks("event_waiter", id);
+    await client.completeWorkerTask(tasks[0]!.id, "worker-1", {
+      event_received: true,
+      event_data: { approved: true, timestamp: new Date().toISOString() },
+    });
 
     // Process the event
     await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-    const processTasks = await client.pollWorkerTasks("event_processor", "worker-1");
-    if (processTasks.length > 0) {
-      await client.completeWorkerTask(processTasks[0]!.id, 'worker-1', { processed: true });
-    }
+    const processTasks = await waitForTasks("event_processor", id);
+    await client.completeWorkerTask(processTasks[0]!.id, 'worker-1', { processed: true });
 
     // Instance should complete
     const completed = await client.waitForState(id, 'completed', { timeoutMs: 10_000 });
