@@ -236,8 +236,7 @@ pub enum ContinuityServiceError {
     Storage(#[from] StorageError),
 }
 
-pub async fn commit_handoff_export(
-    storage: &dyn StorageBackend,
+fn validate_handoff_export(
     expected_handoff: &ExecutionHandoff,
     exported_handoff: &ExecutionHandoff,
     expected_execution: &ContinuityExecution,
@@ -259,16 +258,112 @@ pub async fn commit_handoff_export(
     if expected_handoff.version.checked_add(1) != Some(exported_handoff.version) {
         return Err(ContinuityServiceError::InvalidHandoffVersion);
     }
-    if expected_execution.continuity_id != transferring_execution.continuity_id
+    if expected_execution.tenant_id != expected_handoff.tenant_id
+        || expected_execution.continuity_id != expected_handoff.continuity_id
+        || expected_execution.owner_runtime_id != expected_handoff.source_runtime_id
+        || expected_execution.epoch != expected_handoff.expected_epoch
+        || expected_handoff.source_runtime_id != exported_handoff.source_runtime_id
+        || expected_handoff.expected_epoch != exported_handoff.expected_epoch
+        || expected_execution.continuity_id != transferring_execution.continuity_id
         || expected_execution.tenant_id != transferring_execution.tenant_id
         || expected_execution.owner_runtime_id != transferring_execution.owner_runtime_id
         || expected_execution.current_instance_id != transferring_execution.current_instance_id
         || expected_execution.epoch != transferring_execution.epoch
-        || expected_execution.state != orch8_types::continuity::OwnershipState::Owned
+        || !matches!(
+            expected_execution.state,
+            orch8_types::continuity::OwnershipState::Owned
+                | orch8_types::continuity::OwnershipState::Transferring
+        )
         || transferring_execution.state != orch8_types::continuity::OwnershipState::Transferring
     {
         return Err(ContinuityServiceError::ExecutionIdentityChanged);
     }
+    Ok(())
+}
+
+/// Commit an export and its signed audit boundary atomically. A concurrent
+/// provenance append retries from the new head without exposing a partial handoff.
+pub async fn commit_handoff_export_with_provenance(
+    storage: &dyn StorageBackend,
+    expected_handoff: &ExecutionHandoff,
+    exported_handoff: &ExecutionHandoff,
+    expected_execution: &ContinuityExecution,
+    transferring_execution: &ContinuityExecution,
+    manifest: &orch8_types::continuity::CapsuleManifest,
+    signer: Option<crate::provenance::ProvenanceSigner<'_>>,
+) -> Result<(), ContinuityServiceError> {
+    validate_handoff_export(
+        expected_handoff,
+        exported_handoff,
+        expected_execution,
+        transferring_execution,
+    )?;
+    if Some(manifest.capsule_id) != exported_handoff.capsule_id
+        || manifest.tenant_id != expected_execution.tenant_id
+        || manifest.continuity_id != expected_execution.continuity_id
+        || manifest.epoch != expected_execution.epoch
+        || manifest.source_runtime_id != expected_execution.owner_runtime_id
+        || manifest.source_instance_id != expected_execution.current_instance_id
+        || manifest
+            .allowed_destination_runtime_id
+            .is_some_and(|id| id != exported_handoff.destination_runtime_id)
+    {
+        return Err(ContinuityServiceError::ExecutionIdentityChanged);
+    }
+    let encoded = serde_json::to_vec(manifest).map_err(StorageError::Serialization)?;
+    let digest = crate::dataflow::hex_sha256(&encoded);
+    for attempt in 0..8 {
+        let previous = storage
+            .get_provenance_head(
+                &expected_execution.tenant_id,
+                expected_execution.continuity_id,
+            )
+            .await?
+            .map(|entry| entry.entry_sha256);
+        let mut entry = build_provenance_entry_with_summary(
+            transferring_execution,
+            "capsule_exported",
+            Some("signed capsule exported".into()),
+            &digest,
+            previous,
+            Utc::now(),
+        );
+        if let Some(signer) = signer {
+            entry = sign_provenance_entry(entry, signer.key_id.to_owned(), signer.signing_key);
+        }
+        match storage
+            .commit_handoff_export_with_provenance(
+                &expected_execution.tenant_id,
+                expected_handoff,
+                exported_handoff,
+                expected_execution,
+                transferring_execution,
+                &entry,
+            )
+            .await
+        {
+            Ok(true) => return Ok(()),
+            Ok(false) => return Err(ContinuityServiceError::StaleClaim),
+            Err(error) if attempt == 7 => return Err(error.into()),
+            Err(_) => tokio::task::yield_now().await,
+        }
+    }
+    unreachable!("bounded export commit attempts always return")
+}
+
+pub async fn commit_handoff_export(
+    storage: &dyn StorageBackend,
+    expected_handoff: &ExecutionHandoff,
+    exported_handoff: &ExecutionHandoff,
+    expected_execution: &ContinuityExecution,
+    transferring_execution: &ContinuityExecution,
+) -> Result<(), ContinuityServiceError> {
+    validate_handoff_export(
+        expected_handoff,
+        exported_handoff,
+        expected_execution,
+        transferring_execution,
+    )?;
     let committed = storage
         .commit_handoff_export(
             &expected_handoff.tenant_id,

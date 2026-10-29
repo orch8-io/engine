@@ -217,10 +217,10 @@ describe("Instance Lifecycle", () => {
 
   // Plan #9: PATCH /instances/{id}/state transitions scheduled → paused.
   it("should transition scheduled instance to paused via PATCH /state", async () => {
-    // Create an instance that stays `scheduled` long enough to PATCH.
-    // A sleep step keeps it alive for the duration.
+    // Keep it in scheduled state: a sleep delays completion only after the
+    // scheduler has claimed it, which races the PATCH's state comparison.
     const seq = testSequence("state-patch", [
-      step("s1", "sleep", { duration_ms: 4000 }),
+      step("s1", "noop"),
     ]);
     await client.createSequence(seq);
 
@@ -228,28 +228,16 @@ describe("Instance Lifecycle", () => {
       sequence_id: seq.id,
       tenant_id: "test",
       namespace: "default",
+      next_fire_at: new Date(Date.now() + 3_600_000).toISOString(),
     });
 
-    // PATCH to paused. Works from either scheduled or running — the
-    // engine accepts state transitions from any pre-terminal state.
+    assert.equal((await client.getInstance(id)).state, "scheduled");
     await client.updateState(id, "paused");
 
-    const after = await client.waitForState(
-      id,
-      ["paused", "completed"],
-      { timeoutMs: 8000 },
-    );
-    // In fast CI the sleep may have finished — accept completed as a
-    // post-hoc terminal state. Otherwise we expect paused.
-    assert.ok(
-      ["paused", "completed"].includes(after.state),
-      `expected paused or completed after PATCH, got ${after.state}`,
-    );
+    assert.equal((await client.getInstance(id)).state, "paused");
 
-    // Drain the instance so follow-on tests start clean.
-    if (after.state === "paused") {
-      await client.sendSignal(id, "resume");
-    }
+    await client.updateState(id, "cancelled");
+    await client.waitForState(id, "cancelled");
   });
 
   // Plan #130: block outputs are retrievable via GET /outputs *after*

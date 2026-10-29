@@ -101,7 +101,10 @@ async fn process_signals_inner(
     // the paused/waiting sweep and interruptible built-in handlers). Resolve
     // the definition here when the caller could not supply it so lifecycle
     // interceptors are not silently skipped on those paths.
-    let loaded_sequence = if sequence_def.is_none() {
+    let relay =
+        orch8_storage::delegation_publication::is_proxy_instance(storage, instance_id).await?;
+    let sequence_def = if relay { None } else { sequence_def };
+    let loaded_sequence = if !relay && sequence_def.is_none() {
         match storage.get_instance(instance_id).await? {
             Some(instance) => storage.get_sequence(instance.sequence_id).await?,
             None => None,
@@ -180,13 +183,28 @@ async fn process_signals_inner(
             }
             SignalAction::Resume => {
                 if current_state == InstanceState::Paused {
+                    if relay
+                        && orch8_storage::delegation_publication::proxy_has_native_history(
+                            storage,
+                            instance_id,
+                        )
+                        .await?
+                    {
+                        warn!(%instance_id, "delegation relay requires native-history reconciliation before resume");
+                        storage.mark_signal_delivered(signal.id).await?;
+                        return Ok(true);
+                    }
                     crate::lifecycle::transition_instance(
                         storage,
                         instance_id,
                         None,
                         InstanceState::Paused,
-                        InstanceState::Scheduled,
-                        Some(Utc::now()),
+                        if relay {
+                            InstanceState::Waiting
+                        } else {
+                            InstanceState::Scheduled
+                        },
+                        (!relay).then(Utc::now),
                     )
                     .await?;
                     storage.mark_signal_delivered(signal.id).await?;
@@ -284,6 +302,12 @@ async fn process_signals_inner(
                 }
             }
             SignalAction::Custom { name, .. } => {
+                if relay {
+                    // Native human-input evaluators and custom workflow hooks
+                    // belong to the destination, never to this relay record.
+                    storage.mark_signal_delivered(signal.id).await?;
+                    continue;
+                }
                 // Human-input signals are consumed by scheduler::check_human_input
                 // when the evaluator reaches the wait_for_input step. Leave them
                 // pending so check_human_input (which calls get_pending_signals)

@@ -2234,18 +2234,32 @@ describe("Portable Continuity", () => {
       token: grant.token,
     });
     assert.equal(claimed.destination_runtime_id, destinationRuntimeId);
-    await assert.rejects(
-      () => client.claimDeviceDelegation({
-        tenant_id: tenantId,
-        delegation,
-        signed_grant: grant.signed_grant,
-        token: grant.token,
-      }),
-      (error: unknown) => {
-        assert.equal((error as ApiError).status, 409);
-        return true;
-      },
-    );
+    // A lost publication acknowledgement must not spend the grant twice or
+    // create another mailbox task. Only the identical intent can replay it.
+    const repeatedClaim = await client.claimDeviceDelegation({
+      tenant_id: tenantId,
+      delegation,
+      signed_grant: grant.signed_grant,
+      token: grant.token,
+    });
+    assert.deepEqual(repeatedClaim, claimed);
+    for (const changed of [
+      { delegation: { ...delegation, id: uuid() } },
+      { delegation, input: { changed: "must not replace the published input" } },
+    ]) {
+      await assert.rejects(
+        () => client.claimDeviceDelegation({
+          tenant_id: tenantId,
+          ...changed,
+          signed_grant: grant.signed_grant,
+          token: grant.token,
+        }),
+        (error: unknown) => {
+          assert.equal((error as ApiError).status, 409);
+          return true;
+        },
+      );
+    }
 
     const federationPayload = Buffer.from("encrypted-artifact-reference-only");
     const unsignedEnvelope = {

@@ -63,7 +63,7 @@ async fn load(
         .transpose()
 }
 
-async fn on(
+pub(super) async fn on(
     conn: &mut sqlx::SqliteConnection,
     candidate: &EffectReceipt,
     legacy: EffectId,

@@ -397,6 +397,28 @@ impl EncryptingStorage {
         Ok(run)
     }
 
+    async fn open_source_snapshot(
+        &self,
+        snapshot: &mut crate::capsule_export::CapsuleSourceSnapshot,
+    ) -> Result<(), StorageError> {
+        self.decrypt_instance(&mut snapshot.instance)?;
+        snapshot.checkpoint.checkpoint_data =
+            self.decrypt_json_value(&snapshot.checkpoint.checkpoint_data)?;
+        for output in &mut snapshot.outputs {
+            self.decrypt_block_output(output)?;
+        }
+        let mut budget = crate::capsule_export::CaptureBudget::new();
+        budget.add(&snapshot.instance)?;
+        budget.add(&snapshot.outputs)?;
+        for entry in &mut snapshot.execution_state.payloads {
+            entry.payload = self
+                .open_externalized(entry.instance_id, &entry.ref_key, &entry.payload)
+                .await?;
+            budget.add(&entry.payload)?;
+        }
+        Ok(())
+    }
+
     fn encrypt_live_migration(
         &self,
         record: &orch8_types::continuity_advanced::LiveMigrationRecord,
@@ -796,6 +818,15 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::ContinuityStore for EncryptingStorage {
+    async fn is_delegation_proxy_quarantined(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
+    async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
+    async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>{
+        let task=self.encrypt_worker_task(&intent.task)?.into_owned();
+        let parent=self.encrypt_instance(&intent.parent)?.into_owned();
+        self.inner.publish_delegation(&intent.clone().sealed(task,parent)?).await
+    }
+
+        async fn is_physical_instance_retired(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn create_continuity_execution(&self, execution: &orch8_types::continuity::ContinuityExecution) -> Result<(), StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
         async fn get_continuity_execution_by_instance(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
@@ -807,6 +838,7 @@ passthrough_impl! {
         async fn cas_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId, expected_state: orch8_types::continuity::HandoffState, expected_version: u64, next: &orch8_types::continuity::ExecutionHandoff) -> Result<bool, StorageError>;
         async fn accept_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, accepted_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, accepted_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
         async fn commit_handoff_export(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, exported_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, transferring_execution: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn commit_handoff_export_with_provenance(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, exported_handoff: &orch8_types::continuity::ExecutionHandoff, expected_execution: &orch8_types::continuity::ContinuityExecution, transferring_execution: &orch8_types::continuity::ContinuityExecution, provenance: &orch8_types::continuity::ProvenanceEntry) -> Result<bool, StorageError>;
         async fn resume_handoff(&self, tenant_id: &orch8_types::ids::TenantId, expected_handoff: &orch8_types::continuity::ExecutionHandoff, resumed_handoff: &orch8_types::continuity::ExecutionHandoff, destination_instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
         async fn save_capsule_manifest(&self, manifest: &orch8_types::continuity::CapsuleManifest) -> Result<(), StorageError>;
         async fn get_capsule_manifest(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::CapsuleId) -> Result<Option<orch8_types::continuity::CapsuleManifest>, StorageError>;
@@ -848,6 +880,31 @@ passthrough_impl! {
             }
             self.inner.import_capsule_recovery(capsule_id, destination_runtime_id, &sealed, &checkpoint, effects).await
         }
+        async fn prepare_local_migration_snapshot(&self, request: &crate::local_migration::LocalMigrationSnapshotRequest) -> Result<crate::local_migration::LocalMigrationSnapshotCapture,StorageError> {
+            let mut captured=self.inner.prepare_local_migration_snapshot(request).await?;
+            if let crate::local_migration::LocalMigrationSnapshotCapture::Ready(snapshot)=&mut captured {
+                self.open_source_snapshot(&mut snapshot.source).await?;
+                snapshot.record=self.decrypt_live_migration(snapshot.record.clone())?;
+            }
+            Ok(captured)
+        }
+        async fn capture_capsule_cut(&self, request: &crate::capsule_export::CapsuleCutRequest) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError> {
+            let mut captured = self.inner.capture_capsule_cut(request).await?;
+            if let crate::capsule_export::CapsuleCutCapture::Ready(cut) = &mut captured
+                && let Some(snapshot) = &mut cut.snapshot {
+                    let opened=self.open_source_snapshot(snapshot).await;
+                    if let Err(error) = opened {
+                        self.inner.abort_preparing_capsule_cut(&request.owner.tenant_id, cut.id).await?;
+                        return Err(error);
+                    }
+            }
+            Ok(captured)
+        }
+        async fn seal_capsule_cut(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId, manifest: &orch8_types::continuity::CapsuleManifest, sealed: &[u8]) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError>;
+        async fn abort_preparing_capsule_cut(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId) -> Result<bool, StorageError>;
+        async fn acknowledge_capsule_cut(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId, accepted: &orch8_types::continuity::ContinuityExecution) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError>;
+        async fn capsule_cut_publishable(&self, tenant: &TenantId, id: orch8_types::continuity::CapsuleId) -> Result<bool, StorageError>;
+        async fn claim_retired_capsule_artifacts(&self, now: DateTime<Utc>, retry_at: DateTime<Utc>, limit: u32) -> Result<Vec<String>, StorageError>;
         async fn activate_capsule_import(&self, tenant: &TenantId, capsule: orch8_types::continuity::CapsuleId, runtime: orch8_types::continuity::RuntimeId, instance: InstanceId, now: DateTime<Utc>) -> Result<(), StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId, imported_at: chrono::DateTime<chrono::Utc>) -> Result<orch8_types::ids::InstanceId, StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &orch8_types::ids::TenantId, capsule_id: orch8_types::continuity::CapsuleId, destination_runtime_id: orch8_types::continuity::RuntimeId, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
@@ -867,6 +924,7 @@ passthrough_impl! {
         async fn retire_effect_attempts_for_blocks(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::EffectId, expected_state: orch8_types::continuity::EffectState, next: &orch8_types::continuity::EffectReceipt) -> Result<bool, StorageError>;
+        async fn resolve_effect_with_provenance(&self, expected: &orch8_types::continuity::EffectReceipt, next: &orch8_types::continuity::EffectReceipt, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<crate::effect_resolution::EffectResolutionCommit, StorageError>;
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
@@ -960,7 +1018,12 @@ passthrough_impl! {
                     expected_execution: transition.expected_execution,
                     next_execution: transition.next_execution,
                     expected_instance_state: transition.expected_instance_state,
+                    expected_instance_updated_at: transition.expected_instance_updated_at,
+                    expected_checkpoint_id: transition.expected_checkpoint_id,
+                    expected_source_fingerprint: transition.expected_source_fingerprint,
+                    expected_target_sequence: transition.expected_target_sequence,
                     next_instance_state: transition.next_instance_state,
+                    next_fire_at: transition.next_fire_at,
                     next_sequence_id: transition.next_sequence_id,
                     next_context: encrypted_context.as_ref(),
                     checkpoint: &encrypted_checkpoint,
@@ -2019,6 +2082,12 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::WorkerStore for EncryptingStorage {
+    async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<orch8_types::worker::WorkerTask>,StorageError>{
+        let mut tasks=self.inner.claim_worker_tasks_with_authority(request).await?;
+        for task in &mut tasks{self.decrypt_worker_task(task)?;}Ok(tasks)
+    }
+    async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
+
     async fn create_worker_task(
         &self,
         task: &orch8_types::worker::WorkerTask,
@@ -2026,6 +2095,18 @@ passthrough_impl! {
         let encrypted = self.encrypt_worker_task(task)?;
         self.inner.create_worker_task(encrypted.as_ref()).await
     }
+    async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
+    async fn admit_worker_dispatch(&self,intent:&crate::worker_admission::WorkerDispatchIntent)->Result<crate::worker_admission::WorkerDispatchPublication,StorageError>{
+        let task=self.encrypt_worker_task(&intent.task)?;
+        let sealed=intent.encrypted(task.into_owned())?;
+        self.inner.admit_worker_dispatch(&sealed).await
+    }
+    async fn get_worker_dispatch_admission(&self,tenant_id:&TenantId,task_id:Uuid)->Result<Option<crate::worker_admission::WorkerDispatchAdmission>,StorageError>;
+    async fn create_worker_task_bound(&self, task: &orch8_types::worker::WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError> {
+        let encrypted=self.encrypt_worker_task(task)?;
+        self.inner.create_worker_task_bound(encrypted.as_ref(),fence).await
+    }
+    async fn get_worker_invocation(&self, tenant_id: &TenantId, task_id: Uuid) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError>;
     async fn get_worker_task(
         &self,
         task_id: Uuid,
@@ -2092,16 +2173,75 @@ passthrough_impl! {
         }
         Ok(tasks)
     }
+    async fn get_worker_accepted_outcome(
+        &self, tenant_id: Option<&TenantId>, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
+        let mut outcome = self.inner.get_worker_accepted_outcome(tenant_id, task_id, claim).await?;
+        if let Some(outcome) = &mut outcome
+            && !outcome.is_logical_output() {
+            outcome.output = self.decrypt_json_value(&outcome.output)?;
+        }
+        if let Some(delegation) = outcome.as_mut().and_then(|outcome| outcome.delegation.as_mut())
+            && !delegation.is_logical() {
+            delegation.body = self.decrypt_json_value(&delegation.body)?;
+        }
+        Ok(outcome)
+    }
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
         claim: &orch8_types::worker::WorkerClaim,
         output: &serde_json::Value,
     ) -> Result<bool, StorageError> {
-        let encrypted = self.encrypt_json_value(output)?;
-        self.inner
-            .complete_worker_task(task_id, claim, &encrypted)
-            .await
+        self.accept_worker_completion(task_id, claim, &crate::worker_outcome::WorkerCompletion::new(output.clone())).await
+    }
+    async fn claim_worker_outcome_recovery_page(&self, limit: u32) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError>;
+    async fn apply_worker_outcome_integration(
+        &self, integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+        let Some(raw) = self.inner.get_instance(integration.accepted.instance_id).await? else {
+            return Ok(crate::worker_outcome::WorkerOutcomeApplication::Deferred);
+        };
+        let mut logical = raw.clone();
+        self.decrypt_instance(&mut logical)?;
+        if serde_json::to_value(&logical.context)? != serde_json::to_value(&integration.expected_context)? {
+            return Ok(crate::worker_outcome::WorkerOutcomeApplication::ContextChanged);
+        }
+        let mut sealed = integration.clone();
+        sealed.expected_context = raw.context;
+        // These are logical application values, even if they resemble authentic ciphertext.
+        sealed.output.output = self.encryptor.encrypt_value(&integration.output.output)
+            .map_err(|error| StorageError::Encryption(error.to_string()))?;
+        sealed.context.data = self.encryptor.encrypt_value_with_aad(
+            &integration.context.data, &Self::instance_aad(integration.accepted.instance_id))
+            .map_err(|error| StorageError::Encryption(error.to_string()))?;
+        self.inner.apply_worker_outcome_integration(&sealed).await
+    }
+    async fn accept_worker_completion(
+        &self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim,
+        completion: &crate::worker_outcome::WorkerCompletion,
+    ) -> Result<bool, StorageError> {
+        completion.validate_stored()?;
+        // Caller results are logical values even if they contain an authentic
+        // application ciphertext. Only an already sealed private submission
+        // may use the double-encryption guard.
+        let output = if completion.stored_sealed {
+            self.encrypt_json_value(&completion.output)?
+        } else {
+            self.encryptor.encrypt_value(&completion.output)
+                .map_err(|error|StorageError::Encryption(error.to_string()))?
+        };
+        let mut sealed=completion.with_stored_output(output);
+        if let Some(delegation) = &completion.delegation {
+            let body = if completion.stored_sealed {
+                self.encrypt_json_value(&delegation.body)?
+            } else {
+                self.encryptor.encrypt_value(&delegation.body)
+                    .map_err(|error|StorageError::Encryption(error.to_string()))?
+            };
+            sealed.delegation = Some(delegation.with_stored_body(body));
+        }
+        self.inner.accept_worker_completion(task_id, claim, &sealed).await
     }
     async fn fail_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
     async fn heartbeat_worker_task(&self, task_id: Uuid, claim: &orch8_types::worker::WorkerClaim) -> Result<bool, StorageError>;
@@ -2185,21 +2325,52 @@ passthrough_impl! {
         &self,
         task_id: uuid::Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError> {
         self.inner
-            .finalize_stranded_worker_dispatch(task_id, attempt, effect_id, continuity_epoch)
+            .finalize_stranded_worker_dispatch(task_id, attempt, effect, continuity_epoch)
             .await
     }
 
-    async fn resolve_worker_task(
+    async fn resolve_worker_task(&self,resolution:&orch8_types::worker::WorkerTaskResolution)->Result<bool,StorageError>{
+        self.resolve_worker_task_with_evidence(resolution,&crate::worker_resolution::WorkerResolutionEvidence::new(resolution)).await
+    }
+    async fn get_worker_resolution_outcome_by_id(&self,tenant:&TenantId,id:Uuid)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>{
+        let mut report=self.inner.get_worker_resolution_outcome_by_id(tenant,id).await?;
+        if let Some(report)=&mut report && !report.is_logical_reason(){report.reason=self.decrypt_json_value(&report.reason)?;}
+        Ok(report)
+    }
+    async fn claim_worker_resolution_recovery_page(&self,limit:u32)->Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>,StorageError>;
+    async fn apply_worker_resolution_integration(&self,plan:&crate::worker_resolution_application::WorkerResolutionIntegration)->Result<crate::worker_resolution_application::WorkerResolutionApplication,StorageError>{
+        plan.validate()?;
+        let mut sealed=plan.clone();
+        if let orch8_types::worker::WorkerTaskResolutionAction::Retry{retry_task,retry_output,..}=&mut sealed.action {
+            **retry_task=self.encrypt_worker_task(retry_task)?.into_owned();
+            if let Some(output)=retry_output{**output=self.encrypt_block_output(output)?.into_owned();}
+        }
+        self.inner.apply_worker_resolution_integration(&sealed).await
+    }
+    async fn get_worker_resolution_outcome(&self,tenant_id:Option<&TenantId>,task_id:Uuid,claim:Option<&orch8_types::worker::WorkerClaim>)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>{
+        let mut report=self.inner.get_worker_resolution_outcome(tenant_id,task_id,claim).await?;
+        if let Some(report)=&mut report && !report.is_logical_reason() {report.reason=self.decrypt_json_value(&report.reason)?;}
+        Ok(report)
+    }
+    async fn resolve_worker_task_with_evidence(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
         use orch8_types::worker::WorkerTaskResolutionAction as Action;
+        evidence.validate(resolution)?;
+        let body=if evidence.sealed {self.encrypt_json_value(&evidence.reason)?} else {
+            self.encryptor.encrypt_value(&evidence.reason).map_err(|e|StorageError::Encryption(e.to_string()))?
+        };
+        let evidence=evidence.with_stored_reason(body);
+
         if let Action::Retry {
             retry_task,
+            retry_output,
             node_id,
             fire_at,
         } = &resolution.action
@@ -2208,17 +2379,27 @@ passthrough_impl! {
             let mut sealed = resolution.clone();
             sealed.action = Action::Retry {
                 retry_task: Box::new(encrypted),
+                retry_output: retry_output.as_deref().map(|output|self.encrypt_block_output(output).map(|sealed|Box::new(sealed.into_owned()))).transpose()?,
                 node_id: *node_id,
                 fire_at: *fire_at,
             };
-            return self.inner.resolve_worker_task(&sealed).await;
+            return self.inner.resolve_worker_task_with_evidence(&sealed,&evidence).await;
         }
-        self.inner.resolve_worker_task(resolution).await
+        self.inner.resolve_worker_task_with_evidence(resolution,&evidence).await
     }
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
 
     async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
+
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<orch8_types::worker::WorkerTask>, StorageError> {
+        let mut tasks = self.inner.held_worker_tasks_for_reporter(request).await?;
+        for task in &mut tasks { self.decrypt_worker_task(task)?; }
+        Ok(tasks)
+    }
 
     async fn list_worker_tasks(
         &self,

@@ -29,6 +29,52 @@ pub struct AdminContext;
 /// Extract the admin marker from request extensions (if present).
 pub type OptionalAdmin = Option<axum::Extension<AdminContext>>;
 
+/// Authentication evidence, unlike `AdminContext` which also enables insecure dev mode.
+#[derive(Clone, Debug)]
+struct VerifiedRoot;
+
+/// Stable worker identity derived exclusively from authenticated request extensions.
+pub(crate) struct WorkerCaller(pub orch8_storage::worker_claim::WorkerClaimPrincipal);
+
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for WorkerCaller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        use orch8_storage::worker_claim::WorkerClaimPrincipal;
+        let principal = if let Some(binding) = parts
+            .extensions
+            .get::<crate::browser_sessions::RuntimeBinding>()
+        {
+            WorkerClaimPrincipal::Runtime {
+                tenant_id: binding.tenant_id.clone(),
+                runtime_id: binding.runtime_id,
+                runtime_kind: binding.kind,
+                device_id: binding.device_id.clone(),
+            }
+        } else if let Some(key) = parts.extensions.get::<PrincipalContext>() {
+            let tenant = parts
+                .extensions
+                .get::<TenantContext>()
+                .ok_or_else(|| ApiError::Internal("authenticated worker has no tenant".into()))?;
+            WorkerClaimPrincipal::ApiKey {
+                tenant_id: tenant.tenant_id.clone(),
+                key_id: key.key_id.clone(),
+            }
+        } else if parts.extensions.get::<VerifiedRoot>().is_some() {
+            WorkerClaimPrincipal::Root {}
+        } else {
+            WorkerClaimPrincipal::Unsecured {}
+        };
+        principal
+            .validate()
+            .map_err(|_| ApiError::Internal("invalid authenticated worker identity".into()))?;
+        Ok(Self(principal))
+    }
+}
+
 /// Marker for a request carrying an `o8e1` embed bearer on an embed-token
 /// route. Grants nothing by itself: the request carries no tenant, admin or
 /// principal context, and every embed handler verifies the token through
@@ -161,6 +207,7 @@ pub async fn api_key_middleware(
     // manage per-tenant keys.
     if orch8_types::auth::verify_secret_against_digest(&provided, &expected_digest) {
         request.extensions_mut().insert(AdminContext);
+        request.extensions_mut().insert(VerifiedRoot);
         let mobile = is_mobile_path(request.uri().path());
         let mut response = next.run(request).await;
         if mobile {

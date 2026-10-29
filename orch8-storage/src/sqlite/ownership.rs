@@ -12,35 +12,7 @@ pub(super) struct Owner {
 }
 impl Owner {
     pub(super) fn acquire(path: &str) -> Result<(PathBuf, Arc<Self>), StorageError> {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(path)
-            .map_err(|_| {
-                StorageError::Connection("cannot open mobile database ownership file".into())
-            })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if file
-                .metadata()
-                .map_err(|_| {
-                    StorageError::Connection("cannot inspect mobile database ownership file".into())
-                })?
-                .nlink()
-                != 1
-            {
-                return Err(StorageError::Unsupported(
-                    "mobile database hard links are unsupported".into(),
-                ));
-            }
-        }
-        let canonical = std::fs::canonicalize(path).map_err(|_| {
-            StorageError::Connection("cannot resolve mobile database ownership file".into())
-        })?;
-        drop(file);
+        let canonical = super::resolve_sqlite_database_path(path)?;
         let mut companion = canonical.clone().into_os_string();
         companion.push(".orch8-owner");
         let file = OpenOptions::new()
@@ -55,6 +27,11 @@ impl Owner {
         file.try_lock().map_err(|_| {
             StorageError::Conflict("mobile database is already owned or cannot be locked".into())
         })?;
+        if super::resolve_sqlite_database_path(path)? != canonical {
+            return Err(StorageError::Conflict(
+                "mobile database path changed while acquiring ownership".into(),
+            ));
+        }
         Ok((canonical, Arc::new(Self { _file: file })))
     }
 }

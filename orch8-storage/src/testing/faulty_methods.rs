@@ -185,11 +185,23 @@ fault_impl! {
 
 fault_impl! {
     [WORKER_STORE_METHODS] impl WorkerStore {
+        async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<WorkerTask>,StorageError>;
+        async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
+
         async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
+        async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
+        async fn admit_worker_dispatch(&self,intent:&crate::worker_admission::WorkerDispatchIntent)->Result<crate::worker_admission::WorkerDispatchPublication,StorageError>;
+        async fn get_worker_dispatch_admission(&self,tenant_id:&TenantId,task_id:Uuid)->Result<Option<crate::worker_admission::WorkerDispatchAdmission>,StorageError>;
+        async fn create_worker_task_bound(&self, task: &WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError>;
+        async fn get_worker_invocation(&self, tenant_id: &TenantId, task_id: Uuid) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError>;
         async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
         async fn claim_worker_tasks(&self, handler_name: &str, worker_id: &str, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn claim_worker_tasks_for_tenant(&self, handler_name: &str, worker_id: &str, tenant_id: &TenantId, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn claim_worker_tasks_matching(&self, handler_name: &str, worker_id: &str, tenant_id: Option<&TenantId>, queue_name: Option<&str>, capabilities: &RuntimeCapabilities, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
+        async fn get_worker_accepted_outcome(&self, tenant_id: Option<&TenantId>, task_id: Uuid, claim: &WorkerClaim) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError>;
+        async fn claim_worker_outcome_recovery_page(&self, limit: u32) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError>;
+        async fn apply_worker_outcome_integration(&self, integration: &crate::worker_outcome::WorkerOutcomeIntegration) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError>;
+        async fn accept_worker_completion(&self, task_id: Uuid, claim: &WorkerClaim, completion: &crate::worker_outcome::WorkerCompletion) -> Result<bool, StorageError>;
         async fn complete_worker_task(&self, task_id: Uuid, claim: &WorkerClaim, output: &serde_json::Value) -> Result<bool, StorageError>;
         async fn fail_worker_task(&self, task_id: Uuid, claim: &WorkerClaim, message: &str, retryable: bool) -> Result<bool, StorageError>;
         async fn heartbeat_worker_task(&self, task_id: Uuid, claim: &WorkerClaim) -> Result<bool, StorageError>;
@@ -203,12 +215,21 @@ fault_impl! {
         async fn list_expired_worker_leases(&self, default_lease: Duration, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn list_timed_out_worker_tasks(&self, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
         async fn list_stranded_worker_dispatches(&self, created_before: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<WorkerTask>, StorageError>;
-        async fn finalize_stranded_worker_dispatch(&self, task_id: Uuid, attempt: u16, effect_id: Option<orch8_types::continuity::EffectId>, continuity_epoch: Option<u64>) -> Result<bool, StorageError>;
+        async fn finalize_stranded_worker_dispatch(&self, task_id: Uuid, attempt: u16, effect: Option<&crate::worker_invocation::WorkerDispatchEffect>, continuity_epoch: Option<u64>) -> Result<bool, StorageError>;
         async fn resolve_worker_task(&self, resolution: &orch8_types::worker::WorkerTaskResolution) -> Result<bool, StorageError>;
+        async fn resolve_worker_task_with_evidence(&self, resolution: &orch8_types::worker::WorkerTaskResolution, evidence:&crate::worker_resolution::WorkerResolutionEvidence) -> Result<bool, StorageError>;
+        async fn get_worker_resolution_outcome_by_id(&self,tenant:&TenantId,id:Uuid)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>;
+        async fn claim_worker_resolution_recovery_page(&self,limit:u32)->Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>,StorageError>;
+        async fn apply_worker_resolution_integration(&self,plan:&crate::worker_resolution_application::WorkerResolutionIntegration)->Result<crate::worker_resolution_application::WorkerResolutionApplication,StorageError>;
+        async fn get_worker_resolution_outcome(&self,tenant_id:Option<&TenantId>,task_id:Uuid,claim:Option<&WorkerClaim>)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>;
         async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
 
         async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
+        async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
         async fn list_worker_tasks(&self, filter: &orch8_types::worker_filter::WorkerTaskFilter, pagination: &orch8_types::filter::Pagination) -> Result<Vec<WorkerTask>, StorageError>;
         async fn worker_task_stats(&self, tenant_id: Option<&orch8_types::ids::TenantId>, window_secs: Option<u32>) -> Result<orch8_types::worker_filter::WorkerTaskStats, StorageError>;
         async fn pending_worker_task_depth(&self, limit: u32) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
@@ -457,6 +478,11 @@ fault_impl! {
 
 fault_impl! {
     [CONTINUITY_STORE_METHODS] impl ContinuityStore {
+    async fn is_delegation_proxy_quarantined(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
+    async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
+    async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>;
+
+        async fn is_physical_instance_retired(&self, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn create_continuity_execution(&self, execution: &ContinuityExecution) -> Result<(), StorageError>;
         async fn ensure_continuity_execution(&self, candidate: &ContinuityExecution) -> Result<ContinuityExecution, StorageError>;
         async fn get_continuity_execution(&self, tenant_id: &TenantId, id: ContinuityId) -> Result<Option<ContinuityExecution>, StorageError>;
@@ -469,6 +495,7 @@ fault_impl! {
         async fn cas_handoff(&self, tenant_id: &TenantId, id: HandoffId, expected_state: HandoffState, expected_version: u64, next: &ExecutionHandoff) -> Result<bool, StorageError>;
         async fn accept_handoff(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, accepted_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, accepted_execution: &ContinuityExecution) -> Result<bool, StorageError>;
         async fn commit_handoff_export(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, exported_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, transferring_execution: &ContinuityExecution) -> Result<bool, StorageError>;
+        async fn commit_handoff_export_with_provenance(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, exported_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, transferring_execution: &ContinuityExecution, provenance: &ProvenanceEntry) -> Result<bool, StorageError>;
         async fn resume_handoff(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, resumed_handoff: &ExecutionHandoff, destination_instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn save_capsule_manifest(&self, manifest: &CapsuleManifest) -> Result<(), StorageError>;
         async fn get_capsule_manifest(&self, tenant_id: &TenantId, id: CapsuleId) -> Result<Option<CapsuleManifest>, StorageError>;
@@ -477,6 +504,13 @@ fault_impl! {
         async fn import_capsule_snapshot(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<InstanceId, StorageError>;
         async fn import_capsule_recovery(&self, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, snapshot: &crate::restore::InstanceSnapshot, checkpoint: &orch8_types::checkpoint::Checkpoint, effects: Option<&crate::portable_effects::CapsuleEffectImport>) -> Result<InstanceId, StorageError>;
         async fn record_external_capsule_import(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId, imported_at: DateTime<Utc>) -> Result<InstanceId, StorageError>;
+        async fn prepare_local_migration_snapshot(&self, request: &crate::local_migration::LocalMigrationSnapshotRequest) -> Result<crate::local_migration::LocalMigrationSnapshotCapture,StorageError>;
+        async fn capture_capsule_cut(&self, request: &crate::capsule_export::CapsuleCutRequest) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError>;
+        async fn seal_capsule_cut(&self, tenant: &TenantId, id: CapsuleId, manifest: &CapsuleManifest, sealed: &[u8]) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError>;
+        async fn abort_preparing_capsule_cut(&self, tenant: &TenantId, id: CapsuleId) -> Result<bool, StorageError>;
+        async fn acknowledge_capsule_cut(&self, tenant: &TenantId, id: CapsuleId, accepted: &ContinuityExecution) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError>;
+        async fn capsule_cut_publishable(&self, tenant: &TenantId, id: CapsuleId) -> Result<bool, StorageError>;
+        async fn claim_retired_capsule_artifacts(&self, now: DateTime<Utc>, retry_at: DateTime<Utc>, limit: u32) -> Result<Vec<String>, StorageError>;
         async fn activate_capsule_import(&self, tenant: &TenantId, capsule: CapsuleId, runtime: RuntimeId, instance: InstanceId, now: DateTime<Utc>) -> Result<(), StorageError>;
         async fn is_capsule_import_instance(&self, tenant_id: &TenantId, capsule_id: CapsuleId, destination_runtime_id: RuntimeId, instance_id: InstanceId) -> Result<bool, StorageError>;
         async fn upsert_runtime_capabilities(&self, tenant_id: &TenantId, capabilities: &RuntimeCapabilities) -> Result<(), StorageError>;
@@ -495,6 +529,7 @@ fault_impl! {
         async fn retire_effect_attempts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn get_effect_receipt(&self, tenant_id: &TenantId, id: EffectId) -> Result<Option<EffectReceipt>, StorageError>;
         async fn cas_effect_receipt(&self, tenant_id: &TenantId, id: EffectId, expected_state: EffectState, next: &EffectReceipt) -> Result<bool, StorageError>;
+        async fn resolve_effect_with_provenance(&self, expected: &EffectReceipt, next: &EffectReceipt, entry: &ProvenanceEntry) -> Result<crate::effect_resolution::EffectResolutionCommit, StorageError>;
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &TenantId, next: &EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &TenantId, next: &EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<EffectReceipt>, StorageError>;

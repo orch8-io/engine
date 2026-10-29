@@ -28,7 +28,7 @@ pub(super) async fn save_on(
     validate_payload_size(raw.len())?;
     let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-    if should_compress(raw.len()) {
+    if should_compress(raw.len()) || super::json_encoding::needs_text(payload) {
         let compressed = compress(payload)?;
         sqlx::query(
             r"INSERT INTO externalized_state
@@ -131,7 +131,7 @@ pub(super) async fn batch_save(
         validate_payload_size(raw.len())?;
         let raw_size = i64::try_from(raw.len()).unwrap_or(i64::MAX);
 
-        if should_compress(raw.len()) {
+        if should_compress(raw.len()) || super::json_encoding::needs_text(payload) {
             let c = compress(payload)?;
             compressed.push((ref_key.as_str(), c, raw_size));
         } else {

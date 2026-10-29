@@ -10,7 +10,7 @@ async fn begin(
 ) -> Result<Option<sqlx::Transaction<'static, sqlx::Postgres>>, StorageError> {
     let mut tx = store.pool.begin().await?;
     let held: Option<uuid::Uuid> = sqlx::query_scalar(
-        "SELECT id FROM task_instances WHERE id=$1 AND state='running' AND claimed_at=$2 FOR UPDATE",
+        "SELECT id FROM task_instances WHERE id=$1 AND state='running' AND claimed_at=$2 AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) FOR UPDATE",
     ).bind(instance_id.into_uuid()).bind(claim_token).fetch_optional(&mut *tx).await?;
     if held.is_none() {
         tx.rollback().await?;
@@ -311,7 +311,7 @@ pub(super) async fn create_child(
         tx.rollback().await?;
         return Ok(false);
     }
-    let context = serde_json::to_value(&child.context)?;
+    let context = super::json_encoding::encode_context(&child.context)?;
     super::instances::bind_instance_insert(
         sqlx::query(super::instances::INSTANCE_INSERT_SQL),
         child,

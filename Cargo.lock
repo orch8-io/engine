@@ -3134,6 +3134,8 @@ dependencies = [
  "orch8-types",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
@@ -3158,6 +3160,7 @@ dependencies = [
  "moka",
  "orch8",
  "orch8-engine",
+ "orch8-grpc",
  "orch8-publisher",
  "orch8-push",
  "orch8-storage",
@@ -3167,10 +3170,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tonic",
  "tracing",
  "url",
  "utoipa",
@@ -3892,9 +3898,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags",
  "memchr",

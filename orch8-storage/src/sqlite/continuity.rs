@@ -43,6 +43,18 @@ fn to_i64(value: u64, field: &str) -> Result<i64, StorageError> {
         .map_err(|_| StorageError::Query(format!("{field} exceeds SQLite INTEGER range")))
 }
 
+// Use durable identity evidence and separate active-cut point lookups. A
+// combined OR over captured/sealed/retired/acknowledged cuts cannot use the
+// active partial indexes and would scan retained history on every owner CAS.
+const OWNER_CAS_SQL: &str = "UPDATE continuity_executions
+ SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
+ WHERE tenant_id = ? AND continuity_id = ? AND epoch = ? AND owner_runtime_id = ?
+ AND state <> 'compensating'
+ AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=?10)
+ AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=?10 AND cut.state IN ('captured','sealed'))
+ AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=continuity_executions.tenant_id
+   AND cut.continuity_id=continuity_executions.continuity_id AND cut.state IN ('captured','sealed') AND cut.state='captured')";
+
 // Both lookup paths must agree on scope and indexed progress before returning
 // a durable outcome, including when recovering a lost creation response.
 fn compensation_run_from_row(
@@ -87,6 +99,44 @@ pub(super) async fn delete_receipts_for_blocks_on(
 
 #[async_trait]
 impl crate::ContinuityStore for SqliteStorage {
+    async fn is_delegation_proxy_quarantined(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM delegation_proxy_quarantines WHERE instance_id=?1)",
+        )
+        .bind(instance_id.to_string())
+        .fetch_one(&self.pool)
+        .await?)
+    }
+    async fn get_delegation_publication(
+        &self,
+        tenant: &TenantId,
+        id: uuid::Uuid,
+    ) -> Result<Option<crate::delegation_publication::DelegationPublication>, StorageError> {
+        super::delegation_publication::get(self, tenant, id).await
+    }
+    async fn publish_delegation(
+        &self,
+        intent: &crate::delegation_publication::DelegationPublishIntent,
+    ) -> Result<crate::delegation_publication::DelegationPublishResult, StorageError> {
+        super::delegation_publication::publish(self, intent).await
+    }
+
+    async fn is_physical_instance_retired(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError> {
+        sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM physical_instance_retirements WHERE instance_id=?1)",
+        )
+        .bind(instance_id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     async fn create_continuity_execution(
         &self,
         execution: &ContinuityExecution,
@@ -242,29 +292,26 @@ impl crate::ContinuityStore for SqliteStorage {
         expected_owner: RuntimeId,
         next: &ContinuityExecution,
     ) -> Result<bool, StorageError> {
-        let mut transaction = self
-            .pool
-            .begin()
+        if next.tenant_id != *tenant_id || next.continuity_id != id {
+            return Err(StorageError::Constraint(
+                "continuity owner CAS identity mismatch".into(),
+            ));
+        }
+        let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
+        let result = sqlx::query(OWNER_CAS_SQL)
+            .bind(to_i64(next.epoch.get(), "next epoch")?)
+            .bind(next.owner_runtime_id.to_string())
+            .bind(state_name(next.state)?)
+            .bind(encode(next)?)
+            .bind(next.updated_at.to_rfc3339())
+            .bind(tenant_id.as_str())
+            .bind(id.to_string())
+            .bind(to_i64(expected_epoch.get(), "expected epoch")?)
+            .bind(expected_owner.to_string())
+            .bind(next.current_instance_id.to_string())
+            .execute(&mut *transaction)
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
-        let result = sqlx::query(
-            "UPDATE continuity_executions
-             SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
-             WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
-               AND owner_runtime_id = ? AND state <> 'compensating'",
-        )
-        .bind(to_i64(next.epoch.get(), "next epoch")?)
-        .bind(next.owner_runtime_id.to_string())
-        .bind(state_name(next.state)?)
-        .bind(encode(next)?)
-        .bind(next.updated_at.to_rfc3339())
-        .bind(tenant_id.as_str())
-        .bind(id.to_string())
-        .bind(to_i64(expected_epoch.get(), "expected epoch")?)
-        .bind(expected_owner.to_string())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
         if result.rows_affected() != 1 {
             transaction
                 .rollback()
@@ -475,68 +522,37 @@ impl crate::ContinuityStore for SqliteStorage {
         expected_execution: &ContinuityExecution,
         transferring_execution: &ContinuityExecution,
     ) -> Result<bool, StorageError> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
-        let ownership = sqlx::query(
-            "UPDATE continuity_executions
-             SET state = ?, record = ?, updated_at = ?
-             WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
-               AND owner_runtime_id = ? AND state = ? AND state <> 'compensating'",
+        commit_export(
+            self,
+            tenant_id,
+            expected_handoff,
+            exported_handoff,
+            expected_execution,
+            transferring_execution,
+            None,
         )
-        .bind(state_name(transferring_execution.state)?)
-        .bind(encode(transferring_execution)?)
-        .bind(transferring_execution.updated_at.to_rfc3339())
-        .bind(tenant_id.as_str())
-        .bind(expected_execution.continuity_id.to_string())
-        .bind(to_i64(expected_execution.epoch.get(), "expected epoch")?)
-        .bind(expected_execution.owner_runtime_id.to_string())
-        .bind(state_name(expected_execution.state)?)
-        .execute(&mut *transaction)
         .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
-        if ownership.rows_affected() != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| StorageError::Query(error.to_string()))?;
-            return Ok(false);
-        }
-        let handoff = sqlx::query(
-            "UPDATE execution_handoffs SET state = ?, version = ?, record = ?, updated_at = ?
-             WHERE tenant_id = ? AND id = ? AND state = ? AND version = ?",
+    }
+
+    async fn commit_handoff_export_with_provenance(
+        &self,
+        tenant_id: &TenantId,
+        expected_handoff: &ExecutionHandoff,
+        exported_handoff: &ExecutionHandoff,
+        expected_execution: &ContinuityExecution,
+        transferring_execution: &ContinuityExecution,
+        provenance: &ProvenanceEntry,
+    ) -> Result<bool, StorageError> {
+        commit_export(
+            self,
+            tenant_id,
+            expected_handoff,
+            exported_handoff,
+            expected_execution,
+            transferring_execution,
+            Some(provenance),
         )
-        .bind(state_name(exported_handoff.state)?)
-        .bind(to_i64(
-            exported_handoff.version,
-            "exported handoff version",
-        )?)
-        .bind(encode(exported_handoff)?)
-        .bind(exported_handoff.updated_at.to_rfc3339())
-        .bind(tenant_id.as_str())
-        .bind(expected_handoff.id.to_string())
-        .bind(state_name(expected_handoff.state)?)
-        .bind(to_i64(
-            expected_handoff.version,
-            "expected handoff version",
-        )?)
-        .execute(&mut *transaction)
         .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
-        if handoff.rows_affected() != 1 {
-            transaction
-                .rollback()
-                .await
-                .map_err(|error| StorageError::Query(error.to_string()))?;
-            return Ok(false);
-        }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
-        Ok(true)
     }
 
     async fn resume_handoff(
@@ -702,6 +718,61 @@ impl crate::ContinuityStore for SqliteStorage {
         .await
     }
 
+    async fn prepare_local_migration_snapshot(
+        &self,
+        request: &crate::local_migration::LocalMigrationSnapshotRequest,
+    ) -> Result<crate::local_migration::LocalMigrationSnapshotCapture, StorageError> {
+        super::local_migration::prepare(self, request).await
+    }
+
+    async fn capture_capsule_cut(
+        &self,
+        request: &crate::capsule_export::CapsuleCutRequest,
+    ) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError> {
+        super::capsule_export::capture(self, request).await
+    }
+    async fn seal_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+        manifest: &CapsuleManifest,
+        sealed: &[u8],
+    ) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError> {
+        super::capsule_export::seal(self, tenant, id, manifest, sealed).await
+    }
+    async fn abort_preparing_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+    ) -> Result<bool, StorageError> {
+        super::capsule_export::abort(self, tenant, id).await
+    }
+
+    async fn acknowledge_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+        accepted: &ContinuityExecution,
+    ) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError> {
+        super::capsule_export::acknowledge(self, tenant, id, accepted).await
+    }
+
+    async fn capsule_cut_publishable(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+    ) -> Result<bool, StorageError> {
+        super::capsule_export::publishable(self, tenant, id).await
+    }
+    async fn claim_retired_capsule_artifacts(
+        &self,
+        now: DateTime<Utc>,
+        retry_at: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        super::capsule_export::claim_retired_artifacts(self, now, retry_at, limit).await
+    }
+
     async fn activate_capsule_import(
         &self,
         tenant: &TenantId,
@@ -723,9 +794,11 @@ impl crate::ContinuityStore for SqliteStorage {
     ) -> Result<InstanceId, StorageError> {
         if let Some(effects) = effects {
             effects.validate(snapshot.instance.sequence_id)?;
-            if effects.source.tenant_id != snapshot.instance.tenant_id {
+            if effects.source.tenant_id != snapshot.instance.tenant_id
+                || effects.source.current_instance_id == snapshot.instance.id
+            {
                 return Err(StorageError::Constraint(
-                    "portable effect tenant mismatch".into(),
+                    "portable effect destination identity mismatch".into(),
                 ));
             }
         }
@@ -1186,6 +1259,15 @@ impl crate::ContinuityStore for SqliteStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(result.rows_affected() == 1)
+    }
+
+    async fn resolve_effect_with_provenance(
+        &self,
+        expected: &EffectReceipt,
+        next: &EffectReceipt,
+        entry: &ProvenanceEntry,
+    ) -> Result<crate::effect_resolution::EffectResolutionCommit, StorageError> {
+        super::effect_resolution::resolve(self, expected, next, entry).await
     }
 
     async fn dispatch_effect_receipt_owned(
@@ -1988,17 +2070,23 @@ impl crate::ContinuityStore for SqliteStorage {
             expected_execution,
             next_execution,
             expected_instance_state,
+            expected_instance_updated_at: _,
+            expected_checkpoint_id: _,
+            expected_source_fingerprint: _,
+            expected_target_sequence: _,
             next_instance_state,
+            next_fire_at,
             next_sequence_id,
             next_context,
             checkpoint,
             forbid_effects_epoch,
         } = transition;
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        transition.validate()?;
+        let mut tx = super::helpers::begin_immediate(&self.pool).await?;
+        if !super::local_migration::lock_transition(&mut tx, &transition).await? {
+            tx.rollback().await?;
+            return Ok(false);
+        }
         if let Some(epoch) = forbid_effects_epoch {
             let blocked: i64 = sqlx::query_scalar(
                 "SELECT EXISTS(
@@ -2053,12 +2141,13 @@ impl crate::ContinuityStore for SqliteStorage {
         .map_err(|error| StorageError::Query(error.to_string()))?;
         let instance = sqlx::query(
             "UPDATE task_instances
-             SET sequence_id=?, context=?, state=?, next_fire_at=NULL, updated_at=?
+             SET sequence_id=?, context=?, state=?, next_fire_at=?, claimed_at=NULL, updated_at=?
              WHERE id=? AND tenant_id=? AND state=?",
         )
         .bind(next_sequence_id.to_string())
         .bind(serde_json::to_string(next_context).map_err(StorageError::Serialization)?)
         .bind(state_name(next_instance_state)?)
+        .bind(next_fire_at.map(|t| t.to_rfc3339()))
         .bind(&updated_at)
         .bind(expected_execution.current_instance_id.to_string())
         .bind(tenant_id.as_str())
@@ -2075,11 +2164,7 @@ impl crate::ContinuityStore for SqliteStorage {
                 .map_err(|error| StorageError::Query(error.to_string()))?;
             return Ok(false);
         }
-        sqlx::query("DELETE FROM execution_tree WHERE instance_id=?")
-            .bind(expected_execution.current_instance_id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| StorageError::Query(error.to_string()))?;
+        // In-place migration keeps native nodes and suspension identities.
         sqlx::query(
             "INSERT INTO checkpoints (id,instance_id,checkpoint_data,created_at)
              VALUES (?,?,?,?)",
@@ -2201,5 +2286,157 @@ impl crate::ContinuityStore for SqliteStorage {
         .await
         .map_err(|error| StorageError::Query(error.to_string()))?;
         Ok(result.rows_affected() == 1)
+    }
+}
+
+async fn commit_export(
+    store: &SqliteStorage,
+    tenant_id: &TenantId,
+    expected_handoff: &ExecutionHandoff,
+    exported_handoff: &ExecutionHandoff,
+    expected_execution: &ContinuityExecution,
+    transferring_execution: &ContinuityExecution,
+    provenance: Option<&ProvenanceEntry>,
+) -> Result<bool, StorageError> {
+    if provenance.is_some_and(|entry| {
+        entry.tenant_id != *tenant_id
+            || entry.continuity_id != exported_handoff.continuity_id
+            || entry.epoch != transferring_execution.epoch
+            || entry.kind != "capsule_exported"
+    }) {
+        return Err(StorageError::Constraint(
+            "export provenance identity mismatch".into(),
+        ));
+    }
+    let mut transaction = store
+        .pool
+        .begin()
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+    let ownership = sqlx::query(
+        "UPDATE continuity_executions
+         SET state = ?, record = ?, updated_at = ?
+         WHERE tenant_id = ? AND continuity_id = ? AND epoch = ?
+           AND owner_runtime_id = ? AND ((state = 'owned' AND state = ?) OR
+             (state = 'transferring' AND EXISTS (
+               SELECT 1 FROM capsule_source_cuts c
+               WHERE c.tenant_id = continuity_executions.tenant_id
+                 AND c.continuity_id = continuity_executions.continuity_id
+                 AND c.epoch = continuity_executions.epoch
+                 AND c.source_runtime_id = continuity_executions.owner_runtime_id
+                 AND c.source_instance_id = json_extract(continuity_executions.record, '$.current_instance_id')
+                 AND c.state = 'sealed' AND c.capsule_id = ?
+                 AND (json_extract(c.request, '$.destination_runtime_id') IS NULL
+                      OR json_extract(c.request, '$.destination_runtime_id') = ?))))
+           AND json_extract(record, '$.current_instance_id') = ?",
+    )
+    .bind(state_name(transferring_execution.state)?)
+    .bind(encode(transferring_execution)?)
+    .bind(transferring_execution.updated_at.to_rfc3339())
+    .bind(tenant_id.as_str())
+    .bind(expected_execution.continuity_id.to_string())
+    .bind(to_i64(expected_execution.epoch.get(), "expected epoch")?)
+    .bind(expected_execution.owner_runtime_id.to_string())
+    .bind(state_name(expected_execution.state)?)
+    .bind(exported_handoff.capsule_id.map(|id| id.to_string()))
+    .bind(exported_handoff.destination_runtime_id.to_string())
+    .bind(expected_execution.current_instance_id.to_string())
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| StorageError::Query(error.to_string()))?;
+    if ownership.rows_affected() != 1 {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        return Ok(false);
+    }
+    let handoff = sqlx::query(
+        "UPDATE execution_handoffs SET state = ?, version = ?, record = ?, updated_at = ?
+         WHERE tenant_id = ? AND id = ? AND state = ? AND version = ?",
+    )
+    .bind(state_name(exported_handoff.state)?)
+    .bind(to_i64(
+        exported_handoff.version,
+        "exported handoff version",
+    )?)
+    .bind(encode(exported_handoff)?)
+    .bind(exported_handoff.updated_at.to_rfc3339())
+    .bind(tenant_id.as_str())
+    .bind(expected_handoff.id.to_string())
+    .bind(state_name(expected_handoff.state)?)
+    .bind(to_i64(
+        expected_handoff.version,
+        "expected handoff version",
+    )?)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|error| StorageError::Query(error.to_string()))?;
+    if handoff.rows_affected() != 1 {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        return Ok(false);
+    }
+    if let Some(entry) = provenance {
+        sqlx::query("INSERT INTO provenance_entries (id, continuity_id, tenant_id, epoch, entry_sha256, previous_sha256, record, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(entry.id.to_string()).bind(entry.continuity_id.to_string())
+            .bind(entry.tenant_id.as_str()).bind(to_i64(entry.epoch.get(), "provenance epoch")?)
+            .bind(&entry.entry_sha256).bind(&entry.previous_sha256).bind(encode(entry)?)
+            .bind(entry.created_at.to_rfc3339()).execute(&mut *transaction).await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| StorageError::Query(error.to_string()))?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod captured_query_plan_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn owner_cas_uses_indexed_identity_proofs() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "EXPLAIN QUERY PLAN {OWNER_CAS_SQL}"
+        )))
+        .bind(0_i64)
+        .bind("runtime")
+        .bind("owned")
+        .bind("{}")
+        .bind("now")
+        .bind("tenant")
+        .bind("continuity")
+        .bind(0_i64)
+        .bind("runtime")
+        .bind("physical")
+        .fetch_all(storage.pool())
+        .await
+        .unwrap();
+        let plan = rows
+            .iter()
+            .map(|r| r.get::<String, _>("detail"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            plan.contains("idx_capsule_source_cut_instance"),
+            "missing source point lookup: {plan}"
+        );
+        assert!(
+            plan.contains("idx_capsule_source_cut_active"),
+            "missing continuity point lookup: {plan}"
+        );
+        assert!(
+            plan.contains("SEARCH retired"),
+            "missing permanent identity point lookup: {plan}"
+        );
+        assert!(
+            !plan.contains("SCAN cut"),
+            "owner CAS scans retained cut history: {plan}"
+        );
     }
 }

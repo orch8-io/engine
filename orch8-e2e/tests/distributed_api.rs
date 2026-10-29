@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use orch8_e2e::{Backend, Cloud, backends, wait_for};
+use orch8_e2e::{Backend, Cloud, CloudOptions, ROOT_KEY, backends, wait_for};
 use orch8_grpc::proto;
 use orch8_grpc::proto::orch8_service_client::Orch8ServiceClient;
 use orch8_types::continuity::EffectState;
@@ -113,8 +113,13 @@ fn http_fail_is_one_fenced_resolution() {
         assert!(cloud.task(first.id).is_none(), "{backend}");
         assert_eq!(
             fail(&cloud, &key, &claimed, "w1", true),
+            200,
+            "{backend}: retained acknowledgement survives its retry"
+        );
+        assert_eq!(
+            fail(&cloud, &key, &claimed, "intruder", true),
             404,
-            "{backend}: superseded by its retry"
+            "{backend}: another worker cannot inherit the acknowledgement"
         );
         let retry = wait_for("re-dispatch", LONG, || {
             cloud
@@ -185,7 +190,7 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
         let bound_effect = retry.effect_id.unwrap();
 
         // The older node's re-dispatch: receipt created, row never bound.
-        cloud.strand_dispatch(retry.id, chrono::Duration::zero());
+        cloud.strand_legacy_dispatch(retry.id, chrono::Duration::zero());
         let stranded = cloud.task(retry.id).unwrap();
         assert_eq!(stranded.effect_id, None, "{backend}");
         assert!(cloud.awaiting_dispatch(retry.id), "{backend}");
@@ -207,7 +212,7 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
         assert!(cloud.awaiting_dispatch(retry.id), "{backend}");
 
         // Past the grace period, the running reaper heals it.
-        cloud.strand_dispatch(retry.id, chrono::Duration::hours(1));
+        cloud.strand_legacy_dispatch(retry.id, chrono::Duration::hours(1));
         let healed = wait_for("the reaper's finalization", LONG, || {
             cloud
                 .task(retry.id)
@@ -258,16 +263,37 @@ fn rolling_upgrade_stranded_retry_row_self_heals() {
     }
 }
 
-async fn grpc(cloud: &Cloud) -> Orch8ServiceClient<tonic::transport::Channel> {
-    Orch8ServiceClient::connect(format!("http://{}", cloud.grpc_addr))
-        .await
-        .expect("grpc connect")
+#[derive(Clone)]
+struct GrpcKey(tonic::metadata::MetadataValue<tonic::metadata::Ascii>);
+
+impl tonic::service::Interceptor for GrpcKey {
+    fn call(
+        &mut self,
+        mut request: tonic::Request<()>,
+    ) -> Result<tonic::Request<()>, tonic::Status> {
+        request.metadata_mut().insert("x-api-key", self.0.clone());
+        Ok(request)
+    }
 }
 
-async fn grpc_poll(
-    client: &mut Orch8ServiceClient<tonic::transport::Channel>,
-    handler: &str,
-) -> Vec<WorkerTask> {
+type GrpcClient = Orch8ServiceClient<
+    tonic::service::interceptor::InterceptedService<tonic::transport::Channel, GrpcKey>,
+>;
+
+async fn grpc_with_key(cloud: &Cloud, key: &str) -> GrpcClient {
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://{}", cloud.grpc_addr))
+        .expect("grpc endpoint")
+        .connect()
+        .await
+        .expect("grpc connect");
+    Orch8ServiceClient::with_interceptor(channel, GrpcKey(key.parse().expect("grpc key")))
+}
+
+async fn grpc(cloud: &Cloud) -> GrpcClient {
+    grpc_with_key(cloud, ROOT_KEY).await
+}
+
+async fn grpc_poll(client: &mut GrpcClient, handler: &str) -> Vec<WorkerTask> {
     client
         .poll_tasks(proto::PollTasksRequest {
             handler_name: handler.into(),
@@ -286,7 +312,14 @@ async fn grpc_poll(
 #[test]
 fn grpc_complete_fail_release_settle_effects_like_http() {
     for backend in backends() {
-        let cloud = Cloud::start(&backend, |_| {});
+        let cloud = Cloud::start_with(
+            &backend,
+            |_| {},
+            CloudOptions {
+                grpc_auth: true,
+                ..CloudOptions::default()
+            },
+        );
         let backend = cloud.backend;
 
         // Complete → receipt committed by its stored id; instance completes.
@@ -328,14 +361,39 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
                 })
                 .await
         });
+        late.expect("duplicate completion acknowledges the accepted result");
+        let accepted = cloud
+            .block_on(cloud.storage.get_worker_accepted_outcome(
+                Some(&orch8_types::ids::TenantId::unchecked(&cloud.tenant)),
+                task.id,
+                &orch8_types::worker::WorkerClaim::new("grpc-worker", task.claim_epoch),
+            ))
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            late.unwrap_err().code(),
+            accepted.output,
+            json!({"ok":true}),
+            "{backend}: replay replaced the first result"
+        );
+        let stale = cloud.block_on(async {
+            grpc(&cloud)
+                .await
+                .complete_task(proto::CompleteTaskRequest {
+                    task_id: task.id.to_string(),
+                    worker_id: "grpc-worker".into(),
+                    output_json: "{}".into(),
+                    claim_epoch: task.claim_epoch + 1,
+                })
+                .await
+        });
+        assert_eq!(
+            stale.unwrap_err().code(),
             tonic::Code::FailedPrecondition,
-            "{backend}: fenced"
+            "{backend}: another claim cannot inherit the acknowledgement"
         );
 
         // Fail (retryable, retry policy) → receipt unknown, next attempt;
-        // re-reporting against the superseded task is NotFound.
+        // the winning lease can re-report after the superseded hot task is gone.
         let handler = format!("grpc.fail.{}", Uuid::now_v7().simple());
         let (instance, first) = dispatched(&cloud, &handler, Some(2));
         let task = cloud
@@ -358,10 +416,16 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
         );
         assert!(cloud.task(first.id).is_none(), "{backend}");
         let again = cloud.block_on(async { grpc(&cloud).await.fail_task(fail(&task)).await });
+        again.expect("retained failure acknowledgement survives retry");
+        let mut other_claim = fail(&task);
+        other_claim.claim_epoch += 1;
         assert_eq!(
-            again.unwrap_err().code(),
+            cloud
+                .block_on(async { grpc(&cloud).await.fail_task(other_claim).await })
+                .unwrap_err()
+                .code(),
             tonic::Code::NotFound,
-            "{backend}"
+            "{backend}: another claim cannot inherit the acknowledgement"
         );
         let retry = wait_for("grpc retry", LONG, || {
             cloud
@@ -462,7 +526,7 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
             } else {
                 cloud
                     .block_on(async {
-                        grpc(&cloud)
+                        grpc_with_key(&cloud, &key)
                             .await
                             .complete_task(proto::CompleteTaskRequest {
                                 task_id: task["id"].as_str().unwrap().to_owned(),
@@ -859,17 +923,21 @@ fn run_device_session_scope(cloud: &Cloud, backend: &Backend) {
         &[201],
     );
 
+    // Named polling is available only with an explicit signed queue grant.
+    expect(
+        &token_a,
+        "POST",
+        "/workers/tasks/poll/queue",
+        Some(json!({"queue_name":"q","handler_name":"phone_scan","worker_id":runtime_a})),
+        &[403],
+    );
+
     // Route families outside the scope: refused before routing.
     let id = Uuid::now_v7();
     for (method, path, body) in [
         ("GET", "/workers/tasks".to_owned(), None),
         ("GET", "/workers/tasks/stats".to_owned(), None),
         ("GET", format!("/workers/tasks/{id}/attempts"), None),
-        (
-            "POST",
-            "/workers/tasks/poll/queue".to_owned(),
-            Some(json!({"queue_name": "q", "handler_name": "phone_scan", "worker_id": runtime_a})),
-        ),
         (
             "POST",
             "/workers/commands".to_owned(),

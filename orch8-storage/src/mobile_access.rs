@@ -4,7 +4,7 @@
 /// authority. A catalog session may read its earlier execution history; writes
 /// additionally prove that nonterminal work belongs to that execution epoch.
 /// Foreign callers must not construct these descriptors from workflow JSON.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MobileInstanceAccess {
     Legacy,
     Catalog {

@@ -4818,3 +4818,1879 @@ acknowledgement of exclusive ownership. A local database cannot independently
 prove current ownership in another offline database. The atomic source export
 cut, complete wait/event/family portability, and scoped mobile import admission
 remain required follow-up work for the overall transfer contract.
+
+### DME180 — durable source export cut (work in progress)
+
+A source could resume after capsule snapshot reads but before publication and
+ownership transfer. A deferred native provider admission reproduced two physical
+provider calls: one on the resumed source and one after destination activation.
+The new regression in `orch8-engine/tests/capsule_export_cut.rs` fails with two
+calls before the source-cut change and passes with one afterward.
+
+Migration 129 and SQLite schema 59 introduce a durable source cut. Snapshot
+capture, source claim revocation, pause, and ownership fencing share a database
+transaction. Preparing retries reuse the captured state; sealing retains an
+immutable manifest and encrypted transport payload. Publication uses a stable
+artifact identity so an ambiguous upload can be retried. Only a pre-seal abort
+can restore local ownership. Sealed transport may already have reached another
+runtime, so upload errors cannot authorize resuming the source.
+
+The coordinator export commit must recognize an already fenced local source.
+The implementation accepts that state only with a sealed source cut matching the
+capsule, tenant, continuity, epoch, source runtime and instance, and destination.
+The existing owned-source path remains necessary when the coordinator attaches
+a capsule prepared in a remote device's database. Both paths now compare the
+source instance as well as owner and epoch. The service also binds the execution
+to the handoff's source runtime, tenant, continuity, and expected epoch.
+
+Validation: all 36 source-cut tests and 14 existing continuity storage tests
+passed after the coordinator change. These cover captured-only refusal, wrong
+capsule, wrong destination, wrong source instance, successful sealed commit, and
+stale handoff retry across plain and encrypted SQLite and PostgreSQL.
+Sealing and abort now read only bounded request metadata before taking the owner
+lock, avoiding a redundant full snapshot allocation. After that change, all
+36 source-cut tests, 14 continuity storage tests, and seven retention tests passed
+again (57 total). Strict storage Clippy passed for all targets with warnings
+denied. Documentation checks and whitespace validation also passed.
+
+Remaining work before publication includes acknowledgement and sealed-cut
+compaction, public API reopen/fault tests, immutable
+export overflow tests, migration rollback/reopen checks, and broader engine and
+mobile verification. Full wait/event/family and referenced-artifact portability
+remain separate unresolved parts of the original review scope.
+
+#### DME180 HTTP recovery follow-up
+
+Real loopback HTTP tests in `orch8-api/tests/continuity_export_retry.rs`
+reproduced three failures before the fix: upload acknowledgement loss and payload
+read failure terminally failed the handoff while leaving the source fenced; a
+lost coordinator commit acknowledgement made the next export request fail because
+the handoff was already exported. All three passed after the retry change.
+
+Export now permits Requested, Quiescing, and Exported phases, revalidates source
+runtime and epoch, and reuses the immutable source cut. Publication/read errors
+leave the operation retryable. Exported retries require the exact capsule ID and
+return the same transport. The service accepts a Transferring expectation, while
+the storage commit always requires matching sealed-cut proof for a Transferring
+row; presenting the current state must not bypass the proof. Failed, cancelled,
+and later accepted phases remain ineligible for export.
+
+The HTTP tests also reject replacement transfer keys and advanced ownership
+coordinates. An additional assertion checks that a larger requested TTL cannot
+extend the original sealed expiry. Final verification passed all 57 backend
+source-cut/continuity/retention tests and all seven HTTP retry/product tests.
+Strict Clippy passed for the API library and retry integration test with warnings
+denied; documentation and whitespace checks passed. These results cover retry
+recovery, not the remaining complete portability and history-lifecycle scope.
+
+The HTTP recovery tests exposed an audit gap: export provenance was appended after the coordinator commit.
+A lost commit acknowledgement or crash can leave an Exported handoff without its
+export boundary. The atomic-provenance follow-up below addresses newly committed exports;
+successful HTTP retries alone did not prove that audit invariant.
+
+
+#### DME180 atomic export provenance follow-up
+
+Extending the real HTTP commit-acknowledgement-loss test to require an export
+boundary reproduced a persisted Exported handoff with zero provenance entries.
+The new audited storage primitive commits the ownership transition, handoff CAS,
+and provenance insert in one transaction. A chain-predecessor conflict rolls
+back the transaction. The engine binds the signed manifest to the handoff/source
+coordinates, signs the boundary with the coordinator key, and retries bounded
+head races. Existing storage implementations without the primitive fail closed.
+The original unaudited primitive remains available for existing low-level callers.
+
+Both HTTP source export and device-capsule attachment now use the audited
+primitive. The encrypted wrapper and fault-injection wrapper forward it. HTTP
+lost-acknowledgement tests passed with exactly one export boundary and validated
+the resulting chain against the trusted coordinator signing key. Backend tests
+exercise predecessor conflict rollback, cross-tenant refusal, successful commit,
+and stale retry without a second entry. All 65 backend source-cut/continuity/retention tests passed, covering locally
+fenced and remotely owned modes across SQLite/PostgreSQL and encrypted wrappers.
+All seven HTTP retry/product tests passed with trusted-key signature checks.
+Strict storage Clippy passed for all targets and strict API library/retry-test
+Clippy passed, both with warnings denied. Documentation checks passed.
+
+This establishes atomicity for new audited commits. It does not reconstruct
+historically missing boundaries from older unaudited commits. Full device HTTP
+principal/platform coverage and acknowledged source-cut compaction remain open.
+
+#### DME180 source acknowledgement compaction (in progress)
+
+Sealed cuts retained their transport ciphertext indefinitely. A new storage
+acknowledgement primitive binds explicit trusted-host confirmation to the exact
+capsule, tenant, continuity, next epoch, and permitted destination. In one
+transaction it records a compact accepted-owner receipt, clears snapshot and
+ciphertext, and advances source-side ownership indexes/JSON and location history
+when needed. The local source stays paused. An acknowledgement retry returns the
+immutable receipt without overwriting subsequent ownership or completion.
+
+The storage test matrix exercises unsealed refusal, wrong tenant/continuity,
+wrong destination/epoch/state, lost acknowledgement after commit, compacted SQL
+columns, blocked resealing/source recapture, and preservation of later ownership.
+The first run caught an index/JSON mismatch that prevented the next owner CAS;
+ownership epoch/runtime indexes and destination location are now part of the
+same acknowledgement transaction. Follow-up verification passed all 81
+source-cut, handoff, and retention cases across plain/encrypted SQLite and
+PostgreSQL. Delayed first acknowledgement during the next transfer and after a
+later epoch preserves the current owner/state. Strict storage Clippy passed for
+all targets with warnings denied.
+
+This primitive is internal groundwork. External artifact deletion, publication
+races with deletion, source archive/admission behavior, public host/mobile scope
+authorization, and durable reopen/migration verification remain required before
+exposing the complete acknowledgement lifecycle. Clearing a database payload
+alone does not prove bounded total storage or external artifact cleanup.
+
+#### DME180 external transport retirement (in progress)
+
+Acknowledgement now atomically creates an artifact-deletion tombstone alongside
+the compact receipt. Tombstones have no parent FK and survive cut/history purge.
+The bounded GC pass claims due keys and reschedules them before external I/O;
+it revisits successful deletions too, because an already started upload can
+complete after deletion. This cleanup runs even when general artifact retention
+is disabled: acknowledgement explicitly requests transport retirement. Tombstones
+remain compact retained metadata; this is not a claim of constant total storage.
+
+Export checks publication eligibility before and after upload, including an
+upload that reports an error after writing. If retirement won, export removes
+the transport and refuses to return a capsule. The tombstone covers crashes and
+delete failures. Only the transport's canonical instance/capsule key is retired;
+other instance artifacts remain intact. Eligibility also requires the original
+source owner, epoch, instance, and Transferring fence.
+
+Final verification passed 64 source-cut backend cases, seven retention tests,
+and 15 rollback-file checks, plus four engine scenarios: double-provider
+prevention, deletion failure followed by GC/late-upload cleanup, upload finishing
+after acknowledgement, and SQLite/local-file artifact reopen after source-cut
+purge. Ownership-bound publication eligibility is included in these results.
+Strict storage Clippy passed for all targets and engine library/integration-test
+Clippy passed with warnings denied. Documentation checks passed. Mobile
+uses its own maintenance path rather than server GC, so mobile cleanup wiring,
+SDK acknowledgement scope/API coverage, and source archive/admission lifecycle
+remain open.
+
+#### DME180 mobile production storage and maintenance follow-up
+
+The real `MobileEngine::new` constructor configured no artifact backend, making
+public continuity export fail with “artifact storage is not configured.” Earlier
+continuity tests supplied a memory artifact store directly and missed this.
+A real constructor regression reproduced the failure. Mobile now attaches a
+local artifact store beside the opened database's canonical filename, so symlink
+aliases and restart use the same companion directory. Explicit `:memory:` engines
+use an ephemeral memory store. Hosts must keep the companion artifacts with the
+database when moving/backing up engine data.
+
+Mobile transfer-key identity was also constant across all provided AES keys.
+It now fingerprints the actual decoded 32-byte transfer key, so an immutable
+export retry cannot silently accept another key and return old ciphertext.
+Legacy export refuses non-mobile/account-scoped tenants before source capture;
+scoped export still needs its own explicit owner-authorized surface.
+
+Transport retirement runs outside scheduler locks and host callbacks, including
+manual ticks/OS background batches, foreground startup and quiescent deadlines,
+and memory-budget scheduler skips. A mobile pass is limited to 32 keys and
+250 ms, at most once per five minutes. It claims one tombstone at a time so a
+cancelled pass does not reschedule a large unattempted batch. Server GC uses the
+same shared bounded collector. Tombstones remain eligible after successful
+object deletion to catch late uploads.
+
+The real constructor regression passed through export, alias-path reopen,
+unchanged retry/expiry, changed-key refusal, OS-background cleanup, and a second
+restart into foreground cleanup of a recreated transport. The account-isolation
+regression leaves ownership unchanged and creates no source cut. All 695 mobile
+unit tests, eight integration tests, four shared engine export/cleanup
+regressions, and 18 engine GC unit tests passed (725 total). Strict mobile Clippy
+passed for all targets, and shared engine library/integration-test Clippy
+passed, both with warnings denied. Documentation and whitespace checks passed.
+SDK acknowledgement APIs, scoped mobile
+import/export admission and authorization, source archive/quota semantics, and
+complete wait/event/family/artifact portability remain open.
+
+#### DME180 Rust source acknowledgement and effect-bound contract
+
+The public embeddable facade now accepts explicit trusted app/backend acceptance
+coordinates through `Engine::acknowledge_portable_capsule`: capsule ID, accepted
+epoch, destination runtime, and destination instance. It derives tenant and
+continuity from the engine's tenant-filtered stored manifest, then invokes the
+durable receipt/cleanup path. An external artifact error may follow the receipt
+commit; the host can retry the same coordinates. Source execution stays paused.
+This does not replace the remaining scoped mobile acknowledgement/archive APIs.
+
+Public facade tests passed for full import/activation/wait/acknowledgement,
+wrong destination/epoch refusal, repeated acknowledgement, and a foreign tenant
+sharing the same physical database. The foreign tenant cannot delete the source
+transport; valid acknowledgement deletes it and blocks source re-export.
+Strict facade Clippy passed with warnings denied. The standard `tempfile` test
+dependency owns isolated database/artifact directories; the lockfile change is
+limited to that existing workspace dependency.
+
+The existing effect-bound test expected a retry to recapture a newly appended
+receipt. Its failure was an obsolete expectation after immutable capture, not
+permission to truncate history. Two tests now pass: exactly 10,000 receipts are
+transported and a retry preserves the original set/header/artifact; a separate
+fresh 10,001-receipt source refuses before retaining a cut, fencing ownership,
+or publishing an artifact.
+
+CI follow-up: PR357 failed in the CLI demo because it attempted to create
+continuity ownership after atomic capsule import had already persisted it,
+violating the current-instance uniqueness index. The exact PR357 checkout passed
+all 320 CLI tests and strict CLI Clippy after reusing and validating imported
+pending ownership. PR358 was rebased and also passed all 320 CLI tests and strict CLI Clippy,
+using atomic activation instead of the demo's separate ownership/scheduling
+writes. Both repaired heads were atomically pushed with exact old-head leases.
+All 49 uncommitted working files were preserved byte-for-byte; the clean isolated
+checkout was removed. CI merge gates are running on repaired heads 79d6bba3
+(PR357) and 88482c6a (PR358). No source-cut WIP is included in that CI repair.
+
+
+The complete embeddable Engine integration suite passed all 20 tests. Its old
+conflict test assumed export left the source Owned; immutable source capture now
+makes it Transferring, which legitimately permits another runtime to import into
+the same database. The rejection case now uses acknowledged Owned coordinates
+without a local import proof, and a separate positive test proves same-database
+import/atomic activation/acknowledgement while the original source stays paused.
+Neither change relaxes the production import predicate. Final facade and
+effect-bound Clippy checks passed with warnings denied; documentation and
+whitespace checks also passed.
+
+#### DME180 transactional scoped source authority (in progress)
+
+Scoped capsule capture now carries an explicit trusted mobile access descriptor.
+SQLite checks account activity/session epoch, catalog membership, immutable native
+identity, and current materialization/request eligibility inside the source-cut
+writer transaction. A missing descriptor cannot downgrade a registered account
+run into generic export. The descriptor is pinned in the durable cut and retry
+identity. PostgreSQL refuses mobile descriptors because scoped mobile storage is
+SQLite-specific. Generic non-mobile exports retain their existing path.
+
+Publication rechecks the stored authority and source ownership in one read
+transaction before and after artifact I/O. Account retirement and owned run
+cancellation retire captured/sealed transport copies in their own writer
+transaction: clear retry bytes, retain source ownership fencing, and enqueue
+canonical artifact-deletion tombstones. This retires internal transport copies;
+it does not archive the logical run or invent a remote outcome. A later verified
+acceptance can still reconcile a sealed retired cut into a compact receipt.
+
+Four initial scope race tests passed, then all 699 mobile unit tests passed.
+The final focused set has six passing cases, adding shared-database proof that
+retiring Alice leaves Bob's transport and publication authority intact, and that
+a later verified acceptance reconciles a retired sealed cut without reviving the
+cancelled source. The set
+covers wrong account/catalog/session, generic/legacy bypass refusal, retirement
+before capture, and retirement/cancellation while upload is held. All 85 backend
+source-cut, continuity, and retention tests passed, as did strict mobile and
+storage Clippy. The six engine export/effect-bound regressions also passed.
+This is storage authority groundwork; public
+scoped export/acknowledgement APIs, frozen catalog-policy validation, scoped
+import admission, and archive/quota semantics remain open.
+
+The physical-instance identity regression reproduced an unsafe acknowledgement:
+an isolated destination could reuse the source UUID, and storage accepted those
+coordinates even though local scheduling identifies ownership by instance ID.
+Continuity IDs identify logical runs; destination instance IDs identify a fresh
+physical execution. Public import, direct recovery admission in both backends,
+atomic activation, and source acknowledgement now independently refuse immediate
+source UUID reuse. Nine engine capsule tests pass, including rejection before
+remote persistence, preservation of the source transfer fence, a successful fresh
+ID retry, and superseded source ownership after valid acknowledgement. All 131
+source-cut and portable recovery tests passed across SQLite, encrypted SQLite,
+PostgreSQL, and encrypted PostgreSQL, including rollback and persisted legacy-state
+refusal. Strict storage and engine Clippy passed for all targets with warnings
+denied. Documentation and whitespace checks passed. This does not
+prove arbitrary historical instance ID reuse safe; callers must choose fresh IDs.
+Public mobile-origin enrollment/checkpoint ergonomics also need review; current
+constructor coverage explicitly prepares those durable records in its fixture.
+
+#### DME180 migration round-trip and complete guard audit follow-up
+
+A real PostgreSQL migration 129 down/up regression passed. Empty installations
+can roll back and reapply, including repeated application. Captured and sealed
+cuts prevent rollback; refused DDL preserves exact sealed retry bytes. Compact
+acknowledgement receipts also prevent rollback. After source-cut history is
+explicitly purged, independent artifact-retirement tombstones still prevent
+rollback and remain claimable. Only explicit reconciliation/removal of every
+retained row permits down; reapplying preserves independent continuity ownership.
+
+A separate regression reproduced a false Pass in the effect guard journal:
+10,000 prepared receipts preceded two committed duplicates, and the capped list
+omitted both duplicates. Atomic dispatch admission remained protected, but its
+audit report did not describe the complete ledger. Both backends now aggregate
+all dispatched/committed/unknown/verified receipts in one SQL statement/snapshot.
+The verdict and counts cover every matching row; only the sorted duplicate
+witness sample is capped (16 groups). Proposed dispatches replace their stored
+identity rather than counting the same receipt twice. Wrappers forward this
+primitive; unsupported custom backends fail explicitly rather than certify a
+partial ledger. No migration or unbounded engine-side receipt collection is used.
+
+Twenty receipt paging/audit tests passed on SQLite, encrypted SQLite, PostgreSQL,
+and encrypted PostgreSQL. Cases cover empty history, state/kind filtering,
+destination grouping, cross-tenant/continuity isolation, stable bounded witnesses,
+proposal replacement and refusal of changed scope/kind/state. All 19 engine
+effect-guard tests and strict storage/engine Clippy (all targets, warnings denied)
+passed. Atomic duplicate refusals also fail the audit when
+they reserve an earlier Prepared attempt; they cannot be relabeled Pass merely
+because the earlier attempt has not dispatched yet. Audit fingerprints bind the
+verdict, counts, candidate request/destination and bounded witnesses; they are
+aggregate fingerprints rather than a cryptographic digest of every raw receipt.
+
+Scope remains open: manual API invariant evaluation, compensation planning,
+handoff compatibility and extracted fixtures still consume capped receipt lists
+at `orch8-api/src/continuity.rs`; they need complete evidence semantics as well.
+Mobile-origin enrollment needs a durable runtime identity established before
+universal effect enrollment (which currently derives a per-instance runtime
+namespace). Adding a facade method alone would not solve that ownership model.
+The public scoped portability/archive and wait/event/family/artifact transport
+requirements listed above remain outstanding.
+
+PR357 merged as d3097076955bcea148771617f0b9203c812f1f1e and PR358 merged as
+80e45155807001dd093910cc88d82ee425419950, each after all 25 checks passed. The
+existing merge watchers verified exact heads, tested trees and ancestry before
+removing the remote branches. The uncommitted source-cut/audit work was preserved.
+
+#### DME180 API safety decisions beyond the receipt prefix
+
+Two real HTTP regressions reproduced unsafe API decisions after 10,000 receipts:
+manual NoUnknownEffects and EffectAtMostOnce evaluation returned Pass despite late
+unknown/duplicate effects, and handoff preview returned compatible despite 21
+late unresolved effects. Both paths have now stopped using the capped legacy list.
+
+SQLite and PostgreSQL expose complete ledger state counts under a single SQL
+statement/snapshot, retaining at most 16 unresolved receipts and 16 unknown request
+witnesses. Empty and foreign-tenant/continuity scopes remain empty. Missing or
+unrecognized receipt states make complete safety queries fail rather than silently
+classify unparseable history as safe. The existing complete duplicate audit now
+shares that state classification refusal. Plain/encrypted adapters forward the
+summary operation; unsupported custom adapters fail explicitly.
+
+Manual evaluation uses a shared engine batch evaluator. Receipt-based rules use
+complete duplicate audits or complete unknown counts, caching each kind and state
+summary within the batch; other rules keep their existing non-receipt evidence.
+Public evidence vectors remain bounded samples of matching receipt request hashes.
+Aggregate fingerprints bind deduplication separately. Results are computed before journal appends, so evidence-fetch
+failure cannot first append a partial set of verdicts from that batch.
+
+Handoff preview compatibility uses the full unresolved count. Its response adds
+`unresolved_effect_count` and `unresolved_effects_truncated`; `unresolved_effects`
+is now an explicit bounded sample. Preview digests bind the complete unresolved
+count and sample. Handoff creation already rebuilds the preview, so it uses the
+same complete safety predicate before accepting a placement decision/preview hash.
+Clients must use the count/truncation fields rather than infer complete history
+from the sample. This is a point-in-time decision; it does not claim to serialize
+all later effect writes with handoff creation.
+
+All 28 receipt paging/audit/state-summary backend tests passed across SQLite,
+encrypted SQLite, PostgreSQL and encrypted PostgreSQL. All ten final HTTP tests
+passed, including resolution/compensation restoring a Pass and refusal when a late
+unknown receipt appears after a valid preview. Strict all-target Clippy passed
+for storage, engine and API with warnings denied. Remaining capped API paths include receipt display, extracted
+fixtures and compensation planning. Selection of workflow invariant definitions
+itself still uses its existing 10,000-row limit; this receipt-evidence fix does not
+claim complete enumeration of an arbitrarily large policy set. Full scoped/mobile
+portability, source enrollment, archive/quota and transport dependencies remain
+open as recorded above.
+
+
+The complete receipt-evidence fixes were isolated onto current main
+(80e45155807001dd093910cc88d82ee425419950) and published as
+[PR359](https://github.com/orch8-io/engine/pull/359), head
+ed969d6105844195d40f5cbcdda7b5468fb2539e. That exact independent patch passed
+54 targeted tests (28 backend, 19 engine, 7 HTTP), strict all-target Clippy,
+formatting, documentation and whitespace checks. It excludes pending source-cut,
+scoped portability and migration 129 changes. A digest proved the active source
+state stayed unchanged during isolation/publication. The clean temporary checkout
+was removed after the verified commit was pushed; only the primary worktree
+remains. Its exact-head/all-check merge watcher is running; no merge is claimed.
+
+#### DME180 complete compensation evidence and bounded dependency traversal
+
+The compensation HTTP regression reproduced omission after the 10,000-row prefix:
+a history with 10,001 committed effects and 21 late unknown effects produced only
+10,000 compensation steps and omitted the later uncertainty. Both backends now
+stream a single complete SELECT snapshot, validate each raw receipt's indexed
+identity and scope, and retain only compact committed/verified/unknown planning
+fields. Unrelated raw history is not accumulated. Plan/output memory remains
+linear in actionable steps and hazards; this does not claim constant-size plans.
+
+The planner groups receipts by block once rather than scanning every receipt for
+every block. It sorts each group newest-first with UUID tie-breaking and preserves
+reverse dependency order. An explicit DFS frame stack replaces recursive graph
+traversal. A 5,000-block dependency chain passes on a 256 KiB thread stack.
+
+All 33 storage tests passed, including plain/encrypted SQLite/PostgreSQL and a
+PostgreSQL advisory-lock barrier test: settlement changes while collection is
+paused cannot alter the original SELECT snapshot, and a fresh collection observes
+the update. Eight planner tests and eleven real HTTP tests passed. The HTTP case
+also creates and reloads a durable 10,001-step plan with all 21 uncertainty hazards.
+Strict all-target Clippy passed for storage, engine and API with warnings denied.
+
+The broader compensation lifecycle still needs work. Run creation currently
+inserts a record without atomically fencing forward execution; completion checks
+run steps/residuals rather than reconciling the final effect ledger. Dispatched
+receipts are not currently represented as uncertainty hazards. Template parameters
+are resolved against current instance context/outputs rather than immutable
+per-invocation compensation inputs. These existing gaps require source fencing,
+late-outcome reconciliation and durable invocation-specific bindings before the
+full compensation protocol is considered reviewed. The complete-history fix does
+not certify those lifecycle contracts.
+
+
+The compensation-history fix was published as
+[PR360](https://github.com/orch8-io/engine/pull/360) after 49 targeted tests on its
+isolated parent-based checkout (33 storage, 8 planner, 8 HTTP), strict all-target
+Clippy, formatting, documentation and whitespace checks. It is gated behind PR359.
+
+CI caught a response-contract regression in PR359: adding an aggregate fingerprint
+to `evidence_sha256` made fresh NoUnknownEffects evidence nonempty and added an
+extra entry for one unknown effect. The production code was corrected rather
+than weakening the existing client assertions. Manual and automatic guard reports
+now expose matching receipt request hashes only; aggregate fingerprints bind the
+deduplication key separately. A guard regression checks every exposed evidence
+hash against stored receipt requests.
+
+The repaired stack passed all 123 original TypeScript invariant/compensation/
+runtime-registration tests against its own real server and isolated PostgreSQL,
+19 guard tests, eight HTTP tests, strict all-target Clippy, formatting and docs.
+PR359 is now head 210da6ff9353832b4debf010339381c404befbf3; PR360 is rebased onto
+it at head 696a49a48124d53f97e8b102f798a9bd52806aa0. Both heads were atomically
+pushed with exact prior-head leases. Source digests verified preservation of the
+active work, and both clean repair worktrees were removed. Exact-head merge
+watchers have restarted; PR360 waits for PR359's tested merge proof. Neither PR
+is claimed merged while CI remains in progress.
+
+#### DME180 unsettled work remains visible during compensation
+
+A new planner regression reproduced omission of three unsettled states: a history
+containing Planned, Prepared, Dispatched and Unknown effects retained only one
+hazard. Complete compensation evidence now retains all unsettled states alongside
+committed/verified outcomes, while compensated/abandoned history remains excluded.
+Plans expose `PENDING_EFFECT_MUST_BE_SETTLED` for planned/prepared receipts and
+`IN_FLIGHT_EFFECT_MUST_BE_SETTLED` for dispatched receipts. Existing unknown-outcome
+hazards retain their original representation.
+
+The full HTTP recovery flow passed: one known committed effect is rolled back,
+while three unsettled effects preserve CompletedWithResiduals. After the backend
+confirms the in-flight commit and abandons never-dispatched work through the
+normal resolution API, the next plan contains only that late committed effect.
+Completing it produces a clean Completed result without compensating the prior
+already-compensated receipt again.
+
+The isolated stack passed all 55 Rust cases (37 backend, nine planner and
+nine HTTP evidence tests), 124 TypeScript E2E cases, strict storage/engine/API
+Clippy, formatting, documentation and whitespace checks. The real-worker case
+verifies a dispatched effect remains an in-flight hazard. Published as
+[PR361](https://github.com/orch8-io/engine/pull/361), initially at head
+45796a72800a7214469f67c78b4bcdbecded6799, gated behind PR360. This addresses the missing unsettled-state hazards, not the remaining
+source-forward fencing, final-ledger reconciliation or per-invocation binding
+requirements described above. A receipt created after the plan's read snapshot
+still requires those broader lifecycle contracts.
+
+
+CI then exposed a second compatibility regression in PR359 and PR360: the
+portable-continuity client expects the duplicate-guard summary to retain
+`duplicate effect dispatch or commit evidence`. The refusal and durable failure
+were correct; the complete-ledger summary had dropped that established phrase.
+The repair restores the existing wording while retaining complete counts and
+bounded witness details for both automatic and manual evaluations. The original
+portable-continuity assertion remains unchanged. Both merge watchers stopped
+on the failed jobs; no failed revision was merged.
+
+
+The summary-contract repair passed the unchanged real-server portable duplicate
+guard case, all 124 invariant/compensation/runtime E2E cases and 19 guard tests.
+Strict all-target engine Clippy, formatting, documentation and whitespace checks
+passed. The three PRs were updated atomically with exact prior-head leases:
+PR359 `c455b10fb66380de64665d92e989eb6c58ba5981`, PR360 `c1b2aeb562a6be3dca967d86c6064502f92fd99d`,
+PR361 `27aa80318c0c47259c5ccc0522cbfb8b7f451d92`. Source digests verified preservation of
+the broader active changes. All completed temporary worktrees were removed;
+only the active source-cut worktree remains. CI and tested-tree merge proofs
+are still required before any of these revisions is claimed merged.
+
+
+#### DME181 generic ownership CAS must preserve frozen source authority
+
+A new backend-matrix regression reproduced a source-fence bypass on plain and
+encrypted SQLite/PostgreSQL: after capture, the generic ownership CAS accepted a
+stale same-epoch, same-runtime `Owned` record and revived the frozen physical
+source. Its compare token did not include the source-cut phase. That undermines
+both transfer exclusion and any later compensation protocol built on the fence.
+
+Generic CAS now refuses to point ownership back to the physical source of a
+captured, sealed or retired cut. Retired transport payloads do not authorize
+source revival. A legitimate destination with a different physical instance can
+still become owner; explicit abort may restore a merely captured source through
+its existing transaction. CAS also rejects a record whose tenant/continuity
+identity differs from the row named by its arguments.
+
+PostgreSQL locks the ownership row before issuing the update and cut check as a
+fresh statement. Adding only a subquery to the original UPDATE is insufficient:
+its READ COMMITTED snapshot can miss a cut committed while the UPDATE waits for
+capture's row lock. SQLite takes its immediate writer transaction before the
+check. Validation is in progress, including a controlled PostgreSQL lock race.
+
+Compensation startup remains an open protocol item. Its eventual durable barrier
+must stop new forward admissions, preserve settlement of already-dispatched
+workers, bind the plan to the frozen owner/instance and include effects arriving
+between plan construction and the freeze. The existing transfer fence rejects
+worker lease mutations, so reusing it as a compensation fence would discard valid
+outcome reporting. A plain pause can be undone and is not a durable substitute.
+
+
+The controlled PostgreSQL race pauses actual capsule capture at its cut INSERT,
+then proves generic CAS is blocked on that capture's ownership row. Once capture
+commits, the repaired CAS refuses the stale update. A mutation run removing only
+the explicit pre-lock reproduced source revival despite retaining the UPDATE's
+cut predicate. The original production fix was restored after the failed run.
+The initial 69-case source-cut matrix and the repaired race passed; expanded
+continuity/recovery coverage and strict lint are being verified on the restored
+source. This source-cut repair remains part of the broader unmerged transfer work.
+
+
+Final restored-source verification passed 155 tests: 74 source-cut cases,
+14 general continuity cases and 67 portable-effect recovery cases. This includes
+all plain/encrypted SQLite/PostgreSQL legs, the controlled capture/CAS race,
+identity-mismatch refusal and valid post-abort/post-transfer operations. Strict
+all-target storage Clippy with warnings denied, formatting, documentation and
+whitespace checks passed. No local Rust compiler remains active from these runs.
+
+
+#### DME182 atomic compensation startup separates admission from settlement
+
+A real HTTP regression reproduced that rollback creation left the source owner
+`owned` and did not durably stop forward execution. The new `compensating`
+ownership state permanently closes forward effect admission at the same epoch.
+Atomic startup locks ownership and the source instance, compares the owner,
+instance metadata and complete compact effect set used by the plan, inserts the
+run, updates ownership and parks nonterminal source execution in one transaction.
+A changed snapshot or a concurrent active run refuses admission without a partial
+freeze. This includes effects that appeared while the preview was being built.
+
+Scheduler advancement, native effect admission, worker polling and generic owner
+CAS cannot resume a compensating source. HTTP and gRPC workers can still
+heartbeat and settle already-dispatched outcomes; completion records those
+outcomes without advancing forward execution. A subsequent explicitly requested
+run can compensate newly confirmed outcomes while the durable source fence
+remains. No new owner epoch is invented, and ordinary instance state changes do
+not authorize new effects.
+
+All 24 new storage cases passed across plain/encrypted SQLite/PostgreSQL. They
+cover concurrent starts, injected failure between run insertion and owner freeze,
+stale effect evidence, prepared forward admission, all worker poll variants and
+preserved in-flight heartbeat/completion authority. The initial six HTTP evidence
+cases passed, including the startup regression. Real-worker E2E and cross-crate
+verification are in progress. The new ownership value requires readers that
+understand `compensating`; old readers fail to decode rather than reopening the
+source. This feature is not published as a release.
+
+Remaining work includes immutable per-invocation compensation parameters/rules,
+explicit outcomes/archival for a compensation-fenced paused source, remote/mobile
+owner acknowledgement where authority is held in a separate database, and deeper
+final-ledger reconciliation against administrative/manual effect resolution.
+The existing raw compensation-record insert remains a storage primitive; public
+HTTP startup uses the new atomic admission method.
+
+
+Further startup review reproduced two bypasses on all four backends: a cached live
+migration could rewrite compensating ownership, and attempt identity preparation
+could append a new planned receipt after the fence. Compound migration/handoff
+updates now exclude `compensating`, and attempt preparation checks the state under
+its ownership lock. All named queue paths also check the durable fence, with
+positive controls proving that other eligible executions still dispatch.
+The expanded isolated matrix passed 150 cases (40 compensation/startup, 14 general
+continuity, 37 complete ledger and 59 portable recovery). HTTP/gRPC and E2E checks
+remain in progress on the exact isolated patch.
+
+The full distributed proof remains incomplete for independent offline owner
+stores and legacy worker rows without effect bindings. Existing legacy completion
+is intentionally ledger-free in `commit_external_worker_effect`; a local source
+freeze cannot by itself account for such an unrecorded outcome. Those require
+explicit owner stop/outcome acknowledgement and durable worker receipt adoption,
+not an assumption that the local ledger already contains every remote effect.
+
+
+Final isolated compensation-fence verification passed 189 Rust tests (150 storage/
+continuity/ledger/recovery, six HTTP, 14 gRPC and 19 engine guard), all 125 TypeScript
+E2E cases, strict all-target storage/engine/API/gRPC/CLI/mobile Clippy, formatting,
+typecheck and docs checks. The final real-worker case records an in-flight commit,
+refuses forward propagation after ordinary rescheduling and explicitly compensates
+that newly known outcome in the next run. Complete ledger checks and tenant-indexed
+poll fences were tested on the final isolated source.
+
+PR359 merged at `0f95e86e309b73b140a7fb8b1a0a9940c86e21cc`, PR360 at
+`4c9f2ee830342db852df64707a22098f5b321d23`, and PR361 at
+`6c84d6c00441caa569dba54ddf8566fc23c04494`. Each had 25 successful checks,
+exact tested/merged tree equality and head ancestry proof. Their merged local and
+remote branches were removed. The compensation-fence patch is being published
+separately from the remaining transfer work.
+
+
+The isolated compensation fence was published as [PR362](https://github.com/orch8-io/engine/pull/362)
+at head `973888ff9d61f5d4ffdf17a7190d45437410d82a` on merged main
+`6c84d6c00441caa569dba54ddf8566fc23c04494`. Its completed clean temporary worktree was removed
+after verifying the pushed head. The active review branch now uses that main
+base; a file manifest proved preservation of every working source file through
+the index/base change. The three merged review documents were materialized from
+their exact committed blobs. Transfer/mobile work remains uncommitted; PR362
+requires its own complete CI and tested-tree merge proof.
+
+
+#### DME183 compensation creation needs lost-response recovery
+
+The next confirmed lifecycle gap is a lost creation response. Startup allocates a
+random run ID, persists the run and returns it only in the POST response. The
+public API can fetch a run only by its known ID; the storage trait has no active
+lookup by continuity. A retry receives the active-run conflict without learning
+the committed ID. With a durable source fence, recovery must not depend on the
+client having received that first acknowledgement.
+
+Add an optional durable request UUID to creation, scope its deterministic run
+identity to tenant and continuity, and return the original persisted run for a
+retry of the same intent, including after completion. Preserve the existing
+conflict behavior for distinct/legacy requests. Verify lost acknowledgement,
+same-key concurrent starts, immutable plan replay after evidence changes,
+completed-run replay and tenant/continuity isolation. This gap is still open;
+PR362 provides the local source fence and does not claim to resolve it.
+
+
+PR362 CI repair: deterministic sub-microsecond instance timestamps reproduced
+the PostgreSQL admission failures. Comparing the bound expected timestamp in
+the locking SQL predicate fixes native precision without weakening rejection of
+changed state, sequence or revision. All 40 storage cases pass across plain and
+encrypted PostgreSQL/SQLite. HTTP admission retries up to eight fresh complete
+snapshots when normal completion races planning; the seven isolated HTTP tests
+include a forced completion barrier. Nested cancellation now uses a durable
+input barrier rather than a 200ms assumption.
+
+Full shared verification exposed hard-coded event-test ports and SSRF tests
+attached to a server configured to allow private networks. Event tests now honor
+the configured URL/port. SSRF tests moved into the common self-managed registry
+and explicitly disable private access. A reachable local HTTP positive control
+proves the blocked workflow sends no request; it fails with protection disabled.
+All 1,586 shared tests and five standalone SSRF cases pass, plus strict all-target
+Clippy across storage/engine/API/gRPC/CLI/mobile, fmt, typecheck and docs.
+
+DME183 now has an uncommitted recovery implementation with all 15 HTTP safety
+tests passing on the active source: same-intent concurrent retries, saved-plan
+replay, completed replay, committed-acknowledgement loss, legacy active lookup
+and scope/auth validation. Backend/CLI/E2E verification and isolated publication
+remain necessary. Switching checkouts with a shared Cargo target can reuse a
+newer test executable from the other checkout; workspace input mtimes were
+refreshed before this run, the root crates rebuilt, and the expected 15-test
+count was checked rather than accepting an obsolete seven-test executable.
+
+The CI repair is published at `f2c1fd9b1b274865ffe02c7ebe8ac3d5747ee027`
+(tree `25e84b239ac5e3b31e7fa37b9168653cf1a71bcb`). The completed repair
+worktree was removed after checking clean status and the exact pushed head; a
+content digest proved preservation of the active source. Only the primary
+checkout remains. The exact-head watcher is gating PR362 on all 25 successful
+checks and requires tested/merged tree equality and ancestry before branch
+cleanup. The PR is not yet merged.
+
+DME183 refreshed-source verification also passed all 48 compensation storage
+cases across both backends and encryption wrappers, including active-state
+lookup, scope isolation, terminal hiding, decrypted parameters and fail-closed
+record/index mismatch checks. Formatting, TypeScript and documentation checks
+passed; isolated follow-up publication remains pending.
+
+DME183 strict all-target Clippy also passed for storage, API and CLI (including
+their engine dependencies) on the refreshed root source.
+
+
+DME183 is implemented in [PR363](https://github.com/orch8-io/engine/pull/363),
+head `f92626a10330bd32aeaca09e5e71a59c5d1ba2d2`, tested tree
+`460f8ce4e5d77ec5eef1fdcfccf32cf4cf904786`, based on the exact repaired
+PR362 head. Isolation copied only the compensation API region, active lookup
+methods/forwarders, recovery CLI, tests and operations docs; the broader source-cut
+work remained outside the PR. The final isolated stack passed 64 Rust cases
+(48 storage, 15 HTTP, one identity unit), 129 real-server PostgreSQL E2E cases,
+strict all-target storage/engine/API/gRPC/CLI/mobile Clippy, fmt, typecheck and
+docs. The completed clean worktree was removed after verifying its exact pushed
+head; root source content was preserved. CI and merge remain pending.
+
+The isolation review additionally reproduced inconsistent known-ID reads on all
+four storage variants. Active and known-ID lookups now share validated decoding
+against indexed tenant, continuity, ID, state and version. The corruption matrix
+checks all five fields on both paths. The prerequisite-aware PR363 watcher waits
+for PR362's completed tested-tree/ancestry merge proof before considering the
+follow-up's own 25 CI checks and exact-head merge proof.
+
+#### DME184 compensation mutation identity needs adversarial review
+
+Both backend `cas_compensation_run` implementations currently predicate writes
+on the caller's tenant, run ID and expected version while serializing the whole
+next record. Reader consistency checks now detect mismatched scope and progress,
+but mutation should also prevent introducing inconsistent identity or regressing
+revision data. The next review should reproduce tenant/continuity/source identity
+changes and invalid revision increments through the storage API, then enforce
+only the invariants supported by the actual compensation lifecycle. This is a
+review candidate, not yet a verified fix. Immutable invocation-specific rules
+and parameters, offline owner acknowledgement and explicit archival outcomes
+remain separate required work.
+
+
+PR362's repaired head `f2c1fd9b` passed the shared suite but its standalone
+lifecycle suite still expected a completed compensation to return to `waiting`.
+The source correctly remained paused. The correction is published at
+`a7490e7f44ecb70dc54ff4140407f3f471eb439f`, tree
+`b7f52dfd4430ba7b32ed165477a658b97d4c32e6`. Only the integration test and
+source-fence review document changed; production Rust is unchanged. All 221
+lifecycle/isolation cases passed with assertions that migration planning and
+rejected apply preserve paused/compensating authority and compensated evidence.
+The fixture uses its own OS-temporary artifact directory and removes it after
+server shutdown; verification found no new directory left behind.
+
+The recovery PR363 was refreshed onto that correction at
+`bfa7d369024b82455ef015a819082f94778a2aeb`, tree
+`06d7183baea8aea21f52332bd9eca44c1e272c81`. Its Rust code matches the earlier
+verified recovery source. The exact refreshed server passed 221 lifecycle/
+isolation and 129 invariant/compensation/runtime cases; typecheck, formatting
+and docs checks pass. The old stopped watchers were archived and restarted for
+the exact new heads.
+
+DME184 is now reproduced and fixed in [PR364](https://github.com/orch8-io/engine/pull/364),
+head `f1fceaa67a3891db6ce46f0c5dd2e62a4a4b4cdb`, tested tree
+`a20a3c72d0b397da7a23651a38cce08268c5b006`, based on refreshed PR363. The
+old CAS accepted a foreign tenant on all four storage variants. Both backends
+now validate tenant and consecutive, SQL-storable revision inputs, and bind
+continuity, source instance and original JSON creation time in their atomic
+UPDATE. Rejected identity/revision changes preserve the stored run. Concurrent
+valid claims still have one winner, and fresh parameter ciphertext remains
+supported. A restored run at the final storable revision previously returned
+500 on claim; version advancement now returns 409 without changing progress.
+
+The final isolated guard stack passed 86 Rust cases (56 compensation storage,
+14 continuity, 16 HTTP), 350 real-server PostgreSQL E2E cases (221 lifecycle/
+isolation and 129 invariant/compensation/runtime), strict all-target Clippy for
+storage/engine/API/gRPC/CLI/mobile, formatting, typecheck and docs. Completed
+source-fence repair, recovery sync and mutation checkouts were removed only
+after clean/pushed-head verification. A root content digest proved preservation
+of every active working source through publication and final cleanup; only the
+primary worktree remains.
+
+CI and merges remain pending: PR362 has its own 25-check exact-head gate; PR363
+waits for PR362's complete tested-tree/ancestry merge proof; PR364 then waits for
+PR363's equivalent proof before evaluating its own 25 checks. No release is
+published. Immutable invocation-specific compensation rules/parameters, offline
+owner acknowledgement, explicit archive outcomes and the broader source-cut/
+mobile work remain required; this closes the demonstrated mutation gap only.
+
+
+#### DME185 acknowledged source cuts must keep their ownership fence
+
+Fresh root compilation and the complete mobile library suite passed 701 tests
+with the compensation guards and scoped source-cut changes. The next review
+then reproduced a source authority regression on all four storage variants:
+`cas_continuity_owner` excluded acknowledged cuts from its refusal, allowing the
+accepted destination owner to point back to the old physical source at the same
+epoch or a newer one. Both backends now retain that acknowledged-cut fence.
+
+The final targeted matrix passed 159 cases (78 source-cut, 14 continuity,
+67 portable recovery), plus strict all-target storage Clippy and docs checks.
+The new test preserves the accepted owner after each refused source revival,
+allows a genuinely fresh later destination and refuses the old source again
+after that later move. Existing delayed-acknowledgement and portable proof/
+recovery cases remain green. Logs: `/private/tmp/orch8-mobile-source-cut-final.log`,
+`/private/tmp/orch8-acknowledged-source-before.log`,
+`/private/tmp/orch8-source-cut-ack-final.log`,
+`/private/tmp/orch8-source-cut-ack-lint.log`. This fix remains in the broader
+unpublished source-cut work.
+
+#### DME186 physical identity must survive history GC and archival
+
+Retained-cut protection alone is insufficient. Source cuts are continuity
+children removed by history purge, new continuity creation currently checks
+import bindings rather than all retired sources, and compound import/activation
+paths write ownership directly. A physical UUID must not gain fresh authority
+through another continuity/account/catalog/tenant or through restore after GC.
+The archive API also currently treats only terminal native states as outcomes;
+a transferred source remains paused, and account retirement can locally cancel
+it even though a verified destination owns the continuing logical execution.
+
+The required identity lifetime, concurrency, downgrade and explicit-archive
+verification gates are recorded in
+[Physical instance lifetime and acknowledged archival](2026-10-27-physical-instance-lifetime.md).
+The next implementation must use compact independent retirement evidence, cover
+all admission/restore/ownership paths, preserve valid late outcomes and callback
+quarantine, and represent transferred ownership in archival/history without
+inventing completion. Source-cut publication remains pending these safety and
+lifecycle contracts; immutable invocation-specific compensation inputs and
+independent offline-owner acknowledgement remain required review work too.
+
+#### DME187 permanent physical identity after history collection
+
+A four-backend regression used real terminal-instance purge after acknowledged
+transfer, then recreated the source physical ID as scheduled work. Every plain
+and encrypted SQLite/PostgreSQL leg reproduced the authority-loss boundary.
+The current work adds independent compact retirement evidence (PostgreSQL 130,
+SQLite 60), backfills retained sealed/retired/acknowledged cuts and installs
+database guards for native insertion and new/revived continuity ownership.
+Markers contain IDs and retirement time, no payload/context, and survive native,
+continuity and artifact history GC. Marker mutation/deletion is refused;
+PostgreSQL rollback cannot remove nonempty security evidence. SQLite trigger
+bodies are installed atomically outside its schema statement splitter.
+
+The expanded run passes all 83 source-cut and 67 portable-recovery tests. Direct
+coverage includes admitted writes, snapshot restore, mixed fresh/retired batch
+atomicity, foreign tenants/new continuities, valid fresh IDs and a controlled
+PostgreSQL insertion that resumes after waiting for the retiring transaction's
+uniqueness lock. Strict all-target storage Clippy and documentation checks pass.
+The full mobile suite is being rerun against this schema/trigger change.
+
+This does not yet complete the lifetime contract. All existing-row forward
+mutation/claim paths, inconsistent legacy ownership, upgrade/reopen/downgrade
+writer cases, compound recovery/activation races and transfer-aware acknowledged
+archive/native payload GC still require explicit tests and implementation.
+Detailed evidence and remaining gates are in
+[the lifetime plan](2026-10-27-physical-instance-lifetime.md).
+
+DME187 validation update: the full mobile library suite passes all 701 tests
+against the first retirement implementation, with no failures or skips. The
+remaining lifetime gates and bounded SQLite backfill work remain open.
+
+#### DME188 existing source rows, bounded upgrade and late outcomes
+
+Retirement evidence now gates native claiming and every global/tenant/capability
+worker polling path, including PostgreSQL's second capability-claim phase. An
+eight-case four-backend baseline demonstrated that collecting destination
+continuity history revived an existing source row and pending legacy task;
+those regressions now pass alongside healthy native/worker controls. Native
+per-tenant and uncapped modes refuse the source without modifying its original
+claim; pending legacy evidence is retained. The engine checks permanent physical
+retirement before treating missing continuity as legacy ownership, and propagates
+retirement-read errors. Encryption/fault decorators preserve that contract.
+
+SQLite schema-60 evidence/guard installation and its completion marker commit in
+one immediate transaction. A failed-backfill injection proves failed open and no
+partial completion; retry backfills old cuts, and subsequent reopen skips the
+completed history scan. Rollback dependency order now preserves the permanent
+source-recording trigger. Combined storage tests pass 215 cases; the engine
+missing-history/foreign-scope/read-failure test passes on SQLite and PostgreSQL.
+
+A real HTTP worker completion and changed-payload retry now verify all four
+backends retain the original outcome without rescheduling the retired source,
+restoring context or publishing a forward block output. All 20 HTTP safety cases
+pass. Older-writer forward state changes, captured-cut admission and compound
+races still require explicit enforcement/verification; transferred archive
+receipts, native payload GC and immutable invocation-specific compensation
+parameters remain open. The full objective is not complete.
+
+DME188 validation update: strict all-target Clippy passes for all six affected
+packages; both SQLite point-index tests and the complete 701-test mobile library
+suite pass after the new admission/one-time-backfill changes. The 215 storage,
+20 HTTP and engine authority checks remain green. One completed build executable
+from an already removed repair worktree was removed (277,535,344 bytes); only the
+active root worktree remains. The broader lifetime/portability objective remains
+open with its remaining gates in the lifetime plan.
+
+#### DME189 persistent source freeze and PostgreSQL worker snapshot freshness
+
+Captured sources are excluded from native/worker claiming and mixed scheduling
+batches; permanent native forward writes and legacy worker claims are also
+refused by database triggers. Recording retirement atomically quarantines native
+state without deleting context or existing worker outcome evidence. SQLite 61
+backfills quarantine once and commits its completion atomically; interrupted
+completion rolls back, retry repairs and reopen skips the completed scan.
+
+A controlled PostgreSQL test demonstrated a repeatable-read capture returning a
+snapshot that missed a worker committed while capture waited on its foreign-key
+parent lock. New enqueue now touches the parent's MVCC version before its worker
+row/index and refuses enqueue after capture. Stale capture aborts, and fresh
+capture sees the pending task. Matching parent-before-worker resolution/retry
+ordering passes a deterministic duplicate-enqueue/retry barrier without deadlock.
+This worker-specific proof does not complete the other child-evidence race audit.
+
+Expanded validation passes 123 full-matrix source-cut cases plus one schema-61
+atomic/reopen case, 56 compensation, 67 portable-recovery, 136 storage integration
+and 20 HTTP safety cases. Strict lint passes across storage, engine, API, gRPC,
+CLI and mobile. Further scheduler/mobile checks and the remaining portability,
+archive, invocation-binding and ingress gates remain active.
+
+PR363 and PR364 merged after all 25 checks each, with exact tested-tree equality
+and ancestry proved; their exact merged branches were deleted. The active review
+branch advanced from 19c74d41 to main 21cb1454, preserving hashes/modes for all
+2,195 existing working files and adding only the two merged review documents.
+Only the active root worktree remains. No release was published.
+
+DME189 scheduler update: a retirement stop must bypass a forward claim predicate
+that deliberately rejects retired rows. It now relies on permanent retirement
+plus a Running-to-Paused state CAS, preserving concurrent terminal outcomes and
+the original claim fence for non-retired superseded work. All 11 selected engine
+scheduler/driver tests pass, including the new inconsistent-retired-running-row
+case on SQLite and PostgreSQL. The immutable retirement evidence never certifies
+an independent/offline callback has stopped.
+
+DME189 final local validation: all 701 mobile library cases pass after the final
+source-freeze/enqueue/scheduler changes; both point-index checks and strict
+six-package all-target Clippy pass. Main and origin/main are 21cb1454 after the
+verified PR363/364 merges, with merged branches cleaned. The newer foundation is
+being preserved in a draft PR while its named source/transfer/archive gates are
+still under review; the full objective remains active.
+
+#### DME190 production mobile artifact features and standalone lockfile
+
+PR365 draft CI caught artifact constructors missing in a production-only mobile
+build and a stale fuzz lockfile. The former reproduced locally without dev
+feature unification. Mobile now opts into local filesystem/memory artifacts;
+server artifact builds keep S3. The compiler feature trace verifies no object-store
+cloud/S3 feature in the production mobile dependency graph. All 13 artifact cases
+and all four locked workspace metadata gates pass, with no dependency version
+upgrades. The fuzz repair adds only the existing SHA-256 dependency reference.
+A native mobile build and refreshed CI remain the next verification steps.
+Ten obsolete, non-running test executables were removed (1,119,354,208 bytes),
+with newer-input, Cargo test-fingerprint and process checks recorded separately.
+
+DME190 update: the production mobile native library build and strict
+production-only Clippy both pass. The compiler graph verifies local artifacts
+without cloud clients, and the lock repair changes no dependency versions.
+Draft CI will be refreshed after the repair is pushed; portability/lifetime
+behavioral gates remain open.
+
+DME190 repair verification: combined six-package all-target strict Clippy passes
+after the feature split, as do production-only mobile check/build/lint, the actual
+no-cloud artifact feature trace, 13 artifact tests and all four locked graph gates.
+The repaired revision will remain a draft with its existing behavioral gates.
+
+#### DME191 compound worker resolution target identity
+
+Reproduced ten unsafe transitions across the four-backend matrix: SQLite
+accepted a valid task fence with another instance ID; both databases accepted
+a replacement task under another instance or a node belonging to another
+instance. The legacy retry API reproduced the mixed-parent mutation on all
+four backends. These are storage API authorization-boundary failures even
+when current engine callers normally construct matching targets.
+
+Fenced resolution now validates the original task's instance and block, the
+replacement task's instance and block, and the optional node's instance and
+block before any mutation or attempt event. Missing/mismatched targets return
+false. Legacy retry applies the same checks and returns a conflict. SQLite
+uses BEGIN IMMEDIATE; PostgreSQL keeps native parent before worker and node
+locks. Plain and encrypted tests include valid retries/node failure alongside
+foreign-instance, foreign-node, wrong-block and missing-node refusals.
+
+All 280 storage regressions pass: 20 identity cases, 124 source-cut cases
+(including the controlled PostgreSQL enqueue/retry lock-order race), and 136
+existing storage integration cases. Strict all-target storage Clippy also
+passes. All 24 engine-level distributed scenarios and 23 HTTP continuity /
+export-retry scenarios also pass. The identity fixtures additionally use
+distinct tenants for foreign-target rejection; the final 20-case matrix and
+24 distributed scenarios pass together.
+This does not close the captured-owner, suspension-transport, durable transfer
+receipt or immutable-invocation gates.
+
+#### DME192 export regression fixtures must satisfy the new lifetime contract
+
+The full engine run exposed an export-admission fixture with no artifact backend;
+configuration rejection masked its intended worker-in-flight assertion. The
+fixture now uses isolated in-memory artifacts on both SQLite and PostgreSQL,
+while artifact-free fixtures remain available for configuration tests. The
+24-case distributed suite passes.
+
+Exact-head PR365 CI then failed all three HTTP retry scenarios because their
+last step advanced ownership while pointing at the permanently retired source
+ID. They now assert this revival is refused, create a fresh destination physical
+instance, advance ownership there, and still assert stale export replay is
+refused. All three scenarios pass alongside the 20 HTTP safety cases. No
+production retirement guard was relaxed.
+
+DME191/DME192 final validation: strict all-target Clippy passes across storage,
+engine, API, gRPC, CLI and mobile. A separate SQLite-only storage library lint
+with artifacts-local/test-util and no default features also passes, covering
+the artifact-enabled test helper without PostgreSQL. Formatting, documentation
+and whitespace checks pass. The broader transfer/archival gates remain open.
+
+#### DME193 captured-source authority requires database enforcement
+
+A four-backend baseline reproduced twelve unsafe transitions: direct native
+forward-state writes after capture, raw old-writer ownership restoration, and
+generic owner CAS advancing to a fresh physical destination before sealing.
+The existing CAS predicate only rejected a destination that was itself a frozen
+source; it did not freeze the originating continuity during capture.
+
+PostgreSQL migration 131 and SQLite schema 62 add captured-source native and
+owner guards. Native forward state, fresh claim/fire time, physical recreation,
+owner/runtime/epoch/instance changes and JSON/indexed-state disagreement are
+refused. A same-owner transferring timestamp refresh, compensation fence and
+terminal native outcome remain admissible. Active captured/sealed cuts cannot
+be silently deleted by an ordinary history sweep. Explicit unsealed abort marks
+the cut aborted before restoring the owner/native state inside the same
+transaction; a failure must roll back that release as well. Sealed publication
+still permits ownership at a fresh destination; it never permits source revival.
+
+SQLite installs complete trigger bodies outside the schema splitter. Its
+captured-source quarantine and version-62 completion marker commit atomically,
+then future opens skip the historical scan. PostgreSQL uses volatile AFTER
+checks to re-read cuts committed while an older native/owner writer waited.
+Pre-guard test fixtures explicitly disable/reinstall guards to inject invalid
+legacy rows, rather than using normal forward APIs to create forbidden state.
+
+New cases exercise authority rejection, valid abort, post-seal ownership,
+compensation/terminal outcome preservation, abort rollback, active-cut deletion,
+JSON/index disagreement, controlled PostgreSQL parent waits and interrupted
+SQLite upgrade/reopen. All 175 source-cut cases, 56 compensation cases, 67 portable-recovery cases,
+136 storage integration cases and 15 migration checks pass. All 701 mobile
+case tests and 47 engine/HTTP integration cases also pass. Strict all-target
+lint across the six affected runtime packages passes.
+The broader child-evidence snapshot, suspension transport, accepted-transfer
+receipt, archive and immutable-invocation gates remain open.
+
+#### DME194 report the actual storage migration ceiling
+
+The shared storage schema constant still reported 129 while the published draft
+already contained migration 130. It now reports 131 alongside the new forward
+migration. The migration-ceiling regression compares this constant with the
+actual newest migration file, covering health/backup metadata drift.
+
+#### DME195 retain active native history and keep admission checks indexed
+
+Ordinary terminal purge already skips active source cuts; new mixed-batch
+regressions verify it still deletes a healthy terminal sibling. Older raw DELETE
+writers lacked that protection. Database guards now retain captured/sealed native
+rows and their local input/suspension/outcome history until explicit abort,
+retirement or acknowledgement. After release, normal terminal GC still succeeds.
+An injected pre-guard missing native row cannot be recreated under the captured
+physical ID, and its cut evidence remains. SQLite authorization-dependent replay
+of already-lost native history is not certified by this result.
+
+The installed SQLite trigger predicates initially caused full cut-table scans;
+a regression reads their actual SQL from sqlite_master and EXPLAINs every cut
+lookup. Explicit partial-index predicates and three separate owner identity
+lookups now make all seven installed guard lookups indexed point searches.
+Generic owner CAS also had a retained-history scan. It now uses the independent
+permanent retirement key and separate active source/continuity point lookups on
+both databases. A private-statement SQLite EXPLAIN test proves those exact CAS
+queries use the existing identity and partial indexes without scanning history.
+No extra history index or payload copy is added.
+
+#### DME196 live migration must not retire its own rollback source (open)
+
+PR365 head 349a7b87's E2E logs expose a production interaction: the live migration
+apply endpoint in orch8-api/src/continuity.rs calls export_paused_capsule to
+prepare a rollback capsule. That API now seals a physical ownership transfer,
+permanently retiring the same source that the subsequent in-place migration
+tries to retain. The database correctly refuses the revival. Live migration and
+rollback need a separate coherent local recovery snapshot contract that does not
+pretend a snapshot is a runtime handoff; do not relax source retirement to make
+these tests pass. This is a merge gate alongside the remaining transport/archive
+contracts. The E2E suite also retains an obsolete expectation that repeating an
+identical exported handoff returns 409; the durable export retry contract instead
+recovers the original response. That assertion needs updating and verification.
+
+The same head's unit job exposed another artifact-free cloud fixture. The real
+cloud/phone harness now configures isolated in-memory artifacts on each backend
+so in-flight handoff tests reach worker/effect admission. All eight roundtrip
+scenarios and strict harness/scenario lint pass.
+
+DME193/DME195 final concurrency verification also includes native deletion
+waiting behind capture, alongside native forward update, owner replacement and
+downgrade. All four controlled scenarios refuse stale authority/history loss
+after the wait. The final test orchestration passes strict lint. SQLite-only
+embedded-feature lint, formatting, documentation and whitespace checks pass.
+The DME196 migration/retry E2E work and broader transfer/archive gates remain open.
+
+
+DME196 local recovery follow-up (work in progress): live migration now prepares a
+bounded local source snapshot without a transfer cut, owner change, or physical
+retirement. A separate purpose-bound signed/encrypted envelope authenticates the
+plan, tenant, continuity, physical instance, original epoch, source definition,
+checkpoint and expiry. Its stable create-only artifact has a durable independent
+expiry cleanup reservation before upload. Rollback authenticates both the bytes
+and the complete stored reference; a bare matching artifact hash is insufficient.
+
+Commit locks continuity, native instance and plan; checks the exact target
+sequence definition, native timestamp, latest checkpoint and a canonical digest
+of the complete raw persisted plan/source evidence. Encryption decorators retain
+that raw digest while opening source fields. Native execution nodes and queued
+inputs remain in place; rollback restores the original absolute timer deadline.
+No retirement guard is relaxed. PostgreSQL child-row locks protect existing
+outputs, nodes, externalized payloads, checkpoints and effect receipts while the
+final evidence is checked. Insert/callback races and generation semantics still
+need their separate broader review.
+
+Local verification: 16 HTTP cases pass across plain/encrypted SQLite/PostgreSQL,
+including signed recovery with node/input/deadline preservation, changed source
+context, newer paused target context and tampered signature metadata. Storage
+snapshot cases (20), migration storage cases (14), compensation-start cases (56)
+and effect transfer cases (40) pass. The latter now assert export itself freezes
+authority, retired sources reject forward state writes, and direct provider entry
+still fails. The new stale-evidence cases change output, execution tree, plan
+payload or target definition without advancing native updated_at; each refuses
+commit without advancing the owner/checkpoint or retiring the instance.
+
+The stricter transition metadata/version validation and final expiry-after-wait
+fencing pass the complete 146-case Rust regression run and strict all-target
+Clippy across storage, engine and API. The three previously failing TypeScript
+suites pass 299 cases per backend with fresh PostgreSQL/SQLite suite databases
+(239 unchanged cases plus the final 60-case migration suite rerun). The rollback
+case now delivers a real human response, reaches completion, preserves all prior
+output history and produces exactly one acceptance receipt and one handler
+result. TypeScript checking, minimal embedded storage lint and formatting pass. Legacy rollback envelope/key
+rotation compatibility, atomic provenance, worker completion integration and the
+other transport/archive merge gates remain open. This follow-up is not evidence
+that PR365 is ready to merge.
+
+#### DME197 retain the source definition through snapshot commit (fixed)
+
+The PostgreSQL snapshot reader loaded the source sequence without retaining a
+row lock. Local migration locks the destination definition, then compares its
+full source fingerprint before updating the migration record. A concurrent
+non-key source-definition update could commit after that comparison and before
+the migration committed. The same reader is used by physical transfer capture.
+SQLite already holds its writer reservation across the read and commit.
+
+A controlled PostgreSQL regression pauses migration at its first record write,
+after its final source proof. Before the fix, a source handler-definition edit
+commits while migration is paused; the regression fails with “source definition
+changed after the migration's final source proof.” The reader now takes FOR
+SHARE on the source sequence, retained by the enclosing transaction. KEY SHARE
+would allow the non-key definition edit. The writer must wait until migration
+commits and then remains free to edit the original definition. All 21 local snapshot tests and 175 transfer-cut tests pass, including the
+controlled source-definition race.
+
+#### DME198 durable worker outcome integration must bind the invocation (open)
+
+HTTP completion in orch8-api/src/workers.rs settles the effect, marks the task
+completed, then separately writes native output/context/node/state. Its retry
+path can repair a crash between these writes, but skips the old continuity-epoch
+fence for an already completed task and finds a currently live node by block id.
+A later migration or loop invocation can therefore be mistaken for the original
+integration target. Paused/retired/foreign-owner native execution deliberately
+skips propagation after accepting the task outcome; that evidence must remain
+recoverable without the original worker retrying forever.
+
+gRPC complete_task in orch8-grpc/src/service.rs uses the same separate task and
+native writes, but rejects an already completed task instead of recovering the
+integration. It also validates merged context size after settling the effect and
+completing the task. Both snapshot readers currently exclude pending/claimed
+workers but do not transport or reconcile a completed-but-unintegrated outcome.
+Worker tasks carry continuity_epoch and effect_id, but no immutable native node
+or invocation-generation binding. Cleanup/re-dispatch can remove old task rows.
+
+Required next contract: one durable outcome and integration receipt per task
+invocation, separate from hot task history, with exact tenant/physical execution,
+continuity epoch, sequence and native node/generation binding. Atomic native
+integration must consume the retained outcome at most once and preserve it when
+the native target is paused, retired, migrated or gone. HTTP, gRPC, delegation
+and background recovery must share this operation; a completion retry recovers
+the original result without injecting it into a newer invocation. Context bounds
+must be checked before first outcome commit while already durable provider
+outcomes remain recorded for reconciliation. Pending integrations must be
+reconciled or transported explicitly before a migration/transfer can certify a
+complete recovery point. Blanket refusal of all waiting workflows is not a fix.
+
+Verification must cover process failure after task completion, paused completion
+followed by resume without another worker call, duplicate HTTP/gRPC callbacks,
+old callbacks after loop reuse or migration, simultaneous completion/lease expiry,
+completed outcome during capture, malformed/oversized output, scoped encryption,
+receipt retention after native/task GC, and delegation recovery. DME198 remains
+a merge gate; passing DME196 migration tests does not prove this contract.
+
+
+#### DME199 retained execution nodes must keep their branch identity (fixed)
+
+The migration compatibility check indexed block type and parent id, but omitted
+branch_index. Moving a block to another parallel/race branch, router route or
+try/catch arm retains its id/type/parent while changing the executable meaning
+of the retained node. Completed native nodes also participate in branch outcome
+selection, so accepting a completed node under a different branch is unsafe.
+
+Two regressions fail before the fix: a waiting parallel node can change branch
+without refusal, and a negative persisted branch index is accepted. The target
+index now uses the same child-slice traversal and branch positions as native
+build_nodes, and checks the retained branch identity as well as type and parent.
+Unchanged nested loop/foreach bodies remain supported; a blanket refusal of
+suspended/dynamic execution is not introduced. All 93 evaluator tests pass.
+All 28 local recovery HTTP cases pass across plain/encrypted SQLite/PostgreSQL,
+including rejection of a real parallel branch move, compatible parallel
+apply/rollback with unchanged node identities/states and queued input, and
+planning classification. Planning now reports INCOMPATIBLE:EXECUTION_GRAPH
+before apply independently checks the coherent recovery point. All three
+continuity E2E suites pass on PostgreSQL and SQLite (300 cases per backend:
+239 unchanged cases plus the final 61-case migration suite rerun). A real
+parallel human wait completes after rollback without replaying its completed
+sibling branch or losing prior output history. Strict all-target Clippy,
+TypeScript checking and formatting pass. Sibling execution order, dynamic
+injection and invocation generation remain separate review gates.
+
+DME198 binding design follow-up: task id/claim epoch must identify the durable
+outcome; block id alone cannot identify its native integration target. Existing
+RuntimeContext.run_id distinguishes retry/resume/DLQ runs, but is shared across
+loop iterations and parallel activities. A tree outcome therefore also needs the
+original node identity and activation generation (verify node.started_at reset
+semantics before using that timestamp as a nonce). Flat execution needs the
+original run/step-start binding. A global step counter is insufficient because
+other parallel nodes can legitimately advance it. Capture the binding atomically
+at durable dispatch, retain the accepted outcome/integration receipt independently
+of native/task GC, and do not infer a missing legacy invocation binding from a
+currently live node with the same block id. Scope/authentication for receipt
+replay must remain enforceable when hot native rows have been collected.
+
+
+#### DME198 implementation progress: dispatch admission (incomplete)
+
+Local migrations 132–133 and SQLite schemas 63–64 separate invocation reservation
+from actual dispatch admission. An execution node receives an activation token;
+resetting a non-Pending node to Pending rotates it, while repeated Pending resets,
+activation and same-activity resume retain it. started_at survives resets and
+cannot serve as an invocation nonce. Immutable tenant-scoped bindings retain the
+actual task ID, physical instance/sequence/run, block, attempt, mode, target
+node/activation and full continuity ID/epoch/runtime independently of hot history.
+Missing or ambiguous legacy identity remains Unbound evidence.
+
+Both production dispatch paths capture their source fence before conditions,
+output loading, templates and credentials, then carry it unchanged through
+publication. Capture itself does not enroll ownership: doing so for in-process
+pure work caused four embedded SDK capsule-export failures on a9477c51, because
+an automatic owner displaced the caller's explicit initial runtime. For actual
+remote work, a captured unowned source can enroll only its deterministic canonical
+epoch-zero namespace inside the publication transaction. The transaction rechecks
+the original claim/run/activation/mode and refuses foreign, advanced, transferring,
+moved or historically orphaned ownership. Existing owners retain exact full-scope
+fencing. Pure and dry-run remote tasks also receive stable durable authority.
+
+An opaque validated dispatch intent binds the prepared logical payload to its
+planned receipt, mode and run, and rejects stale lease/checkpoint/outcome fields.
+Its debug output omits task inputs. Encryption decorators alone reseal transformed
+storage payloads, retaining the logical fingerprint. The admission transaction
+composes existing effect identity selection and at-most-once dispatch guards with
+the exact queue payload, invocation binding, immutable admission and tree-node
+suspension. Any refusal or insert failure rolls back the new receipt, active
+attempt binding, initial owner/location, queue row and node changes. The separate
+unfenced node update is removed; flat dispatch preserves the original timeout
+baseline. Ownership, native parent, worker and node locks retain their ordering.
+
+An unclaimable retry reservation receives the actual prepared handler, params,
+context, requirements, routing, timeout and credential flag only during admission.
+Its original scope binding is never rewritten. A separate immutable admission
+pins the actual handler, logical/stored payload fingerprints, effect proof and
+source. A unique key over physical/run/activation/attempt/mode/full-owner identity
+makes a concurrent or repeated publication retain the first admitted payload and
+receipt. Notifications and returns use the task ID actually retained by storage.
+Cold admission lookup prevents recreation after hot task collection. Database
+guards reject admitted specification changes, tenant-mirror changes and reuse of
+an admitted task ID; lease/checkpoint/output mutations remain supported. Storage
+source checks use admitted handler/effect identity and verify the stored payload
+fingerprint, so a legitimate fallback can resolve under its original reservation.
+
+Retry resolution checks the retained run, activation and full owner before
+resetting native state. A replacement is reserved only after resetting the exact
+original activation and remains unclaimable until admission. Retry markers are
+transactional and encrypted; planning does not append history. Direct evaluators
+persist run identity before callbacks. u16 counter exhaustion takes the terminal
+path. PostgreSQL's SMALLINT attempt columns still require reconciliation with the
+public u16 range; atomic admission explicitly rejects overflow instead of saturating.
+
+Stranded recovery checks exact retained scope and waiting activation under locks,
+recovers the epoch from immutable evidence, and follows historical locations.
+Receipt recovery verifies request/destination hashes, kind, tenant, physical
+execution, continuity/epoch, block, attempt and dispatched state. Missing or
+uncertain effect evidence does not imply purity, and dry-run mode cannot become
+live work. Unknown legacy recovery/quarantine policy remains a separate gate.
+
+The gRPC context-size fix checks the projected merge before effect settlement or
+consuming a worker claim. Rejected oversized outcomes retain their lease and
+accept a corrected result. Concurrent acceptance/integration still needs the
+atomic outcome contract below. Transaction finalizers await commit or rollback;
+a rejected PostgreSQL acknowledgement no longer leaves an idle transaction holding
+its owner lock. An independent pre-acquired connection verifies immediate release.
+
+Current validation covers 38 new admission cases, 111 invocation cases, 20
+resolution cases, 177 source-cut cases and 136 storage integration cases with
+PostgreSQL required. Admission tests cover concurrent differing payloads, fallback
+handlers, guarded duplicate rollback, later foreign ownership, stale generation,
+context/mode/lease mismatch, injected insertion failure, encrypted privacy, cold
+GC retention, immutable payloads/tenant routing, overflow refusal, downgrade
+retention and SQLite reopen. The full engine suite passes 2,145 unit plus 29
+distributed cases; the embedded public facade passes all 20 engine cases, including
+the four failing CI exports. gRPC passes 148 cases and mobile passes 701, for 3,525
+tests across these suites. Strict all-target lint passes for types, storage, engine,
+gRPC and the embedded facade. Final tenant-mirror guard checks also pass.
+
+The preceding three-file CI repair 0466f9ee fixes downgrade dependency lookup
+falling through to an independent installation later on search_path. Its isolated
+published-baseline candidate passed 176 source-cut cases and strict test-target
+lint; all 25 exact-head checks passed. The later a9477c51 checkpoint's Unit job
+failed the embedded export ownership cases described above. Exact-head CI must
+be rerun for this atomic admission/lazy-enrollment checkpoint.
+
+DME198 remains open. Durable accepted outcomes and atomic scoped native
+integration, HTTP/gRPC/delegation/background parity, pending-integration snapshots,
+cold claim/reporter authorization, acknowledged receipt retention/hot-quota release,
+rolling coordinator protocol enforcement and explicit unknown-legacy quarantine
+remain required. Identity-only legacy queue APIs are still present; blocking
+mutation of already admitted tasks does not establish a complete protocol floor.
+Invariant audit results still follow publication and need durable reconciliation.
+Legacy backup/key rotation compatibility, compensation invocation identity and
+independent offline-owner/outcome handling remain broader review gates. Passing
+these tests does not prove those contracts or justify merging the draft.
+
+### DME198 follow-up: accepted success evidence (checkpoint 0ef2acf9)
+
+The new lost-acknowledgement regression reproduced `NotFound` when a paused
+workflow's completed hot task was collected. Both completion transports now look
+up immutable acceptance evidence using the authenticated tenant and exact winning
+worker ID/claim epoch. A matching replay acknowledges the original acceptance;
+its regenerated payload cannot overwrite the retained result. HTTP retains its
+existing hot-history integration retry and uses the journal's original payload.
+gRPC receipt replays acknowledge acceptance without repeating native writes.
+This distinction is deliberate: neither acknowledgement proves native integration.
+
+Migration 134 and SQLite schema 65 add `worker_accepted_outcomes`, with no foreign
+keys to hot tasks or native history. The winning completion, original stored
+output, admitted invocation (or explicitly retained legacy binding), and Completed
+attempt event commit in one transaction. An insertion error rolls all of them
+back. SQLite takes its writer reservation before the multi-statement operation;
+both backends await rollback on failure. Oversized SQL claim epochs are rejected
+instead of saturated. The encryption decorator seals the payload before storage
+and decrypts it only after indexed scope and fingerprint validation. Debug output
+excludes payloads. Update/delete guards and downgrade retention checks protect the
+journal. SQLite reopening preserves receipts after hot collection.
+
+The published 55f5e6c4 CI run finished with 24/25 checks passing. Four API coverage
+failure cases created synthetic queue rows without a durable run/step identity;
+the fixture now stamps that identity before dispatch capture. Source checks remain
+strict. Migration structure checks additionally caught the previously stale
+reported schema constant and a missing rollback header; both are corrected here.
+
+Acceptance of success evidence is only one part of DME198. Effect settlement
+still precedes task acceptance in a separate transaction. Native context/output,
+exact activation completion and an Applied receipt still need one fenced
+transaction, followed by bounded recovery independent of worker retries. Paused
+results are now durably retained but are not yet automatically integrated on
+resume. Failures/retries, delegation, issued-claim principal retention, snapshot
+consistency, explicit acknowledged archive and the protocol floor remain open.
+The success journal must not be represented as a completed outcome protocol or a
+reason to merge/release the draft.
+
+Checkpoint validation passes 2,810 tests: 60 admission/outcome, 111 invocation,
+20 resolution, 136 integration, 42 encryption, 15 migration, 2,145 engine unit,
+29 distributed, 149 gRPC and 103 API coverage cases. PostgreSQL is required in
+the backend matrix. Strict all-target lint passes for storage, gRPC and API;
+formatting and whitespace checks pass. The overflow regression proves that a
+completion cannot saturate an oversized caller epoch to a real i64::MAX lease.
+These results cover accepted-success retention, not the remaining protocol gates.
+
+### DME198 follow-up: atomic success settlement and GC lock order
+
+A new regression reproduced successful hot completion with its effect still
+Dispatched on all four storage backends. `complete_worker_task` now routes through
+an opaque `WorkerCompletion`: logical output fingerprint and bounded provider
+receipt metadata are derived before encryption, while the decorator reseals only
+the stored payload. The same transaction settles the original bound receipt,
+accepts the original result, completes the task and appends its attempt event.
+Journal insertion failure rolls back the receipt and task together. Both HTTP and
+gRPC completion and local delegation resumption no longer precommit independently.
+
+Admitted work checks the original request/kind/destination proof and the exact
+effect-attempt alias. Legacy immutable bindings retain their weaker classification;
+acceptance does not fabricate an admission or certify an unknown native target.
+Unknown effects can accept a factual success under their original binding. An
+already-Committed receipt without accepted result evidence refuses a regenerated
+payload and requires reconciliation; a durable legacy reconciliation workflow
+remains open. New success records retain an optional logical fingerprint, so old
+134 records remain readable without rewriting a published migration.
+
+The PostgreSQL lock review found an actual inversion: GC locked a native parent
+before waiting for its continuity owner, while completion takes owner before
+parent. A held-owner transaction deterministically reproduced a native UPDATE
+lock timeout. GC now takes physical namespace locks, fences owners/receipts and
+then locks eligible native rows. It skips busy namespaces and rechecks terminal
+and family eligibility after waits. The namespace key is shared with foreground
+admission. Cleanup awaits rollback on error; an independent pre-acquired
+connection verifies that a failed native DELETE has restored evidence and released
+the owner lock before returning. A separate test verifies busy history does not
+block cleanup of a healthy execution.
+
+This closes success effect/acceptance atomicity, not native outcome integration.
+The original output, context quota, exact activation, native transition and Applied
+receipt still need one fenced transaction and bounded recovery. Failure settlement
+still precedes its resolution transaction, and delegation integration remains a
+separate operation. Pending accepted outcomes must block or travel with snapshots
+and GC; explicit acknowledged archive must compact payloads while retaining
+immutable receipt identity. Reporter principal retention, protocol enforcement and
+the broader review gates remain required before merging this draft.
+
+An additional encrypted-backend regression reproduced storage interpreting an
+application's own valid ciphertext as an already sealed storage value. The opaque
+completion now distinguishes caller data from an internally sealed submission;
+caller results are sealed without interpreting their contents. Logical output
+fingerprints also prevent an accepted result that is already logical from being
+unwrapped again. Exact ciphertext values survive both hot-task and journal reads
+on PostgreSQL/SQLite with encryption enabled.
+
+The preceding 0ef2acf9 CI Unit job reached the distributed-worker API suite and
+found two additional synthetic fixtures without dispatch identity. The local
+full API sweep checked all 70 targets and found the same omission in the final
+workers suite. Both fixtures now capture a durable run/flat-step baseline and
+model a Waiting parent before task insertion; no production fence was weakened.
+All 70 API targets pass after rerunning the repaired target (1,357 cases).
+Completed test executables are removed between targets to keep disk bounded.
+
+Validation across the checkpoint's verification runs covers 5,003 distinct test
+cases: 600 storage integration/schema/encryption/dispatch/outcome/GC cases, two
+focused storage unit contracts (decorator interception and record codec), 2,145 engine unit and 29 distributed
+cases, 149 gRPC, 701 mobile, 20 embedded facade cases and 1,357 API cases. The
+checkpoint-resumption test uses the atomic completion path and proves the old
+claim cannot inherit its replacement's acknowledgement. Strict all-target lint
+passes for storage, engine, gRPC, API, mobile and the embedded facade; API lint was
+rerun after the final fixture repair. Native integration and the other stated
+merge gates remain open.
+
+The numeric roundtrip regression then reproduced a committed PostgreSQL result
+whose fingerprint could no longer validate: JSONB changed number representations.
+The private journal codec now stores the original logical output as versioned JSON
+text and decodes it before fingerprint validation. Public outcome serialization
+and established fingerprint algorithms stay unchanged. Tests cover integral
+floats, negative zero, nested numbers, legacy record decoding, unknown codec
+refusal and malformed encoded data.
+
+Migration 135 / SQLite schema 66 advertise the newer format and reject outdated
+journal writers. PostgreSQL downgrade refuses encoded records requiring the newer
+reader; empty downgrade/upgrade remains supported. Original unencoded 134 records
+remain readable when their fingerprints are valid. Previously malformed legacy
+numeric records require reconciliation rather than silent recertification.
+This format floor is narrower than the full coordinator/worker protocol floor,
+which remains open. After these final persistence changes, all 89 admission/outcome
+cases, 177 source-cut cases, 15 migration cases, 149 gRPC cases and the 134 API
+completion cases pass, along with strict all-target checks for six Rust packages.
+
+## Atomic accepted-result application and independent recovery
+
+The [worker result application review](2026-10-28-worker-result-application.md)
+records the next checkpoint: shared HTTP/gRPC native application, exact original
+invocation fencing, context CAS/quota, immutable application receipts, paused-state
+preservation and durable recovery on continuous and explicit mobile ticks.
+Migration 136 / SQLite schema 67 enforce queue insertion, pending-result native
+retention and capsule-cut refusal in the database. Busy PostgreSQL authority and
+scanner locks are skipped; recovery rotation does not depend on a device clock.
+The original failure, delegation, principal, protocol, archive and SDK gates stay
+open. This checkpoint does not establish completion of the original review.
+
+## Atomic failure evidence and lossless native JSON checkpoint
+
+Worker failure/lease resolution now atomically retains its exact report, original
+effect uncertainty, claim result and native/retry action. Cold failure replay is
+tenant/holder/generation scoped after hot and native cleanup. New attempts clear
+old checkpoints; never-claimed evidence is required for abandonment. Concurrent
+PostgreSQL deletion/reinsertion cannot reuse a retained task ID. See
+[worker failure resolution](2026-10-28-worker-failure-resolution.md).
+
+Local delegation and scheduler recovery share one application receipt, retaining
+the original delegation attachment with accepted output. Context replacement
+preserves runtime authority. PostgreSQL native inputs, contexts, outputs,
+checkpoints and captured snapshots preserve NUL and number representations with
+explicit codecs and an encoded-record reader floor. See
+[native JSON encoding](2026-10-28-native-json-encoding.md).
+
+The affected checkpoint passes 4,329 distinct selected cases and strict checks
+on seven packages. Both previously failing CI scenarios are locally verified.
+The draft still requires current-head CI and the full remaining review gates:
+paused failure application, later factual outcomes and explicit reconciliation,
+issued-claim/principal lifetime, complete coordinator protocol enforcement, native
+payload compaction after acknowledgement, transported history/key/backup
+compatibility and public SDK/platform integration. The existing acknowledged
+catalog-run archive and account/catalog isolation are implemented and covered;
+the remaining compaction gate must be audited against those current APIs.
+
+
+## Retained paused failure application
+
+The [paused worker failure application review](2026-10-28-paused-worker-failure-application.md)
+records the next correction. Two reproductions showed that explicit resume left
+reported retryable and permanent failures stranded. A bounded durable queue now
+applies the original failure policy under exact invocation and owner fences,
+with the native change and immutable application receipt committed together.
+Retry reservations carry no parent application context and remain unclaimable
+until fresh normal dispatch. Pause is preserved; old effect uncertainty remains.
+
+PostgreSQL migration 139 / SQLite schema 69 guard pending failures during capsule
+capture and refuse evidence-losing downgrade. Recovery survives hot task cleanup,
+rotates deferred reports, skips busy authority/clock/task/effect rows and applies
+once under concurrency. New PostgreSQL regressions reproduced and fixed both
+busy-task and busy-effect scheduler stalls. Selected verification passes 3,591
+cases across engine/storage/mobile/embedded and the affected integration suites.
+
+The original review remains incomplete: late factual outcomes and reconciliation,
+issued-claim/principal lifetime, full coordinator protocol enforcement, poisoned
+recovery disposition/backoff, native acknowledged payload compaction, transported
+history/key/backup compatibility, server delegation and SDK/platform integration
+remain required. The existing catalog archive API is already implemented. This
+checkpoint does not authorize release or establish readiness to merge the draft.
+
+## gRPC authorization prerequisite for retained claim ownership
+
+The [gRPC worker authorization review](2026-10-28-grpc-worker-authorization.md)
+records a reproduced capability bypass: stored-key authentication retained only
+the tenant, so an Auditor key could reach PollTasks. The auth layer now checks
+explicit grants against the actual 37-method protobuf surface and retains the
+verified request principal. This is not yet a durable issued-claim journal.
+
+Real-transport tests also reproduced worker streams retaining expired/revoked
+keys. Worker/artifact stream guards now reauthorize through the storage-scoped
+cache while idle or backpressured, time out unavailable credential storage, and
+drop blocked work on credential loss, consumer disconnect or shutdown. A separate
+terminal channel and EOF-ordering regression prevent auth failure from being
+hidden by queued data or a channel-close race. Validation passes 178 gRPC cases.
+
+Durable original claimant identity, stable refresh scope and claim-bound artifact
+access remain required implementation work. The generic artifact RPC has no
+claim binding; granting Worker all tenant artifact reads is unsafe. Restricted
+generic downloads must be followed by secure worker access to its exact admitted
+payloads, not treated as a finished replacement for that capability. All broader
+review gates listed above remain active and the draft is not ready to merge.
+
+
+The schema-139 checkpoint's final CI result was 24/25 success. The sole failure
+was an obsolete hand-written PostgreSQL locking fixture that omitted claim epoch
+advancement. The fixture now performs a valid generation transition and retains
+its original lock-scope and source-query checks. All 44 PostgreSQL integration
+cases pass on the isolated repair source; production claim fences are unchanged.
+Unfinished schema-140 issued-claim work was saved separately during verification.
+
+## Issued-claim persistence prerequisite
+
+PostgreSQL migration 140 / SQLite schema 70 retain an immutable, versioned
+journal of every issued task generation in the lease transaction. All five
+normal selectors capture original worker, tenant, physical instance and
+invocation/admission metadata. Legacy callers are explicitly recorded as
+unattributed, without inventing authentication. A validated internal selector
+can retain verified API key, workload, runtime/device, root or unsecured identity.
+The journal contains no task input or checkpoint payload. Transaction failure
+rolls back every lease, event and journal batch; native/hot cleanup cannot erase
+the claim or permit reuse of its task UUID.
+
+The final issued-claim contract suite passes 32 tests, including four backend
+configurations, after a red test exposed Serde unit variants silently dropping
+unknown identity scope. Empty struct variants reject those extra fields.
+Unsupported journal versions cannot satisfy ownership checks. Trusted-root lookup
+can recover the indexed tenant after native cleanup without broadening scoped
+lookup; retrieval itself confers no mutation or replay authority. Strict Clippy
+passes across all eight affected packages. See
+`2026-10-28-issued-worker-claim-journal.md` for evidence and limits.
+
+This is persistence groundwork: HTTP/gRPC still use legacy selectors. Verified
+transport identity wiring, ownership before mutation/replay/reconnect, legacy
+reconciliation, the complete rolling coordinator protocol floor and functional
+claim-bound artifact access remain open. Runtime normal polling also needs a
+reproduced queue-scope bypass test and a functional fix. No original scope gate
+is closed solely by adding this table or by passing these tests.
+
+## Verified transport issuance and scoped queue grants
+
+HTTP polling and gRPC poll/stream demand now journal the verified caller's stable
+identity through the transactional selector. Private authentication markers
+distinguish verified root from unsecured mode; reusable worker labels and request
+JSON establish no ownership. Session identity retains runtime kind, runtime UUID
+and device rather than token JTI. This closes issuance wiring, not the mutation,
+reconnect, receipt replay, legacy reconciliation or artifact-authorization gates.
+
+An authenticated HTTP regression proved unqualified browser polling claimed a
+private named queue without a grant. Runtime-principal default selection now
+constrains SQL to the default queue; named polling checks explicit handler and
+queue grants. PostgreSQL also rechecks queue and tenant at its locking phase.
+Phone session minting lacked named grants, so the functional scoped path adds
+optional bounded queue allowlists and explicit named polling, with exact-grant
+checks and default-only behavior for old sessions. Existing operator/server
+selectors keep their broad queue scope. Renewed phone tokens preserve device
+identity; another device sharing a runtime UUID remains a different principal.
+
+NUL-containing names were also accepted by minting despite being rejected by
+the retained-claim contract. Mint endpoints now reject these before signing or
+device storage access. The final API run passes 412 cases, alongside 179 gRPC,
+36 four-backend issued-claim, six service/scheduler integration and two real
+executor process scenarios. Service/scheduler tests are in-process; separate
+hybrid tests launch rebuilt executor binaries and cover HTTP/gRPC pickup, drain,
+process loss and routing metadata on both SQLite and PostgreSQL. See
+`2026-10-28-worker-transport-identity.md` for the current evidence and remaining
+ownership gates. OpenAPI and the four mobile SDK integration guides reflect the
+additive queue grant; token providers still receive opaque tokens.
+
+## Recorded reporter enforcement: HTTP slice
+
+A real two-key HTTP regression found the second Worker key could heartbeat the
+first key's recorded lease by repeating its worker label and epoch. The new
+classifier distinguishes recorded matches, mismatches and unattributed history.
+HTTP complete/fail/heartbeat/release/upload now reject recorded mismatches before
+mutation, body upload or accepted/resolution receipt integration. Original
+reporting and completion replay remain functional after hot cleanup. Verification
+passes 413 API and 40 issued-claim matrix cases, with strict all-target checks
+across eight packages. See `2026-10-28-recorded-worker-reporter.md`.
+
+This is deliberately not a closed ownership gate: gRPC mutations/reconnect
+adoption still require equivalent enforcement and authenticated internal frame
+context. Unattributed history still uses the old transport behavior; explicit
+durable backend/operator approval, revocation and reconciliation must replace
+that gap before a write floor can safely remove legacy compatibility. Claim-bound
+artifact reads and all original scope gates remain required.
+
+
+## Recorded gRPC reporters and owner-aware reconnect
+
+Unary gRPC complete/fail/heartbeat/release now reject a different recorded actor
+before mutation or retained receipt replay. Stream frame dispatch preserves the
+verified actor in a private extension. Reconnect selectors filter tenant, worker,
+handler and current-generation actor before LIMIT, then validate the immutable
+record against the actual held task. Encrypted wrappers decrypt selected work.
+The four-backend matrix covers JSON field ordering, optional browser device
+semantics, distinct mobile devices sharing a runtime and corrupt worker indices.
+
+Validation passes 56 issued-claim matrix cases, 413 related HTTP cases and
+159 gRPC unit plus 22 real transport cases. Six service/scheduler integrations
+and two rebuilt executor-process scenarios also pass on SQLite and PostgreSQL.
+A cross-transport fixture was corrected to use the same authenticated stored
+key for HTTP claim and gRPC reporting; second-key rejection tests remain.
+See `2026-10-28-grpc-reporter-reconnect.md` for evidence and limits.
+
+These guards still allow unattributed historical claims on the old protocol.
+Explicit durable backend/operator reconciliation, approved handoff/revocation,
+the complete coordinator/database write floor, functional claim-bound artifact
+reads and all other original ledger gates remain unfinished. This checkpoint
+is not completion of the review or permission to merge the draft.
+
+
+## Previously signed device identity validation
+
+The minting endpoint already rejected blank, NUL-containing and over-256-byte
+device IDs, but the verifier accepted correctly signed historical tokens with
+those values. A regression reproduced acceptance of a blank device identity.
+Verification now applies the same device-ID contract before constructing an
+authenticated runtime binding; the auth middleware returns Unauthorized when
+verification fails. Tests also reject NUL/oversized IDs and preserve a valid
+256-byte multibyte ID. This change does not add account/catalog identity to
+runtime tokens or close session-versioning, enrollment or legacy-reconciliation
+gates.
+
+Verification passes 368 API unit cases, nine browser-session transport cases and
+four device-session transport cases with PostgreSQL required. The regression
+failed before the verifier repair and passes after it.
+
+## Operator effect-resolution atomicity prerequisite
+
+An injected provenance append failure proved that the existing effect-resolution
+endpoint returned an error after committing an operator's receipt transition.
+The endpoint now commits receipt evidence and its signed provenance boundary in
+one backend transaction. Full expected-receipt comparison prevents same-state
+provider evidence from being overwritten; a changed continuity epoch requires
+reload. Chain-head races retry only the provenance proposal, preserving the
+original receipt snapshot. All 22 API evidence cases, 14 continuity storage cases and 16 four-backend
+matrix cases pass. The matrix includes suppressed receipt updates; the API
+regression covers receipts written by an ahead-clock replica. See `2026-10-28-atomic-effect-resolution.md`.
+
+This repairs the existing effect settlement path, not legacy reporter attribution.
+A retained explicit backend/operator reconciliation decision, approved handoff
+and revocation, the complete database/coordinator floor and all remaining
+original gates stay open. Resolving a provider effect cannot certify a previously
+unknown worker identity or reconstruct missing worker output.
+
+Final validation also passes strict all-target checks across eight affected
+packages, standalone mobile-library compilation, generated Rust/JavaScript
+client contracts, the unchanged OpenAPI fingerprint and formatting checks.
+
+## Functional explicit legacy completion acceptance
+
+An authenticated Operator/root can now acknowledge one held legacy completion
+through `/workers/tasks/{id}/reconcile-completion`. The immutable accepted
+outcome retains the verified approver, permanent approval UUID, exact tenant,
+task/worker/epoch, backend evidence reference and logical output digest. The
+original issuer is never rewritten; epoch-zero history remains zero. Known
+authenticated claims cannot be reclassified through this path.
+
+Approval, accepted body, effect settlement and completion event share the
+existing transaction. A real PostgreSQL blocked-key test reproduced expiry
+being evaluated before a row-lock wait; the approver's authority is now checked
+against fresh database time after acquiring the lock. Revoked or non-Operator
+keys roll back the completion and bound effect. A permanent unique index refuses
+approval-ID reuse across reports, including tasks with the same label and epoch.
+Identical concurrent requests retain one decision/event; changed bodies or
+references conflict. Cold retry survives hot/native cleanup and encrypted legs.
+
+PostgreSQL migration 141 / SQLite schema 71 require a distinct reconciled codec
+and preserve the current lossless JSON validator. The matrix caught an initial
+copy of a pre-138 JSONB guard that rejected NUL output; both migration directions
+now retain JSON text validation. Downgrade refuses retained decisions. Current
+readers reject missing/downgraded metadata and unsupported attribution versions.
+A file-backed SQLite upgrade/reopen test verifies retention.
+
+The final production behavior passes 899 distinct selected cases: 368 API units,
+261 storage units, 45 reconciliation HTTP cases, 153 admission cases, 56 issued
+claim cases, 15 migration checks and one file-backed upgrade/reopen case. Native
+application, original Unknown-effect settlement with a provider confirmation,
+and role-failure rollback of an effect are covered across all four backends.
+Strict all-target checks across eight consumers, standalone mobile compilation,
+generated Rust/JavaScript client contracts, OpenAPI fingerprint, formatting and
+a fresh real-server build pass. See `2026-10-28-worker-reconciliation.md` and
+`../worker-reconciliation.md` for the workflow and its limits.
+
+This is the first explicit completion path, not closure of the legacy gate.
+Unattributed callback compatibility remains, as do failures/late reports without
+a held task, independent review/read of already accepted history after approver
+key retirement, continuing handoff/revocation, the complete coordinator/database
+write floor, functional claim-bound artifacts and all original review gates.
+
+## Published CI delegation fixture race
+
+The published 61321bbc checkpoint completed 24/25 CI checks. Its sole failed E2E
+case requested delegation from a newly created noop parent while a scheduler
+could still own that parent. The unclaimed mailbox effect fence correctly
+refused the request. The provenance fixture now uses the existing waiting human
+review parent, preserving the epoch/owner and parent-chain assertions. It does
+not weaken the production fence. The full corrected suite passes 221 cases with no skips against a freshly built
+server and disposable PostgreSQL. TypeScript typechecking also passes.
+
+Source inspection also confirms delegation grant consumption currently precedes
+mailbox enqueue and provenance. Atomic grant/task/effect/proxy/provenance
+publication and recovery remain required; correcting the fixture does not close
+that server-delegation gate.
+
+## Scheduled lifecycle fixture and delegation publication reproduction
+
+Checkpoint 6974460e's E2E job ran 1,590 tests: 1,589 passed and the scheduled-to-paused
+lifecycle fixture lost a state comparison to the scheduler. A sleep step does
+not keep an instance scheduled; it delays completion after the scheduler claims
+the instance. This fixture now uses an explicit future `next_fire_at`, asserts
+scheduled before PATCH and exactly paused after PATCH, and waits for cancellation
+cleanup. Production state comparison remains intact. The lifecycle and continuity
+integration suites pass together: 232 tests, no failures or skips, on the real
+server with disposable PostgreSQL.
+
+Fault injection also reproduces the delegation publication defect on all four
+storage configurations: aborting task insertion leaves the single-use grant
+Consumed. The new regression additionally requires provenance insertion failure
+to roll back task/effect/grant, an identical retry to return the original task,
+and changed input to conflict. These latter assertions are requirements, not
+passing evidence yet. The transactional publication gate remains open.
+
+## Delegation proxy identity binding
+
+A four-backend regression reproduced proxy aliasing: `ensure_delegation_proxy`
+accepted the same delegation UUID with a different destination. It now requires
+the entire stored delegation, physical parent, sequence, tenant and namespace
+to match. The supplied parent ownership and sequence snapshots must also match
+the delegation scope. An identical retry can still read a completed proxy;
+mutable state is excluded from the identity comparison.
+
+The regression passes on PostgreSQL, SQLite and both encrypted variants,
+including changed grant, source/destination, parent continuity/epoch, expiry,
+sequence, physical parent and namespace. All 40 distributed execution tests and
+strict all-target lints across engine/API/gRPC/mobile/server/facade pass. This
+does not provide transactional ownership revalidation, cold publication replay,
+grant rollback or atomic outcome integration; those remain required.
+
+The next published CI checkpoint, e7354152, also exposed a Python native snapshot
+test failure: corrupting the current diagnostic did not make `engine.get` raise
+the expected serialization error. The job log is retained for investigation;
+this gate is unresolved, not classified as an infrastructure failure.
+
+## Native/mobile SQLite ownership preserves live file locks
+
+The Python CI investigation reproduced stale reads and a malformed database when
+the fixture used two SQLite library copies against one live file in one process.
+Fault injection now runs in a separate process, retaining the strict current-row
+serialization assertion and verifying affected rows. The corrected snapshot
+test passes 100 consecutive repetitions; the full real Python and packed Node
+binding suites also pass.
+
+The same investigation exposed an independent production defect: rejected
+native/mobile owner attempts opened and closed the database inode, destroying
+the live process's SQLite advisory locks. A real read-transaction/external
+exclusive-lock probe failed before the repair and passes for both ownership
+paths afterward. Both now share metadata-only path resolution and recheck the
+canonical path under their companion lock. Native initialization opens exactly
+that canonical file. Literal filename handling also fixes percent/query syntax
+selecting a different database. Cold reopen tests cover those names.
+
+All 12 native ownership, 261 complete storage unit, 39 facade unit and 41 native
+snapshot/callback/deadline/preflight tests pass, as do strict all-target checks
+across eight consumers and standalone mobile library compilation. See
+`2026-10-28-sqlite-ownership-locks.md` for evidence and the remaining original
+gates. Atomic server delegation publication and integration are still open.
+
+## Atomic grant-authorized delegation publication
+
+The four-backend grant-spending failure is repaired. Claim publication now commits
+the grant, optional inline definition, proxy/initial owner, effect, mailbox task,
+invocation, signed parent provenance and immutable publication receipt together.
+Fresh ownership, grant/index, stored-key and runtime checks occur under locks;
+deadlines are rechecked after later waits. A real PostgreSQL grant-row wait proves
+expired delegation/Operator authority cannot publish. Provenance races roll back
+the whole transaction before retrying only the signed entry.
+
+The receipt retains request/caller identity, original task/effect mapping, owner,
+definition fingerprint and logical/stored task hashes without raw input or token.
+Identical concurrent/lost-response/cold retries acknowledge that same publication.
+Changed input or caller conflicts. New publication invocations require their
+receipts at delivery. Hot params tampering was reproduced on all four backends;
+the shared batched claim journal now refuses it without leaving a partial lease.
+
+PostgreSQL 142 / SQLite 72 require immutable, versioned, scope-consistent receipts.
+Downgrade refuses retained records. File-backed upgrade/reopen and native cleanup
+retain acknowledgement without recreating work. The HTTP tenant guard preserves
+the existing anti-enumeration 404 response; real E2E caught and corrected its
+initial status regression without weakening tests.
+
+Verification passes 993 selected Rust cases and 232 fresh-server E2E cases, strict
+all-target checks across eight consumers, standalone mobile compilation and
+formatting/diff checks. See `2026-10-28-atomic-delegation-publication.md`.
+
+This closes publication atomicity only. Server outcome integration, a frozen
+verified remote-definition SDK contract, tenant/scoped proxy quota integration,
+complete writer enforcement, legacy attribution retirement, continuing
+handoff/revocation, acknowledged compaction, transported history and all original
+ledger gates remain required. The overall review objective is not complete.
+
+## 2026-10-28: durable published mailbox outcomes
+
+The atomic publication checkpoint did not make parent outcome application atomic.
+Four-backend fault injection now reproduces the separate-write failure and the
+suppressed-output false acknowledgement. The follow-up implementation routes
+published mailbox successes through accepted-outcome recovery, using immutable
+publication evidence as a mailbox target rather than inventing a native step.
+Native output/context/state and the application receipt share one transaction;
+held-result retries and scheduler recovery survive hot task cleanup. HTTP/gRPC
+use the same recovery entry point. See
+[the focused review](2026-10-28-durable-delegation-results.md) for boundaries,
+compatibility and validation.
+
+This closes neither historical unbound mailbox reconciliation nor failure/late
+fact integration. It also exposes follow-up cases to complete: proxy control and
+scheduler exclusion on pause/resume, and matching first-report context-size
+preflight to the nested delegation projection used by durable application.
+Frozen remote definition retrieval, scoped quotas, continuing handoff/revocation,
+claim-bound artifacts, recovery dispositions and acknowledged payload compaction
+remain in the original review scope.
+
+Final outcome-checkpoint validation passes 1,127 selected Rust cases plus all 232
+fresh-server lifecycle/continuity cases, strict all-target checks across eight
+consumers and standalone mobile compilation. The focused review lists the tested
+scopes and the historical compatibility boundary; these results do not close the
+remaining original review gates.
+
+## 2026-10-28: exact first-report completion context limits
+
+The published mailbox recovery transaction correctly deferred oversized context,
+but first-report HTTP/gRPC admission measured a different, ordinary merge. Actual
+boundary tests reproduced acknowledgement and effect settlement for an oversized
+wrapped result on all four backends; a smaller retry could not replace that
+accepted body. Both paths now preview the same wrapped/ordinary context that
+recovery writes, without creating acceptance evidence. Rejection preserves the
+held claim and dispatched effect for correction. Replacement, scalar, Unicode,
+NUL and numeric boundary cases are covered in
+[the focused review](2026-10-28-worker-completion-context-limits.md).
+
+Final context-admission validation passes 1,135 selected Rust cases plus 232
+fresh-server integration cases, strict checks across eight consumers and
+standalone mobile compilation. Proxy scheduling/lifecycle, historical/failure
+reconciliation and all other original open gates remain in scope.
+
+CI's portable-continuity failure was a stale assertion rejecting an identical
+publication replay. It now checks the original acknowledgement and preserves
+409 assertions for changed input and grant reuse by a different delegation.
+All 18 cases, including federation/runtime trust rejection, pass on the fresh
+server; TypeScript checking passes. Current selected validation totals 1,385
+Rust/integration cases. Production trust policy was not relaxed.
+
+
+## Delegation relay execution follow-up (2026-10-28)
+
+The [relay execution fence review](2026-10-28-delegation-relay-execution-fence.md) records reproduced wrong-runtime execution through proxy resume/native admission, quarantine loss through hot cleanup and cold restore, and relay acceptance as a native migration snapshot. Migration 143 / SQLite schema 73 exclude relays from native execution, preserve compact immutable quarantine and protect ownership through cleanup. Capsule/local-migration readers reject relays; logical instance backup refuses relay state it cannot restore, while configuration export remains usable.
+
+Validation passed 1,471 distinct Rust tests, 34 freshly rebuilt Node/Python native tests, both actual SDK schema-72-to-73 reopen probes, and 250 fresh-server end-to-end cases with zero failures or skips. Strict lint passed across nine crates, plus mobile/SQLite-only builds and formatting. The published-base CI unit failure was a stale SQLite schema-version assertion; its repaired reconciliation test passed locally while retaining decision immutability checks. The focused report and validation manifest distinguish the full matrix from affected-case reruns. Original open gates remain open; PR #365 remains a draft.

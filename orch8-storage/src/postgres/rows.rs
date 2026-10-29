@@ -196,7 +196,7 @@ impl InstanceRow {
     pub fn into_instance(self) -> Result<TaskInstance, StorageError> {
         let state = InstanceState::from_str(&self.state).map_err(StorageError::Query)?;
         let priority = Priority::try_from(self.priority).map_err(StorageError::Query)?;
-        let context = serde_json::from_value(self.context)?;
+        let context = super::json_encoding::decode_context(self.context)?;
         let budget = self.budget.map(serde_json::from_value).transpose()?;
 
         Ok(TaskInstance {
@@ -272,6 +272,7 @@ pub(super) struct BlockOutputRow {
     pub instance_id: Uuid,
     pub block_id: String,
     pub output: serde_json::Value,
+    pub output_encoding: Option<String>,
     pub output_ref: Option<String>,
     pub output_size: i32,
     pub attempt: i16,
@@ -284,7 +285,7 @@ impl BlockOutputRow {
             id: self.id,
             instance_id: InstanceId::from_uuid(self.instance_id),
             block_id: BlockId::new(self.block_id),
-            output: self.output,
+            output: super::json_encoding::decode(self.output, self.output_encoding.as_deref())?,
             output_ref: self.output_ref,
             output_size: nonnegative_integer(self.output_size, "output_size")?,
             attempt: u16::try_from(self.attempt).map_err(|_| {
@@ -396,6 +397,10 @@ pub(super) struct WorkerTaskRow {
     pub checkpoint_seq: i64,
     pub completed_at: Option<DateTime<Utc>>,
     pub output: Option<serde_json::Value>,
+    pub params_encoding: Option<String>,
+    pub context_encoding: Option<String>,
+    pub output_encoding: Option<String>,
+    pub checkpoint_encoding: Option<String>,
     pub error_message: Option<String>,
     pub error_retryable: Option<bool>,
     pub created_at: DateTime<Utc>,
@@ -413,7 +418,8 @@ macro_rules! worker_task_columns {
          attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at, \
          claim_epoch, resume_checkpoint, checkpoint_seq, \
          completed_at, output, error_message, error_retryable, created_at, \
-         effect_id, continuity_epoch, lease_secs, carries_credentials, claimed_runtime_kind"
+         effect_id, continuity_epoch, lease_secs, carries_credentials, claimed_runtime_kind, \
+         params_encoding, context_encoding, output_encoding, checkpoint_encoding"
     };
 }
 pub(super) use worker_task_columns;
@@ -433,8 +439,8 @@ impl WorkerTaskRow {
             queue_name: self.queue_name,
             requirements: serde_json::from_value(self.requirements)
                 .map_err(StorageError::Serialization)?,
-            params: self.params,
-            context: self.context,
+            params: super::json_encoding::decode(self.params, self.params_encoding.as_deref())?,
+            context: super::json_encoding::decode(self.context, self.context_encoding.as_deref())?,
             attempt: self.attempt as u16,
             timeout_ms: self.timeout_ms,
             state,
@@ -443,11 +449,19 @@ impl WorkerTaskRow {
             heartbeat_at: self.heartbeat_at,
             claim_epoch: u64::try_from(self.claim_epoch)
                 .map_err(|_| StorageError::Query("negative worker claim_epoch".into()))?,
-            resume_checkpoint: self.resume_checkpoint,
+            resume_checkpoint: self
+                .resume_checkpoint
+                .map(|value| {
+                    super::json_encoding::decode(value, self.checkpoint_encoding.as_deref())
+                })
+                .transpose()?,
             checkpoint_seq: u64::try_from(self.checkpoint_seq)
                 .map_err(|_| StorageError::Query("negative worker checkpoint_seq".into()))?,
             completed_at: self.completed_at,
-            output: self.output,
+            output: self
+                .output
+                .map(|value| super::json_encoding::decode(value, self.output_encoding.as_deref()))
+                .transpose()?,
             error_message: self.error_message,
             error_retryable: self.error_retryable,
             created_at: self.created_at,
@@ -657,6 +671,7 @@ mod integer_tests {
     #[test]
     fn rejects_negative_persisted_output_size_and_attempt() {
         let row = BlockOutputRow {
+            output_encoding: None,
             id: Uuid::now_v7(),
             instance_id: Uuid::now_v7(),
             block_id: "step".into(),
@@ -672,6 +687,7 @@ mod integer_tests {
         ));
 
         let row = BlockOutputRow {
+            output_encoding: None,
             id: Uuid::now_v7(),
             instance_id: Uuid::now_v7(),
             block_id: "step".into(),

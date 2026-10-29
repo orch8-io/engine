@@ -753,6 +753,7 @@ async fn purge_knows_every_continuity_child_table() {
         "continuity_locations",
         "continuity_stream_frames",
         "continuity_streams",
+        "capsule_source_cuts",
         "capsule_effect_imports",
         "continuity_effect_guards",
         "effect_attempt_bindings",
@@ -768,4 +769,175 @@ async fn purge_knows_every_continuity_child_table() {
     ];
     known.sort_unstable();
     assert_eq!(referencing, known);
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_gc_waiting_for_owner_does_not_hold_its_native_parent() {
+    let Some(backend) = TestBackend::postgres().await else {
+        return;
+    };
+    let (done, mut receipt) = effect_gc_fixture(&backend, true).await;
+    let mut writer = backend.pg_pool().begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *writer)
+        .await
+        .unwrap();
+    sqlx::query("SELECT continuity_id FROM continuity_executions WHERE tenant_id=$1 AND continuity_id=$2 FOR UPDATE")
+        .bind(receipt.tenant_id.as_str()).bind(receipt.continuity_id.into_uuid()).fetch_one(&mut *writer).await.unwrap();
+    let storage = Arc::clone(&backend.storage);
+    let purge = tokio::spawn(async move { storage.purge_terminal_instances(&[done.id]).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))",
+            )
+            .bind(pid)
+            .fetch_one(backend.pg_pool())
+            .await
+            .unwrap();
+            if blocked {
+                break;
+            }
+            assert!(!purge.is_finished(), "GC must fence the held owner");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("SET LOCAL lock_timeout='500ms'")
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let update = sqlx::query("UPDATE task_instances SET updated_at=updated_at WHERE id=$1")
+        .bind(done.id.into_uuid())
+        .execute(&mut *writer)
+        .await;
+    if let Err(error) = update {
+        writer.rollback().await.unwrap();
+        let _ = purge.await;
+        panic!(
+            "GC locked the native parent before the owner's completion could update it: {error}"
+        );
+    }
+    receipt
+        .transition(EffectState::Dispatched, Utc::now())
+        .unwrap();
+    sqlx::query("UPDATE effect_receipts SET state='dispatched',record=$1 WHERE id=$2")
+        .bind(serde_json::to_value(&receipt).unwrap())
+        .bind(receipt.id.into_uuid())
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    assert_eq!(
+        purge.await.unwrap().unwrap(),
+        0,
+        "GC lost newly dispatched evidence"
+    );
+    assert!(
+        backend
+            .storage
+            .get_instance(done.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_gc_skips_busy_namespace_and_still_cleans_healthy_history() {
+    let Some(backend) = TestBackend::postgres().await else {
+        return;
+    };
+    let (busy, receipt) = effect_gc_fixture(&backend, true).await;
+    let (healthy, _) = effect_gc_fixture(&backend, true).await;
+    let mut writer = backend.pg_pool().begin().await.unwrap();
+    let key = serde_json::to_string(&(
+        "orch8-continuity-instance",
+        receipt.tenant_id.as_str(),
+        busy.id,
+    ))
+    .unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))")
+        .bind(key)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    let storage = Arc::clone(&backend.storage);
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        storage.purge_terminal_instances(&[busy.id, healthy.id]),
+    )
+    .await;
+    writer.rollback().await.unwrap();
+    assert_eq!(
+        result
+            .expect("GC waited for a busy foreground namespace")
+            .unwrap(),
+        1
+    );
+    assert!(
+        backend
+            .storage
+            .get_instance(busy.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        backend
+            .storage
+            .get_instance(healthy.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        backend
+            .storage
+            .purge_terminal_instances(&[busy.id])
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_failed_gc_rolls_back_evidence_and_releases_owner_before_returning() {
+    let Some(backend) = TestBackend::postgres().await else {
+        return;
+    };
+    let (done, receipt) = effect_gc_fixture(&backend, true).await;
+    let mut control = backend.pg_pool().acquire().await.unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_native_gc_test() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected native GC failure'; END $$; CREATE TRIGGER reject_native_gc_test BEFORE DELETE ON task_instances FOR EACH ROW EXECUTE FUNCTION reject_native_gc_test();")
+        .execute(backend.pg_pool()).await.unwrap();
+    assert!(
+        backend
+            .storage
+            .purge_terminal_instances(&[done.id])
+            .await
+            .is_err()
+    );
+    sqlx::query("SELECT continuity_id FROM continuity_executions WHERE tenant_id=$1 AND continuity_id=$2 FOR UPDATE NOWAIT")
+        .bind(receipt.tenant_id.as_str()).bind(receipt.continuity_id.into_uuid()).fetch_one(&mut *control).await.expect("failed GC returned while holding the continuity lock");
+    assert_eq!(
+        backend
+            .storage
+            .get_effect_receipt(&receipt.tenant_id, receipt.id)
+            .await
+            .unwrap()
+            .unwrap(),
+        receipt
+    );
+    assert!(
+        backend
+            .storage
+            .get_instance(done.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }

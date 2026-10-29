@@ -1,10 +1,21 @@
 mod capsule_activation;
+pub mod capsule_export;
 mod child_adoption;
 mod child_lookup;
 mod compensation_start;
 mod compensation_update;
 mod current_outputs;
+pub mod delegation_publication;
 mod effect_attempt;
+pub mod effect_resolution;
+pub mod local_migration;
+pub mod worker_admission;
+pub mod worker_claim;
+pub mod worker_invocation;
+pub mod worker_outcome;
+pub mod worker_reconciliation;
+pub mod worker_resolution;
+pub mod worker_resolution_application;
 pub use compensation_start::CompensationStart;
 mod effect_dispatch;
 mod effect_receipts;
@@ -18,9 +29,9 @@ mod mobile_access;
 pub use child_adoption::ChildAdoption;
 pub use mobile_access::MobileInstanceAccess;
 pub mod api_key_cache;
-#[cfg(feature = "artifacts")]
+#[cfg(feature = "artifacts-local")]
 pub mod artifacts;
-#[cfg(not(feature = "artifacts"))]
+#[cfg(not(feature = "artifacts-local"))]
 #[path = "artifacts_disabled.rs"]
 pub mod artifacts;
 pub mod compression;
@@ -87,7 +98,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 128;
+pub const STORAGE_SCHEMA_VERSION: u32 = 143;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -686,6 +697,8 @@ pub trait InstanceStore: Send + Sync + 'static {
         next_fire_at: Option<DateTime<Utc>>,
     ) -> Result<(), StorageError>;
 
+    /// Frozen capsule sources and permanently retired physical IDs are skipped
+    /// without failing unrelated entries in this internal scheduling batch.
     async fn batch_reschedule_instances(
         &self,
         ids: &[InstanceId],
@@ -1975,9 +1988,86 @@ pub trait SignalStore: Send + Sync + 'static {
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait WorkerStore: Send + Sync + 'static {
+    /// Claim and retain the authenticated owner in the same transaction.
+    async fn claim_worker_tasks_with_authority(
+        &self,
+        request: &worker_claim::WorkerClaimRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
+    /// Original issued claim, retained after hot task/native history cleanup.
+    /// Scoped callers must supply their verified tenant. `None` is reserved for
+    /// trusted root lookup when the native instance no longer exists; finding
+    /// a record does not itself authorize mutation or receipt replay.
+    async fn get_worker_issued_claim(
+        &self,
+        tenant: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<worker_claim::WorkerIssuedClaim>, StorageError>;
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
 
+    /// Capture a consistent source claim, owner and activation before asynchronous
+    /// preparation. Enqueue must use the returned fence without refreshing it.
+    /// Returns `None` for a lost claim, invalid target or unavailable owner.
+    async fn prepare_worker_dispatch(
+        &self,
+        _instance: &TaskInstance,
+        _block_id: &orch8_types::ids::BlockId,
+        _selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
+        Err(StorageError::Unsupported(
+            "worker dispatch preparation".into(),
+        ))
+    }
+
+    /// Atomically admit the logical effect and publish its exact prepared task.
+    async fn admit_worker_dispatch(
+        &self,
+        intent: &crate::worker_admission::WorkerDispatchIntent,
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
+        let _ = intent;
+        Err(StorageError::Unsupported(
+            "atomic worker dispatch admission".into(),
+        ))
+    }
+
+    /// Identity-only primitive. Remote activity producers must use atomic admission.
+    /// Returns the actual queued id when an idempotent upsert retains a retry row.
+    async fn create_worker_task_bound(
+        &self,
+        task: &WorkerTask,
+        fence: &worker_invocation::WorkerDispatchFence,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let _ = (task, fence);
+        Err(StorageError::Unsupported(
+            "claim-bound worker dispatch".into(),
+        ))
+    }
+
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
+
+    /// Immutable dispatch identity, independently scoped and retained after hot GC.
+    async fn get_worker_dispatch_admission(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_admission::WorkerDispatchAdmission>, StorageError> {
+        let _ = (tenant_id, task_id);
+        Err(StorageError::Unsupported(
+            "worker dispatch admission".into(),
+        ))
+    }
+
+    async fn get_worker_invocation(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<worker_invocation::WorkerInvocation>, StorageError> {
+        let _ = (tenant_id, task_id);
+        Err(StorageError::Unsupported(
+            "worker invocation binding".into(),
+        ))
+    }
 
     /// Atomically claim up to `limit` pending tasks for a handler.
     /// Uses `FOR UPDATE SKIP LOCKED` for safe concurrent polling.
@@ -2019,12 +2109,49 @@ pub trait WorkerStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
-    /// Mark a claimed task as completed with output. Verifies `worker_id` ownership.
+    /// Read the original accepted result for an exact winning claim. A tenant
+    /// scope is mandatory for scoped callers; None is reserved for trusted root callers.
+    /// This acknowledges acceptance only, not successful native integration.
+    async fn get_worker_accepted_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError>;
+
+    /// Bounded, fairly rotated recovery candidates. Reserved for trusted coordinators.
+    async fn claim_worker_outcome_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError>;
+
+    /// Apply the exact accepted invocation and record its application in one transaction.
+    async fn apply_worker_outcome_integration(
+        &self,
+        integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError>;
+
+    /// Mark a claimed task as completed and journal its original output in one transaction.
     async fn complete_worker_task(
         &self,
         task_id: Uuid,
         claim: &WorkerClaim,
         output: &serde_json::Value,
+    ) -> Result<bool, StorageError> {
+        self.accept_worker_completion(
+            task_id,
+            claim,
+            &crate::worker_outcome::WorkerCompletion::new(output.clone()),
+        )
+        .await
+    }
+
+    /// Atomically accept the result, settle its admitted effect and append attempt evidence.
+    async fn accept_worker_completion(
+        &self,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+        completion: &crate::worker_outcome::WorkerCompletion,
     ) -> Result<bool, StorageError>;
 
     /// Mark a claimed task as failed. Verifies `worker_id` ownership.
@@ -2076,8 +2203,9 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// task, insert the new one, reset the execution node to Pending, and
     /// reschedule the instance -- all in a single transaction.
     ///
-    /// Default impl is non-atomic (sequential calls); production backends
-    /// should override with a real transaction.
+    /// The original task, replacement task, instance and optional execution
+    /// node must identify the same instance and block. Mismatched or missing
+    /// targets return a conflict without modifying any row.
     async fn retry_worker_task(
         &self,
         old_task_id: Uuid,
@@ -2126,26 +2254,66 @@ pub trait WorkerStore: Send + Sync + 'static {
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
     /// Finalize one stranded retry row: fill `effect_id` / `continuity_epoch`
-    /// where still unset and clear `awaiting_dispatch`, fenced on the row
-    /// being the same pending attempt that is still awaiting dispatch.
+    /// where still unset and clear `awaiting_dispatch`, only under the retained
+    /// invocation's exact native run, node activation and owned continuity scope.
+    /// The parent and target must still be waiting. Effect-free publication needs
+    /// a known pure built-in or retained dry-run proof; other handlers need a
+    /// dispatched receipt for this scope and attempt. Missing legacy identity
+    /// never becomes certified by finding a current node with the same block.
     /// Returns `false` (nothing changed) when the row was bound, claimed,
     /// superseded, or deleted concurrently — the operation is idempotent.
     async fn finalize_stranded_worker_dispatch(
         &self,
         task_id: Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError>;
 
     /// Atomically apply a fenced resolution (requeue / retry / fail node /
     /// fail instance) to a worker task and its instance. Returns `false`
     /// without side effects when the task moved on (completed, reclaimed,
-    /// released, or deleted) since it was read.
+    /// released, or deleted) since it was read, or when the supplied instance,
+    /// replacement task or node does not belong to the original dispatch.
     async fn resolve_worker_task(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+    ) -> Result<bool, StorageError> {
+        self.resolve_worker_task_with_evidence(
+            resolution,
+            &crate::worker_resolution::WorkerResolutionEvidence::new(resolution),
+        )
+        .await
+    }
+
+    /// Commit uncertainty settlement, durable report, task/native action and event together.
+    async fn resolve_worker_task_with_evidence(
+        &self,
+        resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError>;
+
+    /// Read retained report evidence independently of hot/native history. None claim is
+    /// reserved for trusted reconciliation; worker callbacks provide their exact claim.
+    async fn get_worker_resolution_outcome_by_id(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError>;
+    async fn claim_worker_resolution_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>, StorageError>;
+    async fn apply_worker_resolution_integration(
+        &self,
+        plan: &crate::worker_resolution_application::WorkerResolutionIntegration,
+    ) -> Result<crate::worker_resolution_application::WorkerResolutionApplication, StorageError>;
+    async fn get_worker_resolution_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: Option<&WorkerClaim>,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError>;
 
     /// Delete pending/claimed worker tasks for an instance + block (used when race cancels a branch).
     async fn cancel_worker_tasks_for_block(
@@ -2176,6 +2344,13 @@ pub trait WorkerStore: Send + Sync + 'static {
         block_ids: &[String],
         claim_token: DateTime<Utc>,
     ) -> Result<Option<u64>, StorageError>;
+
+    /// Filter recorded issuer, tenant, worker and handlers before the delivery limit.
+    /// Legacy unattributed rows retain the pre-journal rollout behavior.
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError>;
 
     /// List worker tasks with optional filtering and pagination.
     async fn list_worker_tasks(
@@ -4011,6 +4186,32 @@ pub trait MobileSyncStore: Send + Sync + 'static {
 /// supported way to advance ownership, handoff, and effect state.
 #[async_trait]
 pub trait ContinuityStore: Send + Sync + 'static {
+    /// Permanent compact evidence that a relay ran on the wrong runtime.
+    /// Physical identity is globally unique; this fact survives hot/native GC.
+    /// It prevents automatic resume and new destination dispatch, not access checks.
+    async fn is_delegation_proxy_quarantined(
+        &self,
+        instance_id: orch8_types::ids::InstanceId,
+    ) -> Result<bool, StorageError>;
+    async fn get_delegation_publication(
+        &self,
+        tenant: &TenantId,
+        id: uuid::Uuid,
+    ) -> Result<Option<delegation_publication::DelegationPublication>, StorageError>;
+    async fn publish_delegation(
+        &self,
+        intent: &delegation_publication::DelegationPublishIntent,
+    ) -> Result<delegation_publication::DelegationPublishResult, StorageError>;
+
+    /// Permanent, globally unique physical identity fence, independent of tenant
+    /// and continuity history GC. This does not authorize resource reads or
+    /// establish that an offline owner has stopped. Use it before admitting
+    /// forward execution when missing continuity history would mean legacy work.
+    async fn is_physical_instance_retired(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<bool, StorageError>;
+
     async fn create_continuity_execution(
         &self,
         execution: &ContinuityExecution,
@@ -4081,6 +4282,10 @@ pub trait ContinuityStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
 
+    /// Replace an owner only while the epoch/runtime compare token is current.
+    /// A captured, sealed or retired source cut forbids reviving its physical
+    /// source through this generic operation; abort and acknowledgement use
+    /// their own atomic protocols. The next record must keep tenant/continuity.
     async fn cas_continuity_owner(
         &self,
         tenant_id: &TenantId,
@@ -4128,6 +4333,28 @@ pub trait ContinuityStore: Send + Sync + 'static {
         expected_execution: &ContinuityExecution,
         transferring_execution: &ContinuityExecution,
     ) -> Result<bool, StorageError>;
+
+    /// Commit source ownership, exported handoff, and its provenance boundary
+    /// together. A conflicting chain predecessor rolls back all three writes.
+    async fn commit_handoff_export_with_provenance(
+        &self,
+        tenant_id: &TenantId,
+        expected_handoff: &ExecutionHandoff,
+        exported_handoff: &ExecutionHandoff,
+        expected_execution: &ContinuityExecution,
+        transferring_execution: &ContinuityExecution,
+        provenance: &ProvenanceEntry,
+    ) -> Result<bool, StorageError> {
+        let _ = (
+            tenant_id,
+            expected_handoff,
+            exported_handoff,
+            expected_execution,
+            transferring_execution,
+            provenance,
+        );
+        Err(StorageError::Unsupported("atomic export provenance".into()))
+    }
 
     /// Atomically schedule the paused destination and record the handoff as
     /// resumed. Returns false when either compare-and-swap token is stale.
@@ -4388,6 +4615,17 @@ pub trait ContinuityStore: Send + Sync + 'static {
         next: &EffectReceipt,
     ) -> Result<bool, StorageError>;
 
+    /// Commit an explicit effect settlement and its provenance together.
+    /// Compares the entire expected receipt, preserves its immutable identity,
+    /// and refuses stale continuity epochs or consumed chain predecessors.
+    /// This is evidence settlement, never worker ownership or runtime admission.
+    async fn resolve_effect_with_provenance(
+        &self,
+        expected: &EffectReceipt,
+        next: &EffectReceipt,
+        entry: &ProvenanceEntry,
+    ) -> Result<effect_resolution::EffectResolutionCommit, StorageError>;
+
     /// Atomically transition a prepared receipt to dispatched only when it is
     /// the first active effect with the same kind, destination, and request
     /// fingerprint in this continuity execution.
@@ -4509,6 +4747,99 @@ pub trait ContinuityStore: Send + Sync + 'static {
     ) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError> {
         let _ = (tenant, continuity, sequence, version, kind);
         Err(StorageError::Unsupported("portable effect guards".into()))
+    }
+
+    /// Read a bounded local migration recovery point without changing native
+    /// or continuity authority. Registers expiry cleanup before artifact I/O.
+    async fn prepare_local_migration_snapshot(
+        &self,
+        request: &crate::local_migration::LocalMigrationSnapshotRequest,
+    ) -> Result<crate::local_migration::LocalMigrationSnapshotCapture, StorageError> {
+        let _ = request;
+        Err(StorageError::Unsupported(
+            "local migration recovery snapshots".into(),
+        ))
+    }
+
+    /// Capture one consistent source state and revoke source admission before
+    /// any artifact publication. Retries return the durable original cut.
+    async fn capture_capsule_cut(
+        &self,
+        request: &crate::capsule_export::CapsuleCutRequest,
+    ) -> Result<crate::capsule_export::CapsuleCutCapture, StorageError> {
+        let _ = request;
+        Err(StorageError::Unsupported(
+            "durable capsule source cut".into(),
+        ))
+    }
+    /// Persist the immutable transport header and ciphertext before upload.
+    async fn seal_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+        manifest: &CapsuleManifest,
+        sealed: &[u8],
+    ) -> Result<crate::capsule_export::CapsuleSourceCut, StorageError> {
+        let _ = (tenant, id, manifest, sealed);
+        Err(StorageError::Unsupported(
+            "durable capsule source cut".into(),
+        ))
+    }
+    /// A pre-seal validation failure may safely restore local ownership. Once
+    /// sealed, only explicit coordinator reconciliation can retire the cut.
+    async fn abort_preparing_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+    ) -> Result<bool, StorageError> {
+        let _ = (tenant, id);
+        Err(StorageError::Unsupported(
+            "durable capsule source cut".into(),
+        ))
+    }
+
+    /// Record explicit trusted-host acknowledgement of destination acceptance.
+    /// The caller must obtain backend/app ownership confirmation first. Only a
+    /// sealed cut and its exact next epoch/destination are accepted. This drops
+    /// the database retry ciphertext, retaining an immutable compact receipt;
+    /// it does not itself delete the external artifact or resume the source.
+    async fn acknowledge_capsule_cut(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+        accepted: &ContinuityExecution,
+    ) -> Result<crate::capsule_export::CapsuleCutReceipt, StorageError> {
+        let _ = (tenant, id, accepted);
+        Err(StorageError::Unsupported(
+            "capsule source acknowledgement".into(),
+        ))
+    }
+
+    /// Whether a frozen source cut still permits publication. Exporters check
+    /// before and after external I/O; missing/retired cuts return false.
+    async fn capsule_cut_publishable(
+        &self,
+        tenant: &TenantId,
+        id: CapsuleId,
+    ) -> Result<bool, StorageError> {
+        let _ = (tenant, id);
+        Err(StorageError::Unsupported(
+            "capsule publication fence".into(),
+        ))
+    }
+
+    /// Claim a bounded fair batch of durable artifact-deletion tombstones.
+    /// Move their next sweep to `retry_at` before external I/O. Tombstones remain
+    /// eligible for future sweeps even after deletion, catching late uploads and
+    /// surviving source-history purge. `retry_at` must be later than `now`.
+    async fn claim_retired_capsule_artifacts(
+        &self,
+        now: DateTime<Utc>,
+        retry_at: DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<String>, StorageError> {
+        let _ = (now, retry_at, limit);
+        Ok(Vec::new())
     }
 
     /// Atomically accept a proof-bound imported capsule and schedule its paused
@@ -4835,7 +5166,14 @@ pub struct LiveMigrationTransition<'a> {
     pub expected_execution: &'a ContinuityExecution,
     pub next_execution: &'a ContinuityExecution,
     pub expected_instance_state: orch8_types::instance::InstanceState,
+    /// Native version captured with the local recovery point (apply), or the
+    /// original applied timestamp (rollback). State alone cannot fence edits.
+    pub expected_instance_updated_at: DateTime<Utc>,
+    pub expected_checkpoint_id: Uuid,
+    pub expected_source_fingerprint: &'a str,
+    pub expected_target_sequence: &'a SequenceDefinition,
     pub next_instance_state: orch8_types::instance::InstanceState,
+    pub next_fire_at: Option<DateTime<Utc>>,
     pub next_sequence_id: SequenceId,
     pub next_context: &'a orch8_types::context::ExecutionContext,
     pub checkpoint: &'a orch8_types::checkpoint::Checkpoint,

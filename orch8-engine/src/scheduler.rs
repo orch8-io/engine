@@ -74,6 +74,7 @@ pub(crate) struct TickContext<'a> {
     pub batch_size: u32,
     pub max_per_tenant: u32,
     pub externalize_threshold: u32,
+    pub max_context_bytes: u32,
     pub counters: Option<Arc<TickCounters>>,
     /// Time source for all scheduling decisions made during this tick
     /// (claiming, deferrals, deadline/timeout checks). Defaults to the
@@ -115,6 +116,7 @@ pub async fn tick_once(
         batch_size: config.batch_size,
         max_per_tenant: config.max_instances_per_tenant,
         externalize_threshold: config.externalize_output_threshold,
+        max_context_bytes: config.max_context_bytes,
         counters: Some(Arc::clone(&counters)),
         clock: &config.clock,
         stale_instance_threshold_secs: config.stale_instance_threshold_secs,
@@ -304,6 +306,7 @@ pub async fn run_tick_loop_with_liveness(
                     batch_size,
                     max_per_tenant: config.max_instances_per_tenant,
                     externalize_threshold,
+                    max_context_bytes: config.max_context_bytes,
                     // The tick loop does not need per-tick counters — pass None.
                     counters: None,
                     clock: &config.clock,
@@ -442,6 +445,53 @@ async fn wait_for_drain(semaphore: &Semaphore, max_permits: usize) {
 #[tracing::instrument(skip_all, fields(batch_size = ctx.batch_size, claimed = tracing::field::Empty))]
 async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, EngineError> {
     let _tick_timer = crate::metrics::Timer::start(crate::metrics::TICK_DURATION);
+
+    // Cold accepted results recover even without a worker retry, including on
+    // mobile tick_once. Rotate candidates before application so a poisoned or
+    // actively claimed invocation cannot starve younger results.
+    match ctx
+        .storage
+        .claim_worker_outcome_recovery_page(ctx.batch_size.min(64))
+        .await
+    {
+        Ok(page) => {
+            for candidate in page {
+                if let Err(error) = orch8_storage::worker_outcome::integrate_worker_outcome(
+                    ctx.storage.as_ref(),
+                    &candidate.tenant_id,
+                    candidate.task_id,
+                    &candidate.claim,
+                    ctx.max_context_bytes,
+                )
+                .await
+                {
+                    tracing::warn!(task_id = %candidate.task_id, %error, "worker result integration deferred");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "worker result recovery scan failed"),
+    }
+
+    match ctx
+        .storage
+        .claim_worker_resolution_recovery_page(ctx.batch_size.min(64))
+        .await
+    {
+        Ok(page) => {
+            for candidate in page {
+                if let Err(error) = crate::worker_lease::recover_worker_failure(
+                    ctx.storage.as_ref(),
+                    &candidate.tenant_id,
+                    candidate.id,
+                )
+                .await
+                {
+                    tracing::warn!(outcome_id=%candidate.id,%error,"worker failure integration deferred");
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error,"worker failure recovery scan failed"),
+    }
 
     let available = ctx.semaphore.available_permits();
     if available == 0 {
@@ -1340,6 +1390,21 @@ async fn process_one_signalled_instance(
     current_state: InstanceState,
     signals: Vec<Signal>,
 ) -> Result<(), EngineError> {
+    let relay =
+        orch8_storage::delegation_publication::is_proxy_instance(storage.as_ref(), instance_id)
+            .await?;
+    if relay && current_state == InstanceState::Scheduled {
+        // Older resumes may have armed a relay. Its signals still need to be
+        // consumed even though native candidate selection correctly skips it.
+        storage
+            .conditional_update_instance_state(
+                instance_id,
+                InstanceState::Scheduled,
+                InstanceState::Waiting,
+                None,
+            )
+            .await?;
+    }
     // Scheduled instances with a pending *control* signal just need a
     // wake-up so the normal tick processes it immediately. Skip the full
     // signal processor to avoid invalid state transitions.
@@ -1351,7 +1416,7 @@ async fn process_one_signalled_instance(
     // re-armed a parked instance on every sweep, which together with a
     // step delay was a livelock (ENG-R-N1). Storage already filters
     // these rows; this is the backend-independent guard.
-    if current_state == InstanceState::Scheduled {
+    if current_state == InstanceState::Scheduled && !relay {
         if !signals
             .iter()
             .any(|s| wakes_scheduled_instance(&s.signal_type))
@@ -1421,6 +1486,8 @@ async fn process_one_signalled_instance(
         if current_state != InstanceState::Cancelled
             && let Ok(Some(inst)) = storage.get_instance(instance_id).await
             && inst.state == InstanceState::Cancelled
+            && !orch8_storage::delegation_publication::is_proxy_record(storage.as_ref(), &inst)
+                .await?
             && let Ok(seq) = sequence_cache
                 .get_by_id_owned(storage, inst.sequence_id)
                 .await
@@ -2941,16 +3008,32 @@ async fn process_instance(
         }
         crate::ownership::LocalOwnership::Superseded => {
             warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
-            crate::lifecycle::transition_claimed_instance(
-                storage.as_ref(),
-                instance_id,
-                Some(&instance.tenant_id),
-                ctx.claim_token,
-                InstanceState::Running,
-                InstanceState::Waiting,
-                None,
-            )
-            .await?;
+            if storage.is_physical_instance_retired(instance_id).await? {
+                // Permanent retirement authorizes halting this physical ID
+                // regardless of an inconsistent legacy claim. Forward claim
+                // predicates deliberately refuse retired rows. The state CAS
+                // still lets a concurrent terminal outcome win without overwrite.
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    InstanceState::Running,
+                    InstanceState::Paused,
+                    None,
+                )
+                .await?;
+            } else {
+                crate::lifecycle::transition_claimed_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    ctx.claim_token,
+                    InstanceState::Running,
+                    InstanceState::Waiting,
+                    None,
+                )
+                .await?;
+            }
             return Ok(());
         }
     }

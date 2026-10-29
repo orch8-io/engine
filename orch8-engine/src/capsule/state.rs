@@ -1,90 +1,14 @@
 //! Versioned portable recovery rows and destination-local identity remapping.
 use super::CapsuleServiceError;
-use orch8_storage::{StorageBackend, restore::InstanceSnapshot};
+use orch8_storage::restore::InstanceSnapshot;
 use orch8_types::{
-    continuity::{CapsuleExecutionState, CapsulePayload, CapsuleSchemaVersion},
+    continuity::{CapsulePayload, CapsuleSchemaVersion},
     execution::BlockType,
     ids::{ExecutionNodeId, InstanceId},
     instance::TaskInstance,
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-
-pub(super) async fn export(
-    storage: &dyn StorageBackend,
-    instance: InstanceId,
-) -> Result<CapsuleExecutionState, CapsuleServiceError> {
-    let nodes = storage.get_execution_tree(instance).await?;
-    if nodes.len() > CapsulePayload::MAX_EXECUTION_NODES {
-        return Err(CapsuleServiceError::PayloadTooLarge);
-    }
-    let mut payloads = Vec::new();
-    let mut seen = HashSet::new();
-    loop {
-        let after = payloads
-            .last()
-            .map(|entry: &orch8_types::output::ExternalizedEntry| entry.ref_key.as_str());
-        let page = storage
-            .list_externalized_entries(instance, after, 1000)
-            .await?;
-        if page.is_empty() {
-            break;
-        }
-        if payloads.len() + page.len() > CapsulePayload::MAX_EXTERNALIZED_ENTRIES {
-            return Err(CapsuleServiceError::PayloadTooLarge);
-        }
-        // Cursor comparisons belong to the backend's text collation. Detect
-        // repeated keys directly, without imposing Rust ordering on SQL pages.
-        if page
-            .iter()
-            .any(|entry| entry.instance_id != instance || !seen.insert(entry.ref_key.clone()))
-        {
-            return Err(CapsuleServiceError::PayloadIdentityMismatch);
-        }
-        payloads.extend(page);
-    }
-    Ok(CapsuleExecutionState { nodes, payloads })
-}
-
-/// Never publish the capped prefix returned by the legacy ledger list API.
-pub(super) async fn effect_receipts(
-    storage: &dyn StorageBackend,
-    owner: &orch8_types::continuity::ContinuityExecution,
-) -> Result<Vec<orch8_types::continuity::EffectReceipt>, CapsuleServiceError> {
-    let mut ids = Vec::new();
-    let mut seen = HashSet::new();
-    let mut cursor = None;
-    loop {
-        let page = storage
-            .page_effect_receipts(&owner.tenant_id, owner.continuity_id, cursor.as_ref(), 1000)
-            .await?;
-        if page
-            .next
-            .as_ref()
-            .is_some_and(|next| page.receipts.last().map(|receipt| receipt.id) != Some(next.id))
-        {
-            return Err(CapsuleServiceError::PayloadIdentityMismatch);
-        }
-        if ids.len() + page.receipts.len() > CapsulePayload::MAX_PENDING_ITEMS {
-            return Err(CapsuleServiceError::PayloadTooLarge);
-        }
-        for receipt in page.receipts {
-            if receipt.tenant_id != owner.tenant_id
-                || receipt.continuity_id != owner.continuity_id
-                || !seen.insert(receipt.id)
-            {
-                return Err(CapsuleServiceError::PayloadIdentityMismatch);
-            }
-            ids.push(receipt);
-        }
-        match page.next {
-            None => break,
-            Some(next) if cursor.as_ref() != Some(&next) => cursor = Some(next),
-            Some(_) => return Err(CapsuleServiceError::PayloadIdentityMismatch),
-        }
-    }
-    Ok(ids)
-}
 
 /// Adopt only exact pre-binding IDs at the current source location. Retired
 /// generations and receipt origins from earlier hops are history, not aliases.
@@ -344,6 +268,7 @@ pub(super) fn effect_import(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orch8_types::continuity::CapsuleExecutionState;
     use serde_json::json;
 
     fn payload() -> CapsulePayload {

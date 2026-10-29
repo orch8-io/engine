@@ -309,3 +309,66 @@ orch8_storage::backend_test!(async fn deferred_credential_lookup_preserves_stora
     let error=prepared.resolve_deferred_credentials(guarded.as_ref(),&instance,instance.claimed_at.unwrap()).await;
     assert!(matches!(error,Err(PrepareError::Credential(orch8_types::error::StepError::Permanent{..}))));
 });
+
+orch8_storage::backend_test!(async fn old_tree_preparation_cannot_dispatch_a_reused_activation(b) {
+    use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+    use orch8_types::ids::ExecutionNodeId;
+    use orch8_types::filter::Pagination;
+    use orch8_types::worker_filter::WorkerTaskFilter;
+    let (storage, instance, mut step) = source_on(b.storage.clone()).await;
+    storage.ensure_instance_run_started_claimed(instance.id, &uuid::Uuid::now_v7().to_string(), chrono::Utc::now(), instance.claimed_at.unwrap()).await.unwrap();
+    let instance = storage.get_instance(instance.id).await.unwrap().unwrap();
+    step.params = serde_json::json!({"url":"https://example.invalid/{{context.data.value}}"});
+    let node = ExecutionNode {
+        id: ExecutionNodeId::new(), instance_id: instance.id, block_id: step.id.clone(),
+        parent_id: None, block_type: BlockType::Step, branch_index: None,
+        state: NodeState::Running, started_at: Some(chrono::Utc::now()), completed_at: None,
+    };
+    storage.create_execution_node(&node).await.unwrap();
+    let (guarded, faults) = FaultStorage::wrap(storage.clone());
+    let pause = faults.on("get_latest_completed_outputs").times(1).pause();
+    let id = instance.id;
+    let node_id = node.id;
+    let task = tokio::spawn(async move {
+        execute_step_node(&guarded, &HandlerRegistry::new(), &instance, &node, &step, &OutputsSnapshot::new()).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered()).await.unwrap();
+    // The parent claim and run remain unchanged: only the activity generation
+    // moves. Checking the claim again after template I/O cannot detect this.
+    storage.update_node_state(node_id, NodeState::Pending).await.unwrap();
+    storage.update_node_state(node_id, NodeState::Running).await.unwrap();
+    pause.release();
+    let result = task.await.unwrap();
+    assert!(matches!(result, Err(EngineError::ClaimLost { .. })), "old preparation was accepted: {result:?}");
+    assert!(storage.list_worker_tasks(&WorkerTaskFilter { instance_id: Some(id), ..WorkerTaskFilter::default() }, &Pagination::default()).await.unwrap().is_empty());
+    assert_eq!(storage.get_execution_tree(id).await.unwrap()[0].state, NodeState::Running);
+});
+
+orch8_storage::backend_test!(async fn old_flat_preparation_cannot_dispatch_after_step_baseline_changes(b) {
+    use crate::testing::TestEngine;
+    use orch8_types::filter::Pagination;
+    use orch8_types::worker_filter::WorkerTaskFilter;
+    let storage = b.storage.clone();
+    let (guarded, faults) = FaultStorage::wrap(storage.clone());
+    let engine = TestEngine::builder().storage(guarded).build().await;
+    let sequence = SequenceBuilder::new("flat-dispatch-fence")
+        .blocks(vec![orch8_types::sequence::BlockDefinition::Step(Box::new(step_with_params(
+            "work", "remote.http", serde_json::json!({"url":"https://example.invalid/{{runtime.run_id}}"}),
+        )))])
+        .build();
+    let id = engine.start(&sequence).await;
+    let pause = faults.on("get_latest_completed_outputs").times(1).pause();
+    let task = tokio::spawn(async move { engine.tick().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered()).await.unwrap();
+    let instance = storage.get_instance(id).await.unwrap().unwrap();
+    let mut context = instance.context.clone();
+    let changed = context.runtime.current_step_started_at.unwrap() + chrono::Duration::seconds(1);
+    context.runtime.current_step_started_at = Some(changed);
+    storage.update_instance_context(id, &context).await.unwrap();
+    pause.release();
+    task.await.unwrap();
+    assert!(faults.calls("admit_worker_dispatch") > 0);
+    assert!(storage.get_execution_tree(id).await.unwrap().is_empty(), "scenario must exercise the flat scheduler");
+    assert!(storage.list_worker_tasks(&WorkerTaskFilter { instance_id: Some(id), ..WorkerTaskFilter::default() }, &Pagination::default()).await.unwrap().is_empty());
+    assert_eq!(storage.get_instance(id).await.unwrap().unwrap().context.runtime.current_step_started_at, Some(changed));
+});
