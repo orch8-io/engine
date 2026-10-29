@@ -222,7 +222,14 @@ fn state_storage_error(error: &orch8_types::error::StorageError) -> StepError {
 /// An owned native invocation that has reserved admission but has not entered
 /// host code. Dropping it before polling releases its reservation.
 pub type PreparedStep = Pin<Box<dyn Future<Output = Result<serde_json::Value, StepError>> + Send>>;
-type StepPreparation = Box<dyn Fn(StepContext) -> Result<PreparedStep, StepError> + Send + Sync>;
+type StepPreparation = Box<
+    dyn Fn(
+            StepContext,
+            Option<crate::remote_worker::lease::LeaseAuthority>,
+        ) -> Result<PreparedStep, StepError>
+        + Send
+        + Sync,
+>;
 
 /// Registry of named step handlers.
 ///
@@ -321,15 +328,39 @@ impl HandlerRegistry {
         F: Fn(StepContext) -> Result<Fut, StepError> + Send + Sync + 'static,
         Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
     {
+        self.register_lease_aware_prepared_with_deferred_effect_admission(
+            name,
+            move |ctx, _lease| prepare(ctx),
+        );
+    }
+    /// Register a prepared native adapter that retains supervised remote lease
+    /// liveness through its final physical host-entry check. None is ordinary
+    /// local dispatch; workflow JSON cannot manufacture this observer.
+    pub fn register_lease_aware_prepared_with_deferred_effect_admission<F, Fut>(
+        &mut self,
+        name: &str,
+        prepare: F,
+    ) where
+        F: Fn(
+                StepContext,
+                Option<crate::remote_worker::lease::LeaseAuthority>,
+            ) -> Result<Fut, StepError>
+            + Send
+            + Sync
+            + 'static,
+        Fut: Future<Output = Result<serde_json::Value, StepError>> + Send + 'static,
+    {
         let prepare = Arc::new(prepare);
         let invoke = Arc::clone(&prepare);
         self.register_with_deferred_effect_admission(name, move |ctx| {
-            let prepared = invoke(ctx);
+            let prepared = invoke(ctx, None);
             async move { prepared?.await }
         });
         self.prepared_handlers.insert(
             Arc::from(name),
-            Box::new(move |ctx| prepare(ctx).map(|future| Box::pin(future) as PreparedStep)),
+            Box::new(move |ctx, lease| {
+                prepare(ctx, lease).map(|future| Box::pin(future) as PreparedStep)
+            }),
         );
     }
 
@@ -343,7 +374,26 @@ impl HandlerRegistry {
         if self.mocks.contains_key(name) {
             return None;
         }
-        self.prepared_handlers.get(name).map(|prepare| prepare(ctx))
+        self.prepared_handlers
+            .get(name)
+            .map(|prepare| prepare(ctx, None))
+    }
+
+    /// Prepare a leased native invocation without changing `StepContext`'s public
+    /// shape. Lease-aware adapters must check again at physical entry.
+    pub fn prepare_native_handler_with_lease(
+        &self,
+        name: &str,
+        ctx: StepContext,
+        lease: crate::remote_worker::lease::LeaseAuthority,
+    ) -> Option<Result<PreparedStep, StepError>> {
+        if self.mocks.contains_key(name) {
+            return None;
+        }
+        self.prepared_handlers.get(name).map(|prepare| {
+            lease.check().map_err(|_| StepError::ClaimLost)?;
+            prepare(ctx, Some(lease))
+        })
     }
 
     pub(crate) fn defers_effect_admission(&self, name: &str) -> bool {

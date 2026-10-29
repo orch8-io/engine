@@ -53,7 +53,7 @@
 //! against servers that predate the distributed contract. Built-in handlers
 //! never see `__orch8`.
 
-use orch8_engine::remote_worker::lease::{ConfirmedLease, LeaseEnd};
+use orch8_engine::remote_worker::lease::{ConfirmedLease, LeaseAuthority, LeaseEnd};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -688,6 +688,7 @@ impl Worker {
                 return released;
             }
         };
+        let authority = lease.authority();
         let mut started = false;
         let mut outcome = None;
         let result = tokio::select! {
@@ -695,7 +696,7 @@ impl Worker {
             () = superseded.cancelled() => Err(LeaseEnd::LostOwnership),
             result = lease.run(
                 heartbeat,
-                self.execute_confirmed(task, key, &mut started, &mut outcome),
+                self.execute_confirmed(task, key, &mut started, &mut outcome,authority),
                 || client.heartbeat(task.id, task.claim_epoch),
             ) => result,
         };
@@ -734,6 +735,7 @@ impl Worker {
         key: &ClaimKey,
         started: &mut bool,
         saved_outcome: &mut Option<Outcome>,
+        authority: LeaseAuthority,
     ) -> bool {
         let client = &self.deps.client;
         let store = &self.deps.store;
@@ -748,11 +750,11 @@ impl Worker {
         }
         // Reserve physical native admission before recording dispatch. This
         // constructs an owned, unpolled future and must not enter host code.
-        let prepared = match self
-            .deps
-            .registry
-            .prepare_native_handler(&task.handler_name, self.invocation_context(task))
-        {
+        let prepared = match self.deps.registry.prepare_native_handler_with_lease(
+            &task.handler_name,
+            self.invocation_context(task),
+            authority,
+        ) {
             Some(Ok(future)) => Some(future),
             Some(Err(_)) => {
                 let released = release(client, task.id, task.claim_epoch, false).await;

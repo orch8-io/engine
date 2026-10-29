@@ -404,6 +404,7 @@ impl CatalogHandlers {
                 legacy_capacity: None,
                 binding: Some(binding),
                 stop: self.stop.clone(),
+                remote_lease: None,
             },
         )
         .await
