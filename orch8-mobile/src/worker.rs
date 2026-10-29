@@ -689,7 +689,9 @@ impl Worker {
                 return released;
             }
         };
-        let authority = lease.authority();
+        let authority = lease
+            .authority()
+            .with_revocation(superseded.clone(), LeaseEnd::LostOwnership);
         let mut started = false;
         let mut outcome = None;
         let result = tokio::select! {

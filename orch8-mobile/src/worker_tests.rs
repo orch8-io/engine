@@ -1787,3 +1787,6 @@ mod prepared_admission;
 
 #[path = "worker/worker_tests/process_ownership.rs"]
 mod process_ownership;
+
+#[path = "worker/worker_tests/superseded_entry.rs"]
+mod superseded_entry;
