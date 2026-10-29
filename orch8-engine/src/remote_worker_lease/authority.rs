@@ -7,6 +7,7 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::time::Instant;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
 enum State {
@@ -22,6 +23,7 @@ enum State {
 pub struct LeaseAuthority {
     state: Arc<Mutex<State>>,
     physical_owners: Vec<Arc<dyn Send + Sync>>,
+    revocations: Vec<(CancellationToken, LeaseEnd)>,
 }
 impl std::fmt::Debug for LeaseAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -33,6 +35,7 @@ impl LeaseAuthority {
         Self {
             state: Arc::new(Mutex::new(State::Pending(until))),
             physical_owners: Vec::new(),
+            revocations: Vec::new(),
         }
     }
     /// Retain a runtime-owned physical reservation through the last enriched
@@ -45,6 +48,16 @@ impl LeaseAuthority {
         self.physical_owners.push(owner);
         self
     }
+    /// Observe runtime-owned revocation directly at physical admission, even
+    /// when the supervisor cannot be polled. Clones retain these checks. The
+    /// first observed refusal is permanent and becomes visible to all observers.
+    /// This does not release retained physical resources or interrupt host code.
+    /// The runtime must bind the token to the original authenticated claim.
+    #[must_use]
+    pub fn with_revocation(mut self, token: CancellationToken, reason: LeaseEnd) -> Self {
+        self.revocations.push((token, reason));
+        self
+    }
     /// Refuse expired or unsupervised work even when its watcher has not been
     /// polled. Expiration is permanent; a delayed renewal cannot revive it.
     ///
@@ -52,6 +65,17 @@ impl LeaseAuthority {
     /// Returns why physical provider entry is no longer authorized by this lease.
     pub fn check(&self) -> Result<(), LeaseEnd> {
         let mut state = self.state.lock().map_err(|_| LeaseEnd::Unconfirmed)?;
+        if let State::Ended(end) = *state {
+            return Err(end);
+        }
+        if let Some((_, end)) = self
+            .revocations
+            .iter()
+            .find(|(token, _)| token.is_cancelled())
+        {
+            *state = State::Ended(*end);
+            return Err(*end);
+        }
         match *state {
             State::Pending(until) | State::Live(until) if Instant::now() >= until => {
                 *state = State::Ended(LeaseEnd::Expired);

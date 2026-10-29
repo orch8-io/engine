@@ -70,6 +70,55 @@ async fn physical_owners_survive_revocation_but_not_the_last_enriched_observer()
     assert!(first_weak.upgrade().is_none());
     assert!(second_weak.upgrade().is_none());
 }
+
+#[test]
+fn bound_revocation_is_visible_without_supervisor_progress_and_never_revives() {
+    let authority = LeaseAuthority::new(Instant::now() + Duration::from_secs(30));
+    authority.activate().unwrap();
+    let stop = CancellationToken::new();
+    let observer = authority
+        .clone()
+        .with_revocation(stop.clone(), LeaseEnd::LostOwnership);
+    assert_eq!(observer.check(), Ok(()));
+    stop.cancel();
+    assert_eq!(observer.check(), Err(LeaseEnd::LostOwnership));
+    assert_eq!(authority.check(), Err(LeaseEnd::LostOwnership));
+    assert_eq!(
+        authority.renew(Instant::now() + Duration::from_secs(60)),
+        Err(LeaseEnd::LostOwnership)
+    );
+    assert_eq!(authority.activate(), Err(LeaseEnd::LostOwnership));
+}
+
+#[test]
+fn pending_revocation_clones_retain_physical_owners_until_they_drop() {
+    let authority = LeaseAuthority::new(Instant::now() + Duration::from_secs(30));
+    let stop = CancellationToken::new();
+    let owner = Arc::new(());
+    let weak = Arc::downgrade(&owner);
+    let observer = authority
+        .clone()
+        .with_physical_owner(owner)
+        .with_revocation(stop.clone(), LeaseEnd::Unconfirmed);
+    let copy = observer.clone();
+    stop.cancel();
+    assert_eq!(copy.check(), Err(LeaseEnd::Unconfirmed));
+    assert_eq!(authority.activate(), Err(LeaseEnd::Unconfirmed));
+    drop(copy);
+    assert!(weak.upgrade().is_some());
+    drop(observer);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn bound_revocation_preserves_the_first_terminal_reason() {
+    let authority = LeaseAuthority::new(Instant::now());
+    assert_eq!(authority.check(), Err(LeaseEnd::Expired));
+    let stop = CancellationToken::new();
+    stop.cancel();
+    let observer = authority.with_revocation(stop, LeaseEnd::LostOwnership);
+    assert_eq!(observer.check(), Err(LeaseEnd::Expired));
+}
 #[tokio::test(start_paused = true)]
 async fn success_revokes_before_operation_future_destruction() {
     let lease = acquire().await;
