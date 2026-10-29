@@ -79,6 +79,21 @@ pub async fn recorded_reporter(
 pub(crate) fn invalid() -> StorageError {
     StorageError::Constraint("invalid issued worker claim scope".into())
 }
+/// SQL worker counters use signed 64-bit columns. Never alias another token by
+/// clamping an unrepresentable wire value to the last valid generation.
+pub(crate) fn sql_counter(value: u64) -> Result<i64, StorageError> {
+    i64::try_from(value).map_err(|_| counter_range())
+}
+fn counter_range() -> StorageError {
+    StorageError::Constraint("worker counter exceeds supported database range".into())
+}
+pub(crate) fn next_epoch(current: u64) -> Result<u64, StorageError> {
+    let next = sql_counter(current)?
+        .checked_add(1)
+        .ok_or_else(counter_range)?;
+    u64::try_from(next).map_err(|_| counter_range())
+}
+
 impl WorkerClaimPrincipal {
     pub fn validate(&self) -> Result<(), StorageError> {
         match self {

@@ -24,10 +24,14 @@ pub(super) async fn insert_attempt_events(
         "INSERT INTO worker_task_attempt_events \
          (id, task_id, claim_epoch, worker_id, event, reason, created_at) ",
     );
-    qb.push_values(events, |mut row, event| {
+    let epochs = events
+        .iter()
+        .map(|event| crate::worker_claim::sql_counter(event.claim_epoch))
+        .collect::<Result<Vec<_>, _>>()?;
+    qb.push_values(events.iter().zip(epochs), |mut row, (event, epoch)| {
         row.push_bind(event.id)
             .push_bind(event.task_id)
-            .push_bind(i64::try_from(event.claim_epoch).unwrap_or(i64::MAX))
+            .push_bind(epoch)
             .push_bind(&event.worker_id)
             .push_bind(event.event.as_str())
             .push_bind(&event.reason)
@@ -102,9 +106,9 @@ pub(super) fn insert_task_query(
     .bind(task.attempt as i16)
     .bind(task.timeout_ms)
     .bind(task.state.to_string())
-    .bind(i64::try_from(task.claim_epoch).unwrap_or(i64::MAX))
+    .bind(crate::worker_claim::sql_counter(task.claim_epoch)?)
     .bind(checkpoint.map(|value|value.value))
-    .bind(i64::try_from(task.checkpoint_seq).unwrap_or(i64::MAX))
+    .bind(crate::worker_claim::sql_counter(task.checkpoint_seq)?)
     .bind(task.created_at)
     .bind(
         task.effect_id
@@ -112,7 +116,7 @@ pub(super) fn insert_task_query(
     )
     .bind(
         task.continuity_epoch
-            .map(|epoch| i64::try_from(epoch).unwrap_or(i64::MAX)),
+            .map(crate::worker_claim::sql_counter).transpose()?,
     )
     .bind(task.carries_credentials)
     .bind(awaiting_dispatch)
@@ -167,7 +171,7 @@ pub(super) async fn claim(
               claim_epoch = claim_epoch + 1, lease_secs = NULL, claimed_runtime_kind = NULL
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND state = 'pending' AND NOT awaiting_dispatch
+              WHERE handler_name = $1 AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch
                 AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
               ORDER BY created_at
@@ -235,7 +239,7 @@ pub(super) async fn claim_for_tenant(
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1
                 AND wt.tenant_id = $4
-                AND wt.state = 'pending'
+                AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807
                 AND NOT wt.awaiting_dispatch
                 AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND ti.tenant_id = $4
@@ -290,7 +294,7 @@ async fn fill_pending_tenants(
           FROM task_instances ti
           WHERE ti.id = wt.instance_id
             AND wt.handler_name = $1
-            AND wt.state = 'pending'
+            AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807
             AND wt.tenant_id IS NULL",
     )
     .bind(handler_name)
@@ -351,7 +355,7 @@ pub(super) async fn claim_matching(
             .push_bind(handler_name);
         // A retry row is claimable only once its re-dispatch bound the
         // attempt's effect id (see `insert_task_query`).
-        query.push(" AND wt.state = 'pending' AND NOT wt.awaiting_dispatch");
+        query.push(" AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND NOT wt.awaiting_dispatch");
         // Never hand out work for an instance that already finished or was
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
@@ -447,7 +451,7 @@ pub(super) async fn claim_matching(
              lease_secs=$4, claimed_runtime_kind=$5
            WHERE id IN (
              SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND ($6::text IS NULL OR queue_name=$6) AND (NOT $7 OR queue_name IS NULL) AND ($8::text IS NULL OR tenant_id=$8) AND state = 'pending' AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
+             WHERE id = ANY($2) AND ($6::text IS NULL OR queue_name=$6) AND (NOT $7 OR queue_name IS NULL) AND ($8::text IS NULL OR tenant_id=$8) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
              ORDER BY created_at, id
              LIMIT $3
              FOR UPDATE SKIP LOCKED
@@ -560,7 +564,7 @@ pub(super) async fn fail(
     .bind(&claim.worker_id)
     .bind(message)
     .bind(retryable)
-    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+    .bind(crate::worker_claim::sql_counter(claim.claim_epoch)?)
     .fetch_optional(&mut *tx)
     .await?;
     if row.is_some() {
@@ -591,7 +595,7 @@ pub(super) async fn heartbeat(
     )
     .bind(task_id)
     .bind(&claim.worker_id)
-    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+    .bind(crate::worker_claim::sql_counter(claim.claim_epoch)?)
     .execute(&store.pool)
     .await?;
     Ok(result.rows_affected() > 0)
@@ -618,7 +622,7 @@ pub(super) async fn checkpoint(
     )
     .bind(task_id)
     .bind(&claim.worker_id)
-    .bind(i64::try_from(claim.claim_epoch).unwrap_or(i64::MAX))
+    .bind(crate::worker_claim::sql_counter(claim.claim_epoch)?)
     .bind(expected)
     .bind(encoded.value)
     .bind(next)

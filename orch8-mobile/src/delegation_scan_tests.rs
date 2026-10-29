@@ -923,3 +923,60 @@ async fn stop_between_http_phases_records_the_reply_without_dispatching_the_next
         );
     }
 }
+
+#[tokio::test]
+async fn exhausted_claim_epochs_do_not_fill_the_discovery_page() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let runtime = RuntimeId::new();
+    let pump = pump(Arc::clone(&storage), runtime).await;
+    let healthy = seed_discovery(&storage, runtime).await;
+    sqlx::query("UPDATE worker_tasks SET claim_epoch=9223372036854775807 WHERE id<>?1")
+        .bind(healthy.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    pump.discover().await.unwrap();
+    assert_eq!(
+        storage
+            .get_worker_task(healthy)
+            .await
+            .unwrap()
+            .unwrap()
+            .worker_id
+            .as_deref(),
+        Some(PUMP_WORKER_ID)
+    );
+    let changed:i64=sqlx::query_scalar("SELECT COUNT(*) FROM worker_tasks WHERE id<>?1 AND (state<>'pending' OR worker_id IS NOT NULL OR claim_epoch<>9223372036854775807)").bind(healthy.to_string()).fetch_one(storage.pool()).await.unwrap();
+    assert_eq!(changed, 0);
+}
+#[tokio::test]
+async fn exhausted_claim_epoch_is_rechecked_after_the_discovery_snapshot() {
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let runtime = RuntimeId::new();
+    let pump = pump(Arc::clone(&storage), runtime).await;
+    let id = seed_discovery(&storage, runtime).await;
+    let snapshot = storage.get_worker_task(id).await.unwrap().unwrap();
+    sqlx::query("UPDATE worker_tasks SET claim_epoch=9223372036854775807 WHERE id=?1")
+        .bind(id.to_string())
+        .execute(storage.pool())
+        .await
+        .unwrap();
+    pump.park(&snapshot).await.unwrap();
+    pump.reject_unclaimed(&snapshot, "stale snapshot")
+        .await
+        .unwrap();
+    let retained = storage.get_worker_task(id).await.unwrap().unwrap();
+    assert_eq!(
+        retained.state,
+        orch8_types::worker::WorkerTaskState::Pending
+    );
+    assert_eq!(retained.claim_epoch, i64::MAX as u64);
+    assert!(retained.worker_id.is_none());
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM mobile_delegations WHERE local_task_id=?1")
+            .bind(id.to_string())
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+    assert_eq!(rows, 0);
+}
