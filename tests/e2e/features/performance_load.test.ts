@@ -1,4 +1,6 @@
 import { describe, it, before, after } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import type { WorkerTask } from "../types.ts";
 import assert from "node:assert/strict";
 import { Orch8Client, testSequence, step } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
@@ -79,29 +81,43 @@ describe("Performance and Load Testing", () => {
     // the next step. Poll-and-complete each task in order.
     const handlers = ["external_task_1", "external_task_2", "external_task_3"];
     for (const handler of handlers) {
-      // Wait for instance to go to waiting (next external task dispatched).
-      await client.waitForState(id, "waiting", { timeoutMs: 5000 });
-
-      // Poll with multiple workers concurrently — at most one should claim.
-      const workerCount = 5;
-      const pollPromises = Array.from({ length: workerCount }, (_, i) =>
-        client.pollWorkerTasks(handler, `worker-${i}`, 1)
-      );
-      const pollResults = await Promise.all(pollPromises);
-      const claimedTasks = pollResults.flat().filter(task => task.state === "claimed");
-      assert.ok(
-        claimedTasks.length <= 1,
-        `Expected at most 1 claimed task for ${handler}, got ${claimedTasks.length}`,
-      );
+      // An acknowledged completion can still be awaiting native application.
+      // Keep all five workers contending until this handler's actual task is
+      // published, rather than mistaking the previous step's Waiting for it.
+      const deadline = Date.now() + 5000;
+      let claimedTasks: WorkerTask[] = [];
+      while (claimedTasks.length === 0 && Date.now() < deadline) {
+        const pollResults = await Promise.all(
+          Array.from({ length: 5 }, (_, i) =>
+            client.pollWorkerTasks(handler, `worker-${i}`, 1)
+          )
+        );
+        claimedTasks = pollResults.flat().filter(task => task.state === "claimed");
+        assert.ok(
+          claimedTasks.length <= 1,
+          `Expected at most 1 claimed task for ${handler}, got ${claimedTasks.length}`,
+        );
+        for (const task of claimedTasks) {
+          assert.equal(task.instance_id, id, "the contender must claim this instance's task");
+        }
+        if (claimedTasks.length === 0) await delay(25);
+      }
+      assert.equal(claimedTasks.length, 1, `No ${handler} task was claimed for ${id}`);
 
       for (const task of claimedTasks) {
-        await client.completeWorkerTask(task.id, task.worker_id as string, { completed: true });
+        await client.completeWorkerTask(task.id, task.worker_id as string, { completed: true, handler });
       }
     }
 
     // Instance should complete after all 3 tasks are done.
     const completed = await client.waitForState(id, "completed", { timeoutMs: 15_000 });
     assert.equal(completed.state, "completed");
+    const outputs = await client.getOutputs(id);
+    for (const [index, handler] of handlers.entries()) {
+      const results = outputs.filter(output => output.block_id === `s${index + 1}`);
+      assert.equal(results.length, 1, `Expected one output for ${handler}`);
+      assert.deepEqual(results[0]!.output, { completed: true, handler });
+    }
   });
 
   // --- Memory Leak Detection (Indirect) ---
