@@ -1,6 +1,6 @@
 use super::*;
 
-async fn prepared_harness(server: &MockControlPlane, slots: Arc<Semaphore>) -> Harness {
+pub(super) async fn prepared_harness(server: &MockControlPlane, slots: Arc<Semaphore>) -> Harness {
     let mut h = harness(server, ok_handler(Duration::ZERO)).await;
     let mut registry = HandlerRegistry::new();
     crate::handlers::register_foreign_handler_with_capacity(
@@ -28,7 +28,7 @@ async fn install_start_audit(h: &Harness) {
     sqlx::query("CREATE TRIGGER observe_native_start AFTER UPDATE OF started ON mobile_worker_claims WHEN NEW.started=1 BEGIN INSERT INTO native_start_audit VALUES(NEW.task_id); END").execute(&h.pool).await.unwrap();
 }
 
-async fn starts(h: &Harness) -> i64 {
+pub(super) async fn starts(h: &Harness) -> i64 {
     sqlx::query_scalar("SELECT COUNT(*) FROM native_start_audit")
         .fetch_one(&h.pool)
         .await

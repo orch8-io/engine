@@ -135,6 +135,7 @@ pub struct WorkerWindowResult {
 
 mod admission;
 mod claims;
+mod physical;
 use admission::{Admission, Decision, Execution};
 use claims::ClaimKey;
 pub(crate) use claims::{ClaimStore, Outcome};
@@ -750,11 +751,7 @@ impl Worker {
         }
         // Reserve physical native admission before recording dispatch. This
         // constructs an owned, unpolled future and must not enter host code.
-        let prepared = match self.deps.registry.prepare_native_handler_with_lease(
-            &task.handler_name,
-            self.invocation_context(task),
-            authority,
-        ) {
+        let prepared = match self.prepare_invocation(task, key, authority) {
             Some(Ok(future)) => Some(future),
             Some(Err(_)) => {
                 let released = release(client, task.id, task.claim_epoch, false).await;
@@ -817,6 +814,27 @@ impl Worker {
         };
         let outcome = saved_outcome.insert(outcome);
         self.settle_outcome(task, key, outcome).await
+    }
+
+    fn prepare_invocation(
+        &self,
+        task: &RemoteTask,
+        key: &ClaimKey,
+        authority: LeaseAuthority,
+    ) -> Option<Result<orch8_engine::handlers::PreparedStep, StepError>> {
+        let authority = if self.deps.foreign_handlers.contains(&task.handler_name) {
+            let Some(owner) = physical::Reservation::reserve(key) else {
+                return Some(Err(StepError::ClaimLost));
+            };
+            authority.with_physical_owner(owner)
+        } else {
+            authority
+        };
+        self.deps.registry.prepare_native_handler_with_lease(
+            &task.handler_name,
+            self.invocation_context(task),
+            authority,
+        )
     }
 
     async fn settle_outcome(&self, task: &RemoteTask, key: &ClaimKey, outcome: &Outcome) -> bool {

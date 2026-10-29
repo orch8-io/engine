@@ -21,6 +21,7 @@ enum State {
 #[derive(Clone)]
 pub struct LeaseAuthority {
     state: Arc<Mutex<State>>,
+    physical_owners: Vec<Arc<dyn Send + Sync>>,
 }
 impl std::fmt::Debug for LeaseAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -31,7 +32,18 @@ impl LeaseAuthority {
     pub(super) fn new(until: Instant) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::Pending(until))),
+            physical_owners: Vec::new(),
         }
+    }
+    /// Retain a runtime-owned physical reservation through the last enriched
+    /// observer's destruction, including native callbacks that outlive the
+    /// supervisor. This does not activate, renew or extend lease authority.
+    /// The runtime must acquire and bind the reservation to its authenticated
+    /// task before handing this observer to a native adapter.
+    #[must_use]
+    pub fn with_physical_owner(mut self, owner: Arc<dyn Send + Sync>) -> Self {
+        self.physical_owners.push(owner);
+        self
     }
     /// Refuse expired or unsupervised work even when its watcher has not been
     /// polled. Expiration is permanent; a delayed renewal cannot revive it.

@@ -104,13 +104,15 @@ pub(super) enum InvocationPermit {
 }
 
 pub(super) struct NativeOwnership {
-    pub(super) remote_lease: Option<orch8_engine::remote_worker::lease::LeaseAuthority>,
     pub(super) claim: Option<NativeClaim>,
     pub(super) effect_admission: Option<orch8_engine::handlers::EffectAdmission>,
     pub(super) tracking_key: String,
     pub(super) _permits: Option<InvocationPermit>,
     pub(super) binding: Option<Arc<super::scoped::Binding>>,
     pub(super) stop: tokio_util::sync::CancellationToken,
+    // The observer can retain a process-wide task reservation. Release it only
+    // after the other owners, including foreign binding destruction.
+    pub(super) remote_lease: Option<orch8_engine::remote_worker::lease::LeaseAuthority>,
 }
 
 // Declaration order matters: foreign references are released before quarantine

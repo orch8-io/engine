@@ -47,6 +47,29 @@ async fn acquired_and_unpolled_supervision_never_authorize_entry() {
     drop(running);
     assert_eq!(authority.check(), Err(LeaseEnd::Unconfirmed));
 }
+
+#[tokio::test(start_paused = true)]
+async fn physical_owners_survive_revocation_but_not_the_last_enriched_observer() {
+    let lease = acquire().await;
+    let first = Arc::new(());
+    let second = Arc::new(());
+    let first_weak = Arc::downgrade(&first);
+    let second_weak = Arc::downgrade(&second);
+    let observer = lease
+        .authority()
+        .with_physical_owner(first)
+        .with_physical_owner(second);
+    assert_eq!(observer.check(), Err(LeaseEnd::Unconfirmed));
+    let copy = observer.clone();
+    drop(lease);
+    assert_eq!(copy.check(), Err(LeaseEnd::Unconfirmed));
+    drop(observer);
+    assert!(first_weak.upgrade().is_some());
+    assert!(second_weak.upgrade().is_some());
+    drop(copy);
+    assert!(first_weak.upgrade().is_none());
+    assert!(second_weak.upgrade().is_none());
+}
 #[tokio::test(start_paused = true)]
 async fn success_revokes_before_operation_future_destruction() {
     let lease = acquire().await;
