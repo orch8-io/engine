@@ -1,3 +1,5 @@
+pub(crate) mod reconciliation;
+
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -8,14 +10,10 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::filter::Pagination;
-use orch8_types::instance::InstanceState;
-use orch8_types::output::BlockOutput;
 use orch8_types::worker::{
     WorkerAttemptEventKind, WorkerClaim, WorkerTaskAttemptEvent, WorkerTaskState,
 };
 use orch8_types::worker_filter::WorkerTaskFilter;
-
-use orch8_types::execution::NodeState;
 
 use crate::AppState;
 use crate::auth::OptionalAdmin;
@@ -110,6 +108,10 @@ pub fn routes() -> Router<AppState> {
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
         .route(
+            "/workers/tasks/{id}/reconcile-completion",
+            post(reconciliation::reconcile_completion),
+        )
+        .route(
             "/workers/tasks/{id}/artifacts/{upload_id}",
             post(upload_task_artifact),
         )
@@ -192,6 +194,33 @@ async fn record_stale_rejection(
     if let Err(error) = state.storage.record_worker_task_attempt_event(&event).await {
         tracing::warn!(%task_id, %error, "failed to record stale worker mutation");
     }
+}
+
+async fn enforce_recorded_reporter(
+    state: &AppState,
+    tenant: &crate::auth::OptionalTenant,
+    caller: &crate::auth::WorkerCaller,
+    task_id: Uuid,
+    claim: &WorkerClaim,
+) -> Result<(), ApiError> {
+    let attribution = orch8_storage::worker_claim::recorded_reporter(
+        state.storage.as_ref(),
+        tenant.as_ref().map(|ctx| &ctx.tenant_id),
+        task_id,
+        claim,
+        &caller.0,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    if attribution == orch8_storage::worker_claim::RecordedReporter::Different {
+        return Err(ApiError::Forbidden(
+            "worker claim belongs to a different authenticated reporter".into(),
+        ));
+    }
+    // Unattributed history still follows the pre-journal protocol. This is a
+    // compatibility gap, not inferred ownership; reconciliation and a write floor
+    // must close it before the full ownership gate can be considered complete.
+    Ok(())
 }
 
 /// Ownership half of the lease fence: a task dispatched under an older
@@ -638,6 +667,7 @@ pub(crate) fn poll_limit(
 )]
 pub(crate) async fn poll_tasks(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Json(mut req): Json<PollRequest>,
@@ -689,32 +719,21 @@ pub(crate) async fn poll_tasks(
     // with this worker_id, drop it from the response, and leave a ghost
     // `claimed` row invisible to its owning tenant until the stale-task
     // reaper reset it.
-    let tasks = if let Some(capabilities) = req.capabilities.as_ref() {
-        state
-            .storage
-            .claim_worker_tasks_matching(
-                &req.handler_name,
-                &req.worker_id,
-                scoped.as_ref(),
-                None,
-                capabilities,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else if let Some(ref tid) = scoped {
-        state
-            .storage
-            .claim_worker_tasks_for_tenant(&req.handler_name, &req.worker_id, tid, limit)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else {
-        state
-            .storage
-            .claim_worker_tasks(&req.handler_name, &req.worker_id, limit)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    };
+    let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+        caller.0,
+        req.handler_name.clone(),
+        req.worker_id.clone(),
+        scoped.clone(),
+        None,
+        req.capabilities.take(),
+        limit,
+    )
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    let tasks = state
+        .storage
+        .claim_worker_tasks_with_authority(&request)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
 
     record_registration(
         &state,
@@ -750,6 +769,7 @@ pub(crate) struct QueuePollRequest {
 )]
 pub(crate) async fn poll_tasks_from_queue(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Json(mut req): Json<QueuePollRequest>,
@@ -794,43 +814,21 @@ pub(crate) async fn poll_tasks_from_queue(
         return Ok(poll_response(&state, Vec::new()));
     }
 
-    let tasks = if let Some(capabilities) = req.capabilities.as_ref() {
-        state
-            .storage
-            .claim_worker_tasks_matching(
-                &req.handler_name,
-                &req.worker_id,
-                scoped.as_ref(),
-                Some(&req.queue_name),
-                capabilities,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else if let Some(ref tid) = scoped {
-        state
-            .storage
-            .claim_worker_tasks_from_queue_for_tenant(
-                &req.queue_name,
-                &req.handler_name,
-                &req.worker_id,
-                tid,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    } else {
-        state
-            .storage
-            .claim_worker_tasks_from_queue(
-                &req.queue_name,
-                &req.handler_name,
-                &req.worker_id,
-                limit,
-            )
-            .await
-            .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-    };
+    let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+        caller.0,
+        req.handler_name.clone(),
+        req.worker_id.clone(),
+        scoped.clone(),
+        Some(req.queue_name.clone()),
+        req.capabilities.take(),
+        limit,
+    )
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    let tasks = state
+        .storage
+        .claim_worker_tasks_with_authority(&request)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
 
     record_registration(
         &state,
@@ -1055,12 +1053,21 @@ pub(crate) struct WorkerArtifactReceipt {
 #[allow(clippy::too_many_lines)] // lease + ownership fence + bounded upload in one handler
 pub(crate) async fn upload_task_artifact(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     Path((task_id, upload_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<ArtifactUploadQuery>,
     request: Request,
 ) -> Result<impl IntoResponse, ApiError> {
     use sha2::{Digest, Sha256};
+    enforce_recorded_reporter(
+        &state,
+        &tenant_ctx,
+        &caller,
+        task_id,
+        &WorkerClaim::new(query.worker_id.clone(), query.claim_epoch),
+    )
+    .await?;
 
     let task = state
         .storage
@@ -1200,6 +1207,7 @@ async fn persist_reported_logs(
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn complete_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
@@ -1207,6 +1215,29 @@ pub(crate) async fn complete_task(
     Json(req): Json<CompleteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    let replay_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    enforce_recorded_reporter(&state, &tenant_ctx, &caller, task_id, &replay_claim).await?;
+    let accepted = state
+        .storage
+        .get_worker_accepted_outcome(
+            tenant_ctx.as_ref().map(|ctx| &ctx.tenant_id),
+            task_id,
+            &replay_claim,
+        )
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?;
+    if let Some(receipt) = &accepted {
+        orch8_engine::delegation::integrate_completed_worker_outcome(
+            state.storage.as_ref(),
+            &receipt.tenant_id,
+            task_id,
+            &replay_claim,
+            state.max_context_bytes,
+        )
+        .await
+        .map_err(ApiError::from)?;
+        return Ok(StatusCode::OK);
+    }
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
         .storage
@@ -1277,40 +1308,31 @@ pub(crate) async fn complete_task(
     // The committed output wins on a retry (the worker may resend a
     // regenerated payload); a first completion uses the request's.
     let mut req = req;
-    if completion_retry && let Some(stored) = pre_task.output.clone() {
+    if completion_retry
+        && let Some(stored) = accepted
+            .map(|receipt| receipt.output)
+            .or_else(|| pre_task.output.clone())
+    {
         req.output = stored;
     }
 
-    // Enforce `max_context_bytes` on the post-merge context BEFORE anything
-    // is committed. Every other context writer (create, patch, fork) checks
-    // it; the worker merge bypassed it, so one oversized worker output could
-    // grow `context.data` without bound.
-    if let Some(obj) = req.output.as_object() {
-        let mut projected = inst.context.clone();
-        if !projected.data.is_object() {
-            projected.data = serde_json::Value::Object(serde_json::Map::new());
-        }
-        if let Some(data_obj) = projected.data.as_object_mut() {
-            for (k, v) in obj {
-                data_obj.insert(k.clone(), v.clone());
-            }
-        }
-        projected.check_size(state.max_context_bytes)?;
-    }
+    // Admission and durable recovery must measure the same context, including
+    // wrapped mailbox output and replacement of an existing delegation entry.
+    let projected = orch8_storage::worker_outcome::project_worker_completion_context(
+        state.storage.as_ref(),
+        &inst,
+        &pre_task,
+        &claim,
+        &req.output,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    projected.check_size(state.max_context_bytes)?;
 
     let tenant_id = inst.tenant_id.clone();
     let tenant_for_cb = Some(inst.tenant_id);
 
     if !completion_retry {
-        orch8_engine::effect_guard::commit_external_worker_effect(
-            state.storage.as_ref(),
-            &tenant_id,
-            &pre_task,
-            &req.output,
-        )
-        .await
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-
         let updated = state
             .storage
             .complete_worker_task(task_id, &claim, &req.output)
@@ -1343,235 +1365,17 @@ pub(crate) async fn complete_task(
         .await;
     }
 
-    let task = state
-        .storage
-        .get_worker_task(task_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
-        .ok_or_else(|| ApiError::NotFound(format!("worker_task {task_id}")))?;
+    let task = pre_task;
 
-    // Device-mesh delegation: integrate the result into the parent (block
-    // output + `context.data.delegations.<id>` + wake) instead of treating
-    // the mailbox task as one of the parent's own steps.
-    if orch8_engine::delegation::is_delegation_task(&task) {
-        // A completion retry (the first response was lost) integrates only
-        // when the first attempt did not get that far: the result block
-        // output is the integration's first write.
-        let integrated = completion_retry
-            && state
-                .storage
-                .get_block_output(task.instance_id, &task.block_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "block_output"))?
-                .is_some();
-        if !integrated {
-            orch8_engine::delegation::integrate_delegation_outcome(
-                state.storage.as_ref(),
-                &task,
-                Ok(&req.output),
-            )
-            .await
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
-        }
-        return Ok(StatusCode::OK);
-    }
-
-    let output_json = serde_json::to_string(&req.output).map_err(|e| {
-        ApiError::InvalidArgument(format!("failed to serialize worker output: {e}"))
-    })?;
-    let task_block_id = task.block_id.clone();
-    let block_output = BlockOutput {
-        id: Uuid::now_v7(),
-        instance_id: task.instance_id,
-        block_id: task.block_id,
-        output: req.output,
-        output_ref: None,
-        output_size: u32::try_from(output_json.len()).unwrap_or(u32::MAX),
-        attempt: task.attempt,
-        created_at: chrono::Utc::now(),
-    };
-
-    // Re-read instance state before propagating. Between task-claim and
-    // completion a cancel/admin-fail could have terminated the instance.
-    let Some(mut instance) = state
-        .storage
-        .get_instance(task.instance_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instance"))?
-    else {
-        return Ok(StatusCode::OK);
-    };
-    if instance.state.is_terminal()
-        || instance.state == InstanceState::Paused
-        || orch8_engine::ownership::local_ownership(
-            state.storage.as_ref(),
-            &instance.tenant_id,
-            instance.id,
-        )
-        .await
-        .map_err(|error| ApiError::Conflict(error.to_string()))?
-            != orch8_engine::ownership::LocalOwnership::Owned
-    {
-        tracing::info!(
-            instance_id = %task.instance_id,
-            state = %instance.state,
-            block_id = %task_block_id,
-            "external worker completion arrived for terminal/paused instance — task accepted, transition skipped"
-        );
-        // Still roll the external work into the breaker — the handler's
-        // dependency did succeed, and withholding the signal would leave
-        // a spurious failure in the breaker window.
-        if let (Some(cb), Some(tenant)) = (state.circuit_breakers.as_ref(), tenant_for_cb.as_ref())
-            && orch8_engine::circuit_breaker::is_breaker_tracked(&task.handler_name)
-        {
-            cb.record_success(tenant, &task.handler_name);
-        }
-        return Ok(StatusCode::OK);
-    }
-
-    // Merge step output into context.data BEFORE the atomic write.
-    let merged_context = if let Some(obj) = block_output.output.as_object() {
-        if instance.context.data.is_null() || !instance.context.data.is_object() {
-            instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-        }
-        if let Some(data_obj) = instance.context.data.as_object_mut() {
-            for (k, v) in obj {
-                data_obj.insert(k.clone(), v.clone());
-            }
-            true
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-
-    // Find the execution node that this worker task corresponds to.
-    // We do this BEFORE the atomic write so we can include the node
-    // completion in the same transaction, closing the race where the
-    // scheduler claims the instance between output-save and node-complete.
-    let tree = state
-        .storage
-        .get_execution_tree(task.instance_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "execution_tree"))?;
-    let node = tree.iter().find(|n| {
-        n.block_id == task_block_id && matches!(n.state, NodeState::Running | NodeState::Waiting)
-    });
-
-    // On a completion retry, only finish a transition that demonstrably did
-    // not happen yet: the step's node is still live (tree path), or — flat
-    // path, no tree — the instance is still Waiting on this very step.
-    // Otherwise the first attempt already transitioned; re-running the
-    // non-atomic fallback would save a duplicate output and re-schedule.
-    if completion_retry {
-        let pending = if tree.is_empty() {
-            instance.state == InstanceState::Waiting
-                && instance
-                    .context
-                    .runtime
-                    .current_step
-                    .as_ref()
-                    .is_none_or(|step| *step == task_block_id)
-        } else {
-            node.is_some()
-        };
-        if !pending {
-            return Ok(StatusCode::OK);
-        }
-        tracing::info!(
-            task_id = %task_id,
-            instance_id = %task.instance_id,
-            block_id = %task_block_id,
-            "worker completion retry: task already completed, finishing the instance transition"
-        );
-    }
-
-    let cas_err = if let Some(node) = node {
-        let result = if merged_context {
-            state
-                .storage
-                .save_output_complete_node_merge_context_and_transition(
-                    &block_output,
-                    node.id,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        } else {
-            state
-                .storage
-                .save_output_complete_node_and_transition(
-                    &block_output,
-                    node.id,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        };
-        match result {
-            Ok(()) => false,
-            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => true,
-            Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
-        }
-    } else {
-        // No live node. Flat (step-only) sequences run on the scheduler's
-        // fast path and never build an execution tree: saving the output and
-        // re-scheduling the instance *is* their completion path. Only a tree
-        // instance without a live node for this step is unexpected (the node
-        // was cancelled or already settled concurrently).
-        if tree.is_empty() {
-            tracing::debug!(
-                instance_id = %task.instance_id,
-                block_id = %task_block_id,
-                "worker completion for a flat (tree-less) instance"
-            );
-        } else {
-            tracing::warn!(
-                instance_id = %task.instance_id,
-                block_id = %task_block_id,
-                "worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
-            );
-        }
-        let result = if merged_context {
-            state
-                .storage
-                .save_output_merge_context_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    &instance.context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        } else {
-            state
-                .storage
-                .save_output_and_transition(
-                    &block_output,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        };
-        match result {
-            Ok(()) => false,
-            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => true,
-            Err(e) => return Err(ApiError::from_storage(e, "worker_task")),
-        }
-    };
-
-    if cas_err {
-        tracing::info!(
-            instance_id = %task.instance_id,
-            block_id = %task_block_id,
-            "worker completion CAS failed — instance became terminal/paused after read"
-        );
-    }
+    orch8_engine::delegation::integrate_completed_worker_outcome(
+        state.storage.as_ref(),
+        &tenant_id,
+        task_id,
+        &claim,
+        state.max_context_bytes,
+    )
+    .await
+    .map_err(ApiError::from)?;
 
     // Roll external-worker success into the same breaker registry the
     // in-process step-exec path uses. Skip-listed handlers (pure control-flow
@@ -1608,12 +1412,28 @@ pub(crate) struct FailRequest {
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn fail_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<FailRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    let report_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
+    enforce_recorded_reporter(&state, &tenant_ctx, &caller, task_id, &report_claim).await?;
+    if let Some(report) = state
+        .storage
+        .get_worker_resolution_outcome(
+            tenant_ctx.as_ref().map(|ctx| &ctx.tenant_id),
+            task_id,
+            Some(&report_claim),
+        )
+        .await
+        .map_err(|e| ApiError::from_storage(e, "worker_task"))?
+        && report.event == orch8_types::worker::WorkerAttemptEventKind::Failed
+    {
+        return Ok(StatusCode::OK);
+    }
     // Fetch task first to verify tenant access via its instance.
     let pre_task = state
         .storage
@@ -1650,8 +1470,10 @@ pub(crate) async fn fail_task(
     }
     enforce_ownership_fence(&state, &inst.tenant_id, &pre_task, &claim, "fail").await?;
 
-    // One fenced transaction (shared with the reaper, timeouts and release):
-    // receipt → `unknown`, then the task fails and the instance advances per
+    // Fenced task/native resolution (shared with the reaper, timeouts and release).
+    // The original uncertainty receipt and retained report commit with the
+    // task/native action, including when a retry removes the hot task row.
+    // The task fails and the instance advances per
     // the step's retry policy — or only the task fails for a delegation or a
     // terminal/paused instance. A racing lease change applies nothing.
     let failed = orch8_engine::worker_lease::fail_worker_task(
@@ -1720,12 +1542,21 @@ pub(crate) struct HeartbeatRequest {
 )]
 pub(crate) async fn heartbeat_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    enforce_recorded_reporter(
+        &state,
+        &tenant_ctx,
+        &caller,
+        task_id,
+        &WorkerClaim::new(req.worker_id.clone(), req.claim_epoch),
+    )
+    .await?;
     // Fetch task first to verify tenant access via its instance.
     let task = state
         .storage
@@ -1818,12 +1649,21 @@ pub(crate) struct ReleaseRequest {
 )]
 pub(crate) async fn release_task(
     State(state): State<AppState>,
+    caller: crate::auth::WorkerCaller,
     tenant_ctx: crate::auth::OptionalTenant,
     binding: crate::browser_sessions::OptionalBinding,
     Path(task_id): Path<Uuid>,
     Json(req): Json<ReleaseRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    enforce_recorded_reporter(
+        &state,
+        &tenant_ctx,
+        &caller,
+        task_id,
+        &WorkerClaim::new(req.worker_id.clone(), req.claim_epoch),
+    )
+    .await?;
     let task = state
         .storage
         .get_worker_task(task_id)

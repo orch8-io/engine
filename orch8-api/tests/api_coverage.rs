@@ -79,6 +79,17 @@ async fn seed_worker_task(
     queue: Option<&str>,
 ) -> Uuid {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
+    // A dispatched activity belongs to a durable run and flat-step activation.
+    // Bare queue rows intentionally cannot advance an unidentified native run.
+    let native_id = InstanceId::from_uuid(instance_id);
+    let mut parent = srv.storage.get_instance(native_id).await.unwrap().unwrap();
+    parent.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    parent.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("s1"));
+    parent.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    srv.storage
+        .update_instance_context(native_id, &parent.context)
+        .await
+        .unwrap();
     let task = WorkerTask {
         id: Uuid::now_v7(),
         instance_id: orch8_types::ids::InstanceId::from_uuid(instance_id),
@@ -87,7 +98,7 @@ async fn seed_worker_task(
         queue_name: queue.map(String::from),
         requirements: orch8_types::continuity::CapsuleRequirements::default(),
         params: json!({}),
-        context: json!({}),
+        context: serde_json::to_value(&parent.context).unwrap(),
         attempt: 0,
         timeout_ms: None,
         state: WorkerTaskState::Pending,
@@ -2338,4 +2349,92 @@ async fn t100_versioned_api_prefix() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn completed_outcome_replay_after_hot_gc_requires_original_claim_and_tenant() {
+    use orch8_types::{ids::TenantId, instance::InstanceState, worker::WorkerClaim};
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_seq(&client, &srv.base_url, "t1").await;
+    let inst_id = create_inst(&client, &srv.base_url, seq_id, "t1").await;
+    let native = InstanceId::from_uuid(Uuid::parse_str(&inst_id).unwrap());
+    let task = seed_worker_task(&srv, native.into_uuid(), "outcome.worker", None).await;
+    let claimed = srv
+        .storage
+        .claim_worker_tasks("outcome.worker", "worker", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    srv.storage
+        .update_instance_state(native, InstanceState::Paused, None)
+        .await
+        .unwrap();
+    let url = format!("{}/workers/tasks/{task}/complete", srv.base_url);
+    let original = json!({"result":"original"});
+    let response = client
+        .post(&url)
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"worker_id":"worker", "claim_epoch":claimed.claim_epoch, "output":original}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "{}",
+        response.text().await.unwrap()
+    );
+    srv.storage.delete_worker_task(task).await.unwrap();
+    for (tenant, worker, epoch, status) in [
+        ("t1", "worker", claimed.claim_epoch, StatusCode::OK),
+        (
+            "other",
+            "worker",
+            claimed.claim_epoch,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "t1",
+            "other-worker",
+            claimed.claim_epoch,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            "t1",
+            "worker",
+            claimed.claim_epoch + 1,
+            StatusCode::NOT_FOUND,
+        ),
+    ] {
+        let response = client
+            .post(&url)
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({"worker_id":worker,"claim_epoch":epoch,"output":{"result":"changed"}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+    }
+    let accepted = srv
+        .storage
+        .get_worker_accepted_outcome(
+            Some(&TenantId::unchecked("t1")),
+            task,
+            &WorkerClaim::new("worker", claimed.claim_epoch),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.output, original);
+    assert_eq!(
+        srv.storage
+            .get_instance(native)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        InstanceState::Paused
+    );
 }

@@ -94,7 +94,9 @@
 //! reference—rather than embed—the immutable sequence definition, so the
 //! destination must provision that definition first. Import does not transfer
 //! ownership by itself; the control plane or host must complete the continuity
-//! handoff before resuming the destination.
+//! handoff before resuming the destination. After verified acceptance, call
+//! [`Engine::acknowledge_portable_capsule`] on the source to retain a compact
+//! receipt and retire its encrypted transport artifact.
 //!
 //! ## Agent runtime preset
 //!
@@ -168,7 +170,7 @@ pub use orch8_types::context::ExecutionContext;
 /// Durable evidence and lifecycle state for one externally visible handler
 /// effect.
 pub use orch8_types::continuity::{
-    CapsuleRequirements, EffectReceipt, EffectState, ExecutionEpoch, RuntimeId,
+    CapsuleId, CapsuleRequirements, EffectReceipt, EffectState, ExecutionEpoch, RuntimeId,
 };
 /// AES-256-GCM payload encryptor used for portable execution capsules.
 pub use orch8_types::encryption::FieldEncryptor;
@@ -187,3 +189,7 @@ pub use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 /// Signal types for [`Engine::send_signal`] (`Pause`, `Resume`, `Cancel`,
 /// `UpdateContext`, or `Custom`).
 pub use orch8_types::signal::SignalType;
+
+// Shared by the native bindings before opening a recovery-owned pool.
+#[doc(hidden)]
+pub use orch8_storage::sqlite::resolve_sqlite_database_path;

@@ -2,10 +2,10 @@
 //! This is a necessary storage boundary, not scoped dispatch authorization.
 //! No production API materializes scoped requests until handler ownership is ready.
 //!
-//! Legacy instances remain unaffected. A registered account tenant requires its
+//! Non-retired legacy instances remain unaffected. A registered account tenant requires its
 //! immutable request proof; changing tenant/catalog/definition cannot turn an
 //! owned request into legacy work. PK lookups keep this out of history scans.
-pub(super) const ALLOWED: &str = "CASE
+pub(super) const ALLOWED: &str = "(CASE
     WHEN EXISTS (SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id = task_instances.id)
     THEN EXISTS (
         SELECT 1 FROM mobile_catalog_run_requests r
@@ -20,7 +20,7 @@ pub(super) const ALLOWED: &str = "CASE
         SELECT 1 FROM mobile_accounts a
         WHERE a.id = substr(task_instances.tenant_id, 16)
           AND task_instances.tenant_id = 'mobile-account-' || a.id
-    ) END";
+    ) END) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed'))";
 
 /// Both native rows must prove the same durable catalog owner, or both be
 /// legacy. Source/target aliases are fixed trusted SQL, never caller input.

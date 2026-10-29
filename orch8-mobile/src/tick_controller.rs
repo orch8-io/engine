@@ -185,6 +185,7 @@ impl TickController {
             let mut idle_streak: u32 = 0;
             let mut sync_scan = SyncScanSchedule::new(Instant::now());
             let mut next_instance_gc = Instant::now() + INSTANCE_GC_INTERVAL;
+            let mut next_capsule_gc = Instant::now();
             let mut notification_scan_due = true;
             let mut scheduler_is_quiescent = false;
 
@@ -203,6 +204,7 @@ impl TickController {
                         } else {
                             scheduled_tick_interval(tick_interval, state, idle_streak)
                         };
+                        next_tick = next_tick.min(next_capsule_gc);
                         continue;
                     }
                     () = work_available.notified() => SchedulerWake::Work,
@@ -216,7 +218,7 @@ impl TickController {
                 }
 
                         // A timer wake while the scheduler is known quiescent
-                        // exists only to service the sync deadline. Local work
+                        // services sync and transport-retirement deadlines. Local work
                         // retains a `Notify` permit and server commands are
                         // handled below, so neither an RSS sample nor a full
                         // scheduler pass can discover anything on this path.
@@ -226,6 +228,13 @@ impl TickController {
                         let ps = PowerState::from_atomic(
                             power_state.load(Ordering::Acquire),
                         );
+
+                        // Independent of scheduler work, RSS gates, and general
+                        // history retention: acknowledgement explicitly retires transport.
+                        if Instant::now() >= next_capsule_gc {
+                            lifecycle.sweep_capsule_artifacts().await;
+                            next_capsule_gc = Instant::now() + crate::lifecycle::CAPSULE_SWEEP_INTERVAL;
+                        }
 
                         // RSS sampling is deliberately much slower than the
                         // scheduler cadence. On Darwin it launches `ps`; on
@@ -256,6 +265,7 @@ impl TickController {
                         if scheduler_tick_due && memory_budget_exceeded {
                             next_tick = Instant::now()
                                 + effective_tick_interval(tick_interval, ps);
+                            next_tick = next_tick.min(next_capsule_gc);
                             continue;
                         }
 
@@ -411,6 +421,7 @@ impl TickController {
                         } else {
                             scheduled_tick_interval(tick_interval, ps, idle_streak)
                         };
+                        next_tick = next_tick.min(next_capsule_gc);
             }
             info!("mobile tick loop stopped");
         });

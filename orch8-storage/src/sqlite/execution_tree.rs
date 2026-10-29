@@ -57,9 +57,17 @@ pub(super) async fn get_tree(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<ExecutionNode>, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    get_tree_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn get_tree_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+) -> Result<Vec<ExecutionNode>, StorageError> {
     let rows = sqlx::query("SELECT * FROM execution_tree WHERE instance_id=?1 ORDER BY id")
         .bind(instance_id.into_uuid().to_string())
-        .fetch_all(&storage.pool)
+        .fetch_all(&mut *conn)
         .await?;
     rows.iter().map(row_to_node).collect()
 }

@@ -238,8 +238,12 @@ async fn effect_handler_dry_run_has_no_dispatch_identity() {
 }
 
 async fn portable_fixture() -> (Engine, Engine, InstanceId) {
+    portable_fixture_with_storage(Storage::sqlite_in_memory().artifacts_in_memory()).await
+}
+
+async fn portable_fixture_with_storage(storage: Storage) -> (Engine, Engine, InstanceId) {
     let source = Engine::builder()
-        .storage(Storage::sqlite_in_memory().artifacts_in_memory())
+        .storage(storage)
         .build()
         .await
         .expect("source engine");
@@ -451,6 +455,59 @@ async fn portable_capsule_round_trip_is_verified_and_idempotent() {
     assert_eq!(
         serde_json::to_value(waiting).unwrap(),
         serde_json::to_value(redelivered).unwrap()
+    );
+    assert_source_acknowledgement(
+        &source,
+        &capsule,
+        destination_runtime,
+        imported.id,
+        source_instance,
+    )
+    .await;
+}
+
+async fn assert_source_acknowledgement(
+    source: &Engine,
+    capsule: &orch8::PortableCapsule,
+    destination_runtime: RuntimeId,
+    destination_instance: InstanceId,
+    source_instance: InstanceId,
+) {
+    let capsule_id = capsule.signed_manifest.manifest.capsule_id;
+    let epoch = capsule
+        .signed_manifest
+        .manifest
+        .epoch
+        .checked_next()
+        .unwrap();
+    assert!(
+        source
+            .acknowledge_portable_capsule(capsule_id, epoch, RuntimeId::new(), destination_instance)
+            .await
+            .is_err()
+    );
+    assert!(
+        source
+            .acknowledge_portable_capsule(
+                capsule_id,
+                epoch.checked_next().unwrap(),
+                destination_runtime,
+                destination_instance
+            )
+            .await
+            .is_err()
+    );
+    source
+        .acknowledge_portable_capsule(capsule_id, epoch, destination_runtime, destination_instance)
+        .await
+        .unwrap();
+    source
+        .acknowledge_portable_capsule(capsule_id, epoch, destination_runtime, destination_instance)
+        .await
+        .unwrap();
+    assert_eq!(
+        source.get_instance(source_instance).await.unwrap().state,
+        InstanceState::Paused
     );
 }
 
@@ -927,13 +984,27 @@ async fn facade_is_tenant_scoped_on_shared_storage() {
 }
 
 /// M7: an import whose continuity identity conflicts must be rejected before
-/// any instance is persisted. Importing a capsule back into its *source*
-/// store conflicts with the source's own `Owned` continuity record.
+/// any instance is persisted. After the source acknowledges remote acceptance,
+/// its Owned record has no local import proof for a new destination instance.
 #[tokio::test]
 async fn conflicting_capsule_import_persists_nothing() {
     let (source, _destination, source_instance) = portable_fixture().await;
     let (capsule, destination_runtime, encryptor) =
         export_test_capsule(&source, source_instance).await;
+    source
+        .acknowledge_portable_capsule(
+            capsule.signed_manifest.manifest.capsule_id,
+            capsule
+                .signed_manifest
+                .manifest
+                .epoch
+                .checked_next()
+                .unwrap(),
+            destination_runtime,
+            InstanceId::new(),
+        )
+        .await
+        .unwrap();
     let trusted_keys = [capsule.signed_manifest.public_key.clone()];
     let before = source
         .list_instances(&orch8::InstanceFilter::default())
@@ -961,5 +1032,139 @@ async fn conflicting_capsule_import_persists_nothing() {
     assert_eq!(
         before, after,
         "conflicting import must not persist an instance"
+    );
+}
+
+#[tokio::test]
+async fn portable_source_acknowledgement_is_tenant_bound_and_retires_only_its_transport() {
+    let scratch = tempfile::tempdir().unwrap();
+    let database = scratch.path().join("source.sqlite");
+    let artifacts = scratch.path().join("artifacts");
+    let (source, destination, instance) =
+        portable_fixture_with_storage(Storage::sqlite(&database).artifacts_local(&artifacts)).await;
+    let (capsule, runtime, key) = export_test_capsule(&source, instance).await;
+    let manifest = &capsule.signed_manifest.manifest;
+    let blob = artifacts.join(&manifest.payload_artifact.key);
+    assert!(blob.is_file());
+    let foreign = Engine::builder()
+        .storage(Storage::sqlite(&database).artifacts_local(&artifacts))
+        .tenant("another-account")
+        .build()
+        .await
+        .unwrap();
+    let epoch = manifest.epoch.checked_next().unwrap();
+    assert!(
+        foreign
+            .acknowledge_portable_capsule(manifest.capsule_id, epoch, runtime, InstanceId::new())
+            .await
+            .is_err()
+    );
+    assert!(
+        blob.is_file(),
+        "a foreign tenant removed the source transport"
+    );
+    let imported = destination
+        .import_portable_capsule(
+            &capsule,
+            runtime,
+            None,
+            std::slice::from_ref(&capsule.signed_manifest.public_key),
+            &key,
+        )
+        .await
+        .unwrap();
+    destination
+        .activate_portable_capsule(manifest.capsule_id, runtime, imported.id)
+        .await
+        .unwrap();
+    source
+        .acknowledge_portable_capsule(manifest.capsule_id, epoch, runtime, imported.id)
+        .await
+        .unwrap();
+    source
+        .acknowledge_portable_capsule(manifest.capsule_id, epoch, runtime, imported.id)
+        .await
+        .unwrap();
+    assert!(!blob.exists());
+    assert_eq!(
+        source.get_instance(instance).await.unwrap().state,
+        InstanceState::Paused
+    );
+    assert!(
+        source
+            .export_portable_capsule(
+                instance,
+                CapsuleExportOptions {
+                    source_runtime_id: manifest.source_runtime_id,
+                    destination_runtime_id: Some(runtime),
+                    requirements: CapsuleRequirements::default(),
+                    expires_in_seconds: 300,
+                    signing_key_id: manifest.signing_key_id.clone(),
+                    encryption_key_id: manifest.encryption_key_id.clone(),
+                },
+                &CapsuleSigningKey::from_bytes(&[9; 32]),
+                &key
+            )
+            .await
+            .is_err()
+    );
+    foreign.close().await;
+    source.close().await;
+    destination.close().await;
+}
+
+#[tokio::test]
+async fn fenced_capsule_can_handoff_to_a_second_runtime_in_the_same_database() {
+    let (engine, _unused_destination, source_instance) = portable_fixture().await;
+    let (capsule, runtime, key) = export_test_capsule(&engine, source_instance).await;
+    let imported = engine
+        .import_portable_capsule(
+            &capsule,
+            runtime,
+            None,
+            std::slice::from_ref(&capsule.signed_manifest.public_key),
+            &key,
+        )
+        .await
+        .unwrap();
+    assert_ne!(imported.id, source_instance);
+    assert_eq!(imported.state, InstanceState::Paused);
+    let capsule_id = capsule.signed_manifest.manifest.capsule_id;
+    let active = engine
+        .activate_portable_capsule(capsule_id, runtime, imported.id)
+        .await
+        .unwrap();
+    assert_eq!(active.state, InstanceState::Scheduled);
+    engine
+        .acknowledge_portable_capsule(
+            capsule_id,
+            capsule
+                .signed_manifest
+                .manifest
+                .epoch
+                .checked_next()
+                .unwrap(),
+            runtime,
+            imported.id,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        engine.get_instance(source_instance).await.unwrap().state,
+        InstanceState::Paused
+    );
+    for _ in 0..20 {
+        engine.tick_once().await.unwrap();
+        if engine.get_instance(imported.id).await.unwrap().state == InstanceState::Waiting {
+            break;
+        }
+    }
+    assert_eq!(
+        engine.get_instance(imported.id).await.unwrap().state,
+        InstanceState::Waiting
+    );
+    assert_eq!(
+        engine.get_instance(source_instance).await.unwrap().state,
+        InstanceState::Paused
     );
 }

@@ -43,7 +43,7 @@ pub(super) async fn owned(
     }
 }
 
-async fn on(
+pub(super) async fn on(
     conn: &mut sqlx::SqliteConnection,
     tenant: &TenantId,
     next: &EffectReceipt,

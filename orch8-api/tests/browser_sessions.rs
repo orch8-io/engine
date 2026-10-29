@@ -10,9 +10,10 @@ use orch8_api::test_harness::{BackendTestServer, spawn_test_server_on};
 use orch8_storage::StorageBackend;
 use orch8_storage::postgres::PostgresStorage;
 use orch8_storage::sqlite::SqliteStorage;
-use orch8_types::continuity::CapsuleRequirements;
-use orch8_types::ids::{BlockId, InstanceId};
-use orch8_types::worker::{WorkerTask, WorkerTaskState};
+use orch8_storage::worker_claim::WorkerClaimPrincipal;
+use orch8_types::continuity::{CapsuleRequirements, RuntimeKind};
+use orch8_types::ids::{BlockId, InstanceId, TenantId};
+use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskState};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -23,7 +24,14 @@ async fn servers() -> Vec<(&'static str, BackendTestServer)> {
     let mut out = vec![(
         "sqlite",
         spawn_test_server_on(
-            Arc::new(SqliteStorage::in_memory().await.unwrap()) as Arc<dyn StorageBackend>,
+            Arc::new(
+                SqliteStorage::in_memory()
+                    .await
+                    .unwrap()
+                    .with_artifact_store(Arc::new(
+                        orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                    )),
+            ) as Arc<dyn StorageBackend>,
             Some(ROOT),
         )
         .await,
@@ -33,7 +41,13 @@ async fn servers() -> Vec<(&'static str, BackendTestServer)> {
         pg.run_migrations().await.unwrap();
         out.push((
             "postgres",
-            spawn_test_server_on(Arc::new(pg) as Arc<dyn StorageBackend>, Some(ROOT)).await,
+            spawn_test_server_on(
+                Arc::new(pg.with_artifact_store(Arc::new(
+                    orch8_storage::artifacts::ObjectArtifactStore::memory(),
+                ))) as Arc<dyn StorageBackend>,
+                Some(ROOT),
+            )
+            .await,
         ));
     }
     out
@@ -48,6 +62,16 @@ async fn seed_task(
     client: &Client,
     tenant: &str,
     handler: &str,
+) -> WorkerTask {
+    seed_task_in_queue(server, client, tenant, handler, None).await
+}
+
+async fn seed_task_in_queue(
+    server: &BackendTestServer,
+    client: &Client,
+    tenant: &str,
+    handler: &str,
+    queue: Option<&str>,
 ) -> WorkerTask {
     let sequence_id = Uuid::now_v7();
     let response = client
@@ -87,7 +111,7 @@ async fn seed_task(
         instance_id: InstanceId::from_uuid(instance),
         block_id: BlockId::new("read"),
         handler_name: handler.into(),
-        queue_name: None,
+        queue_name: queue.map(str::to_owned),
         requirements: CapsuleRequirements::default(),
         params: json!({"selector": "#total"}),
         context: json!({"data": {"page": "checkout"}, "config": {"stripe": "sk_live_x"}}),
@@ -139,6 +163,87 @@ fn caps(runtime_id: &str, kind: &str, handler: &str) -> Value {
         "observed_at": now.to_rfc3339(),
         "expires_at": (now + chrono::Duration::seconds(240)).to_rfc3339()
     })
+}
+
+#[tokio::test]
+async fn browser_default_poll_cannot_claim_ungranted_named_queues() {
+    let client = Client::new();
+    for (backend, server) in servers().await {
+        let tenant = tenant();
+        let handler = format!("queue_scope_{}", Uuid::now_v7().simple());
+        let named =
+            seed_task_in_queue(&server, &client, &tenant, &handler, Some("private-queue")).await;
+        let default = seed_task(&server, &client, &tenant, &handler).await;
+        let session: Value = mint(&server, &client, &tenant, json!({"handlers": [handler]}))
+            .await
+            .json()
+            .await
+            .unwrap();
+        let token = session["token"].as_str().unwrap();
+        let worker = session["runtime_id"].as_str().unwrap();
+        let response = client
+            .post(format!("{}/workers/tasks/poll", server.v1_url()))
+            .header("x-api-key", token)
+            .json(&json!({"handler_name":handler,"worker_id":worker,"limit":10}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{backend}");
+        let body: Value = response.json().await.unwrap();
+        let ids: Vec<_> = body["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![default.id.to_string()],
+            "{backend}: unqualified session poll crossed its queue scope"
+        );
+        assert_eq!(
+            server
+                .storage
+                .get_worker_task(named.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkerTaskState::Pending,
+            "{backend}: unauthorized queue was leased"
+        );
+
+        let response = client
+            .post(format!("{}/workers/tasks/poll/queue", server.v1_url()))
+            .header("x-api-key", token)
+            .json(&json!({"handler_name":handler,"worker_id":worker,"queue_name":"private-queue"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{backend}");
+
+        let granted: Value = mint(
+            &server,
+            &client,
+            &tenant,
+            json!({"handlers":[handler],"queues":["private-queue"]}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+        let response = client.post(format!("{}/workers/tasks/poll/queue", server.v1_url()))
+            .header("x-api-key", granted["token"].as_str().unwrap())
+            .json(&json!({"handler_name":handler,"worker_id":granted["runtime_id"],"queue_name":"private-queue"}))
+            .send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{backend}");
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(
+            body["tasks"][0]["id"],
+            named.id.to_string(),
+            "{backend}: explicit queue grant must remain usable"
+        );
+    }
 }
 
 #[tokio::test]
@@ -221,6 +326,26 @@ async fn browser_session_token_is_scoped_to_the_lease_protocol() {
         assert_eq!(claimed["lease_secs"], 30, "{backend}");
         assert!(claimed["context"].get("config").is_none(), "{backend}");
         let epoch = claimed["claim_epoch"].as_u64().unwrap();
+        let issued = server
+            .storage
+            .get_worker_issued_claim(
+                Some(&TenantId::unchecked(&tenant)),
+                task.id,
+                &WorkerClaim::new(&runtime_id, epoch),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            issued.principal,
+            WorkerClaimPrincipal::Runtime {
+                tenant_id: TenantId::unchecked(&tenant),
+                runtime_id: serde_json::from_value(json!(runtime_id)).unwrap(),
+                runtime_kind: RuntimeKind::Browser,
+                device_id: None,
+            },
+            "{backend}: runtime authority must come from the verified session"
+        );
 
         // Oversized page data is refused; lease mutations for another
         // runtime identity are refused; the bound runtime completes.
@@ -274,6 +399,94 @@ async fn browser_session_token_is_scoped_to_the_lease_protocol() {
         assert_eq!(provenance.details["runtime_kind"], "browser", "{backend}");
         assert_eq!(provenance.details["runtime_id"], runtime_id, "{backend}");
     }
+}
+
+#[tokio::test]
+async fn http_polls_record_the_authenticated_key_instead_of_the_worker_label() {
+    let client = Client::new();
+    for (backend, server) in servers().await {
+        let tenant = tenant();
+        let key: Value = client
+            .post(format!("{}/api-keys", server.v1_url()))
+            .header("x-api-key", ROOT)
+            .json(&json!({"tenant_id":tenant,"name":"claim-owner","capabilities":["worker"]}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        for (credential, expected) in [
+            (ROOT, WorkerClaimPrincipal::Root {}),
+            (
+                key["secret"].as_str().unwrap(),
+                WorkerClaimPrincipal::ApiKey {
+                    tenant_id: TenantId::unchecked(&tenant),
+                    key_id: key["id"].as_str().unwrap().into(),
+                },
+            ),
+        ] {
+            for queue in [None, Some("explicit-queue")] {
+                let handler = format!("identity_{}", Uuid::now_v7().simple());
+                let task = seed_task_in_queue(&server, &client, &tenant, &handler, queue).await;
+                let path = if queue.is_some() {
+                    "poll/queue"
+                } else {
+                    "poll"
+                };
+                let response = client.post(format!("{}/workers/tasks/{path}",server.v1_url()))
+                    .header("x-api-key",credential).header("x-tenant-id",&tenant)
+                    .json(&json!({"handler_name":handler,"worker_id":"reused-label","queue_name":queue,"principal":{"kind":"root"}}))
+                    .send().await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{backend}");
+                let body: Value = response.json().await.unwrap();
+                assert_eq!(body["tasks"][0]["id"], task.id.to_string(), "{backend}");
+                let claim = WorkerClaim::new(
+                    "reused-label",
+                    body["tasks"][0]["claim_epoch"].as_u64().unwrap(),
+                );
+                let issued = server
+                    .storage
+                    .get_worker_issued_claim(Some(&TenantId::unchecked(&tenant)), task.id, &claim)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    issued.principal, expected,
+                    "{backend}: worker-supplied principal must grant no authority"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn insecure_http_poll_does_not_invent_verified_root_authority() {
+    let client = Client::new();
+    let server =
+        spawn_test_server_on(Arc::new(SqliteStorage::in_memory().await.unwrap()), None).await;
+    let tenant = tenant();
+    let handler = format!("unsecured_{}", Uuid::now_v7().simple());
+    let task = seed_task(&server, &client, &tenant, &handler).await;
+    let response = client
+        .post(format!("{}/workers/tasks/poll", server.v1_url()))
+        .header("x-api-key", ROOT)
+        .header("x-tenant-id", &tenant)
+        .json(&json!({"handler_name":handler,"worker_id":"worker"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = response.json().await.unwrap();
+    let claim = WorkerClaim::new("worker", body["tasks"][0]["claim_epoch"].as_u64().unwrap());
+    let issued = server
+        .storage
+        .get_worker_issued_claim(Some(&TenantId::unchecked(&tenant)), task.id, &claim)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(issued.principal, WorkerClaimPrincipal::Unsecured {});
+    assert!(!issued.principal.has_authenticated_owner());
 }
 
 #[tokio::test]
@@ -374,6 +587,232 @@ async fn expired_or_forged_tokens_are_unauthorized() {
             response.status(),
             StatusCode::UNAUTHORIZED,
             "{backend}: forged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn another_key_cannot_mutate_or_replay_a_recorded_lease() {
+    let client = Client::new();
+    for (backend, server) in servers().await {
+        let tenant = tenant();
+        let handler = format!("recorded_owner_{}", Uuid::now_v7().simple());
+        let task = seed_task(&server, &client, &tenant, &handler).await;
+        let mut keys = Vec::new();
+        for name in ["original", "replacement"] {
+            let key: Value = client
+                .post(format!("{}/api-keys", server.v1_url()))
+                .header("x-api-key", ROOT)
+                .json(&json!({"tenant_id":tenant,"name":name,"capabilities":["worker"]}))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            keys.push(key["secret"].as_str().unwrap().to_owned());
+        }
+        let response = client
+            .post(format!("{}/workers/tasks/poll", server.v1_url()))
+            .header("x-api-key", &keys[0])
+            .json(&json!({"handler_name":handler,"worker_id":"shared-label"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{backend}");
+        let body: Value = response.json().await.unwrap();
+        let epoch = body["tasks"][0]["claim_epoch"].as_u64().unwrap();
+        for operation in ["heartbeat", "complete", "fail", "release"] {
+            let response=client.post(format!("{}/workers/tasks/{}/{operation}",server.v1_url(),task.id))
+                .header("x-api-key",&keys[1])
+                .json(&json!({"worker_id":"shared-label","claim_epoch":epoch,"output":{},"message":"foreign"}))
+                .send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "{backend}: {operation} inherited another key's claim"
+            );
+        }
+        let upload = Uuid::now_v7();
+        for (key, expected) in [
+            (&keys[1], StatusCode::FORBIDDEN),
+            (&keys[0], StatusCode::CREATED),
+        ] {
+            let response = client.post(format!("{}/workers/tasks/{}/artifacts/{upload}?worker_id=shared-label&claim_epoch={epoch}", server.v1_url(), task.id))
+                .header("x-api-key", key).header("content-type", "application/octet-stream")
+                .body("original reporter bytes").send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "{backend}: upload must enforce the recorded reporter before storing bytes"
+            );
+        }
+        let response = client
+            .post(format!(
+                "{}/workers/tasks/{}/complete",
+                server.v1_url(),
+                task.id
+            ))
+            .header("x-api-key", &keys[0])
+            .json(&json!({"worker_id":"shared-label","claim_epoch":epoch,"output":{"value":7}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{backend}: original reporter must remain functional"
+        );
+        server.storage.delete_worker_task(task.id).await.unwrap();
+        for (key, expected) in [
+            (&keys[1], StatusCode::FORBIDDEN),
+            (&keys[0], StatusCode::OK),
+        ] {
+            let response=client.post(format!("{}/workers/tasks/{}/complete",server.v1_url(),task.id))
+                .header("x-api-key",key)
+                .json(&json!({"worker_id":"shared-label","claim_epoch":epoch,"output":{"value":"ignored replay"}}))
+                .send().await.unwrap();
+            assert_eq!(
+                response.status(),
+                expected,
+                "{backend}: replay must retain the original reporter after hot GC"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn runtime_session_minting_rejects_nul_in_identity_or_grants() {
+    let client = Client::new();
+    for (backend, server) in servers().await {
+        let tenant = tenant();
+        let runtime = Uuid::now_v7();
+        for (kind, body) in [
+            ("browser", json!({"handlers":["read\0"]})),
+            ("browser", json!({"handlers":["read"],"queues":["queue\0"]})),
+            (
+                "device",
+                json!({"device_id":"phone\0","runtime_id":runtime}),
+            ),
+            (
+                "device",
+                json!({"device_id":"phone","runtime_id":runtime,"handlers":["read\0"]}),
+            ),
+            (
+                "device",
+                json!({"device_id":"phone","runtime_id":runtime,"queues":["queue\0"]}),
+            ),
+        ] {
+            let response = client
+                .post(format!("{}/runtimes/{kind}-sessions", server.v1_url()))
+                .header("x-api-key", ROOT)
+                .header("x-tenant-id", &tenant)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{backend}: minted an unusable {kind} identity/grant"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn device_claim_identity_survives_renewal_without_transferring_to_another_device() {
+    let client = Client::new();
+    for (backend, server) in servers().await {
+        let tenant = tenant();
+        let handler = format!("phone_{}", Uuid::now_v7().simple());
+        let runtime = Uuid::now_v7().to_string();
+        let device_a = format!("phone-a-{}", Uuid::now_v7().simple());
+        let device_b = format!("phone-b-{}", Uuid::now_v7().simple());
+        let mut originals = Vec::new();
+        let mut tokens = Vec::new();
+        for device in [&device_a, &device_b, &device_a] {
+            let named =
+                seed_task_in_queue(&server, &client, &tenant, &handler, Some("phone-queue")).await;
+            let response=client.post(format!("{}/runtimes/device-sessions",server.v1_url()))
+                .header("x-api-key",ROOT).header("x-tenant-id",&tenant)
+                .json(&json!({"device_id":device,"runtime_id":runtime,"handlers":[handler],"queues":["phone-queue","phone-queue"]}))
+                .send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED, "{backend}");
+            let session: Value = response.json().await.unwrap();
+            assert_eq!(session["queues"], json!(["phone-queue"]));
+            let token = session["token"].as_str().unwrap();
+            tokens.push(token.to_owned());
+            let response = client
+                .post(format!("{}/workers/tasks/poll", server.v1_url()))
+                .header("x-api-key", token)
+                .json(&json!({"handler_name":handler,"worker_id":runtime,"limit":10}))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{backend}");
+            let body: Value = response.json().await.unwrap();
+            assert!(
+                body["tasks"].as_array().unwrap().is_empty(),
+                "{backend}: default device poll crossed a named queue"
+            );
+            let denied = client
+                .post(format!("{}/workers/tasks/poll/queue", server.v1_url()))
+                .header("x-api-key", token)
+                .json(
+                    &json!({"handler_name":handler,"worker_id":runtime,"queue_name":"other-queue"}),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                denied.status(),
+                StatusCode::FORBIDDEN,
+                "{backend}: queue grant must remain exact"
+            );
+            let response = client
+                .post(format!("{}/workers/tasks/poll/queue", server.v1_url()))
+                .header("x-api-key", token)
+                .json(
+                    &json!({"handler_name":handler,"worker_id":runtime,"queue_name":"phone-queue"}),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{backend}");
+            let body: Value = response.json().await.unwrap();
+            assert_eq!(body["tasks"][0]["id"], named.id.to_string());
+            let claim =
+                WorkerClaim::new(&runtime, body["tasks"][0]["claim_epoch"].as_u64().unwrap());
+            let issued = server
+                .storage
+                .get_worker_issued_claim(Some(&TenantId::unchecked(&tenant)), named.id, &claim)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                issued.principal,
+                WorkerClaimPrincipal::Runtime {
+                    tenant_id: TenantId::unchecked(&tenant),
+                    runtime_id: serde_json::from_value(json!(runtime)).unwrap(),
+                    runtime_kind: RuntimeKind::Mobile,
+                    device_id: Some(device.clone()),
+                },
+                "{backend}"
+            );
+            originals.push(issued);
+        }
+        assert_ne!(
+            tokens[0], tokens[2],
+            "renewal must exercise a new signed token"
+        );
+        assert!(
+            !originals[0].belongs_to(&originals[1].principal),
+            "a different device must not inherit a reused runtime id"
+        );
+        assert!(
+            originals[0].belongs_to(&originals[2].principal),
+            "token renewal must retain stable device identity"
         );
     }
 }

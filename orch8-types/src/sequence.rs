@@ -1449,6 +1449,16 @@ pub const REMOTE_EXECUTABLE_BUILTINS: &[&str] = &[
     "notify",
 ];
 
+/// Remote built-ins that can be recovered without an external-effect receipt.
+/// New or external handlers require evidence until classified explicitly.
+#[must_use]
+pub fn is_pure_remote_builtin(handler: &str) -> bool {
+    matches!(
+        handler,
+        "noop" | "log" | "sleep" | "fail" | "transform" | "assert"
+    )
+}
+
 /// Whether `handler` is a built-in that must run on the engine node (it is
 /// built in and not in [`REMOTE_EXECUTABLE_BUILTINS`]). Placement never
 /// applies to such steps.

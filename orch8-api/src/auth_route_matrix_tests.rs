@@ -451,6 +451,12 @@ fn device_node_may_only_sync_its_device_lease_tasks_and_delegate_continuity() {
             true,
         ),
         ("fail own task", Method::POST, &fail, true),
+        (
+            "explicit queue poll",
+            Method::POST,
+            "/api/v1/workers/tasks/poll/queue",
+            true,
+        ),
         ("read a delegation", Method::GET, &delegation, true),
         (
             "claim a delegation",

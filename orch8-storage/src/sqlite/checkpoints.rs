@@ -22,11 +22,19 @@ pub(super) async fn get_latest(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Option<Checkpoint>, StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    get_latest_on(&mut conn, instance_id).await
+}
+
+pub(super) async fn get_latest_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+) -> Result<Option<Checkpoint>, StorageError> {
     let row = sqlx::query(
-        "SELECT * FROM checkpoints WHERE instance_id=?1 ORDER BY created_at DESC LIMIT 1",
+        "SELECT * FROM checkpoints WHERE instance_id=?1 ORDER BY created_at DESC, id DESC LIMIT 1",
     )
     .bind(instance_id.into_uuid().to_string())
-    .fetch_optional(&storage.pool)
+    .fetch_optional(&mut *conn)
     .await?;
     row.as_ref().map(row_to_checkpoint).transpose()
 }

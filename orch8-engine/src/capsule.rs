@@ -21,7 +21,7 @@ use orch8_types::continuity::{
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{BlockId, InstanceId, TenantId};
-use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::instance::TaskInstance;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -44,7 +44,8 @@ pub struct CapsuleImportRequest<'a> {
     pub destination_runtime_id: RuntimeId,
     /// Runtime-local identity chosen by an isolated destination. Supplying it
     /// lets the control plane and the offline runtime record the same global
-    /// location instead of inventing unrelated shadow identities.
+    /// location instead of inventing unrelated shadow identities. It must be
+    /// fresh for this physical execution, distinct from the source instance.
     pub destination_instance_id: Option<InstanceId>,
     pub expected_epoch: ExecutionEpoch,
     pub trusted_public_keys: &'a [String],
@@ -201,152 +202,122 @@ pub async fn export_paused_capsule_manifest(
     request: CapsuleExportRequest,
     payload_encryptor: &FieldEncryptor,
 ) -> Result<CapsuleManifest, CapsuleServiceError> {
-    let instance = storage
-        .get_instance(request.continuity.current_instance_id)
-        .await?
-        .ok_or(CapsuleServiceError::OwnershipMismatch)?;
-    if instance.tenant_id != request.continuity.tenant_id
-        || request.continuity.current_instance_id != instance.id
-        || request.continuity.state != orch8_types::continuity::OwnershipState::Owned
-    {
-        return Err(CapsuleServiceError::OwnershipMismatch);
-    }
-    if !matches!(
-        instance.state,
-        InstanceState::Paused | InstanceState::Waiting
-    ) {
-        return Err(CapsuleServiceError::UnsafeBoundary);
-    }
-    // A `Waiting` instance may be waiting on a remote node: exporting now
-    // would let that node's completion land on an execution that already
-    // moved. Refuse until every worker task settled.
-    let in_flight = open_worker_task_count(storage, instance.id).await?;
-    if in_flight > 0 {
-        return Err(CapsuleServiceError::WorkerTasksInFlight(in_flight));
-    }
+    export_capsule_manifest(storage, request, payload_encryptor, None).await
+}
+
+/// Export under a trusted mobile account/catalog session. Capture and publish
+/// checks enforce the descriptor in storage, including retries after revocation.
+pub async fn export_paused_capsule_manifest_with_mobile_access(
+    storage: &dyn StorageBackend,
+    request: CapsuleExportRequest,
+    payload_encryptor: &FieldEncryptor,
+    access: &orch8_storage::MobileInstanceAccess,
+) -> Result<CapsuleManifest, CapsuleServiceError> {
+    export_capsule_manifest(storage, request, payload_encryptor, Some(access.clone())).await
+}
+
+#[allow(clippy::too_many_lines)] // linear durable capture/seal/publication protocol
+async fn export_capsule_manifest(
+    storage: &dyn StorageBackend,
+    request: CapsuleExportRequest,
+    payload_encryptor: &FieldEncryptor,
+    mobile_access: Option<orch8_storage::MobileInstanceAccess>,
+) -> Result<CapsuleManifest, CapsuleServiceError> {
+    use orch8_storage::capsule_export::{CapsuleCutCapture, CapsuleCutRefusal, CapsuleCutRequest};
     let now = Utc::now();
     if request.expires_at <= now {
         return Err(CapsuleServiceError::InvalidExpiry);
     }
-    let checkpoint = storage
-        .get_latest_checkpoint(instance.id)
+    if !storage.artifacts_enabled() {
+        return Err(StorageError::Unsupported("artifact storage is not configured".into()).into());
+    }
+    let options = canonical_json(&serde_json::json!({
+        "requirements":request.requirements,
+        "signing_key_id":request.signing_key_id,
+        "encryption_key_id":request.encryption_key_id,
+    }))
+    .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
+    let cut_request = CapsuleCutRequest {
+        owner: request.continuity.clone(),
+        destination_runtime_id: request.destination_runtime_id,
+        options_sha256: sha256_hex(options.as_bytes()),
+        mobile_access,
+        now,
+        expires_at: request.expires_at,
+    };
+    let cut = match storage.capture_capsule_cut(&cut_request).await? {
+        CapsuleCutCapture::Ready(cut) => *cut,
+        CapsuleCutCapture::Refused(reason) => {
+            return Err(match reason {
+                CapsuleCutRefusal::Ownership => CapsuleServiceError::OwnershipMismatch,
+                CapsuleCutRefusal::UnsafeBoundary => CapsuleServiceError::UnsafeBoundary,
+                CapsuleCutRefusal::MissingCheckpoint => CapsuleServiceError::MissingCheckpoint,
+                CapsuleCutRefusal::MissingSequence => CapsuleServiceError::MissingSequence,
+                CapsuleCutRefusal::PayloadTooLarge => CapsuleServiceError::PayloadTooLarge,
+                CapsuleCutRefusal::WorkerTasksInFlight(n) => {
+                    CapsuleServiceError::WorkerTasksInFlight(n)
+                }
+            });
+        }
+    };
+    if cut.request.expires_at <= now {
+        return Err(CapsuleServiceError::InvalidExpiry);
+    }
+    let id = cut.id;
+    let cut = if cut.manifest.is_some() {
+        cut
+    } else {
+        let prepared = prepare_cut_payload(cut, &request, payload_encryptor);
+        let (manifest, sealed) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                storage
+                    .abort_preparing_capsule_cut(&request.continuity.tenant_id, id)
+                    .await?;
+                return Err(error);
+            }
+        };
+        storage
+            .seal_capsule_cut(&request.continuity.tenant_id, id, &manifest, &sealed)
+            .await?
+    };
+    let manifest = cut
+        .manifest
+        .ok_or(CapsuleServiceError::PayloadIdentityMismatch)?;
+    let sealed = cut
+        .sealed_payload
+        .ok_or(CapsuleServiceError::MissingArtifact)?;
+    if !storage
+        .capsule_cut_publishable(&manifest.tenant_id, id)
         .await?
-        .ok_or(CapsuleServiceError::MissingCheckpoint)?;
-    let sequence = storage
-        .get_sequence(instance.sequence_id)
-        .await?
-        .ok_or(CapsuleServiceError::MissingSequence)?;
-    if sequence.tenant_id != instance.tenant_id {
+    {
         return Err(CapsuleServiceError::OwnershipMismatch);
     }
-    let receipts = state::effect_receipts(storage, &request.continuity).await?;
-    let effect_ids = receipts.iter().map(|receipt| receipt.id).collect();
-    let (active_attempts, reset_blocks) =
-        storage.export_effect_attempts(&request.continuity).await?;
-    let commit_guards = storage
-        .load_effect_guards(
-            &instance.tenant_id,
-            request.continuity.continuity_id,
-            sequence.id,
-            sequence.version,
-            None,
+    let artifact_result = storage
+        .put_artifact_with_id(
+            manifest.source_instance_id,
+            id.into_uuid(),
+            CAPSULE_CONTENT_TYPE,
+            Bytes::from(sealed),
         )
-        .await?;
-    let mut effect_state = orch8_types::continuity::CapsuleEffectState {
-        receipts,
-        active_attempts,
-        reset_blocks,
-        commit_guards,
-    };
-    state::complete_legacy_bindings(&request.continuity, &mut effect_state)?;
-    let outputs = storage.get_all_outputs(instance.id).await?;
-    let payload = CapsulePayload {
-        instance: CapsuleInstanceState {
-            sequence_id: instance.sequence_id,
-            namespace: instance.namespace.clone(),
-            priority: instance.priority,
-            timezone: instance.timezone.clone(),
-            metadata: instance.metadata.clone(),
-            context: instance.context.clone(),
-            budget: instance.budget.clone(),
-            parent_instance_id: instance.parent_instance_id,
-        },
-        checkpoint: checkpoint.clone(),
-        execution_state: Some(state::export(storage, instance.id).await?),
-        effect_state: Some(effect_state),
-        outputs,
-        pending_waits: Vec::new(),
-        pending_signals: Vec::new(),
-        effect_ids,
-        artifacts: Vec::new(),
-        stream_cursors: Vec::new(),
-        redacted_audit_context: serde_json::Value::Null,
-    };
-    payload.validate_bounds()?;
-    let encoded = canonical_json(&payload)
-        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?
-        .into_bytes();
-    if encoded.len() > CapsulePayload::MAX_ENCODED_BYTES {
-        return Err(CapsuleServiceError::PayloadTooLarge);
+        .await;
+    if !storage
+        .capsule_cut_publishable(&manifest.tenant_id, id)
+        .await?
+    {
+        // The upload may have landed even if its acknowledgement was lost.
+        // A durable tombstone retries this deletion if we crash or it fails.
+        storage
+            .delete_artifact(&manifest.payload_artifact.key)
+            .await?;
+        return Err(CapsuleServiceError::OwnershipMismatch);
     }
-    let aad = capsule_aad(
-        &request.continuity.tenant_id,
-        request.continuity.continuity_id,
-        request.continuity.epoch,
-        request.destination_runtime_id,
-    );
-    let sealed = payload_encryptor
-        .encrypt_bytes_with_aad(&encoded, &aad)
-        .map_err(|error| CapsuleServiceError::Encryption(error.to_string()))?;
-    let payload_sha256 = sha256_hex(&sealed);
-    let artifact = storage
-        .put_artifact(instance.id, CAPSULE_CONTENT_TYPE, Bytes::from(sealed))
-        .await?;
-    let sequence_hash = sequence_content_hash(&sequence, CapsuleSchemaVersion::CURRENT)?;
-    let checkpoint_json = canonical_json(&checkpoint)
-        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
-    let requirements_json = canonical_json(&request.requirements)
-        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
-    let block_id = instance
-        .context
-        .runtime
-        .current_step
-        .clone()
-        .unwrap_or_else(|| BlockId::new("checkpoint"));
-    let manifest = CapsuleManifest {
-        schema: CapsuleSchemaVersion::CURRENT,
-        capsule_id: CapsuleId::new(),
-        continuity_id: request.continuity.continuity_id,
-        source_instance_id: instance.id,
-        epoch: request.continuity.epoch,
-        tenant_id: request.continuity.tenant_id,
-        source_runtime_id: request.continuity.owner_runtime_id,
-        allowed_destination_runtime_id: request.destination_runtime_id,
-        sequence: SequenceIdentity {
-            id: sequence.id,
-            version: sequence.version,
-            content_sha256: sequence_hash,
-        },
-        checkpoint: CheckpointIdentity {
-            block_id,
-            sha256: sha256_hex(checkpoint_json.as_bytes()),
-        },
-        requirements_sha256: sha256_hex(requirements_json.as_bytes()),
-        payload_artifact: ArtifactReference {
-            key: artifact.key,
-            sha256: payload_sha256,
-            bytes: artifact.size,
-        },
-        provenance_head: storage
-            .get_provenance_head(&instance.tenant_id, request.continuity.continuity_id)
-            .await?
-            .map(|entry| entry.entry_sha256),
-        issued_at: now,
-        expires_at: request.expires_at,
-        signing_key_id: request.signing_key_id,
-        encryption_key_id: request.encryption_key_id,
-    };
-    storage.save_capsule_manifest(&manifest).await?;
+    let artifact = artifact_result?;
+    if artifact.key != manifest.payload_artifact.key
+        || artifact.size != manifest.payload_artifact.bytes
+    {
+        return Err(CapsuleServiceError::ArtifactSubstitution);
+    }
     Ok(manifest)
 }
 
@@ -362,6 +333,106 @@ pub async fn verify_and_import_paused_capsule(
         .ok_or(CapsuleServiceError::MissingArtifact)?;
     verify_and_import_paused_capsule_bytes(storage, signed, &sealed, request, payload_encryptor)
         .await
+}
+
+/// No SQL or external I/O occurs while encoding the already frozen snapshot.
+fn prepare_cut_payload(
+    cut: orch8_storage::capsule_export::CapsuleSourceCut,
+    request: &CapsuleExportRequest,
+    encryptor: &FieldEncryptor,
+) -> Result<(CapsuleManifest, Vec<u8>), CapsuleServiceError> {
+    let source = cut
+        .snapshot
+        .ok_or(CapsuleServiceError::PayloadIdentityMismatch)?;
+    let instance = source.instance;
+    let checkpoint = source.checkpoint;
+    let mut effects = source.effects;
+    state::complete_legacy_bindings(&cut.request.owner, &mut effects)?;
+    let payload = CapsulePayload {
+        instance: CapsuleInstanceState {
+            sequence_id: instance.sequence_id,
+            namespace: instance.namespace.clone(),
+            priority: instance.priority,
+            timezone: instance.timezone.clone(),
+            metadata: instance.metadata.clone(),
+            context: instance.context.clone(),
+            budget: instance.budget.clone(),
+            parent_instance_id: instance.parent_instance_id,
+        },
+        checkpoint: checkpoint.clone(),
+        execution_state: Some(source.execution_state),
+        effect_ids: effects.receipts.iter().map(|receipt| receipt.id).collect(),
+        effect_state: Some(effects),
+        outputs: source.outputs,
+        pending_waits: Vec::new(),
+        pending_signals: Vec::new(),
+        artifacts: Vec::new(),
+        stream_cursors: Vec::new(),
+        redacted_audit_context: serde_json::Value::Null,
+    };
+    payload.validate_bounds()?;
+    // The same recovery validation used by import runs before sealing. A bad
+    // frozen reference can therefore be safely abandoned without publication.
+    state::restore(
+        &payload,
+        instance.id,
+        instance.clone(),
+        payload.outputs.clone(),
+    )?;
+    let encoded = canonical_json(&payload)
+        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?
+        .into_bytes();
+    if encoded.len() > CapsulePayload::MAX_ENCODED_BYTES {
+        return Err(CapsuleServiceError::PayloadTooLarge);
+    }
+    let aad = capsule_aad(
+        &cut.request.owner.tenant_id,
+        cut.request.owner.continuity_id,
+        cut.request.owner.epoch,
+        cut.request.destination_runtime_id,
+    );
+    let sealed = encryptor
+        .encrypt_bytes_with_aad(&encoded, &aad)
+        .map_err(|error| CapsuleServiceError::Encryption(error.to_string()))?;
+    let checkpoint_json = canonical_json(&checkpoint)
+        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
+    let requirements_json = canonical_json(&request.requirements)
+        .map_err(|error| CapsuleServiceError::Serialization(error.to_string()))?;
+    let manifest = CapsuleManifest {
+        schema: CapsuleSchemaVersion::CURRENT,
+        capsule_id: cut.id,
+        continuity_id: cut.request.owner.continuity_id,
+        source_instance_id: instance.id,
+        epoch: cut.request.owner.epoch,
+        tenant_id: instance.tenant_id,
+        source_runtime_id: cut.request.owner.owner_runtime_id,
+        allowed_destination_runtime_id: cut.request.destination_runtime_id,
+        sequence: SequenceIdentity {
+            id: source.sequence.id,
+            version: source.sequence.version,
+            content_sha256: sequence_content_hash(&source.sequence, CapsuleSchemaVersion::CURRENT)?,
+        },
+        checkpoint: CheckpointIdentity {
+            block_id: instance
+                .context
+                .runtime
+                .current_step
+                .unwrap_or_else(|| BlockId::new("checkpoint")),
+            sha256: sha256_hex(checkpoint_json.as_bytes()),
+        },
+        requirements_sha256: sha256_hex(requirements_json.as_bytes()),
+        payload_artifact: ArtifactReference {
+            key: format!("{}/{}", instance.id, cut.id),
+            sha256: sha256_hex(&sealed),
+            bytes: sealed.len() as u64,
+        },
+        provenance_head: source.provenance_head,
+        issued_at: cut.request.now,
+        expires_at: cut.request.expires_at,
+        signing_key_id: request.signing_key_id.clone(),
+        encryption_key_id: request.encryption_key_id.clone(),
+    };
+    Ok((manifest, sealed))
 }
 
 /// Verify and import a capsule whose encrypted payload traveled with its
@@ -413,6 +484,12 @@ pub async fn verify_and_import_paused_capsule_bytes(
     payload.validate_bounds()?;
     state::validate_version(&payload, signed.manifest.schema)?;
     let destination_id = request.destination_instance_id.unwrap_or_default();
+    // ContinuityId survives a move; InstanceId identifies a physical execution.
+    // Reusing the source ID would let its scheduler mistake remote ownership
+    // for local ownership once the accepted receipt is reconciled.
+    if destination_id == signed.manifest.source_instance_id {
+        return Err(CapsuleServiceError::PayloadIdentityMismatch);
+    }
     let outputs = remap_capsule_outputs(&payload, &signed.manifest, destination_id)?;
     let sequence = storage
         .get_sequence(payload.instance.sequence_id)
@@ -522,6 +599,24 @@ fn remap_capsule_outputs(
         output.instance_id = destination;
     }
     Ok(outputs)
+}
+
+/// Record trusted app/backend destination acceptance, then delete its transport
+/// artifact. The receipt and cleanup tombstone commit before external I/O; a
+/// deletion error can be retried and background GC also retries it durably.
+pub async fn acknowledge_exported_capsule(
+    storage: &dyn StorageBackend,
+    tenant: &TenantId,
+    id: orch8_types::continuity::CapsuleId,
+    accepted: &ContinuityExecution,
+) -> Result<orch8_storage::capsule_export::CapsuleCutReceipt, CapsuleServiceError> {
+    let receipt = storage
+        .acknowledge_capsule_cut(tenant, id, accepted)
+        .await?;
+    storage
+        .delete_artifact(&receipt.manifest.payload_artifact.key)
+        .await?;
+    Ok(receipt)
 }
 
 #[cfg(test)]

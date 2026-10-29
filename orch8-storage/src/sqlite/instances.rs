@@ -20,7 +20,7 @@ pub(super) async fn has_due_higher_priority(
     let exists: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
         "SELECT EXISTS(
             SELECT 1 FROM task_instances
-            WHERE state = 'scheduled' AND {scope}
+            WHERE state = 'scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope}
               AND (next_fire_at IS NULL OR next_fire_at <= ?1)
               AND priority > ?2
         )",
@@ -321,7 +321,7 @@ async fn claim_due_inner(
             "WITH candidates AS (
                 SELECT id, tenant_id, priority, next_fire_at
                 FROM task_instances
-                WHERE state='scheduled' AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1)
+                WHERE state='scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1)
                 ORDER BY priority DESC, next_fire_at ASC
                 LIMIT ?4
             ), ranked AS (
@@ -352,7 +352,7 @@ async fn claim_due_inner(
         .await?
     } else {
         // No per-tenant cap — original fast path.
-        sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM task_instances WHERE state='scheduled' AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2", scope = super::mobile_execution::ALLOWED)))
+        sqlx::query(sqlx::AssertSqlSafe(format!("SELECT * FROM task_instances WHERE state='scheduled' AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope} AND (next_fire_at IS NULL OR next_fire_at <= ?1) ORDER BY priority DESC, next_fire_at ASC LIMIT ?2", scope = super::mobile_execution::ALLOWED)))
         .bind(now_s)
         .bind(i64::from(limit))
         .fetch_all(&mut *conn)
@@ -538,6 +538,8 @@ pub(super) async fn batch_reschedule(
         separated.push_bind(id.to_string());
     }
     separated.push_unseparated(")");
+    qb.push(" AND ");
+    qb.push(super::mobile_execution::ALLOWED);
     qb.build().execute(&storage.pool).await?;
     Ok(())
 }
@@ -1298,6 +1300,9 @@ pub(super) async fn list_artifact_gc_candidates(
          WHERE state IN ('completed','failed','cancelled') \
            AND updated_at < ?1 \
            AND json_extract(metadata, '$._artifacts_gced') IS NULL \
+           AND NOT EXISTS (SELECT 1 FROM worker_accepted_outcomes accepted WHERE accepted.tenant_id=task_instances.tenant_id AND accepted.instance_id=task_instances.id AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations applied WHERE applied.task_id=accepted.task_id)) \
+           AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=task_instances.tenant_id AND cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed')) \
+           AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=task_instances.tenant_id AND json_extract(ce.record, '$.current_instance_id')=task_instances.id AND cut.state IN ('captured','sealed')) \
          ORDER BY updated_at ASC LIMIT ?2",
     )
     .bind(ts(cutoff))
@@ -1335,6 +1340,9 @@ pub(super) async fn list_instance_gc_candidates(
            AND NOT EXISTS ( \
                SELECT 1 FROM task_instances c \
                WHERE c.parent_instance_id = t.id) \
+           AND NOT EXISTS (SELECT 1 FROM worker_accepted_outcomes accepted WHERE accepted.tenant_id=t.tenant_id AND accepted.instance_id=t.id AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations applied WHERE applied.task_id=accepted.task_id)) \
+           AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=t.tenant_id AND cut.source_instance_id=t.id AND cut.state IN ('captured','sealed')) \
+           AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=t.tenant_id AND json_extract(ce.record, '$.current_instance_id') = t.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS ( \
                SELECT 1 FROM effect_receipts r \
                WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \
@@ -1365,6 +1373,7 @@ pub(super) async fn list_instance_gc_candidates(
 const CONTINUITY_CHILD_TABLES: &[&str] = &[
     "continuity_stream_frames",
     "continuity_streams",
+    "capsule_source_cuts",
     "capsule_effect_imports",
     "continuity_effect_guards",
     "effect_attempt_bindings",
@@ -1415,6 +1424,9 @@ pub(super) async fn purge_terminal_instances(
                SELECT 1 FROM task_instances p \
                WHERE p.id = t.parent_instance_id \
                  AND p.state NOT IN ('completed', 'failed', 'cancelled')) \
+           AND NOT EXISTS (SELECT 1 FROM worker_accepted_outcomes accepted WHERE accepted.tenant_id=t.tenant_id AND accepted.instance_id=t.id AND NOT EXISTS(SELECT 1 FROM worker_outcome_integrations applied WHERE applied.task_id=accepted.task_id)) \
+           AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=t.tenant_id AND cut.source_instance_id=t.id AND cut.state IN ('captured','sealed')) \
+           AND NOT EXISTS (SELECT 1 FROM continuity_executions ce JOIN capsule_source_cuts cut ON cut.tenant_id=ce.tenant_id AND cut.continuity_id=ce.continuity_id WHERE ce.tenant_id=t.tenant_id AND json_extract(ce.record, '$.current_instance_id') = t.id AND cut.state IN ('captured','sealed')) \
            AND NOT EXISTS ( \
                SELECT 1 FROM effect_receipts r \
                WHERE r.tenant_id = t.tenant_id AND r.instance_id = t.id \

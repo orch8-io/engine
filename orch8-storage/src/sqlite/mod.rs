@@ -36,6 +36,8 @@ mod api_keys;
 mod approval_tokens;
 mod audit;
 mod capsule_activation;
+mod capsule_export;
+mod capsule_source_snapshot;
 mod checkpoints;
 mod circuit_breakers;
 mod claimed_writes;
@@ -43,18 +45,25 @@ mod cluster;
 mod continuity;
 mod credentials;
 mod cron;
+mod delegation_publication;
 mod effect_attempt;
 mod effect_dispatch;
 mod effect_receipts;
+mod effect_resolution;
 mod events;
 mod evidence;
 mod execution_tree;
 mod externalized;
 mod externalized_snapshot;
 mod federation;
+mod file_path;
 mod helpers;
+
+#[doc(hidden)]
+pub use file_path::resolve_sqlite_database_path;
 mod instances;
 mod kv_state;
+mod local_migration;
 mod memory;
 mod misc;
 mod mobile_execution;
@@ -83,7 +92,15 @@ mod tenancy;
 mod triggers;
 mod webhook_deliveries;
 mod webhook_outbox;
+mod worker_admission;
+mod worker_claim;
 mod worker_commands;
+mod worker_dispatch;
+mod worker_invocations;
+mod worker_outcome;
+mod worker_reconciliation;
+mod worker_resolution;
+mod worker_resolution_application;
 mod worker_version_pins;
 mod workers;
 
@@ -198,6 +215,18 @@ impl SqliteStorage {
         &self.pool
     }
 
+    /// Called by the mobile adapter after it serializes account retirement in
+    /// this transaction. Clears only that account's source retry payloads and
+    /// retains ownership fences plus durable artifact cleanup tombstones.
+    pub async fn retire_mobile_capsule_cuts_in_transaction(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        account_id: &str,
+    ) -> Result<(), StorageError> {
+        let tenant = TenantId::new(format!("mobile-account-{account_id}"))
+            .map_err(StorageError::Constraint)?;
+        capsule_export::retire(tx, &tenant, None).await
+    }
+
     /// Insert using an adapter-owned transaction, so ownership records and the
     /// engine definition commit together. Uses the normal sequence encoding.
     /// The adapter must enforce its authorization/ownership boundary.
@@ -284,7 +313,26 @@ impl SqliteStorage {
     pub async fn file(path: &str) -> Result<Self, StorageError> {
         let uri = format!("sqlite:{path}");
         let opts = SqliteConnectOptions::from_str(&uri)
-            .map_err(|e| StorageError::Connection(e.to_string()))?
+            .map_err(|e| StorageError::Connection(e.to_string()))?;
+        Self::file_with_options(opts, &uri).await
+    }
+
+    /// Open a literal filesystem path. Unlike `file`, URI parameters and
+    /// percent escapes in a filename do not select another database.
+    pub async fn file_path(path: &str) -> Result<Self, StorageError> {
+        if path == ":memory:" {
+            return Self::in_memory().await;
+        }
+        let path = std::path::absolute(path)
+            .map_err(|error| StorageError::Connection(error.to_string()))?;
+        Self::file_with_options(SqliteConnectOptions::new().filename(path), "").await
+    }
+
+    async fn file_with_options(
+        opts: SqliteConnectOptions,
+        uri: &str,
+    ) -> Result<Self, StorageError> {
+        let opts = opts
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
             .busy_timeout(Duration::from_secs(5))
@@ -292,7 +340,7 @@ impl SqliteStorage {
             .foreign_keys(true);
         let opts = space_reclaiming(opts);
 
-        let (pool, memory_database) = memory::connect(pool_options(8), opts, &uri).await?;
+        let (pool, memory_database) = memory::connect(pool_options(8), opts, uri).await?;
 
         let storage = Self {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -512,6 +560,150 @@ impl SqliteStorage {
                 return Err(e.into());
             }
         }
+        // Complete trigger bodies must bypass SCHEMA's semicolon splitter.
+        // Install/backfill atomically before exposing this storage to callers.
+        let mut retirement = helpers::begin_immediate(&self.pool).await?;
+        sqlx::raw_sql(include_str!("physical_retirement.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        let complete: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=60)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !complete {
+            sqlx::query("INSERT OR IGNORE INTO physical_instance_retirements SELECT source_instance_id,tenant_id,continuity_id,capsule_id,created_at FROM capsule_source_cuts WHERE state IN ('sealed','retired','acknowledged')")
+                .execute(&mut *retirement).await?;
+            // Publish completion in the same transaction as evidence/guards.
+            // Subsequent boots install guards without scanning transfer history.
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(60)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let quarantined: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=61)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !quarantined {
+            sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('scheduled','running','waiting','paused') AND (state!='paused' OR claimed_at IS NOT NULL OR next_fire_at IS NOT NULL) AND EXISTS(SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=task_instances.id)")
+                .execute(&mut *retirement).await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(61)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("captured_source.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        let captured_quarantined: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=62)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !captured_quarantined {
+            sqlx::query("UPDATE task_instances SET state='paused',claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('scheduled','running','waiting','paused') AND (state!='paused' OR claimed_at IS NOT NULL OR next_fire_at IS NOT NULL) AND EXISTS(SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=task_instances.id AND cut.state IN ('captured','sealed') AND cut.state='captured')")
+                .execute(&mut *retirement).await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(62)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("worker_outcomes.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(65)")
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(include_str!("worker_outcome_encoding.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(66)")
+            .execute(&mut *retirement)
+            .await?;
+        let integrated_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=67)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !integrated_schema {
+            sqlx::raw_sql(include_str!("worker_outcome_integrations.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(67)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("worker_resolution.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(68)")
+            .execute(&mut *retirement)
+            .await?;
+        let resolution_application_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=69)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !resolution_application_schema {
+            sqlx::raw_sql(include_str!("worker_resolution_application.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(69)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let issued_claim_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=70)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !issued_claim_schema {
+            sqlx::raw_sql(include_str!("worker_claims.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(70)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("delegation_publications.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(72)")
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(include_str!("delegation_proxy_execution.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("UPDATE task_instances SET state=CASE WHEN state='running' OR EXISTS(SELECT 1 FROM delegation_proxy_native_history history WHERE history.instance_id=task_instances.id) THEN 'paused' ELSE 'waiting' END,claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('running','scheduled') AND EXISTS(SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id)")
+            .execute(&mut *retirement).await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(73)")
+            .execute(&mut *retirement)
+            .await?;
+        let reconciliation_schema: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=71)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !reconciliation_schema {
+            sqlx::raw_sql(include_str!("worker_reconciliation.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(71)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        sqlx::raw_sql(include_str!("worker_admissions.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(64)")
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(include_str!("worker_invocations.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        let activations: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=63)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !activations {
+            sqlx::query("UPDATE execution_tree SET activation_id=lower(hex(randomblob(16))) WHERE activation_id IS NULL").execute(&mut *retirement).await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(63)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        retirement.commit().await?;
         self.backfill_legacy_api_key_capabilities().await?;
         self.record_schema_version().await?;
         Ok(())
@@ -1333,7 +1525,7 @@ impl crate::InstanceStore for SqliteStorage {
         claimed_at: DateTime<Utc>,
     ) -> Result<bool, StorageError> {
         sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-            "SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=?1 AND tenant_id=?2 AND state='running' AND claimed_at=?3 AND {scope})",
+            "SELECT EXISTS(SELECT 1 FROM task_instances WHERE id=?1 AND tenant_id=?2 AND state='running' AND claimed_at=?3 AND NOT EXISTS (SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id) AND {scope})",
             scope = mobile_execution::ALLOWED
         )))
         .bind(instance_id.to_string()).bind(tenant_id.as_str()).bind(claimed_at.to_rfc3339())
@@ -1990,8 +2182,123 @@ impl crate::SignalStore for SqliteStorage {
 
 #[async_trait]
 impl crate::WorkerStore for SqliteStorage {
+    async fn claim_worker_tasks_with_authority(
+        &self,
+        request: &crate::worker_claim::WorkerClaimRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        request.validate()?;
+        let principal = Some(&request.principal);
+        if let Some(capabilities) = &request.capabilities {
+            return workers::claim_matching(
+                self,
+                &request.handler_name,
+                &request.worker_id,
+                request.tenant_id.as_ref(),
+                request.queue_name.as_deref(),
+                crate::worker_claim::ClaimRuntime {
+                    capabilities,
+                    principal,
+                },
+                request.limit,
+            )
+            .await;
+        }
+        match (request.queue_name.as_deref(), request.tenant_id.as_ref()) {
+            (Some(queue), Some(tenant)) => {
+                misc::claim_worker_tasks_from_queue_for_tenant(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (Some(queue), None) => {
+                misc::claim_worker_tasks_from_queue(
+                    self,
+                    queue,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, Some(tenant)) => {
+                workers::claim_for_tenant(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    tenant,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+            (None, None) => {
+                workers::claim(
+                    self,
+                    &request.handler_name,
+                    &request.worker_id,
+                    request.limit,
+                    principal,
+                )
+                .await
+            }
+        }
+    }
+    async fn get_worker_issued_claim(
+        &self,
+        tenant: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_claim::WorkerIssuedClaim>, StorageError> {
+        worker_claim::get(self, tenant, task_id, claim).await
+    }
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError> {
         workers::create(self, task).await
+    }
+
+    async fn prepare_worker_dispatch(
+        &self,
+        instance: &TaskInstance,
+        block_id: &BlockId,
+        selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
+        worker_dispatch::prepare(self, instance, block_id, selection).await
+    }
+
+    async fn admit_worker_dispatch(
+        &self,
+        intent: &crate::worker_admission::WorkerDispatchIntent,
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
+        worker_admission::create(self, intent).await
+    }
+    async fn get_worker_dispatch_admission(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_admission::WorkerDispatchAdmission>, StorageError> {
+        worker_admission::get(self, tenant_id, task_id).await
+    }
+    async fn create_worker_task_bound(
+        &self,
+        task: &WorkerTask,
+        fence: &crate::worker_invocation::WorkerDispatchFence,
+    ) -> Result<Option<Uuid>, StorageError> {
+        worker_dispatch::create(self, task, fence).await
+    }
+
+    async fn get_worker_invocation(
+        &self,
+        tenant_id: &TenantId,
+        task_id: Uuid,
+    ) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError> {
+        worker_invocations::get(self, tenant_id, task_id).await
     }
 
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError> {
@@ -2004,7 +2311,7 @@ impl crate::WorkerStore for SqliteStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim(self, handler_name, worker_id, limit).await
+        workers::claim(self, handler_name, worker_id, limit, None).await
     }
 
     async fn claim_worker_tasks_for_tenant(
@@ -2014,7 +2321,7 @@ impl crate::WorkerStore for SqliteStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit).await
+        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None).await
     }
 
     async fn claim_worker_tasks_matching(
@@ -2032,19 +2339,42 @@ impl crate::WorkerStore for SqliteStorage {
             worker_id,
             tenant_id,
             queue_name,
-            capabilities,
+            crate::worker_claim::ClaimRuntime {
+                capabilities,
+                principal: None,
+            },
             limit,
         )
         .await
     }
 
-    async fn complete_worker_task(
+    async fn get_worker_accepted_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<Option<crate::worker_outcome::WorkerAcceptedOutcome>, StorageError> {
+        worker_outcome::get(self, tenant_id, task_id, claim).await
+    }
+    async fn claim_worker_outcome_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_outcome::WorkerOutcomeRecovery>, StorageError> {
+        worker_outcome::recovery_page(self, limit).await
+    }
+    async fn apply_worker_outcome_integration(
+        &self,
+        integration: &crate::worker_outcome::WorkerOutcomeIntegration,
+    ) -> Result<crate::worker_outcome::WorkerOutcomeApplication, StorageError> {
+        worker_outcome::apply(self, integration).await
+    }
+    async fn accept_worker_completion(
         &self,
         task_id: Uuid,
         claim: &WorkerClaim,
-        output: &serde_json::Value,
+        completion: &crate::worker_outcome::WorkerCompletion,
     ) -> Result<bool, StorageError> {
-        workers::complete(self, task_id, claim, output).await
+        workers::complete(self, task_id, claim, completion).await
     }
 
     async fn fail_worker_task(
@@ -2102,21 +2432,51 @@ impl crate::WorkerStore for SqliteStorage {
         instance_id: InstanceId,
         fire_at: DateTime<Utc>,
     ) -> Result<(), StorageError> {
-        let mut tx = self.pool.begin().await?;
+        let mut tx = helpers::begin_immediate(&self.pool).await?;
+        let result = async {
+        let block: Option<String> =
+            sqlx::query_scalar("SELECT block_id FROM worker_tasks WHERE id=?1 AND instance_id=?2")
+                .bind(old_task_id.to_string())
+                .bind(instance_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+        if new_task.instance_id != instance_id
+            || block.as_deref() != Some(new_task.block_id.as_str())
+        {
+            return Err(StorageError::Conflict(
+                "retry targets do not match the original worker dispatch".into(),
+            ));
+        }
+        if let Some(nid) = node_id {
+            let valid: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM execution_tree WHERE id=?1 AND instance_id=?2 AND block_id=?3)")
+                .bind(nid.to_string()).bind(instance_id.to_string()).bind(new_task.block_id.as_str())
+                .fetch_one(&mut *tx).await?;
+            if !valid {
+                return Err(StorageError::Conflict(
+                    "retry node does not match the original worker dispatch".into(),
+                ));
+            }
+        }
+
+        let Some(source) = worker_invocations::source_on(&mut tx, &old_task_id.to_string()).await?
+        else {
+            return Err(StorageError::Conflict(
+                "retry source invocation changed or is unknown".into(),
+            ));
+        };
+        if !source.accepts_node(node_id) {
+            return Err(StorageError::Conflict(
+                "retry node differs from original invocation".into(),
+            ));
+        }
+        source.validate_retry_task(new_task)?;
 
         sqlx::query("DELETE FROM worker_tasks WHERE id = ?1")
             .bind(old_task_id.to_string())
             .execute(&mut *tx)
             .await?;
 
-        workers::insert_task(&mut tx, new_task, true).await?;
-
-        if let Some(nid) = node_id {
-            sqlx::query("UPDATE execution_tree SET state = 'pending' WHERE id = ?1")
-                .bind(nid.to_string())
-                .execute(&mut *tx)
-                .await?;
-        }
+        worker_invocations::reserve_retry_on(&mut tx, &source, new_task, node_id).await?;
 
         sqlx::query("UPDATE task_instances SET state = 'scheduled', next_fire_at = ?2, updated_at = ?3 WHERE id = ?1")
             .bind(instance_id.into_uuid().to_string())
@@ -2124,9 +2484,9 @@ impl crate::WorkerStore for SqliteStorage {
             .bind(chrono::Utc::now().to_rfc3339())
             .execute(&mut *tx)
             .await?;
-
-        tx.commit().await?;
         Ok(())
+    }.await;
+        finish_transaction(tx, result).await
     }
 
     async fn reap_stale_worker_tasks(
@@ -2167,18 +2527,47 @@ impl crate::WorkerStore for SqliteStorage {
         &self,
         task_id: Uuid,
         attempt: u16,
-        effect_id: Option<orch8_types::continuity::EffectId>,
+        effect: Option<&crate::worker_invocation::WorkerDispatchEffect>,
         continuity_epoch: Option<u64>,
     ) -> Result<bool, StorageError> {
-        workers::finalize_stranded_dispatch(self, task_id, attempt, effect_id, continuity_epoch)
-            .await
+        workers::finalize_stranded_dispatch(self, task_id, attempt, effect, continuity_epoch).await
     }
 
-    async fn resolve_worker_task(
+    async fn resolve_worker_task_with_evidence(
         &self,
         resolution: &orch8_types::worker::WorkerTaskResolution,
+        evidence: &crate::worker_resolution::WorkerResolutionEvidence,
     ) -> Result<bool, StorageError> {
-        workers::resolve(self, resolution).await
+        workers::resolve(self, resolution, evidence).await
+    }
+    async fn get_worker_resolution_outcome_by_id(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get_by_id(self, tenant, id).await
+    }
+    async fn claim_worker_resolution_recovery_page(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<crate::worker_resolution_application::WorkerResolutionRecovery>, StorageError>
+    {
+        worker_resolution_application::recovery_page(self, limit).await
+    }
+    async fn apply_worker_resolution_integration(
+        &self,
+        plan: &crate::worker_resolution_application::WorkerResolutionIntegration,
+    ) -> Result<crate::worker_resolution_application::WorkerResolutionApplication, StorageError>
+    {
+        worker_resolution_application::apply(self, plan).await
+    }
+    async fn get_worker_resolution_outcome(
+        &self,
+        tenant_id: Option<&TenantId>,
+        task_id: Uuid,
+        claim: Option<&WorkerClaim>,
+    ) -> Result<Option<crate::worker_resolution::WorkerResolutionOutcome>, StorageError> {
+        worker_resolution::get(self, tenant_id, task_id, claim).await
     }
 
     async fn cancel_worker_tasks_for_block(
@@ -2204,6 +2593,13 @@ impl crate::WorkerStore for SqliteStorage {
         block_ids: &[String],
     ) -> Result<u64, StorageError> {
         workers::cancel_for_blocks(self, instance_id, block_ids).await
+    }
+
+    async fn held_worker_tasks_for_reporter(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+    ) -> Result<Vec<WorkerTask>, StorageError> {
+        worker_claim::reconnect(self, request).await
     }
 
     async fn list_worker_tasks(
@@ -2238,7 +2634,8 @@ impl crate::WorkerStore for SqliteStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit).await
+        misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit, None)
+            .await
     }
 
     async fn claim_worker_tasks_from_queue_for_tenant(
@@ -2256,6 +2653,7 @@ impl crate::WorkerStore for SqliteStorage {
             worker_id,
             tenant_id,
             limit,
+            None,
         )
         .await
     }
@@ -3935,6 +4333,23 @@ impl crate::MobileSyncStore for SqliteStorage {
 
     async fn cleanup_expired_commands(&self, ttl_secs: i64) -> Result<u64, StorageError> {
         mobile_sync::cleanup_expired_commands(self, ttl_secs).await
+    }
+}
+
+/// Finish before returning: dropping a transaction only queues its rollback.
+async fn finish_transaction<T>(
+    tx: sqlx::Transaction<'_, sqlx::Sqlite>,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    match result {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
     }
 }
 

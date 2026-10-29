@@ -65,7 +65,7 @@ pub(super) async fn complete(
 ) -> Result<bool, StorageError> {
     require_legacy(access)?;
     let step = crate::mobile_access::completion_step(signal)?;
-    let context_json = serde_json::to_value(context)?;
+    let context_json = super::json_encoding::encode_context(context)?;
     let mut transaction = storage.pool.begin().await?;
     let target: Option<uuid::Uuid> = sqlx::query_scalar(
         "SELECT i.id FROM task_instances i WHERE i.id=$1 AND i.tenant_id='mobile' AND i.state='waiting'

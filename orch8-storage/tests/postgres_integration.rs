@@ -598,7 +598,8 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
     let mut tx = s.pool().begin().await.unwrap();
     sqlx::query(
         r"UPDATE worker_tasks
-          SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW()
+          SET state = 'claimed', worker_id = $2, claimed_at = NOW(), heartbeat_at = NOW(),
+              claim_epoch = claim_epoch + 1
           WHERE id IN (
               SELECT wt.id FROM worker_tasks wt
               JOIN task_instances ti ON ti.id = wt.instance_id

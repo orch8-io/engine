@@ -436,7 +436,24 @@ impl MobileEngine {
             let s = orch8_storage::sqlite::SqliteStorage::file_mobile_owned(&db_path)
                 .await
                 .map_err(MobileError::from)?;
-            let arc = Arc::new(s);
+            let artifacts = if db_path == ":memory:" {
+                orch8_storage::artifacts::ObjectArtifactStore::memory()
+            } else {
+                // Use the opened database's canonical path, so symlink aliases
+                // and restarts address the same companion artifact directory.
+                let mut directory = s
+                    .pool()
+                    .connect_options()
+                    .get_filename()
+                    .as_os_str()
+                    .to_os_string();
+                directory.push(".artifacts");
+                let directory = directory.to_str().ok_or_else(|| MobileError::Storage {
+                    detail: "mobile artifact directory is not valid UTF-8".into(),
+                })?;
+                orch8_storage::artifacts::ObjectArtifactStore::local(directory)?
+            };
+            let arc = Arc::new(s.with_artifact_store(Arc::new(artifacts)));
             Ok::<_, MobileError>((arc.clone() as Arc<dyn StorageBackend>, arc))
         })?;
 
@@ -629,6 +646,10 @@ impl MobileEngine {
             .memory_sampler
             .over_budget(self.config.memory_budget_bytes)
         {
+            self.run_with_timeout(async {
+                self.lifecycle.sweep_capsule_artifacts().await;
+                Ok(())
+            })?;
             warn!(
                 budget = self.config.memory_budget_bytes,
                 rss, "tick skipped — memory budget exceeded"
@@ -646,6 +667,7 @@ impl MobileEngine {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         self.run_with_timeout(async {
+            self.lifecycle.sweep_capsule_artifacts().await;
             let guard = self.tick_controller.tick_mutex().lock().await;
 
             if self.cancel.is_cancelled() {

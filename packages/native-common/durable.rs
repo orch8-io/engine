@@ -157,7 +157,13 @@ impl DurableEngine {
             handlers.entries.clone()
         };
         let mut builder = Engine::builder()
-            .storage(Storage::sqlite(&self.path))
+            .storage(
+                database
+                    .as_ref()
+                    .map_or_else(Storage::sqlite_in_memory, |owner| {
+                        Storage::sqlite(owner.path())
+                    }),
+            )
             // Single-process ownership: anything left Running was interrupted
             // by a crash, so resume it immediately on initialization.
             .stale_instance_threshold(Duration::ZERO);

@@ -4,8 +4,8 @@ use orch8_engine::capsule::{CapsuleExportRequest, CapsuleImportRequest};
 use orch8_publisher::capsule::SignedCapsuleManifest;
 use orch8_types::checkpoint::Checkpoint;
 use orch8_types::continuity::{
-    CapsuleRequirements, ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState,
-    RuntimeId,
+    CapsuleId, CapsuleRequirements, ContinuityExecution, ContinuityId, ExecutionEpoch,
+    OwnershipState, RuntimeId,
 };
 use orch8_types::encryption::FieldEncryptor;
 use orch8_types::ids::InstanceId;
@@ -112,7 +112,10 @@ impl Engine {
             .await?;
         if continuity.owner_runtime_id != options.source_runtime_id
             || continuity.current_instance_id != instance.id
-            || continuity.state != OwnershipState::Owned
+            || !matches!(
+                continuity.state,
+                OwnershipState::Owned | OwnershipState::Transferring
+            )
         {
             return Err(Error::Config(
                 "source runtime does not own this continuity execution".into(),
@@ -197,6 +200,43 @@ impl Engine {
             Utc::now(),
         )
         .await?)
+    }
+
+    /// Retire a source capsule after the trusted host verifies app/backend
+    /// acceptance of this exact destination and epoch. This never resumes the
+    /// source. The compact receipt and cleanup tombstone commit before artifact
+    /// deletion; an I/O error can be retried with the same coordinates.
+    pub async fn acknowledge_portable_capsule(
+        &self,
+        capsule_id: CapsuleId,
+        accepted_epoch: ExecutionEpoch,
+        destination_runtime_id: RuntimeId,
+        destination_instance_id: InstanceId,
+    ) -> Result<(), Error> {
+        let storage = self.storage_backend();
+        let manifest = storage
+            .get_capsule_manifest(self.tenant_id(), capsule_id)
+            .await?
+            .ok_or_else(|| {
+                Error::Config("portable capsule does not exist in this tenant".into())
+            })?;
+        let accepted = ContinuityExecution {
+            continuity_id: manifest.continuity_id,
+            tenant_id: self.tenant_id().clone(),
+            epoch: accepted_epoch,
+            owner_runtime_id: destination_runtime_id,
+            current_instance_id: destination_instance_id,
+            state: OwnershipState::Owned,
+            updated_at: Utc::now(),
+        };
+        orch8_engine::capsule::acknowledge_exported_capsule(
+            storage.as_ref(),
+            self.tenant_id(),
+            capsule_id,
+            &accepted,
+        )
+        .await?;
+        Ok(())
     }
 
     /// Preflight permits pending ownership and exact accepted redelivery.

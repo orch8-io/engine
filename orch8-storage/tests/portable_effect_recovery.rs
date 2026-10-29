@@ -183,6 +183,17 @@ async fn advance_receipt(storage: &dyn StorageBackend, f: &Fixture) -> EffectRec
     receipt
 }
 
+orch8_storage::backend_test!(async fn import_rejects_reused_source_instance_before_persisting_recovery(b) {
+    let mut f = fixture(b.storage.as_ref()).await;
+    f.snapshot.instance.id = f.effects.source.current_instance_id;
+    f.checkpoint.instance_id = f.snapshot.instance.id;
+    assert!(import(b.storage.as_ref(), &f).await.is_err());
+    assert_empty(&b).await;
+    // A refused physical identity does not consume the capsule's import claim.
+    let fresh = other_candidate(&f);
+    assert_eq!(import(b.storage.as_ref(), &fresh).await.unwrap(), fresh.snapshot.instance.id);
+});
+
 orch8_storage::backend_test!(async fn final_import_proof_failure_rolls_back_all_recovery_state(b) {
     let f=fixture(b.storage.as_ref()).await;
     match &b.raw {
@@ -468,6 +479,34 @@ async fn activate(
         )
         .await
 }
+
+orch8_storage::backend_test!(async fn activation_refuses_persisted_source_identity_reuse(b) {
+    let f = fixture(b.storage.as_ref()).await;
+    import(b.storage.as_ref(), &f).await.unwrap();
+    let tenant = &f.effects.source.tenant_id;
+    let before = b.storage.get_continuity_execution(tenant, f.effects.source.continuity_id).await.unwrap().unwrap();
+    // Simulate a capsule persisted by admission code that allowed source UUID
+    // reuse. Activation must independently fence such legacy recovery state.
+    let mut manifest = f.effects.manifest.clone();
+    manifest.source_instance_id = f.snapshot.instance.id;
+    match &b.raw {
+        RawPool::Sqlite(pool) => {
+            sqlx::query("UPDATE execution_capsules SET manifest=?1 WHERE id=?2")
+                .bind(serde_json::to_string(&manifest).unwrap()).bind(f.capsule.to_string())
+                .execute(pool).await.unwrap();
+        }
+        #[cfg(feature = "postgres")]
+        RawPool::Postgres(pool) => {
+            sqlx::query("UPDATE execution_capsules SET manifest=$1 WHERE id=$2")
+                .bind(serde_json::to_value(&manifest).unwrap()).bind(f.capsule.into_uuid())
+                .execute(pool).await.unwrap();
+        }
+    }
+    assert!(activate(b.storage.as_ref(), &f).await.is_err());
+    assert_eq!(b.storage.get_continuity_execution(tenant, before.continuity_id).await.unwrap().unwrap(), before);
+    assert_eq!(b.storage.get_instance(f.snapshot.instance.id).await.unwrap().unwrap().state, InstanceState::Paused);
+    assert_eq!(b.storage.list_continuity_locations(tenant, before.continuity_id, 100).await.unwrap().len(), 1);
+});
 
 orch8_storage::backend_test!(async fn activation_retries_preserve_progress_claims_and_completed_ownership(b) {
     let f=fixture(b.storage.as_ref()).await; import(b.storage.as_ref(),&f).await.unwrap();

@@ -173,7 +173,7 @@ impl Storage {
                 let path = path.to_str().ok_or_else(|| {
                     Error::Config("SQLite database path must be valid UTF-8".into())
                 })?;
-                let mut storage = SqliteStorage::file(path).await?;
+                let mut storage = SqliteStorage::file_path(path).await?;
                 if let Some(store) = artifact_store {
                     storage = storage.with_artifact_store(store);
                 }

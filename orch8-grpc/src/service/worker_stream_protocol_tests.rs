@@ -134,6 +134,7 @@ impl Session {
                 },
                 &self.open,
                 self.tenant.as_ref(),
+                &orch8_storage::worker_claim::WorkerClaimPrincipal::Unsecured {},
                 self.max_in_flight,
                 &mut self.outstanding,
                 &mut self.runtime_id,
@@ -264,6 +265,7 @@ async fn payloadless_frame_is_invalid_argument() {
             proto::WorkerStreamClient { payload: None },
             &session.open,
             None,
+            &orch8_storage::worker_claim::WorkerClaimPrincipal::Unsecured {},
             session.max_in_flight,
             &mut session.outstanding,
             &mut session.runtime_id,
@@ -854,10 +856,14 @@ async fn seed_pending_task(
         .create_sequence(&sequence_definition(seq, tenant))
         .await
         .unwrap();
-    storage
-        .create_instance(&task_instance(inst, seq, tenant))
-        .await
-        .unwrap();
+    // This task represents an already dispatched flat activity, with durable
+    // native identity available to fenced failure and retry resolution.
+    let mut instance = task_instance(inst, seq, tenant);
+    instance.state = InstanceState::Waiting;
+    instance.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    instance.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("step_1"));
+    instance.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    storage.create_instance(&instance).await.unwrap();
     let task = pending_task(inst, "payments");
     storage.create_worker_task(&task).await.unwrap();
     task
@@ -985,4 +991,230 @@ async fn permanent_failure_of_a_claimed_task_is_persisted_and_releases_the_slot(
     assert_eq!(stored.state, WorkerTaskState::Failed);
     assert_eq!(stored.error_message.as_deref(), Some("card declined"));
     assert_eq!(stored.error_retryable, Some(false));
+}
+
+#[tokio::test]
+async fn oversized_completion_keeps_claim_retryable_and_does_not_commit_output() {
+    let mut session = session(&["task_delivery", "completion"], Some("test")).await;
+    session.service.max_context_bytes = 1024;
+    seed_pending_task(
+        &session.storage,
+        "00000000-0000-0000-0000-000000000121",
+        "00000000-0000-0000-0000-000000000122",
+        "test",
+    )
+    .await;
+    let claimed = claim_one(&mut session).await;
+    let before = session
+        .storage
+        .get_instance(claimed.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = |output: serde_json::Value| {
+        stream_request(
+            proto::CompleteTaskRequest {
+                task_id: claimed.id.to_string(),
+                worker_id: "worker-a".into(),
+                claim_epoch: claimed.claim_epoch,
+                output_json: output.to_string(),
+            },
+            session.tenant.as_ref(),
+        )
+    };
+    let error = session
+        .service
+        .complete_task(request(serde_json::json!({"huge": "x".repeat(2048)})))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    let retained = session
+        .storage
+        .get_worker_task(claimed.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.state,
+        WorkerTaskState::Claimed,
+        "size rejection consumed the worker lease"
+    );
+    assert_eq!(retained.claim_epoch, claimed.claim_epoch);
+    assert!(retained.output.is_none());
+    assert!(
+        session
+            .storage
+            .get_block_output(claimed.instance_id, &claimed.block_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let after = session
+        .storage
+        .get_instance(claimed.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(after.context).unwrap(),
+        serde_json::to_value(before.context).unwrap()
+    );
+    session
+        .service
+        .complete_task(request(serde_json::json!({"small": true})))
+        .await
+        .unwrap();
+    assert_eq!(
+        session
+            .storage
+            .get_worker_task(claimed.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        WorkerTaskState::Completed
+    );
+}
+
+async fn seed_admitted_flat_task(storage: &Arc<dyn StorageBackend>) -> WorkerTask {
+    use orch8_storage::{
+        worker_admission::{
+            WorkerDispatchIntent, WorkerDispatchPublication, WorkerEffectPlan, dispatch_effect,
+            dispatch_scope,
+        },
+        worker_invocation::WorkerDispatchSelection,
+    };
+    use orch8_types::continuity::{EffectId, EffectReceipt, EffectState, ExecutionEpoch};
+    let sequence_id = Uuid::now_v7().to_string();
+    let instance_id = Uuid::now_v7().to_string();
+    let mut sequence = sequence_definition(&sequence_id, "test");
+    if let orch8_types::sequence::BlockDefinition::Step(step) = &mut sequence.blocks[0] {
+        step.handler = "payments".into();
+    }
+    storage.create_sequence(&sequence).await.unwrap();
+    let mut instance = task_instance(&instance_id, &sequence_id, "test");
+    instance.state = InstanceState::Scheduled;
+    instance.next_fire_at = Some(chrono::Utc::now());
+    instance.context.runtime.run_id = Some(Uuid::now_v7().to_string());
+    instance.context.runtime.current_step = Some(orch8_types::ids::BlockId::new("step_1"));
+    instance.context.runtime.current_step_started_at = Some(chrono::Utc::now());
+    storage.create_instance(&instance).await.unwrap();
+    let instance = storage
+        .claim_due_instances(chrono::Utc::now() + chrono::Duration::seconds(1), 1, 0)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let mut task = pending_task(&instance_id, "payments");
+    task.context = serde_json::to_value(&instance.context).unwrap();
+    let fence = storage
+        .prepare_worker_dispatch(
+            &instance,
+            &task.block_id,
+            &WorkerDispatchSelection::Flat {
+                step_started_at: instance.context.runtime.current_step_started_at.unwrap(),
+            },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    task.continuity_epoch = fence.continuity.as_ref().map(|scope| scope.epoch);
+    let scope = dispatch_scope(&fence);
+    let proof = dispatch_effect(&task, EffectId::new());
+    let now = chrono::Utc::now();
+    let effect = WorkerEffectPlan::new(
+        EffectReceipt {
+            id: proof.effect_id,
+            tenant_id: instance.tenant_id.clone(),
+            continuity_id: scope.continuity_id,
+            epoch: ExecutionEpoch::from_u64(scope.epoch),
+            instance_id: instance.id,
+            block_id: task.block_id.clone(),
+            kind: proof.kind,
+            state: EffectState::Planned,
+            request_sha256: proof.request_sha256,
+            destination_fingerprint: proof.destination_fingerprint,
+            idempotency_key: None,
+            provider_receipt_id: None,
+            attempt: u32::from(task.attempt),
+            created_at: now,
+            updated_at: now,
+        },
+        false,
+    );
+    let intent = WorkerDispatchIntent::new(task, fence, Some(effect)).unwrap();
+    let WorkerDispatchPublication::Published { task_id, .. } =
+        storage.admit_worker_dispatch(&intent).await.unwrap()
+    else {
+        panic!("fixture admission refused")
+    };
+    storage
+        .update_instance_state(instance.id, InstanceState::Waiting, None)
+        .await
+        .unwrap();
+    storage.get_worker_task(task_id).await.unwrap().unwrap()
+}
+
+#[tokio::test]
+async fn completed_outcome_replay_after_hot_gc_keeps_original_payload_while_paused() {
+    let mut session = session(&["task_delivery", "completion"], Some("test")).await;
+    seed_admitted_flat_task(&session.storage).await;
+    let claimed = claim_one(&mut session).await;
+    session
+        .storage
+        .update_instance_state(claimed.instance_id, InstanceState::Paused, None)
+        .await
+        .unwrap();
+    let request = |output: serde_json::Value| {
+        stream_request(
+            proto::CompleteTaskRequest {
+                task_id: claimed.id.to_string(),
+                worker_id: claimed.worker_id.clone().unwrap(),
+                claim_epoch: claimed.claim_epoch,
+                output_json: output.to_string(),
+            },
+            session.tenant.as_ref(),
+        )
+    };
+    session
+        .service
+        .complete_task(request(serde_json::json!({"result":"original"})))
+        .await
+        .unwrap();
+    session
+        .storage
+        .delete_worker_task(claimed.id)
+        .await
+        .unwrap();
+    let replay = session
+        .service
+        .complete_task(request(serde_json::json!({"result":"changed"})))
+        .await;
+    assert!(
+        replay.is_ok(),
+        "lost completion acknowledgement depended on the hot task: {replay:?}"
+    );
+    let parent = session
+        .storage
+        .get_instance(claimed.instance_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let claim = orch8_types::worker::WorkerClaim::new(
+        claimed.worker_id.clone().unwrap(),
+        claimed.claim_epoch,
+    );
+    let accepted = session
+        .storage
+        .get_worker_accepted_outcome(session.tenant.as_ref(), claimed.id, &claim)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(accepted.output, serde_json::json!({"result":"original"}));
+    assert_eq!(parent.state, InstanceState::Paused);
+    assert_eq!(parent.context.data["result"], "original");
+    assert_ne!(
+        parent.context.data.get("result"),
+        Some(&serde_json::json!("changed"))
+    );
 }
