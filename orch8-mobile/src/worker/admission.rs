@@ -11,7 +11,6 @@ use super::claims::ClaimKey;
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct TaskScope {
     api_base: String,
-    worker_id: String,
     task_id: uuid::Uuid,
 }
 
@@ -19,7 +18,6 @@ impl From<&ClaimKey> for TaskScope {
     fn from(key: &ClaimKey) -> Self {
         Self {
             api_base: key.api_base.clone(),
-            worker_id: key.worker_id.clone(),
             task_id: key.task_id,
         }
     }
@@ -144,6 +142,9 @@ impl Admission {
     }
 
     pub fn admit(self: &Arc<Self>, key: &ClaimKey) -> Decision {
+        // A changed runtime/worker identity does not create another physical
+        // task. Keep reporter identity in ClaimKey for journaling and transport,
+        // while serializing generations of one control-plane task here.
         let scope = TaskScope::from(key);
         let epoch = key.claim_epoch;
         let mut state = self.lock();
@@ -248,5 +249,47 @@ mod tests {
         assert!(matches!(admission.admit(&key), Decision::Ignore));
         drop(guard);
         assert!(matches!(admission.admit(&key), Decision::Execute(_)));
+    }
+
+    #[test]
+    fn changing_worker_identity_cannot_overlap_the_same_remote_task() {
+        let admission = Arc::new(Admission::default());
+        admission.configure(2);
+        let mut key = key();
+        let Decision::Execute(first) = admission.admit(&key) else {
+            panic!("first claim must start")
+        };
+        key.worker_id = "replacement-phone".into();
+        assert!(matches!(admission.admit(&key), Decision::Ignore));
+        key.claim_epoch += 1;
+        let Decision::Release { guard, superseded } = admission.admit(&key) else {
+            panic!("a changed worker ID must not overlap the same remote task")
+        };
+        superseded
+            .expect("the predecessor must be cancelled")
+            .cancel();
+        assert!(first.cancellation().is_cancelled());
+        assert_eq!(admission.in_flight(), 1);
+        drop(first);
+        assert!(matches!(admission.admit(&key), Decision::Ignore));
+        drop(guard);
+        assert!(matches!(admission.admit(&key), Decision::Execute(_)));
+    }
+
+    #[test]
+    fn different_control_planes_keep_independent_task_identities() {
+        let admission = Arc::new(Admission::default());
+        admission.configure(2);
+        let mut key = key();
+        let Decision::Execute(first) = admission.admit(&key) else {
+            panic!("first control plane")
+        };
+        key.api_base = "https://other.example/api/v1".into();
+        let Decision::Execute(second) = admission.admit(&key) else {
+            panic!("independent control plane")
+        };
+        assert_eq!(admission.in_flight(), 2);
+        assert!(!first.cancellation().is_cancelled());
+        assert!(!second.cancellation().is_cancelled());
     }
 }
