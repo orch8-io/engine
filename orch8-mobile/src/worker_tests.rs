@@ -1153,6 +1153,63 @@ async fn newer_mobile_claim_cancels_and_defers_while_the_predecessor_is_live() {
 }
 
 #[tokio::test]
+async fn replacement_identity_defers_the_same_task_even_with_spare_capacity() {
+    let server = spawn_control_plane(route_with(Vec::new(), 200, 200)).await;
+    let (h, gate, calls) = admission_harness(&server).await;
+    let client = NodeClient::new_unchecked(
+        server.base.clone(),
+        crate::credential::Credential::new("replacement-key".into()),
+        "replacement-device".into(),
+        RuntimeId::new(),
+        Advertisement {
+            handlers: vec!["scan".into()],
+            caps: NodeCapabilities::default(),
+            draining: false,
+        },
+    );
+    let next = Worker::new(
+        WorkerDeps {
+            client: Arc::clone(&client),
+            store: h.store.clone(),
+            registry: Arc::clone(&h.worker.deps.registry),
+            foreign_handlers: h.worker.deps.foreign_handlers.clone(),
+            storage: Arc::clone(&h.worker.deps.storage),
+            signals: h.worker.deps.signals.clone(),
+            stragglers: Arc::clone(&h.worker.deps.stragglers),
+        },
+        WorkerOptions {
+            max_concurrent_tasks: 2,
+            ..WorkerOptions::default()
+        },
+    )
+    .unwrap();
+    assert_ne!(client.worker_id(), h.client.worker_id());
+    let id = uuid::Uuid::new_v4();
+    let old: RemoteTask = serde_json::from_value(task_json(id)).unwrap();
+    let mut new = old.clone();
+    new.claim_epoch += 1;
+    let worker = Arc::clone(&h.worker);
+    let first = tokio::spawn(async move { worker.execute(old, Duration::from_millis(100)).await });
+    wait_for(|| calls.load(Ordering::SeqCst) == 1).await;
+    let second = tokio::spawn(async move { next.execute(new, Duration::from_millis(100)).await });
+    wait_for(|| calls.load(Ordering::SeqCst) == 2 || server.count(&format!("{id}/release")) > 0)
+        .await;
+    let observed = calls.load(Ordering::SeqCst);
+    gate.add_permits(2);
+    first.await.unwrap();
+    second.await.unwrap();
+    assert_eq!(
+        observed, 1,
+        "worker identity changes must not duplicate invocation"
+    );
+    let releases = server.bodies(&format!("{id}/release"));
+    assert_eq!(releases.len(), 1);
+    assert_eq!(releases[0]["worker_id"], client.worker_id());
+    assert_eq!(releases[0]["claim_epoch"], 8);
+    assert_eq!(releases[0]["started"], false);
+}
+
+#[tokio::test]
 async fn surplus_mobile_releases_are_bounded_and_block_additional_polls() {
     let release_gate = Arc::new(Semaphore::new(0));
     let tasks = (0..101).map(|_| task_json(uuid::Uuid::new_v4())).collect();
