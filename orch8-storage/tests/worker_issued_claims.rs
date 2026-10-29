@@ -836,3 +836,29 @@ orch8_storage::backend_test!(kinds=[postgres,encrypted_postgres], async fn match
     assert!(result.is_empty(),"an expired capability observation acquired new work");
     let retained=b.storage.get_worker_task(task.id).await.unwrap().unwrap();assert_eq!(retained.state,WorkerTaskState::Pending);assert_eq!(retained.claim_epoch,0);
 });
+
+orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn claim_timestamps_return_the_exact_committed_lease_anchor(b) {
+    let s=b.storage.as_ref();
+    for mode in 0..5 {
+        let task=fixture(s,false).await;
+        let held=s.claim_worker_tasks_with_authority(&request(mode)).await.unwrap().pop().unwrap();
+        let stored=s.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(held.claimed_at,stored.claimed_at,"selector {mode} returned a different claim anchor");
+        assert_eq!(held.heartbeat_at,stored.heartbeat_at,"selector {mode} returned a different lease anchor");
+        s.delete_worker_task(task.id).await.unwrap();
+    }
+});
+orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn claim_timestamps_are_sampled_after_waiting_for_the_database(b) {
+    let s=b.storage.as_ref();assert_eq!(b.sqlite_pool().options().get_max_connections(),1);
+    for mode in 0..5 {
+        let task=fixture(s,false).await;let req=request(mode);
+        let gate=b.sqlite_pool().acquire().await.unwrap();
+        let claim=s.claim_worker_tasks_with_authority(&req);tokio::pin!(claim);
+        assert!(futures::poll!(claim.as_mut()).is_pending());
+        let released_at=Utc::now();drop(gate);
+        let held=tokio::time::timeout(std::time::Duration::from_secs(10),&mut claim).await.unwrap().unwrap().pop().unwrap();
+        let stored=s.get_worker_task(task.id).await.unwrap().unwrap();
+        assert!(stored.heartbeat_at.unwrap()>=released_at,"selector {mode} backdated its lease across the database wait");
+        assert_eq!(held.heartbeat_at,stored.heartbeat_at);s.delete_worker_task(task.id).await.unwrap();
+    }
+});
