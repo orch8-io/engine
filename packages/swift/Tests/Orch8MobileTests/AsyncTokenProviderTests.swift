@@ -274,16 +274,42 @@ final class AsyncTokenProviderTests: XCTestCase {
         XCTAssertEqual(gate.calls(), 1)
     }
 
+    private final class ManualClock: TokenFetchClock, @unchecked Sendable {
+        private let lock = NSLock()
+        private var instant = DispatchTime.now()
+        private var pending: (DispatchTime, @Sendable () -> Void)?
+        private var armed: XCTestExpectation?
+
+        init(armed: XCTestExpectation) { self.armed = armed }
+        func now() -> DispatchTime { lock.lock(); defer { lock.unlock() }; return instant }
+        func schedule(deadline: DispatchTime, action: @escaping @Sendable () -> Void) -> @Sendable () -> Void {
+            lock.lock(); pending = (deadline, action); let notification = armed; armed = nil; lock.unlock()
+            notification?.fulfill()
+            return {}
+        }
+        func expire() {
+            lock.lock()
+            let callback = pending
+            pending = nil
+            if let callback { instant = callback.0 }
+            lock.unlock()
+            callback?.1()
+        }
+    }
+
     func testInitialTimeoutRetainsPhysicalAdmissionUntilLateCompletion() async throws {
         let budget = TokenFetchBudget(capacity: 1)
         let entered = expectation(description: "initial fetch entered before timeout")
+        let firstArmed = expectation(description: "initial deadline can be expired")
+        let clock = ManualClock(armed: firstArmed)
         let gate = Gate(started: entered)
         defer { gate.release() }
-        let provider = AsyncTokenProvider(initialToken: "", timeout: 30, budget: budget) { await gate.fetch() }
+        let provider = AsyncTokenProvider(initialToken: "", timeout: 30, budget: budget, clock: clock) { await gate.fetch() }
         let initial = Task { try await provider.fetchInitialToken() }
-        await fulfillment(of: [entered], timeout: 45)
+        await fulfillment(of: [entered, firstArmed], timeout: 30)
+        clock.expire()
         do { _ = try await initial.value; XCTFail("held initial fetch must time out") }
-        catch { /* expected timeout */ }
+        catch { XCTAssertTrue(String(describing: error).contains("token provider timed out")) }
         XCTAssertEqual(budget.availablePermits, 0)
         XCTAssertEqual(provider.currentToken(), "")
         gate.release()
@@ -291,6 +317,7 @@ final class AsyncTokenProviderTests: XCTestCase {
         XCTAssertEqual(provider.currentToken(), "", "late first fetch cannot populate the cache")
         let token = try await provider.fetchInitialToken()
         XCTAssertEqual(token, "dst_recovered")
+        try await waitForBudget(budget, available: 1)
     }
 
     func testAlreadyCancelledInitialFetchDoesNotInvokeOrReserveHostWork() async {
