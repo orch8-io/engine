@@ -91,6 +91,13 @@ pub async fn fork_instance(
 
     crate::auth::enforce_tenant_access(&tenant_ctx, &source.tenant_id, &format!("instance {id}"))?;
 
+    orch8_storage::delegation_publication::ensure_native_instance(
+        state.storage.as_ref(),
+        source_id,
+    )
+    .await
+    .map_err(|e| ApiError::from_storage(e, "instance"))?;
+
     // Validate the context patch up-front (same rule as resume-from).
     let patch = match req.context {
         None => None,

@@ -1,5 +1,5 @@
-//! Artifact backend placeholder for builds without the `artifacts` feature
-//! (the embedded mobile engine). It keeps the backends' `artifact_store`
+//! Artifact backend placeholder for builds without artifact storage features
+//! (minimal embedded/browser consumers). Mobile opts into `artifacts-local`. It keeps the backends' `artifact_store`
 //! plumbing type-checking while making an artifact store impossible to
 //! construct, so every artifact call returns the same permanent
 //! `Unsupported` error as an unconfigured server.
@@ -13,7 +13,7 @@ use uuid::Uuid;
 use orch8_types::artifact::{ArtifactMeta, ArtifactRef};
 use orch8_types::error::StorageError;
 
-/// Uninhabited: no value of this type can exist without the `artifacts` feature.
+/// Uninhabited: no value of this type can exist without artifact storage features.
 pub struct ObjectArtifactStore {
     never: Infallible,
 }

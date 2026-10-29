@@ -325,6 +325,11 @@ app.post("/device-session", requireUser, async (req, res) => {
 });
 ```
 
+App backends may include optional `queues` in the device-session mint request
+to grant explicit `/workers/tasks/poll/queue` access (at most 16 named queues).
+Normal polls use the default queue; a named poll must match a signed queue grant.
+The SDK token provider continues returning the opaque session token.
+
 App (common code), **before** `registerNode`:
 
 ```kotlin

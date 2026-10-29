@@ -163,3 +163,44 @@ CONCURRENTLY IF NOT EXISTS` statement from the migration header online, outside
 a transaction, before upgrading large installations. The normal migration then
 reuses that index. It changes no stored workflow columns or activation values.
 SQLite adds the equivalent index through idempotent schema setup.
+
+## Delegation publication receipts (142)
+
+Migration 142 adds an initially empty metadata table for atomic delegation
+publication. Receipts survive hot/native cleanup and cannot be updated or
+deleted; rollback refuses a nonempty receipt table. SQLite schema 72 creates
+the equivalent table during upgrade. No historical publication or caller is
+backfilled. Deploy a compatible coordinator cohort before activating new
+publication traffic; mixed older writers remain a separate enforcement gate.
+
+## Delegation relay execution fence (143)
+
+Migration 143 (SQLite schema 73) excludes delegation relay records from native
+execution. Relay identity comes from the reserved legacy metadata field or an
+immutable publication whose task owner differs from the delegated parent.
+Hosted publications remain runnable, including coincident instance/delegation
+UUIDs. New partial indexes support point lookups without scanning hosted history.
+
+The upgrade clears claims and schedules on historical scheduled/running relays.
+A relay with native runtime or execution-tree evidence is paused; its evidence
+is retained for operator reconciliation. Other scheduled relays become waiting.
+Resume cannot release a relay with native history, and pending mailbox tasks for
+that relay cannot acquire a new worker claim. Already issued destination claims
+retain their existing completion semantics. Reconcile possible duplicate side
+effects before restoring such a quarantined relay.
+
+Database triggers reject native running state and changes to a relay's identity
+or native runtime history. Normal destination outcome integration remains
+permitted. PostgreSQL rollback refuses while any relay identity remains,
+including publication receipts retained after native instance cleanup. Older
+coordinators may encounter explicit write errors; deploy compatible coordinators
+before activating this schema. This fence does not establish general mixed-version
+writer compatibility for other continuity operations.
+
+Quarantine is stored as compact immutable `delegation_proxy_quarantines` rows,
+independently of hot instance and execution-tree retention. These records must
+survive full database backup/restore. They have no automatic expiry or resume
+bypass: reconciliation must not reuse a poisoned physical identity. Capsule and
+local-migration snapshots refuse relay records. The logical configuration/native
+instance archive cannot preserve relay authority and refuses to include relays;
+configuration-only exports remain available.

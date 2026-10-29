@@ -292,3 +292,9 @@ Next: [Observe failure and recover](05-failure-and-recovery.md).
 | Instance remains waiting after completion | Completion used the wrong task or worker ID         | Use `task.id` and the exact `workerId` that claimed it                    |
 | Output schema rejects the result          | Worker returned strings or a different field name   | Return integer `score` plus `customer_id` and `segment` exactly as shown  |
 | Node says `fetch is not defined`          | Node is older than 18                               | Upgrade Node or use the official SDK with its supported runtime           |
+
+
+For held tasks from older deployments without a retained authenticated issuer,
+a backend can explicitly acknowledge a confirmed completion using the
+[operator reconciliation API](../worker-reconciliation.md). Workers and phone
+apps must not carry the Operator credentials used for that decision.

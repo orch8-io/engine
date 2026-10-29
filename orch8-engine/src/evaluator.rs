@@ -466,30 +466,48 @@ pub async fn migration_incompatibilities(
     instance: &TaskInstance,
     target: &SequenceDefinition,
 ) -> Result<Vec<String>, EngineError> {
+    let blocks = merged_blocks(storage, instance.id, target).await?;
+    let tree = storage.get_execution_tree(instance.id).await?;
+    Ok(migration_snapshot_incompatibilities(
+        instance, &blocks, &tree,
+    ))
+}
+
+/// Validate the exact recovery snapshot that will be rechecked at commit.
+pub fn migration_snapshot_incompatibilities(
+    instance: &TaskInstance,
+    blocks: &[BlockDefinition],
+    tree: &[ExecutionNode],
+) -> Vec<String> {
     use std::collections::HashMap;
 
-    type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>)>;
-    fn walk<'a>(blocks: &'a [BlockDefinition], parent: Option<&'a BlockId>, index: &mut Index<'a>) {
+    type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>, Option<usize>)>;
+    fn walk<'a>(
+        blocks: &'a [BlockDefinition],
+        parent: Option<&'a BlockId>,
+        branch: Option<usize>,
+        index: &mut Index<'a>,
+    ) {
         for block in blocks {
             let (id, block_type) = block_meta(block);
-            index.insert(id, (block_type, parent));
-            for_each_child_slice(block, &mut |_, children| walk(children, Some(id), index));
+            index.insert(id, (block_type, parent, branch));
+            for_each_child_slice(block, &mut |branch, children| {
+                walk(children, Some(id), branch, index);
+            });
         }
     }
 
-    let blocks = merged_blocks(storage, instance.id, target).await?;
     let mut index = Index::new();
-    walk(&blocks, None, &mut index);
+    walk(blocks, None, None, &mut index);
 
-    let tree = storage.get_execution_tree(instance.id).await?;
     let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
     let mut problems = Vec::new();
-    for node in &tree {
+    for node in tree {
         let live = matches!(
             node.state,
             NodeState::Pending | NodeState::Running | NodeState::Waiting
         );
-        let Some((block_type, parent)) = index.get(&node.block_id) else {
+        let Some((block_type, parent, branch)) = index.get(&node.block_id) else {
             if live {
                 problems.push(format!(
                     "block '{}' is {:?} in the instance's execution tree but does not exist in the target sequence",
@@ -504,6 +522,15 @@ pub async fn migration_incompatibilities(
                 node.block_id, node.block_type, block_type
             ));
             continue;
+        }
+        let tree_branch = node
+            .branch_index
+            .and_then(|value| usize::try_from(value).ok());
+        if node.branch_index.is_some_and(|value| value < 0) || tree_branch != *branch {
+            problems.push(format!(
+                "block '{}' sits in branch {:?} in the instance's execution tree but in branch {:?} in the target sequence",
+                node.block_id, node.branch_index, branch,
+            ));
         }
         let tree_parent = node
             .parent_id
@@ -529,7 +556,7 @@ pub async fn migration_incompatibilities(
     }
     problems.sort();
     problems.dedup();
-    Ok(problems)
+    problems
 }
 
 fn block_meta(block: &BlockDefinition) -> (&BlockId, BlockType) {
@@ -613,6 +640,31 @@ pub async fn evaluate_with_claim_token(
     claim_token: chrono::DateTime<chrono::Utc>,
     stop: &std::sync::atomic::AtomicBool,
 ) -> Result<EvalOutcome, EngineError> {
+    // Public/direct evaluators also dispatch remote work. Persist the same
+    // first-writer run identity as the scheduler before any callback can run;
+    // initial_instance below reloads the actual winner of concurrent starts.
+    if instance.context.runtime.run_id.is_none() || instance.context.runtime.started_at.is_none() {
+        let run_id = instance
+            .context
+            .runtime
+            .run_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let started_at = instance
+            .context
+            .runtime
+            .started_at
+            .unwrap_or_else(|| clock.now());
+        if !storage
+            .ensure_instance_run_started_claimed(instance.id, &run_id, started_at, claim_token)
+            .await?
+        {
+            return Err(EngineError::ClaimLost {
+                instance_id: instance.id,
+            });
+        }
+    }
+
     // Merge sequence blocks with any dynamically injected blocks.
     let blocks = merged_blocks(storage.as_ref(), instance.id, sequence).await?;
 

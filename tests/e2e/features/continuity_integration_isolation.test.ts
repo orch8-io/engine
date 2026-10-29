@@ -941,7 +941,12 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
   describe("A. device delegation records a boundary on the parent chain", () => {
     it("a claimed delegation appends device_delegation to the parent's chain, not a new one", async () => {
       const tenantId = tid("int-deleg");
-      const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
+      // Mailbox publication is unclaimed work. A fresh noop can still be
+      // scheduler-owned; keep this provenance fixture at a stable waiting gate.
+      const { execution, runtimeId: sourceRuntimeId } = await pausedContinuityFixture(
+        tenantId,
+        "int-deleg-parent",
+      );
       await registerRuntime(tenantId, sourceRuntimeId);
       const destRuntime = uuid();
       await registerRuntime(tenantId, destRuntime);
@@ -4524,7 +4529,7 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       assert.equal(exported.handoff.state, "exported");
     });
 
-    it("export_handoff against a handoff already in Exported state is rejected (export is not idempotent/re-callable)", async () => {
+    it("export_handoff retry recovers the original exported handoff", async () => {
       const tenantId = tid("int-hoff-export-twice");
       const { execution } = await pausedContinuityFixture(tenantId, "int-hoff-export-twice");
       const destRuntime = uuid();
@@ -4541,15 +4546,12 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
         expires_in_seconds: 60,
       });
       assert.equal(exported.handoff.state, "exported");
-      await rejects(
-        client.exportHandoff(handoff.id, {
-          tenant_id: tenantId,
-          requirements: req.requirements,
-          expires_in_seconds: 60,
-        }),
-        409,
-        "a handoff already exported cannot be exported a second time",
-      );
+      const replay = await client.exportHandoff(handoff.id, {
+        tenant_id: tenantId,
+        requirements: req.requirements,
+        expires_in_seconds: 60,
+      });
+      assert.deepEqual(replay, exported, "retry must recover the original sealed outcome");
     });
 
     it("accept_handoff with a destination_instance_id that was never produced by import_capsule for this handoff is rejected", async () => {

@@ -200,6 +200,9 @@ POST /runtimes/device-sessions
   `TokenProvider` for a fresh token on `401` and retries once
   (`MobileEngine.setTokenProvider`). Minting for a `device_id` registered to
   another tenant is `409`.
+- Optional `queues` grants at most 16 named queues (nonblank, ≤256 bytes each).
+  Normal polling claims only the default queue. Explicit named polling uses
+  `/workers/tasks/poll/queue` and checks both handler and queue grants.
 - Same signer as browser sessions (`ORCH8_BROWSER_SESSION_SECRET`, else the
   root-key derivation). The signed claims carry the runtime kind; a `bst_`
   token never verifies as `dst_` or the reverse.
@@ -210,13 +213,14 @@ POST /runtimes/device-sessions
   | `POST /mobile/devices/register`, `POST /mobile/sync`                                | the session's `device_id`; `step_delegations` (server-side credential resolution) refused — for stored keys it is off unless `ORCH8_MOBILE_SYNC_RESOLVE_CREDENTIALS=true`                                                         |
   | `POST /mobile/devices/{device_id}/runtime`                                          | the session's device and `runtime_id`, kind `mobile`; handlers clamped to the allowlist                                                                                                                                           |
   | `POST /workers/tasks/poll`, `/workers/tasks/{id}/{complete,fail,heartbeat,release}` | `worker_id = runtime_id`, kind `mobile`, a granted handler                                                                                                                                                                        |
+  | `POST /workers/tasks/poll/queue` | Same runtime and granted handler; `queue_name` must match the signed queue allowlist |
   | `POST /continuity/executions`                                                       | `hosted_by_runtime: true`, `runtime_id` = the session's                                                                                                                                                                           |
   | `POST /continuity/grants`                                                           | `allowed_actions: ["accept"]`, execution owned by the session's runtime (else `404`)                                                                                                                                              |
   | `POST /continuity/delegations/claim`                                                | `source_runtime_id` = the session's runtime (which must own the parent)                                                                                                                                                           |
   | `GET /continuity/delegations/{id}`                                                  | the session's runtime is the source or destination (else `404`)                                                                                                                                                                   |
   | `GET /runtimes`                                                                     | only live delegation destinations (not itself, not draining/expired, ≥ `registered`, advertising `orch8.delegation`), reduced to `runtime_id`, `kind`, `handlers`, `observed_at`, `expires_at` (`trust` reported as `registered`) |
 
-- Refused: task listing and stats, `/workers/tasks/poll/queue`, worker
+- Refused: task listing and stats, ungranted queue polling, worker
   commands, other devices' data (`GET /mobile/devices|approvals|status`,
   `POST /mobile/commands`), browser/device session minting,
   `/runtimes/register`, sequences, credentials, instances, API keys,

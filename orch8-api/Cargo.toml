@@ -38,6 +38,13 @@ base64.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+orch8-engine = { path = "../orch8-engine", default-features = false, features = ["test-util"] }
+# Exercise identical durable results across the HTTP and gRPC transports.
+orch8-grpc = { path = "../orch8-grpc" }
+tonic.workspace = true
+tempfile.workspace = true
+# Direct database fixtures verify transport behavior after continuity history GC.
+sqlx.workspace = true
 tokio = { workspace = true, features = ["full"] }
 # `orch8_storage::testing` (backend matrix, fault injection, fixtures).
 orch8-storage = { path = "../orch8-storage", features = ["test-util"] }

@@ -1,5 +1,10 @@
 //! Portable-continuity control-plane endpoints.
 
+mod delegation;
+mod effect_resolution;
+use delegation::claim_delegation;
+mod local_recovery;
+
 use std::fmt::Write as _;
 use std::sync::Arc;
 
@@ -35,10 +40,10 @@ use orch8_types::continuity_advanced::{
     ExtractedEffectMock, ExtractedTestFixture, FaultInjection, FaultKind, FaultLabRun,
     FaultProfile, FederationEnvelope, FederationPeerId, ForkEffectMode, GeneratedScenario,
     InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
-    LiveMigrationState, MigrationDisposition, MigrationPlanId, MigrationRollbackCapsule,
-    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, RecommendationId,
-    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
-    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
+    LiveMigrationState, MigrationDisposition, MigrationPlanId, OptimizationRecommendation,
+    OwnershipTransition, ProviderCandidate, RecommendationId, ReservationState, ResidencyEvidence,
+    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
+    WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::release::{InFlightPolicy, ReleaseDecision, ReleaseState, WorkflowRelease};
@@ -87,7 +92,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/continuity/executions/{id}/effects", get(list_effects))
         .route("/instances/{id}/effects", get(list_instance_effects))
-        .route("/continuity/effects/{id}/resolve", post(resolve_effect))
+        .route(
+            "/continuity/effects/{id}/resolve",
+            post(effect_resolution::resolve),
+        )
         .route(
             "/continuity/executions/{id}/provenance",
             get(list_provenance).post(record_provenance_boundary),
@@ -1161,9 +1169,12 @@ async fn export_handoff(
         .await
         .map_err(|error| ApiError::from_storage(error, "handoff"))?
         .ok_or_else(|| ApiError::NotFound(format!("handoff {id}")))?;
-    if handoff.state != HandoffState::Requested {
+    if !matches!(
+        handoff.state,
+        HandoffState::Requested | HandoffState::Quiescing | HandoffState::Exported
+    ) {
         return Err(ApiError::Conflict(
-            "only a requested handoff can begin export".into(),
+            "handoff cannot export in its current state".into(),
         ));
     }
     let execution = state
@@ -1172,6 +1183,17 @@ async fn export_handoff(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if execution.owner_runtime_id != handoff.source_runtime_id
+        || execution.epoch != handoff.expected_epoch
+        || !matches!(
+            execution.state,
+            OwnershipState::Owned | OwnershipState::Transferring
+        )
+    {
+        return Err(ApiError::Conflict(
+            "handoff source ownership has changed".into(),
+        ));
+    }
     let placement_id = handoff.placement_decision_id.ok_or_else(|| {
         ApiError::Conflict("handoff is missing dispatch placement evidence".into())
     })?;
@@ -1247,22 +1269,27 @@ async fn export_handoff(
     }
     let now = Utc::now();
     let mut quiescing = handoff.clone();
-    quiescing.state = HandoffState::Quiescing;
-    quiescing.version = handoff.version.saturating_add(1);
-    quiescing.updated_at = now;
-    if !state
-        .storage
-        .cas_handoff(
-            &tenant_id,
-            id,
-            HandoffState::Requested,
-            handoff.version,
-            &quiescing,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "handoff"))?
-    {
-        return Err(ApiError::Conflict("handoff changed concurrently".into()));
+    if handoff.state == HandoffState::Requested {
+        quiescing.state = HandoffState::Quiescing;
+        quiescing.version = handoff
+            .version
+            .checked_add(1)
+            .ok_or_else(|| ApiError::Conflict("handoff version exhausted".into()))?;
+        quiescing.updated_at = now;
+        if !state
+            .storage
+            .cas_handoff(
+                &tenant_id,
+                id,
+                HandoffState::Requested,
+                handoff.version,
+                &quiescing,
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "handoff"))?
+        {
+            return Err(ApiError::Conflict("handoff changed concurrently".into()));
+        }
     }
     let capsule_result = orch8_engine::capsule::export_paused_capsule(
         state.storage.as_ref(),
@@ -1278,79 +1305,54 @@ async fn export_handoff(
         payload_encryptor,
     )
     .await;
-    let capsule = match capsule_result {
-        Ok(capsule) => capsule,
-        Err(error) => {
-            return Err(mark_capsule_export_failed(
-                &state,
-                &tenant_id,
-                &quiescing,
-                error.to_string(),
-            )
-            .await);
-        }
-    };
-    let payload_result = state
+    // Publication and read errors may follow a committed source fence. Keep the
+    // handoff retryable; only the durable cut decides whether ownership can move.
+    let capsule = capsule_result.map_err(|error| ApiError::Conflict(error.to_string()))?;
+    let payload = state
         .storage
         .get_artifact(&capsule.manifest.payload_artifact.key)
-        .await;
-    let payload = match payload_result {
-        Ok(Some(payload)) => payload,
-        Ok(None) => {
-            return Err(mark_capsule_export_failed(
-                &state,
-                &tenant_id,
-                &quiescing,
-                "exported capsule payload is unavailable".into(),
-            )
-            .await);
-        }
-        Err(error) => {
-            return Err(mark_capsule_export_failed(
-                &state,
-                &tenant_id,
-                &quiescing,
-                format!("cannot read exported capsule payload: {error}"),
-            )
-            .await);
-        }
-    };
+        .await
+        .map_err(|error| ApiError::from_storage(error, "capsule payload"))?
+        .ok_or_else(|| ApiError::Conflict("exported capsule payload is unavailable".into()))?;
     if payload.len() as u64 != capsule.manifest.payload_artifact.bytes
         || hex_sha256(&payload) != capsule.manifest.payload_artifact.sha256
     {
-        return Err(mark_capsule_export_failed(
-            &state,
-            &tenant_id,
-            &quiescing,
+        return Err(ApiError::Conflict(
             "exported capsule payload does not match its signed manifest".into(),
-        )
-        .await);
+        ));
+    }
+    if handoff.state == HandoffState::Exported {
+        if handoff.capsule_id != Some(capsule.manifest.capsule_id) {
+            return Err(ApiError::Conflict("handoff capsule has changed".into()));
+        }
+        return Ok(Json(ExportHandoffResponse {
+            handoff,
+            capsule,
+            payload_base64: BASE64.encode(payload),
+        }));
     }
     let mut exported = quiescing.clone();
     exported.state = HandoffState::Exported;
     exported.capsule_id = Some(capsule.manifest.capsule_id);
-    exported.version = quiescing.version.saturating_add(1);
+    exported.version = quiescing
+        .version
+        .checked_add(1)
+        .ok_or_else(|| ApiError::Conflict("handoff version exhausted".into()))?;
     exported.updated_at = Utc::now();
     let mut transferring = execution.clone();
     transferring.state = OwnershipState::Transferring;
     transferring.updated_at = exported.updated_at;
-    orch8_engine::continuity::commit_handoff_export(
+    orch8_engine::continuity::commit_handoff_export_with_provenance(
         state.storage.as_ref(),
         &quiescing,
         &exported,
         &execution,
         &transferring,
+        &capsule.manifest,
+        state.provenance_signer(),
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    append_provenance_boundary(
-        &state,
-        &transferring,
-        "capsule_exported",
-        "signed capsule exported",
-        &capsule.manifest,
-    )
-    .await?;
     Ok(Json(ExportHandoffResponse {
         handoff: exported,
         capsule,
@@ -1605,12 +1607,14 @@ async fn attach_device_capsule(
     let mut transferring = execution.clone();
     transferring.state = OwnershipState::Transferring;
     transferring.updated_at = exported.updated_at;
-    orch8_engine::continuity::commit_handoff_export(
+    orch8_engine::continuity::commit_handoff_export_with_provenance(
         state.storage.as_ref(),
         &quiescing,
         &exported,
         &execution,
         &transferring,
+        &body.capsule.manifest,
+        state.provenance_signer(),
     )
     .await
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
@@ -2201,58 +2205,6 @@ async fn list_instance_effects(
         .await
         .map_err(|error| ApiError::from_storage(error, "effect receipts"))?;
     Ok(Json(receipts))
-}
-
-#[derive(Debug, Deserialize)]
-struct ResolveEffectRequest {
-    tenant_id: TenantId,
-    state: EffectState,
-    provider_receipt_id: Option<String>,
-}
-
-async fn resolve_effect(
-    State(state): State<AppState>,
-    tenant_ctx: crate::auth::OptionalTenant,
-    Path(id): Path<orch8_types::continuity::EffectId>,
-    Json(body): Json<ResolveEffectRequest>,
-) -> Result<Json<EffectReceipt>, ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    let mut receipt = state
-        .storage
-        .get_effect_receipt(&tenant_id, id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "effect receipt"))?
-        .ok_or_else(|| ApiError::NotFound(format!("effect receipt {id}")))?;
-    let expected = receipt.state;
-    receipt.provider_receipt_id = body.provider_receipt_id;
-    receipt
-        .transition(body.state, Utc::now())
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    if !state
-        .storage
-        .cas_effect_receipt(&tenant_id, id, expected, &receipt)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "effect receipt"))?
-    {
-        return Err(ApiError::Conflict(
-            "effect receipt changed concurrently; reload before resolving".into(),
-        ));
-    }
-    let execution = state
-        .storage
-        .get_continuity_execution(&tenant_id, receipt.continuity_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
-        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
-    append_provenance_boundary(
-        &state,
-        &execution,
-        "effect_resolved",
-        "effect receipt resolved",
-        &receipt,
-    )
-    .await?;
-    Ok(Json(receipt))
 }
 
 async fn list_provenance(
@@ -4867,6 +4819,19 @@ async fn plan_live_migration(
             .filter(|output| !target_blocks.contains(output.block_id.as_str()))
             .map(|output| format!("CHECKPOINT_OUTPUT_REMOVED:{}", output.block_id.as_str())),
     );
+    // Planning reports retained-graph incompatibility before the caller asks
+    // to apply it. Apply independently checks its coherent source snapshot.
+    if !orch8_engine::evaluator::migration_incompatibilities(
+        state.storage.as_ref(),
+        &instance,
+        &target,
+    )
+    .await
+    .map_err(|e| ApiError::Conflict(format!("migration target graph: {e}")))?
+    .is_empty()
+    {
+        finding_codes.push("INCOMPATIBLE:EXECUTION_GRAPH".into());
+    }
     finding_codes.sort();
     finding_codes.dedup();
     let historical_validation_passed = Box::pin(validate_migration_history(
@@ -5012,26 +4977,24 @@ async fn apply_live_migration(
     if target.tenant_id != tenant_id || target.version != record.plan.to_version {
         return Err(ApiError::Conflict("target sequence changed".into()));
     }
-    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
-        ApiError::Unavailable(
-            "live migration is disabled without a configured engine encryption key".into(),
-        )
-    })?;
-    let signed_capsule = orch8_engine::capsule::export_paused_capsule(
-        state.storage.as_ref(),
-        orch8_engine::capsule::CapsuleExportRequest {
-            continuity: execution.clone(),
-            destination_runtime_id: None,
-            requirements: CapsuleRequirements::default(),
-            expires_at: record.rollback_expires_at,
-            signing_key_id: crypto.signing_key_id.clone(),
-            encryption_key_id: crypto.encryption_key_id.clone(),
-        },
-        &crypto.signing_key,
-        &crypto.payload_encryptor,
-    )
-    .await
-    .map_err(|error| ApiError::Conflict(format!("rollback capsule export failed: {error}")))?;
+    let (rollback_capsule, recovery) =
+        local_recovery::prepare(&state, &record, &execution, &instance).await?;
+    let target_blocks =
+        orch8_engine::evaluator::merged_blocks(state.storage.as_ref(), instance.id, &target)
+            .await
+            .map_err(|e| ApiError::Conflict(format!("migration target graph: {e}")))?;
+    let incompatibilities = orch8_engine::evaluator::migration_snapshot_incompatibilities(
+        &recovery.source.instance,
+        &target_blocks,
+        &recovery.source.execution_state.nodes,
+    );
+    if !incompatibilities.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "migration cannot rebind live nodes: {}",
+            incompatibilities.join("; ")
+        )));
+    }
+    let instance = recovery.source.instance;
     let transformed = orch8_engine::continuity_advanced::apply_state_transforms(
         &record.source_checkpoint.checkpoint_data,
         &record.plan.transforms,
@@ -5052,13 +5015,7 @@ async fn apply_live_migration(
     next_record.state = LiveMigrationState::Applied;
     next_record.applied_epoch = Some(next_execution.epoch);
     next_record.applied_at = Some(now);
-    next_record.rollback_capsule = Some(MigrationRollbackCapsule {
-        capsule_id: signed_capsule.manifest.capsule_id,
-        payload_artifact: signed_capsule.manifest.payload_artifact,
-        manifest_sha256: signed_capsule.manifest_sha256,
-        public_key: signed_capsule.public_key,
-        signature: signed_capsule.signature,
-    });
+    next_record.rollback_capsule = Some(rollback_capsule);
     let checkpoint = orch8_types::checkpoint::Checkpoint {
         id: uuid::Uuid::now_v7(),
         instance_id: instance.id,
@@ -5074,7 +5031,12 @@ async fn apply_live_migration(
             expected_execution: &execution,
             next_execution: &next_execution,
             expected_instance_state: instance.state,
+            expected_instance_updated_at: instance.updated_at,
+            expected_checkpoint_id: record.source_checkpoint.id,
+            expected_source_fingerprint: &recovery.fingerprint,
+            expected_target_sequence: &target,
             next_instance_state: orch8_types::instance::InstanceState::Paused,
+            next_fire_at: None,
             next_sequence_id: target.id,
             next_context: &next_context,
             checkpoint: &checkpoint,
@@ -5121,22 +5083,7 @@ async fn rollback_live_migration(
             "migration is not inside its active rollback window".into(),
         ));
     }
-    let rollback_capsule = record.rollback_capsule.as_ref().ok_or_else(|| {
-        ApiError::Conflict("migration has no retained pre-migration capsule".into())
-    })?;
-    let capsule_payload = state
-        .storage
-        .get_artifact(&rollback_capsule.payload_artifact.key)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "rollback capsule"))?
-        .ok_or_else(|| ApiError::Conflict("rollback capsule artifact is unavailable".into()))?;
-    if capsule_payload.len() as u64 != rollback_capsule.payload_artifact.bytes
-        || hex_sha256(&capsule_payload) != rollback_capsule.payload_artifact.sha256
-    {
-        return Err(ApiError::Conflict(
-            "rollback capsule artifact failed integrity verification".into(),
-        ));
-    }
+    let recovery = local_recovery::load(&state, &record).await?;
     let applied_epoch = record
         .applied_epoch
         .ok_or_else(|| ApiError::Conflict("migration has no applied epoch".into()))?;
@@ -5150,9 +5097,22 @@ async fn rollback_live_migration(
             "migration target changed or resumed before rollback".into(),
         ));
     }
-    let source_context: orch8_types::context::ExecutionContext =
-        serde_json::from_value(record.source_context.clone())
-            .map_err(|error| ApiError::Internal(format!("invalid rollback context: {error}")))?;
+    let target_checkpoint = state
+        .storage
+        .get_latest_checkpoint(instance.id)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "migration target checkpoint"))?
+        .ok_or_else(|| ApiError::Conflict("migration target checkpoint is missing".into()))?;
+    let current_snapshot = local_recovery::capture(
+        &state,
+        &record,
+        &execution,
+        record
+            .applied_at
+            .ok_or_else(|| ApiError::Conflict("migration has no applied timestamp".into()))?,
+    )
+    .await?;
+    let source_context = recovery.instance.context;
     let now = Utc::now();
     let mut next_execution = execution.clone();
     next_execution.epoch = execution
@@ -5178,7 +5138,14 @@ async fn rollback_live_migration(
             expected_execution: &execution,
             next_execution: &next_execution,
             expected_instance_state: instance.state,
+            expected_instance_updated_at: record
+                .applied_at
+                .ok_or_else(|| ApiError::Conflict("migration has no applied timestamp".into()))?,
+            expected_checkpoint_id: target_checkpoint.id,
+            expected_source_fingerprint: &current_snapshot.fingerprint,
+            expected_target_sequence: &recovery.sequence,
             next_instance_state: record.source_state,
+            next_fire_at: recovery.instance.next_fire_at,
             next_sequence_id: record.plan.from_sequence_id,
             next_context: &source_context,
             checkpoint: &checkpoint,
@@ -6936,215 +6903,6 @@ async fn verify_federation(
     Ok(Json(VerifyFederationResponse { valid: true }))
 }
 
-#[derive(Debug, Deserialize)]
-struct ClaimDelegationRequest {
-    tenant_id: TenantId,
-    delegation: DeviceDelegation,
-    signed_grant: SignedContinuationGrant,
-    token: String,
-    /// Explicit input handed to the delegated sub-sequence (the delegation
-    /// never shares mutable execution state with its parent).
-    #[serde(default)]
-    input: serde_json::Value,
-    /// An isolated step delegated as a one-step sequence: the control plane
-    /// publishes it (idempotently) under the deterministic id
-    /// `delegation.sub_sequence_id` must carry, so the delegating runtime
-    /// needs no sequence-authoring rights.
-    #[serde(default)]
-    step: Option<DelegatedStep>,
-}
-
-#[derive(Debug, Deserialize)]
-struct DelegatedStep {
-    handler: String,
-    block_id: String,
-}
-
-/// Publish the one-step sequence of an isolated delegated step, if it does
-/// not exist yet. Its id must be the deterministic one the delegation names.
-async fn ensure_delegated_step_sequence(
-    state: &AppState,
-    tenant_id: &TenantId,
-    delegation: &DeviceDelegation,
-    step: &DelegatedStep,
-) -> Result<(), ApiError> {
-    const MAX_NAME_BYTES: usize = 256;
-    if [&step.handler, &step.block_id]
-        .iter()
-        .any(|name| name.trim().is_empty() || name.len() > MAX_NAME_BYTES)
-    {
-        return Err(ApiError::InvalidArgument(format!(
-            "delegated step handler and block_id must be non-empty and at most {MAX_NAME_BYTES} bytes"
-        )));
-    }
-    let id = orch8_engine::delegation::step_sequence_id(
-        tenant_id.as_str(),
-        &step.handler,
-        &step.block_id,
-    );
-    if delegation.sub_sequence_id.into_uuid() != id {
-        return Err(ApiError::InvalidArgument(
-            "delegation.sub_sequence_id is not the delegated step's sequence id".into(),
-        ));
-    }
-    if state
-        .storage
-        .get_sequence(delegation.sub_sequence_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegated step sequence"))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let sequence: orch8_types::sequence::SequenceDefinition =
-        serde_json::from_value(orch8_engine::delegation::step_sequence_document(
-            tenant_id.as_str(),
-            &step.handler,
-            &step.block_id,
-        ))
-        .map_err(|error| ApiError::InvalidArgument(format!("delegated step sequence: {error}")))?;
-    sequence
-        .validate()
-        .map_err(|error| ApiError::validation(error.catalog_key(), error.to_string()))?;
-    match state.storage.create_sequence(&sequence).await {
-        // A concurrent claim may have published it first.
-        Ok(()) | Err(orch8_types::error::StorageError::Conflict(_)) => Ok(()),
-        Err(error) => Err(ApiError::from_storage(error, "delegated step sequence")),
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct ClaimDelegationResponse {
-    #[serde(flatten)]
-    delegation: DeviceDelegation,
-    /// Mailbox task targeted at the destination runtime, when the parent
-    /// instance is hosted by this server.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mailbox_task_id: Option<uuid::Uuid>,
-}
-
-/// The claim's grant is signed by this control plane and authorizes exactly
-/// this delegation, now.
-fn verify_delegation_grant(
-    trusted_key: &str,
-    body: &ClaimDelegationRequest,
-    now: chrono::DateTime<Utc>,
-) -> Result<(), ApiError> {
-    verify_signed_continuation_grant(&body.signed_grant, &[trusted_key.to_owned()])
-        .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    orch8_engine::continuity_advanced::validate_device_delegation(
-        &body.delegation,
-        &body.signed_grant.grant,
-        now,
-    )
-    .map_err(|error| ApiError::Conflict(error.to_string()))
-}
-
-async fn claim_delegation(
-    State(state): State<AppState>,
-    tenant_ctx: crate::auth::OptionalTenant,
-    binding: crate::browser_sessions::OptionalBinding,
-    Json(body): Json<ClaimDelegationRequest>,
-) -> Result<Json<ClaimDelegationResponse>, ApiError> {
-    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    if body.delegation.tenant_id != tenant_id {
-        return Err(ApiError::NotFound("delegation".into()));
-    }
-    // A device session delegates only as the source runtime; the control
-    // plane check below then requires that runtime to own the parent.
-    crate::device_sessions::enforce_bound_runtime(&binding, body.delegation.source_runtime_id)?;
-    let crypto = state.continuity_crypto.as_ref().ok_or_else(|| {
-        ApiError::Unavailable(
-            "device delegation is disabled without a configured engine encryption key".into(),
-        )
-    })?;
-    let trusted_key = BASE64.encode(crypto.signing_key.verifying_key().to_bytes());
-    let now = Utc::now();
-    if let Some(step) = &body.step {
-        // Publish the step's sequence only for an authentic, live grant.
-        verify_delegation_grant(&trusted_key, &body, now)?;
-        ensure_delegated_step_sequence(&state, &tenant_id, &body.delegation, step).await?;
-    }
-    let execution = validate_delegation_control_plane(&state, &tenant_id, &body.delegation).await?;
-    verify_delegation_grant(&trusted_key, &body, now)?;
-    let token = BASE64
-        .decode(&body.token)
-        .map_err(|_| ApiError::InvalidArgument("delegation token is not valid base64".into()))?;
-    if token.len() != 32 {
-        return Err(ApiError::InvalidArgument(
-            "delegation token must decode to 32 bytes".into(),
-        ));
-    }
-    let consumed = state
-        .storage
-        .consume_continuation_grant(
-            &tenant_id,
-            body.signed_grant.grant.id,
-            &hex_sha256(&token),
-            now,
-        )
-        .await
-        .map_err(|error| ApiError::from_storage(error, "continuation grant"))?;
-    if !consumed {
-        return Err(ApiError::Conflict(
-            "delegation grant is expired, revoked, invalid, or already consumed".into(),
-        ));
-    }
-    // Route through the server mailbox: a task targeted at the destination
-    // runtime, claimable only by it, settled through the regular fenced
-    // lease protocol. A parent hosted by a runtime (e.g. a phone's local
-    // engine) has no instance here: the task is anchored on a delegation
-    // proxy the hosting runtime reads the outcome from.
-    let sub_sequence = state
-        .storage
-        .get_sequence(body.delegation.sub_sequence_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegated sub-sequence"))?
-        .ok_or_else(|| ApiError::NotFound("delegated sub-sequence".into()))?;
-    let hosted_parent = state
-        .storage
-        .get_instance(execution.current_instance_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegation parent"))?
-        .filter(|instance| {
-            instance.tenant_id == tenant_id
-                && !orch8_engine::delegation::is_delegation_proxy(instance)
-        });
-    let parent = match hosted_parent {
-        Some(parent) => parent,
-        None => orch8_engine::delegation::ensure_delegation_proxy(
-            state.storage.as_ref(),
-            &execution,
-            &body.delegation,
-            &sub_sequence,
-        )
-        .await
-        .map_err(|error| ApiError::Conflict(error.to_string()))?,
-    };
-    let task = orch8_engine::delegation::enqueue_delegation_task(
-        state.storage.as_ref(),
-        &parent,
-        &body.delegation,
-        &sub_sequence,
-        body.input,
-    )
-    .await
-    .map_err(|error| ApiError::Conflict(error.to_string()))?;
-    let mailbox_task_id = Some(task.id);
-    append_provenance_boundary(
-        &state,
-        &execution,
-        "device_delegation",
-        "destination-bound device delegation claimed",
-        &body.delegation,
-    )
-    .await?;
-    Ok(Json(ClaimDelegationResponse {
-        delegation: body.delegation,
-        mailbox_task_id,
-    }))
-}
-
 /// Where a delegation stands, as its hosting runtime reads it.
 #[derive(Debug, Serialize)]
 struct DelegationStatusResponse {
@@ -7243,66 +7001,4 @@ async fn get_delegation(
         result,
         delegation,
     }))
-}
-
-async fn validate_delegation_control_plane(
-    state: &AppState,
-    tenant_id: &TenantId,
-    delegation: &DeviceDelegation,
-) -> Result<ContinuityExecution, ApiError> {
-    let execution = state
-        .storage
-        .get_continuity_execution(tenant_id, delegation.parent_continuity_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegation execution"))?
-        .ok_or_else(|| ApiError::NotFound("delegation execution".into()))?;
-    if execution.epoch != delegation.parent_epoch
-        || execution.owner_runtime_id != delegation.source_runtime_id
-    {
-        return Err(ApiError::Conflict(
-            "delegation source is not the current execution owner".into(),
-        ));
-    }
-    let delegation_now = Utc::now();
-    let source = state
-        .storage
-        .get_runtime_capability(tenant_id, delegation.source_runtime_id, delegation_now)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegation runtimes"))?
-        .ok_or_else(|| ApiError::Conflict("delegation source runtime is not reachable".into()))?;
-    let destination = state
-        .storage
-        .get_runtime_capability(tenant_id, delegation.destination_runtime_id, delegation_now)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegation runtimes"))?
-        .ok_or_else(|| {
-            ApiError::Conflict("delegation destination runtime is not reachable".into())
-        })?;
-    let (source, destination) = (&source, &destination);
-    if source.trust < RuntimeTrustLevel::Registered
-        || destination.trust < RuntimeTrustLevel::Registered
-    {
-        return Err(ApiError::Conflict(
-            "device delegation requires registered source and destination runtimes".into(),
-        ));
-    }
-    let sub_sequence = state
-        .storage
-        .get_sequence(delegation.sub_sequence_id)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "delegated sub-sequence"))?
-        .filter(|sequence| &sequence.tenant_id == tenant_id)
-        .ok_or_else(|| ApiError::NotFound("delegated sub-sequence".into()))?;
-    let missing_handlers = sub_sequence
-        .handler_names()
-        .into_iter()
-        .filter(|handler| !destination.handlers.contains(handler))
-        .collect::<Vec<_>>();
-    if !missing_handlers.is_empty() {
-        return Err(ApiError::Conflict(format!(
-            "delegation destination lacks handlers: {}",
-            missing_handlers.join(", ")
-        )));
-    }
-    Ok(execution)
 }

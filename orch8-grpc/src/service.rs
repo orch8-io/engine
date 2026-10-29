@@ -148,6 +148,12 @@ impl Orch8GrpcService {
             return Err(Status::not_found("sequence not found"));
         }
 
+        if instance.metadata.get("orch8_delegation_proxy").is_some() {
+            return Err(Status::invalid_argument(
+                "delegation relay metadata is reserved",
+            ));
+        }
+
         // Enforce the same context-size cap as the HTTP path.
         instance
             .context
@@ -163,54 +169,6 @@ impl Orch8GrpcService {
         instance.next_fire_at = Some(chrono::Utc::now());
 
         Ok(())
-    }
-
-    /// Atomically save worker output, mark the execution node Completed, and
-    /// transition the instance state. The instance UPDATE is CAS-guarded: if
-    /// the instance became terminal/paused after our read, the tx rolls back
-    /// and we return `Ok(())` (the late completion is harmlessly dropped).
-    async fn atomically_complete_node(
-        &self,
-        task: &orch8_types::worker::WorkerTask,
-        block_output: &orch8_types::output::BlockOutput,
-        node_id: orch8_types::ids::ExecutionNodeId,
-        merged_context: bool,
-        context: &orch8_types::context::ExecutionContext,
-    ) -> Result<(), Status> {
-        let result = if merged_context {
-            self.storage
-                .save_output_complete_node_merge_context_and_transition(
-                    block_output,
-                    node_id,
-                    task.instance_id,
-                    context,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        } else {
-            self.storage
-                .save_output_complete_node_and_transition(
-                    block_output,
-                    node_id,
-                    task.instance_id,
-                    InstanceState::Scheduled,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-        };
-        match result {
-            Ok(()) => Ok(()),
-            Err(orch8_types::error::StorageError::TerminalTarget { .. }) => {
-                tracing::info!(
-                    instance_id = %task.instance_id,
-                    block_id = %task.block_id.as_str(),
-                    "gRPC worker completion CAS failed — instance became terminal/paused after read"
-                );
-                Ok(())
-            }
-            Err(e) => Err(storage_err(e)),
-        }
     }
 }
 
@@ -351,6 +309,45 @@ fn stream_request<T>(payload: T, tenant: Option<&TenantId>) -> Request<T> {
             .insert(crate::auth::CallerTenant(tenant.clone()));
     }
     request
+}
+
+fn worker_frame_request<T>(
+    payload: T,
+    tenant: Option<&TenantId>,
+    principal: &orch8_storage::worker_claim::WorkerClaimPrincipal,
+) -> Request<T> {
+    let mut request = stream_request(payload, tenant);
+    request
+        .extensions_mut()
+        .insert(crate::auth::WorkerFramePrincipal(principal.clone()));
+    request
+}
+
+async fn ensure_recorded_reporter<T>(
+    storage: &Arc<dyn StorageBackend>,
+    request: &Request<T>,
+    task_id: Uuid,
+    worker_id: &str,
+    epoch: u64,
+) -> Result<(), Status> {
+    let principal = crate::auth::worker_claim_principal(request);
+    let attribution = orch8_storage::worker_claim::recorded_reporter(
+        storage.as_ref(),
+        caller_tenant(request),
+        task_id,
+        &WorkerClaim::new(worker_id, epoch),
+        &principal,
+    )
+    .await
+    .map_err(storage_err)?;
+    if attribution == orch8_storage::worker_claim::RecordedReporter::Different {
+        return Err(Status::permission_denied(
+            "worker claim belongs to a different authenticated reporter",
+        ));
+    }
+    // Unattributed history remains on the legacy path until explicit durable
+    // reconciliation and the coordinator write floor replace that compatibility.
+    Ok(())
 }
 
 fn worker_server_frame(payload: proto::worker_stream_server::Payload) -> proto::WorkerStreamServer {
@@ -564,24 +561,22 @@ impl Orch8GrpcService {
         &self,
         open: &proto::WorkerStreamOpen,
         tenant: Option<&TenantId>,
+        principal: &orch8_storage::worker_claim::WorkerClaimPrincipal,
         max_in_flight: u32,
         outstanding: &mut std::collections::HashSet<Uuid>,
         sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
     ) -> Result<(), Status> {
-        let filter = orch8_types::worker_filter::WorkerTaskFilter {
-            tenant_id: tenant.cloned(),
-            states: Some(vec![WorkerTaskState::Claimed]),
-            worker_id: Some(open.worker_id.clone()),
-            ..Default::default()
-        };
-        let pagination = orch8_types::filter::Pagination {
-            offset: 0,
-            limit: max_in_flight,
-            sort_ascending: true,
-        };
+        let request = orch8_storage::worker_claim::WorkerReconnectRequest::new(
+            principal.clone(),
+            tenant.cloned(),
+            open.worker_id.clone(),
+            open.handler_names.clone(),
+            max_in_flight,
+        )
+        .map_err(|error| Status::invalid_argument(error.to_string()))?;
         let held = self
             .storage
-            .list_worker_tasks(&filter, &pagination)
+            .held_worker_tasks_for_reporter(&request)
             .await
             .map_err(storage_err)?;
         for task in held {
@@ -615,6 +610,7 @@ impl Orch8GrpcService {
         frame: proto::WorkerStreamClient,
         open: &proto::WorkerStreamOpen,
         tenant: Option<&TenantId>,
+        claim_principal: &orch8_storage::worker_claim::WorkerClaimPrincipal,
         max_in_flight: u32,
         outstanding: &mut std::collections::HashSet<Uuid>,
         runtime_id: &mut Option<RuntimeId>,
@@ -664,31 +660,21 @@ impl Orch8GrpcService {
                         break;
                     }
                     let limit = u32::try_from(remaining).unwrap_or(u32::MAX);
-                    let tasks = if let (Some(tenant), Some(capabilities)) =
-                        (tenant, advertised.as_ref())
-                    {
-                        self.storage
-                            .claim_worker_tasks_matching(
-                                handler,
-                                &open.worker_id,
-                                Some(tenant),
-                                None,
-                                capabilities,
-                                limit,
-                            )
-                            .await
-                            .map_err(storage_err)?
-                    } else if let Some(tenant) = tenant {
-                        self.storage
-                            .claim_worker_tasks_for_tenant(handler, &open.worker_id, tenant, limit)
-                            .await
-                            .map_err(storage_err)?
-                    } else {
-                        self.storage
-                            .claim_worker_tasks(handler, &open.worker_id, limit)
-                            .await
-                            .map_err(storage_err)?
-                    };
+                    let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+                        claim_principal.clone(),
+                        handler.clone(),
+                        open.worker_id.clone(),
+                        tenant.cloned(),
+                        None,
+                        advertised.clone(),
+                        limit,
+                    )
+                    .map_err(storage_err)?;
+                    let tasks = self
+                        .storage
+                        .claim_worker_tasks_with_authority(&request)
+                        .await
+                        .map_err(storage_err)?;
                     for task in tasks {
                         orch8_engine::step_placement::record_placement_claimed(
                             self.storage.as_ref(),
@@ -777,7 +763,10 @@ impl Orch8GrpcService {
                         "completion does not belong to this worker session",
                     ));
                 }
-                if let Err(status) = self.complete_task(stream_request(complete, tenant)).await {
+                if let Err(status) = self
+                    .complete_task(worker_frame_request(complete, tenant, claim_principal))
+                    .await
+                {
                     return self
                         .reject_task_frame(status, task_id, "completion", outstanding, sender)
                         .await;
@@ -803,7 +792,10 @@ impl Orch8GrpcService {
                         "failure does not belong to this worker session",
                     ));
                 }
-                if let Err(status) = self.fail_task(stream_request(failure, tenant)).await {
+                if let Err(status) = self
+                    .fail_task(worker_frame_request(failure, tenant, claim_principal))
+                    .await
+                {
                     return self
                         .reject_task_frame(status, task_id, "failure", outstanding, sender)
                         .await;
@@ -829,7 +821,10 @@ impl Orch8GrpcService {
                         "heartbeat does not belong to this worker session",
                     ));
                 }
-                match self.heartbeat_task(stream_request(heartbeat, tenant)).await {
+                match self
+                    .heartbeat_task(worker_frame_request(heartbeat, tenant, claim_principal))
+                    .await
+                {
                     Ok(_) => sender
                         .send(Ok(worker_server_frame(
                             proto::worker_stream_server::Payload::Ack(proto::WorkerStreamAck {
@@ -1671,11 +1666,19 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<tonic::Streaming<proto::ArtifactTransferClient>>,
     ) -> Result<Response<Self::ArtifactTransferStream>, Status> {
         let tenant = caller_tenant(&req).cloned();
+        let principal = req
+            .extensions()
+            .get::<crate::auth::CallerPrincipal>()
+            .cloned();
         let mut inbound = req.into_inner();
-        let first = inbound
-            .message()
-            .await?
-            .ok_or_else(|| Status::invalid_argument("artifact transfer requires an open frame"))?;
+        let first = crate::auth::stream_scope::guard_operation(
+            principal.as_ref(),
+            &self.storage,
+            "/orch8.Orch8Service/ArtifactTransfer",
+            inbound.message(),
+        )
+        .await??
+        .ok_or_else(|| Status::invalid_argument("artifact transfer requires an open frame"))?;
         let Some(proto::artifact_transfer_client::Payload::Open(open)) = first.payload else {
             return Err(Status::invalid_argument(
                 "first artifact transfer frame must be open",
@@ -1709,75 +1712,89 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(|_| Status::cancelled("artifact transfer closed during handshake"))?;
 
         let shutdown = self.shutdown.clone();
+        let auth_storage = Arc::clone(&self.storage);
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
-            loop {
-                let end = offset
-                    .saturating_add(usize::try_from(chunk_bytes).unwrap_or(usize::MAX))
-                    .min(bytes.len());
-                let data = bytes[offset..end].to_vec();
-                let chunk_digest = Sha256::digest(&data).to_vec();
-                let final_chunk = end == bytes.len();
-                let chunk = proto::ArtifactTransferChunk {
-                    transfer_id: transfer_id.clone(),
-                    offset: u64::try_from(offset).unwrap_or(u64::MAX),
-                    data,
-                    sha256: chunk_digest,
-                    final_chunk,
-                };
-                let sent = tokio::select! {
-                    () = shutdown.cancelled() => break,
-                    sent = sender.send(Ok(artifact_server_frame(
-                        proto::artifact_transfer_server::Payload::Chunk(chunk),
-                    ))) => sent,
-                };
-                if sent.is_err() {
-                    break;
-                }
-                let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
-                let next = tokio::select! {
-                    () = shutdown.cancelled() => {
-                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+            let operation = async {
+                let mut offset = usize::try_from(resume_offset).unwrap_or(bytes.len());
+                loop {
+                    let end = offset
+                        .saturating_add(usize::try_from(chunk_bytes).unwrap_or(usize::MAX))
+                        .min(bytes.len());
+                    let data = bytes[offset..end].to_vec();
+                    let chunk_digest = Sha256::digest(&data).to_vec();
+                    let final_chunk = end == bytes.len();
+                    let chunk = proto::ArtifactTransferChunk {
+                        transfer_id: transfer_id.clone(),
+                        offset: u64::try_from(offset).unwrap_or(u64::MAX),
+                        data,
+                        sha256: chunk_digest,
+                        final_chunk,
+                    };
+                    let sent = tokio::select! {
+                        () = shutdown.cancelled() => break,
+                        sent = sender.send(Ok(artifact_server_frame(
+                            proto::artifact_transfer_server::Payload::Chunk(chunk),
+                        ))) => sent,
+                    };
+                    if sent.is_err() {
                         break;
                     }
-                    next = tokio::time::timeout(ARTIFACT_ACK_IDLE_TIMEOUT, inbound.message()) => next,
-                };
-                let Ok(next) = next else {
-                    let _ = sender.try_send(Err(Status::deadline_exceeded(
-                        "artifact acknowledgement not received in time",
-                    )));
-                    break;
-                };
-                match next {
-                    Ok(Some(proto::ArtifactTransferClient {
-                        payload:
-                            Some(proto::artifact_transfer_client::Payload::Ack(
-                                proto::ArtifactTransferAck { next_offset },
-                            )),
-                    })) if next_offset == expected_offset => {
-                        if final_chunk {
+                    let expected_offset = u64::try_from(end).unwrap_or(u64::MAX);
+                    let next = tokio::select! {
+                        () = shutdown.cancelled() => {
+                            let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
                             break;
                         }
-                        offset = end;
-                    }
-                    Ok(Some(_)) => {
-                        let _ = sender
+                        next = tokio::time::timeout(ARTIFACT_ACK_IDLE_TIMEOUT, inbound.message()) => next,
+                    };
+                    let Ok(next) = next else {
+                        let _ = sender.try_send(Err(Status::deadline_exceeded(
+                            "artifact acknowledgement not received in time",
+                        )));
+                        break;
+                    };
+                    match next {
+                        Ok(Some(proto::ArtifactTransferClient {
+                            payload:
+                                Some(proto::artifact_transfer_client::Payload::Ack(
+                                    proto::ArtifactTransferAck { next_offset },
+                                )),
+                        })) if next_offset == expected_offset => {
+                            if final_chunk {
+                                break;
+                            }
+                            offset = end;
+                        }
+                        Ok(Some(_)) => {
+                            let _ = sender
                             .send(Err(Status::failed_precondition(
                                 "artifact acknowledgement offset is not the next chunk boundary",
                             )))
                             .await;
-                        break;
-                    }
-                    Ok(None) => break,
-                    Err(status) => {
-                        let _ = sender.send(Err(status)).await;
-                        break;
+                            break;
+                        }
+                        Ok(None) => break,
+                        Err(status) => {
+                            let _ = sender.send(Err(status)).await;
+                            break;
+                        }
                     }
                 }
-            }
+            };
+            crate::auth::stream_scope::run_stream(
+                principal.as_ref(),
+                &auth_storage,
+                "/orch8.Orch8Service/ArtifactTransfer",
+                sender.clone(),
+                terminal_sender,
+                &shutdown,
+                Box::pin(operation),
+            )
+            .await;
         });
         Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(receiver),
+            crate::auth::stream_scope::response_stream(receiver, terminal_receiver),
         )))
     }
 
@@ -1789,11 +1806,20 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<tonic::Streaming<proto::WorkerStreamClient>>,
     ) -> Result<Response<Self::WorkerStreamStream>, Status> {
         let caller_tenant = caller_tenant(&req).cloned();
+        let claim_principal = crate::auth::worker_claim_principal(&req);
+        let principal = req
+            .extensions()
+            .get::<crate::auth::CallerPrincipal>()
+            .cloned();
         let mut inbound = req.into_inner();
-        let first = inbound
-            .message()
-            .await?
-            .ok_or_else(|| Status::invalid_argument("worker stream requires an open frame"))?;
+        let first = crate::auth::stream_scope::guard_operation(
+            principal.as_ref(),
+            &self.storage,
+            "/orch8.Orch8Service/WorkerStream",
+            inbound.message(),
+        )
+        .await??
+        .ok_or_else(|| Status::invalid_argument("worker stream requires an open frame"))?;
         if prost::Message::encoded_len(&first)
             > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
         {
@@ -1888,75 +1914,100 @@ impl Orch8Service for Orch8GrpcService {
             .as_ref()
             .is_some_and(|capabilities| capabilities.draining);
         let service = self.clone();
+        let auth_storage = Arc::clone(&self.storage);
+        let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            // Return the receiver before sending queued commands. The hello
-            // can already fill a one-frame channel; awaiting another send in
-            // the RPC handler would prevent the client from draining it.
-            if features
-                .iter()
-                .any(|feature| feature == "placement_commands")
-            {
-                match service
-                    .send_worker_commands(&open.worker_id, tenant.as_ref(), &sender)
-                    .await
+            let operation = async {
+                // Return the receiver before sending queued commands. The hello
+                // can already fill a one-frame channel; awaiting another send in
+                // the RPC handler would prevent the client from draining it.
+                if features
+                    .iter()
+                    .any(|feature| feature == "placement_commands")
                 {
-                    Ok(drain_requested) => draining |= drain_requested,
-                    Err(status) => {
-                        let _ = sender.send(Err(status)).await;
-                        return;
+                    match service
+                        .send_worker_commands(&open.worker_id, tenant.as_ref(), &sender)
+                        .await
+                    {
+                        Ok(drain_requested) => draining |= drain_requested,
+                        Err(status) => {
+                            let _ = sender.send(Err(status)).await;
+                            return;
+                        }
                     }
                 }
-            }
-            let mut outstanding = std::collections::HashSet::new();
-            if !draining
-                && let Err(status) = service
-                    .adopt_held_tasks(
-                        &open,
-                        tenant.as_ref(),
-                        max_in_flight,
-                        &mut outstanding,
-                        &sender,
-                    )
-                    .await
-            {
-                let _ = sender.send(Err(status)).await;
-                return;
-            }
-            let mut runtime_id = initial_capabilities.map(|capabilities| capabilities.runtime_id);
-            loop {
-                // Stop accepting frames (Demand included) on shutdown and end
-                // the response stream so graceful shutdown can complete; the
-                // worker reconnects to a live node.
-                let frame = tokio::select! {
-                    biased;
-                    () = service.shutdown.cancelled() => {
-                        let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+                let mut outstanding = std::collections::HashSet::new();
+                if !draining
+                    && let Err(status) = service
+                        .adopt_held_tasks(
+                            &open,
+                            tenant.as_ref(),
+                            &claim_principal,
+                            max_in_flight,
+                            &mut outstanding,
+                            &sender,
+                        )
+                        .await
+                {
+                    let _ = sender.send(Err(status)).await;
+                    return;
+                }
+                let mut runtime_id =
+                    initial_capabilities.map(|capabilities| capabilities.runtime_id);
+                loop {
+                    // Stop accepting frames (Demand included) on shutdown and end
+                    // the response stream so graceful shutdown can complete; the
+                    // worker reconnects to a live node.
+                    let frame = tokio::select! {
+                        biased;
+                        () = service.shutdown.cancelled() => {
+                            let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
+                            break;
+                        }
+                        frame = inbound.message() => frame,
+                    };
+                    let Ok(Some(frame)) = frame else { break };
+                    if let Some(principal) = &principal
+                        && let Err(status) = principal
+                            .reauthorize(&service.storage, "/orch8.Orch8Service/WorkerStream")
+                            .await
+                    {
+                        let _ = sender.send(Err(status)).await;
                         break;
                     }
-                    frame = inbound.message() => frame,
-                };
-                let Ok(Some(frame)) = frame else { break };
-                let result = service
-                    .handle_worker_stream_frame(
-                        frame,
-                        &open,
-                        tenant.as_ref(),
-                        max_in_flight,
-                        &mut outstanding,
-                        &mut runtime_id,
-                        &mut draining,
-                        &sender,
-                    )
-                    .await;
-                if let Err(status) = result {
-                    let _ = sender.send(Err(status)).await;
-                    break;
+                    let result = service
+                        .handle_worker_stream_frame(
+                            frame,
+                            &open,
+                            tenant.as_ref(),
+                            &claim_principal,
+                            max_in_flight,
+                            &mut outstanding,
+                            &mut runtime_id,
+                            &mut draining,
+                            &sender,
+                        )
+                        .await;
+                    if let Err(status) = result {
+                        let _ = sender.send(Err(status)).await;
+                        break;
+                    }
                 }
-            }
+            };
+            crate::auth::stream_scope::run_stream(
+                principal.as_ref(),
+                &auth_storage,
+                "/orch8.Orch8Service/WorkerStream",
+                sender.clone(),
+                terminal_sender,
+                &service.shutdown,
+                Box::pin(operation),
+            )
+            .await;
         });
 
         Ok(Response::new(Box::pin(
-            tokio_stream::wrappers::ReceiverStream::new(receiver),
+            crate::auth::stream_scope::response_stream(receiver, terminal_receiver),
         )))
     }
 
@@ -1965,21 +2016,24 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::PollTasksRequest>,
     ) -> Result<Response<proto::PollTasksResponse>, Status> {
         let scoped = crate::auth::caller_tenant(&req).cloned();
+        let principal = crate::auth::worker_claim_principal(&req);
         let inner = req.into_inner();
         let limit = inner.limit.min(1000);
-        // Route through tenant-aware claim when caller is tenant-scoped,
-        // matching the HTTP path's isolation semantics.
-        let tasks = if let Some(ref tid) = scoped {
-            self.storage
-                .claim_worker_tasks_for_tenant(&inner.handler_name, &inner.worker_id, tid, limit)
-                .await
-                .map_err(storage_err)?
-        } else {
-            self.storage
-                .claim_worker_tasks(&inner.handler_name, &inner.worker_id, limit)
-                .await
-                .map_err(storage_err)?
-        };
+        let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
+            principal,
+            inner.handler_name,
+            inner.worker_id,
+            scoped,
+            None,
+            None,
+            limit,
+        )
+        .map_err(storage_err)?;
+        let tasks = self
+            .storage
+            .claim_worker_tasks_with_authority(&request)
+            .await
+            .map_err(storage_err)?;
         let json: Result<Vec<_>, _> = tasks.iter().map(|t| to_json_string(t)).collect();
         Ok(Response::new(proto::PollTasksResponse {
             tasks_json: json?,
@@ -1992,7 +2046,36 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::CompleteTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
+        let replay_claim =
+            WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
+        // Acceptance is independent of hot history and current workflow ownership.
+        // Replaying an acknowledgement never applies caller-supplied output again.
+        if let Some(receipt) = self
+            .storage
+            .get_worker_accepted_outcome(caller_tenant.as_ref(), task_id, &replay_claim)
+            .await
+            .map_err(storage_err)?
+        {
+            orch8_engine::delegation::integrate_completed_worker_outcome(
+                self.storage.as_ref(),
+                &receipt.tenant_id,
+                task_id,
+                &replay_claim,
+                self.max_context_bytes,
+            )
+            .await
+            .map_err(engine_err)?;
+            return Ok(Response::new(proto::Empty {}));
+        }
         let (pre_task, pre_instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         // W3C trace context echoed by the worker (gRPC metadata `traceparent`)
@@ -2013,17 +2096,21 @@ impl Orch8Service for Orch8GrpcService {
         ensure_worker_claim(&self.storage, &pre_task, &claim, "complete").await?;
         let output: serde_json::Value = from_json_str(&inner.output_json)?;
 
-        // Settle the attempt's effect receipt (by its stored id) before the
-        // task is marked complete — the same order as the HTTP path.
-        orch8_engine::effect_guard::commit_external_worker_effect(
+        // Use the same projection as HTTP admission and durable recovery.
+        let projected = orch8_storage::worker_outcome::project_worker_completion_context(
             self.storage.as_ref(),
-            &pre_instance.tenant_id,
+            &pre_instance,
             &pre_task,
+            &claim,
             &output,
         )
         .await
-        .map_err(engine_err)?;
+        .map_err(storage_err)?;
+        projected
+            .check_size(self.max_context_bytes)
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
 
+        // Storage settles the original admitted effect and accepts its result together.
         let updated = self
             .storage
             .complete_worker_task(task_id, &claim, &output)
@@ -2043,163 +2130,15 @@ impl Orch8Service for Orch8GrpcService {
         )
         .await;
 
-        let task = self
-            .storage
-            .get_worker_task(task_id)
-            .await
-            .map_err(storage_err)?
-            .ok_or_else(|| Status::not_found(format!("worker_task {task_id}")))?;
-
-        // Device-mesh delegation: integrate the result into the parent
-        // instead of treating the mailbox task as one of its steps.
-        if orch8_engine::delegation::is_delegation_task(&task) {
-            orch8_engine::delegation::integrate_delegation_outcome(
-                self.storage.as_ref(),
-                &task,
-                Ok(&output),
-            )
-            .await
-            .map_err(engine_err)?;
-            return Ok(Response::new(proto::Empty {}));
-        }
-
-        let Some(mut instance) = self
-            .storage
-            .get_instance(task.instance_id)
-            .await
-            .map_err(storage_err)?
-        else {
-            return Ok(Response::new(proto::Empty {}));
-        };
-        if instance.state.is_terminal()
-            || instance.state == InstanceState::Paused
-            || orch8_engine::ownership::local_ownership(
-                self.storage.as_ref(),
-                &instance.tenant_id,
-                instance.id,
-            )
-            .await
-            .map_err(engine_err)?
-                != orch8_engine::ownership::LocalOwnership::Owned
-        {
-            tracing::info!(
-                instance_id = %task.instance_id,
-                state = %instance.state,
-                "gRPC worker completion for terminal/paused instance; task accepted, transition skipped"
-            );
-            return Ok(Response::new(proto::Empty {}));
-        }
-
-        let mut merged_context = false;
-        if let Some(obj) = output.as_object() {
-            if instance.context.data.is_null() || !instance.context.data.is_object() {
-                instance.context.data = serde_json::Value::Object(serde_json::Map::new());
-            }
-            if let Some(data_obj) = instance.context.data.as_object_mut() {
-                for (k, v) in obj {
-                    data_obj.insert(k.clone(), v.clone());
-                }
-                merged_context = true;
-            }
-        }
-        // A worker's output is merged into context.data; a large output would
-        // otherwise grow the instance context past the configured cap and ride
-        // along on every scheduler claim. Validate the merged size before it is
-        // persisted (the HTTP worker path is bounded by the request body limit).
-        if merged_context {
-            instance
-                .context
-                .check_size(self.max_context_bytes)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?;
-        }
-
-        // `Value` implements `Display` via infallible serialization, so the
-        // size estimate needs no error fallback.
-        let output_size = u32::try_from(output.to_string().len()).unwrap_or(u32::MAX);
-        let block_output = orch8_types::output::BlockOutput {
-            id: Uuid::now_v7(),
-            instance_id: task.instance_id,
-            block_id: task.block_id.clone(),
-            output,
-            output_ref: None,
-            output_size,
-            attempt: task.attempt,
-            created_at: chrono::Utc::now(),
-        };
-
-        // Atomic: save output + complete node + transition instance in one tx.
-        let tree = self
-            .storage
-            .get_execution_tree(task.instance_id)
-            .await
-            .map_err(storage_err)?;
-        if let Some(node) = tree.iter().find(|n| {
-            n.block_id == task.block_id
-                && matches!(
-                    n.state,
-                    orch8_types::execution::NodeState::Running
-                        | orch8_types::execution::NodeState::Waiting
-                )
-        }) {
-            self.atomically_complete_node(
-                &task,
-                &block_output,
-                node.id,
-                merged_context,
-                &instance.context,
-            )
-            .await?;
-        } else {
-            // No live node: expected for flat (step-only) instances, which run
-            // on the scheduler fast path without an execution tree (see the
-            // HTTP twin); unexpected only when a tree exists.
-            if tree.is_empty() {
-                tracing::debug!(
-                    instance_id = %task.instance_id,
-                    block_id = %task.block_id,
-                    "gRPC worker completion for a flat (tree-less) instance"
-                );
-            } else {
-                tracing::warn!(
-                    instance_id = %task.instance_id,
-                    block_id = %task.block_id,
-                    "gRPC worker completion: execution node not in Running/Waiting state — falling back to non-atomic transition"
-                );
-            }
-            let result = if merged_context {
-                self.storage
-                    .save_output_merge_context_and_transition(
-                        &block_output,
-                        task.instance_id,
-                        &instance.context,
-                        InstanceState::Scheduled,
-                        Some(chrono::Utc::now()),
-                    )
-                    .await
-            } else {
-                self.storage
-                    .save_output_and_transition(
-                        &block_output,
-                        task.instance_id,
-                        InstanceState::Scheduled,
-                        Some(chrono::Utc::now()),
-                    )
-                    .await
-            };
-            match result {
-                Ok(()) => {}
-                // Lost the race to a cancel/pause: the terminal state stands
-                // (mirrors the HTTP completion path).
-                Err(orch8_types::error::StorageError::TerminalTarget { .. }) => {
-                    tracing::info!(
-                        instance_id = %task.instance_id,
-                        block_id = %task.block_id.as_str(),
-                        "gRPC worker completion CAS failed — instance became terminal/paused after read"
-                    );
-                }
-                Err(e) => return Err(storage_err(e)),
-            }
-        }
+        orch8_engine::delegation::integrate_completed_worker_outcome(
+            self.storage.as_ref(),
+            &pre_instance.tenant_id,
+            task_id,
+            &claim,
+            self.max_context_bytes,
+        )
+        .await
+        .map_err(engine_err)?;
 
         Ok(Response::new(proto::Empty {}))
     }
@@ -2209,7 +2148,26 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::FailTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
+        let report_claim =
+            WorkerClaim::new(req.get_ref().worker_id.clone(), req.get_ref().claim_epoch);
+        if let Some(report) = self
+            .storage
+            .get_worker_resolution_outcome(caller_tenant.as_ref(), task_id, Some(&report_claim))
+            .await
+            .map_err(storage_err)?
+            && report.event == orch8_types::worker::WorkerAttemptEventKind::Failed
+        {
+            return Ok(Response::new(proto::Empty {}));
+        }
         let (pre_task, instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
         let inner = req.into_inner();
@@ -2245,6 +2203,14 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::ReleaseTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
         let (task, instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;
@@ -2271,6 +2237,14 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::HeartbeatTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        ensure_recorded_reporter(
+            &self.storage,
+            &req,
+            task_id,
+            &req.get_ref().worker_id,
+            req.get_ref().claim_epoch,
+        )
+        .await?;
         let caller_tenant = caller_tenant(&req).cloned();
         let (task, _instance) =
             get_worker_task_checked(&self.storage, caller_tenant, task_id).await?;

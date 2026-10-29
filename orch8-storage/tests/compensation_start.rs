@@ -218,7 +218,7 @@ orch8_storage::backend_test!(async fn stale_live_migration_cannot_reopen_compens
     applied.applied_epoch=Some(next.epoch);applied.applied_at=Some(next.updated_at);
     assert!(!b.storage.commit_live_migration_transition(orch8_storage::LiveMigrationTransition {
         tenant_id:&owner.tenant_id,expected_record:&record,next_record:&applied,expected_execution:&owner,next_execution:&next,
-        expected_instance_state:InstanceState::Paused,next_instance_state:InstanceState::Scheduled,next_sequence_id:target.id,
+        expected_instance_state:InstanceState::Paused,expected_instance_updated_at:instance.updated_at,expected_checkpoint_id:checkpoint.id,expected_source_fingerprint:&"a".repeat(64),expected_target_sequence:&target,next_instance_state:InstanceState::Scheduled,next_fire_at:None,next_sequence_id:target.id,
         next_context:&instance.context,checkpoint:&checkpoint,forbid_effects_epoch:None}).await.unwrap(),
         "a stale migration reopened compensation-fenced ownership");
     assert_eq!(b.storage.get_continuity_execution(&owner.tenant_id,owner.continuity_id).await.unwrap().unwrap().state,OwnershipState::Compensating);

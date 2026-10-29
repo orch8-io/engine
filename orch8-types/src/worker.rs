@@ -504,14 +504,16 @@ mod attempt_tests {
 /// worker-reported outcome (lease expiry, timeout, voluntary release).
 #[derive(Debug, Clone)]
 pub enum WorkerTaskResolutionAction {
-    /// Give the task back: state `pending`, lease cleared, receipt untouched.
-    /// Only valid when no side effect can have started (pure step, or a
-    /// release before the handler started).
+    /// Give the task back with its lease cleared. The explicit effect
+    /// disposition distinguishes release before start from checkpointed
+    /// resumption, which must preserve uncertainty from previous claims.
     Requeue,
     /// Replace the task with `retry_task` (next attempt), reset the tree node
     /// to `pending` (when present), and schedule the instance at `fire_at`.
     Retry {
         retry_task: Box<WorkerTask>,
+        /// Optional append-only retry marker, committed with the resolution.
+        retry_output: Option<Box<crate::output::BlockOutput>>,
         node_id: Option<crate::ids::ExecutionNodeId>,
         fire_at: DateTime<Utc>,
     },
@@ -528,6 +530,18 @@ pub enum WorkerTaskResolutionAction {
     FailTaskOnly,
 }
 
+/// Effect disposition committed with the exact worker resolution fence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerTaskEffectResolution {
+    /// Preserve the receipt (for example, release before starting).
+    Keep,
+    /// A claimant may have acted; retain uncertainty rather than certify failure.
+    Unknown,
+    /// A never-claimed pending task could not have executed.
+    Abandoned,
+}
+
 /// One fenced, atomic worker-task resolution. Storage applies `action` only
 /// when the task is still in `expected_state` at `expected_claim_epoch` (and,
 /// when set, still held by `expected_worker_id`); otherwise nothing changes
@@ -539,10 +553,11 @@ pub struct WorkerTaskResolution {
     pub expected_state: WorkerTaskState,
     pub expected_claim_epoch: u64,
     pub expected_worker_id: Option<String>,
-    /// Lease holder recorded on the attempt event (evidence only, not part
-    /// of the fence).
+    /// Legacy caller annotation. Storage derives the actual event/report
+    /// holder from its locked task row rather than trusting this label.
     pub holder_worker_id: Option<String>,
     pub event: WorkerAttemptEventKind,
+    pub effect_resolution: WorkerTaskEffectResolution,
     pub reason: String,
     pub retryable: bool,
     pub action: WorkerTaskResolutionAction,

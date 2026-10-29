@@ -2226,3 +2226,79 @@ async fn compact_iteration_outputs_is_per_block_and_boundary_exact() {
         );
     }
 }
+
+#[test]
+fn migration_branch_identity_survives_waiting_and_completed_nodes() {
+    use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
+    use serde_json::json;
+    let sequence = SequenceBuilder::new("migration-branch").build();
+    let instance = InstanceBuilder::for_sequence(&sequence)
+        .state(InstanceState::Waiting)
+        .build();
+    let a = json!({"type":"step","id":"a","handler":"noop"});
+    let b = json!({"type":"step","id":"b","handler":"noop"});
+    let composites = [
+        json!({"type":"parallel","id":"parent","branches":[[a.clone()],[b.clone()]]}),
+        json!({"type":"race","id":"parent","branches":[[a.clone()],[b.clone()]]}),
+        json!({"type":"router","id":"parent","routes":[{"condition":"true","blocks":[a.clone()]},{"condition":"false","blocks":[b.clone()]}]}),
+        json!({"type":"try_catch","id":"parent","try_block":[a],"catch_block":[b]}),
+    ];
+    for composite in composites {
+        let source: BlockDefinition = serde_json::from_value(composite.clone()).unwrap();
+        let source = vec![source];
+        let mut nodes = Vec::new();
+        build_nodes(instance.id, None, None, &source, &mut nodes);
+        assert!(migration_snapshot_incompatibilities(&instance, &source, &nodes).is_empty());
+        // Move both leaf identities to the other branch without changing their
+        // block type or native parent: those checks alone cannot detect this.
+        let moved = composite
+            .to_string()
+            .replace("\"a\"", "\"temporary\"")
+            .replace("\"b\"", "\"a\"")
+            .replace("\"temporary\"", "\"b\"");
+        let target = vec![serde_json::from_str::<BlockDefinition>(&moved).unwrap()];
+        for state in [NodeState::Waiting, NodeState::Completed] {
+            for node in &mut nodes {
+                node.state = state;
+            }
+            let problems = migration_snapshot_incompatibilities(&instance, &target, &nodes);
+            assert!(
+                problems.iter().any(|p| p.contains("branch")),
+                "moved {state:?} node was accepted: {composite}"
+            );
+        }
+    }
+}
+
+#[test]
+fn migration_branch_identity_preserves_nested_iteration_bodies() {
+    use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
+    use serde_json::json;
+    let sequence = SequenceBuilder::new("migration-iteration").build();
+    let instance = InstanceBuilder::for_sequence(&sequence)
+        .state(InstanceState::Waiting)
+        .build();
+    let step = json!({"type":"step","id":"work","handler":"noop"});
+    let branch = json!({"type":"parallel","id":"parallel","branches":[[step]]});
+    for composite in [
+        json!({"type":"loop","id":"iteration","condition":"true","body":[branch.clone()]}),
+        json!({"type":"for_each","id":"iteration","collection":"{{ data.items }}","body":[branch]}),
+    ] {
+        let blocks = vec![serde_json::from_value::<BlockDefinition>(composite).unwrap()];
+        let mut nodes = Vec::new();
+        build_nodes(instance.id, None, None, &blocks, &mut nodes);
+        for node in &mut nodes {
+            node.state = NodeState::Waiting;
+        }
+        assert!(migration_snapshot_incompatibilities(&instance, &blocks, &nodes).is_empty());
+        let nested = nodes
+            .iter_mut()
+            .find(|n| n.block_id.as_str() == "work")
+            .unwrap();
+        nested.branch_index = Some(-1);
+        assert!(
+            !migration_snapshot_incompatibilities(&instance, &blocks, &nodes).is_empty(),
+            "invalid negative branch index was accepted"
+        );
+    }
+}

@@ -34,10 +34,14 @@ pub struct InstanceLifecycleManager {
     last_compaction: std::sync::Mutex<Option<std::time::Instant>>,
     /// When finished delegations were last swept (MC-09).
     last_delegation_sweep: std::sync::Mutex<Option<std::time::Instant>>,
+    last_capsule_sweep: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 /// Finished-delegation retention sweeps run at most this often.
 const DELEGATION_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Explicit transport retirement also runs when the scheduler has no work.
+pub(crate) const CAPSULE_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
 /// Compaction (incremental vacuum + WAL truncate) runs when a purge freed rows,
 /// otherwise at most this often.
@@ -55,6 +59,46 @@ impl InstanceLifecycleManager {
             max_concurrent_instances,
             last_compaction: std::sync::Mutex::new(None),
             last_delegation_sweep: std::sync::Mutex::new(None),
+            last_capsule_sweep: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Small maintenance pass outside scheduler locks and host callbacks.
+    /// Claim one key at a time: cancellation cannot reschedule an entire batch
+    /// without attempting it. Durable tombstones handle timeouts and restarts.
+    pub(crate) async fn sweep_capsule_artifacts(&self) {
+        {
+            let now = std::time::Instant::now();
+            let mut last = self
+                .last_capsule_sweep
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if last.is_some_and(|at| now.duration_since(at) < CAPSULE_SWEEP_INTERVAL) {
+                return;
+            }
+            *last = Some(now);
+        }
+        let sweep = async {
+            for _ in 0..32 {
+                if orch8_engine::gc::collect_retired_capsule_artifacts(
+                    self.storage.as_ref(),
+                    chrono::Utc::now(),
+                    1,
+                )
+                .await?
+                    == 0
+                {
+                    break;
+                }
+            }
+            Ok::<_, orch8_types::error::StorageError>(())
+        };
+        match tokio::time::timeout(Duration::from_millis(250), sweep).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "mobile capsule cleanup failed; durable retry retained");
+            }
+            Err(_) => debug!("mobile capsule cleanup yielded at its time budget"),
         }
     }
 

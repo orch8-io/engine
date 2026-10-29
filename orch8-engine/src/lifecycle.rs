@@ -126,7 +126,10 @@ async fn transition_instance_inner(
     next_fire_at: Option<DateTime<Utc>>,
     outbox_entries: &[WebhookOutboxEntry],
 ) -> Result<(), EngineError> {
-    if !from.can_transition_to(to) {
+    let relay_resume = from == InstanceState::Paused
+        && to == InstanceState::Waiting
+        && orch8_storage::delegation_publication::is_proxy_instance(storage, instance_id).await?;
+    if !from.can_transition_to(to) && !relay_resume {
         warn!(
             instance_id = %instance_id,
             from = %from,

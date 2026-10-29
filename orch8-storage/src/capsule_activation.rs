@@ -19,7 +19,8 @@ pub(crate) fn accepted_owner(
     instance: InstanceId,
     now: DateTime<Utc>,
 ) -> Result<Option<ContinuityExecution>, StorageError> {
-    if &manifest.tenant_id != tenant
+    if instance == manifest.source_instance_id
+        || &manifest.tenant_id != tenant
         || &current.tenant_id != tenant
         || manifest.continuity_id != current.continuity_id
         || manifest

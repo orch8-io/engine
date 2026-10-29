@@ -131,6 +131,14 @@ async fn minting_is_validated_and_bound_to_the_device_tenant() {
                 json!({"device_id": "phone-1", "runtime_id": runtime, "handlers": [" "]}),
                 "blank handler",
             ),
+            (
+                json!({"device_id": "phone-1", "runtime_id": runtime, "queues": [" "]}),
+                "blank queue",
+            ),
+            (
+                json!({"device_id": "phone-1", "runtime_id": runtime, "queues": vec!["queue";17]}),
+                "too many queues",
+            ),
         ] {
             let response = call(
                 &client,
