@@ -438,7 +438,10 @@ impl Worker {
             if self.cancel.is_cancelled() {
                 break;
             }
-            let mut wait = self.idle_interval();
+            let mut wait = self.admission.poll_delay();
+            if wait.is_zero() {
+                wait = self.idle_interval();
+            }
             if self.may_claim() && self.admission.available() > 0 {
                 match self.poll_round(&mut cursor).await {
                     Ok((claimed, hint)) => {
@@ -825,7 +828,11 @@ impl Worker {
         authority: LeaseAuthority,
     ) -> Option<Result<orch8_engine::handlers::PreparedStep, StepError>> {
         let authority = if self.deps.foreign_handlers.contains(&task.handler_name) {
-            let Some(owner) = physical::Reservation::reserve(key) else {
+            let Some(owner) = physical::Reservation::reserve(key, task) else {
+                self.admission.defer_poll(
+                    self.idle_interval()
+                        .clamp(Duration::from_secs(1), Duration::from_secs(30)),
+                );
                 return Some(Err(StepError::ClaimLost));
             };
             authority.with_physical_owner(owner)
