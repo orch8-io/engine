@@ -282,7 +282,6 @@ async fn claim_from_queue_inner(
     limit: u32,
     principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
-    let now = ts(chrono::Utc::now());
     let rows = if let Some(tenant) = tenant_id {
         sqlx::query(
             "SELECT wt.* FROM worker_tasks wt
@@ -316,6 +315,7 @@ async fn claim_from_queue_inner(
         .map(row_to_worker_task)
         .collect::<Result<Vec<_>, _>>()?;
     let now_dt = chrono::Utc::now();
+    let now = ts(now_dt);
     for t in &mut tasks {
         t.state = orch8_types::worker::WorkerTaskState::Claimed;
         t.worker_id = Some(worker_id.to_string());

@@ -157,8 +157,6 @@ pub(super) async fn claim(
     limit: u32,
     principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
-    let now = ts(Utc::now());
-
     // Use `BEGIN IMMEDIATE` rather than sqlx's default `BEGIN` (DEFERRED) so
     // SQLite acquires a RESERVED write lock up-front — the closest equivalent
     // to Postgres's `SELECT ... FOR UPDATE SKIP LOCKED`. Without this, two
@@ -194,6 +192,7 @@ pub(super) async fn claim(
         // Reflect the state change in the returned objects so callers don't
         // see stale 'pending' values after a successful claim.
         let now_dt = chrono::Utc::now();
+        let now = ts(now_dt);
         for t in &mut tasks {
             t.state = orch8_types::worker::WorkerTaskState::Claimed;
             t.worker_id = Some(worker_id.to_string());
@@ -252,7 +251,6 @@ pub(super) async fn claim_for_tenant(
     limit: u32,
     principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
 ) -> Result<Vec<WorkerTask>, StorageError> {
-    let now = ts(Utc::now());
     let mut conn = begin_immediate(&storage.pool).await?;
     let result=async {
 
@@ -280,6 +278,7 @@ pub(super) async fn claim_for_tenant(
 
     if !tasks.is_empty() {
         let now_dt = chrono::Utc::now();
+        let now = ts(now_dt);
         for t in &mut tasks {
             t.state = orch8_types::worker::WorkerTaskState::Claimed;
             t.worker_id = Some(worker_id.to_string());
@@ -351,7 +350,6 @@ pub(super) async fn claim_matching(
     if limit == 0 {
         return Ok(Vec::new());
     }
-    let now_text = ts(Utc::now());
     let mut conn = begin_immediate(&storage.pool).await?;
     let result=async {
 
@@ -440,6 +438,7 @@ pub(super) async fn claim_matching(
     }
     if !tasks.is_empty() {
         let now_dt = Utc::now();
+        let now_text = ts(now_dt);
         for task in &mut tasks {
             task.state = orch8_types::worker::WorkerTaskState::Claimed;
             task.worker_id = Some(worker_id.to_string());
