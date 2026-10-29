@@ -128,19 +128,31 @@ final class AsyncTokenProviderTests: XCTestCase {
         XCTAssertEqual(gate.calls(), 2)
     }
 
-    func testRetiredProviderCanDeallocateWhileItsNonCooperativeFetchFinishes() {
-        let gate = Gate()
+    func testRetiredProviderCanDeallocateWhileItsNonCooperativeFetchFinishes() async throws {
+        let entered = expectation(description: "retired provider host fetch entered")
+        let armed = expectation(description: "retired provider deadline registered")
+        let clock = ManualClock(armed: armed)
+        let gate = Gate(started: entered)
         defer { gate.release() }
         let budget = TokenFetchBudget(capacity: 1)
-        var provider: AsyncTokenProvider? = AsyncTokenProvider(initialToken: "dst_first", timeout: 30, budget: budget) { await gate.fetch() }
+        var provider: AsyncTokenProvider? = AsyncTokenProvider(initialToken: "dst_first", timeout: 30, budget: budget, clock: clock) { await gate.fetch() }
         weak var retired = provider
-        XCTAssertThrowsError(try provider?.refreshToken())
+        let initial = Task { [weak provider] in
+            guard let provider else { return false }
+            do { _ = try await provider.fetchInitialToken(); return false }
+            catch { return String(describing: error).contains("token provider timed out") }
+        }
+        await fulfillment(of: [entered, armed], timeout: 30)
+        clock.expire()
+        let expired = await initial.value
+        XCTAssertTrue(expired, "retire the logical waiter while host work remains blocked")
         XCTAssertEqual(gate.calls(), 1, "retirement must be tested with physical host work in flight")
         provider = nil
         XCTAssertNil(retired, "a detached fetch must not keep the provider alive")
         XCTAssertEqual(budget.availablePermits, 0, "retirement retains live physical admission")
         retired = nil
         gate.release()
+        try await waitForBudget(budget, available: 1)
     }
 
     func testInvalidTimeoutDoesNotInvokeFetch() {
