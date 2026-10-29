@@ -1784,3 +1784,6 @@ async fn denied_renewal_stops_owned_native_work_but_retains_started_evidence() {
 
 #[path = "worker/worker_tests/prepared_admission.rs"]
 mod prepared_admission;
+
+#[path = "worker/worker_tests/process_ownership.rs"]
+mod process_ownership;
