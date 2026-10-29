@@ -869,12 +869,29 @@ async fn named_queue_skips_quarantined_relay(
 ) {
     let storage = backend.storage.as_ref();
     let blocked = fixture(storage, false).await;
-    sqlx::query("INSERT INTO delegation_proxy_quarantines(instance_id,tenant_id) VALUES(?1,?2)")
-        .bind(blocked.instance_id.to_string())
-        .bind("issued-claims")
-        .execute(backend.sqlite_pool())
-        .await
-        .unwrap();
+    match &backend.raw {
+        orch8_storage::testing::backends::RawPool::Sqlite(pool) => {
+            sqlx::query(
+                "INSERT INTO delegation_proxy_quarantines(instance_id,tenant_id) VALUES(?1,?2)",
+            )
+            .bind(blocked.instance_id.to_string())
+            .bind("issued-claims")
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        #[cfg(feature = "postgres")]
+        orch8_storage::testing::backends::RawPool::Postgres(pool) => {
+            sqlx::query(
+                "INSERT INTO delegation_proxy_quarantines(instance_id,tenant_id) VALUES($1,$2)",
+            )
+            .bind(blocked.instance_id.into_uuid())
+            .bind("issued-claims")
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+    }
     let control = fixture(storage, false).await;
     let claimed = storage
         .claim_worker_tasks_with_authority(&request(mode))
@@ -889,9 +906,9 @@ async fn named_queue_skips_quarantined_relay(
     assert_eq!(retained.state, WorkerTaskState::Pending);
     assert_eq!(retained.claim_epoch, 0);
 }
-orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_claim_skips_quarantined_native_relay(b) {
+orch8_storage::backend_test!(async fn named_queue_claim_skips_quarantined_native_relay(b) {
     named_queue_skips_quarantined_relay(&b,2).await;
 });
-orch8_storage::backend_test!(kinds=[sqlite,encrypted_sqlite], async fn named_queue_tenant_claim_skips_quarantined_native_relay(b) {
+orch8_storage::backend_test!(async fn named_queue_tenant_claim_skips_quarantined_native_relay(b) {
     named_queue_skips_quarantined_relay(&b,3).await;
 });
