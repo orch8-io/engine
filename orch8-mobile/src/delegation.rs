@@ -707,7 +707,7 @@ impl DelegationPump {
         let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claimed_at = ?2,
              heartbeat_at = ?2, claim_epoch = claim_epoch + 1
-             WHERE id = ?3 AND state = 'pending' AND awaiting_dispatch = 0 AND {}",
+             WHERE id = ?3 AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND awaiting_dispatch = 0 AND {}",
             owner::native("worker_tasks.instance_id")
         )))
         .bind(PUMP_WORKER_ID)
@@ -775,7 +775,7 @@ impl DelegationPump {
         }
         let claimed = sqlx::query(sqlx::AssertSqlSafe(format!(
             "UPDATE worker_tasks SET state = 'claimed', worker_id = ?1, claim_epoch = claim_epoch + 1
-             WHERE id = ?2 AND state = 'pending' AND {}", owner::native("worker_tasks.instance_id")
+             WHERE id = ?2 AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND {}", owner::native("worker_tasks.instance_id")
         )))
         .bind(PUMP_WORKER_ID)
         .bind(task.id.to_string())

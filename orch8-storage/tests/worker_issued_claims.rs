@@ -628,3 +628,98 @@ orch8_storage::backend_test!(async fn reconnect_keeps_devices_distinct_for_the_s
         assert_eq!(tasks.iter().map(|task|task.id).collect::<Vec<_>>(),vec![id],"another device inherited this runtime's reconnect payload");
     }
 });
+
+async fn set_claim_epoch(b: &orch8_storage::testing::backends::TestBackend, id: Uuid, epoch: i64) {
+    use orch8_storage::testing::backends::RawPool;
+    match &b.raw {
+        RawPool::Sqlite(pool) => {
+            sqlx::query("UPDATE worker_tasks SET claim_epoch=?2,created_at='2000-01-01T00:00:00Z' WHERE id=?1").bind(id.to_string()).bind(epoch).execute(pool).await.unwrap();
+        }
+        #[cfg(feature = "postgres")]
+        RawPool::Postgres(pool) => {
+            sqlx::query("UPDATE worker_tasks SET claim_epoch=$2,created_at='2000-01-01T00:00:00Z' WHERE id=$1").bind(id).bind(epoch).execute(pool).await.unwrap();
+        }
+    }
+}
+
+orch8_storage::backend_test!(async fn claim_limits_skip_exhausted_rows_before_limit_without_poisoning_healthy_work(b) {
+    let s=b.storage.as_ref();
+    for mode in 0..5 {
+        let exhausted=fixture(s,false).await;set_claim_epoch(&b,exhausted.id,i64::MAX).await;
+        let healthy=fixture(s,false).await;
+        let held=s.claim_worker_tasks_with_authority(&request(mode)).await.unwrap();
+        assert_eq!(held.iter().map(|t|t.id).collect::<Vec<_>>(),vec![healthy.id],"exhausted epoch poisoned selector {mode}");
+        let unchanged=s.get_worker_task(exhausted.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.claim_epoch,i64::MAX as u64);assert_eq!(unchanged.state,WorkerTaskState::Pending);assert!(unchanged.worker_id.is_none());
+        for id in [exhausted.id,healthy.id] {s.delete_worker_task(id).await.unwrap();}
+    }
+});
+
+orch8_storage::backend_test!(async fn claim_limits_out_of_range_tokens_never_alias_the_last_valid_generation(b) {
+    let s=b.storage.as_ref();let task=fixture(s,false).await;set_claim_epoch(&b,task.id,i64::MAX-1).await;
+    let held=s.claim_worker_tasks_with_authority(&request(0)).await.unwrap().pop().unwrap();assert_eq!(held.claim_epoch,i64::MAX as u64);
+    let bad=WorkerClaim::new("worker",u64::MAX);let legitimate=proof(&held);
+    assert!(!matches!(s.heartbeat_worker_task(held.id,&bad).await,Ok(true)),"oversized epoch renewed another generation");
+    assert!(!matches!(s.checkpoint_worker_task(held.id,&bad,0,&json!({"forged":true})).await,Ok(Some(_))),"oversized epoch checkpointed another generation");
+    assert!(!matches!(s.fail_worker_task(held.id,&bad,"forged failure",false).await,Ok(true)),"oversized epoch failed another generation");
+    assert!(!matches!(s.complete_worker_task(held.id,&bad,&json!({"forged":true})).await,Ok(true)),"oversized epoch completed another generation");
+    let unchanged=s.get_worker_task(held.id).await.unwrap().unwrap();assert_eq!(unchanged.state,WorkerTaskState::Claimed);assert_eq!(unchanged.checkpoint_seq,0);assert!(unchanged.resume_checkpoint.is_none());
+    assert!(s.heartbeat_worker_task(held.id,&legitimate).await.unwrap());
+    assert_eq!(s.checkpoint_worker_task(held.id,&legitimate,0,&json!({"legitimate":true})).await.unwrap(),Some(1));
+    assert!(s.fail_worker_task(held.id,&legitimate,"legitimate failure",false).await.unwrap());
+});
+
+orch8_storage::backend_test!(async fn claim_limits_task_counter_writes_reject_values_that_cannot_round_trip(b) {
+    let s=b.storage.as_ref();
+    for field in ["claim_epoch","checkpoint_seq","continuity_epoch"] {
+        let mut task=fixture(s,false).await;s.delete_worker_task(task.id).await.unwrap();task.id=Uuid::now_v7();
+        match field {"claim_epoch"=>task.claim_epoch=u64::MAX,"checkpoint_seq"=>task.checkpoint_seq=u64::MAX,_=>task.continuity_epoch=Some(u64::MAX)}
+        assert!(s.create_worker_task(&task).await.is_err(),"{field} was silently clamped");
+        assert!(s.get_worker_task(task.id).await.unwrap().is_none());
+        task.claim_epoch=0;task.checkpoint_seq=0;task.continuity_epoch=None;s.create_worker_task(&task).await.unwrap();
+        assert_eq!(s.get_worker_task(task.id).await.unwrap().unwrap().claim_epoch,0);
+    }
+});
+
+orch8_storage::backend_test!(async fn claim_limits_attempt_evidence_never_clamps_an_out_of_range_generation(b) {
+    use orch8_types::worker::{WorkerTaskAttemptEvent,WorkerAttemptEventKind};
+    let s=b.storage.as_ref();let task=fixture(s,false).await;
+    let mut event=WorkerTaskAttemptEvent{id:Uuid::now_v7(),task_id:task.id,claim_epoch:u64::MAX,worker_id:Some("worker".into()),event:WorkerAttemptEventKind::StaleMutationRejected,reason:None,created_at:Utc::now()};
+    assert!(s.record_worker_task_attempt_event(&event).await.is_err());
+    assert!(s.list_worker_task_attempt_events(task.id,10).await.unwrap().is_empty());
+    event.claim_epoch=1;s.record_worker_task_attempt_event(&event).await.unwrap();
+    let events=s.list_worker_task_attempt_events(task.id,10).await.unwrap();assert_eq!(events.len(),1);assert_eq!(events[0].id,event.id);assert_eq!(events[0].claim_epoch,1);
+});
+
+async fn exhausted_backlog(b: &orch8_storage::testing::backends::TestBackend, parent: &WorkerTask) {
+    use orch8_storage::testing::backends::RawPool;
+    let rows: Vec<_> = (0..4097)
+        .map(|n| (Uuid::now_v7(), format!("exhausted-{n}")))
+        .collect();
+    for chunk in rows.chunks(64) {
+        match &b.raw {
+            RawPool::Sqlite(pool) => {
+                let mut q = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                    "INSERT INTO worker_tasks(id,instance_id,block_id,handler_name,params,context,queue_name,requirements,created_at,claim_epoch,state,tenant_id) ",
+                );
+                q.push_values(chunk,|mut row,(id,block)|{row.push_bind(id.to_string()).push_bind(parent.instance_id.to_string()).push_bind(block).push_unseparated(", 'noop','{}','{}','queue','{}','2000-01-01T00:00:00Z',9223372036854775807,'pending','issued-claims'");});
+                q.build().execute(pool).await.unwrap();
+            }
+            #[cfg(feature = "postgres")]
+            RawPool::Postgres(pool) => {
+                let mut q = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+                    "INSERT INTO worker_tasks(id,instance_id,block_id,handler_name,params,context,queue_name,requirements,created_at,claim_epoch,state,tenant_id) ",
+                );
+                q.push_values(chunk,|mut row,(id,block)|{row.push_bind(*id).push_bind(parent.instance_id.into_uuid()).push_bind(block).push_unseparated(", 'noop','{}','{}','queue','{}','2000-01-01T00:00:00Z',9223372036854775807,'pending','issued-claims'");});
+                q.build().execute(pool).await.unwrap();
+            }
+        }
+    }
+}
+orch8_storage::backend_test!(async fn claim_limits_exhausted_backlog_does_not_consume_the_capability_scan_window(b) {
+    let s=b.storage.as_ref();let poison=fixture(s,false).await;set_claim_epoch(&b,poison.id,i64::MAX).await;
+    exhausted_backlog(&b,&poison).await;
+    let healthy=fixture(s,false).await;
+    let held=s.claim_worker_tasks_with_authority(&request(4)).await.unwrap();
+    assert_eq!(held.iter().map(|t|t.id).collect::<Vec<_>>(),vec![healthy.id]);
+});

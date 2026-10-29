@@ -27,11 +27,11 @@ pub(super) static OPEN: LazyLock<Scan> = LazyLock::new(|| Scan {
 pub(super) static DISCOVERY: LazyLock<Scan> = LazyLock::new(|| Scan {
     name: "discovery",
     exists: format!(
-        "SELECT EXISTS(SELECT 1 FROM worker_tasks INDEXED BY idx_mobile_delegation_discovery WHERE state = 'pending' AND awaiting_dispatch = 0 AND requirements <> '{{}}' AND {})",
+        "SELECT EXISTS(SELECT 1 FROM worker_tasks INDEXED BY idx_mobile_delegation_discovery WHERE state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND awaiting_dispatch = 0 AND requirements <> '{{}}' AND {})",
         owner::native("worker_tasks.instance_id")
     ),
     page: format!(
-        "SELECT id, requirements, created_at, id AS scan_id FROM worker_tasks INDEXED BY idx_mobile_delegation_discovery WHERE state = 'pending' AND awaiting_dispatch = 0 AND requirements <> '{{}}' AND {} AND (created_at, id) > (?1, ?2) ORDER BY created_at, id LIMIT ?3",
+        "SELECT id, requirements, created_at, id AS scan_id FROM worker_tasks INDEXED BY idx_mobile_delegation_discovery WHERE state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND awaiting_dispatch = 0 AND requirements <> '{{}}' AND {} AND (created_at, id) > (?1, ?2) ORDER BY created_at, id LIMIT ?3",
         owner::native("worker_tasks.instance_id")
     ),
 });
