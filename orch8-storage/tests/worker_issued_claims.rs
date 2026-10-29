@@ -723,3 +723,116 @@ orch8_storage::backend_test!(async fn claim_limits_exhausted_backlog_does_not_co
     let held=s.claim_worker_tasks_with_authority(&request(4)).await.unwrap();
     assert_eq!(held.iter().map(|t|t.id).collect::<Vec<_>>(),vec![healthy.id]);
 });
+
+#[cfg(feature = "postgres")]
+async fn one_connection_claimant(
+    b: &orch8_storage::testing::backends::TestBackend,
+) -> (
+    std::sync::Arc<orch8_storage::postgres::PostgresStorage>,
+    std::sync::Arc<dyn StorageBackend>,
+) {
+    use orch8_storage::testing::backends::{TEST_ENCRYPTION_KEY_HEX, postgres_url};
+    use std::sync::Arc;
+    let one = Arc::new(
+        orch8_storage::postgres::PostgresStorage::with_min_connections(
+            &postgres_url().unwrap(),
+            1,
+            1,
+            b.pg_schema(),
+        )
+        .await
+        .unwrap(),
+    );
+    let claimant: Arc<dyn StorageBackend> = if b.kind.is_encrypted() {
+        Arc::new(orch8_storage::encrypting::EncryptingStorage::new(
+            one.clone(),
+            orch8_types::encryption::FieldEncryptor::from_hex_key(TEST_ENCRYPTION_KEY_HEX).unwrap(),
+        ))
+    } else {
+        one.clone()
+    };
+    (one, claimant)
+}
+#[cfg(feature = "postgres")]
+async fn claim_with_scan_barrier(
+    one: &orch8_storage::postgres::PostgresStorage,
+    claimant: &dyn StorageBackend,
+    req: &WorkerClaimRequest,
+    between: impl std::future::Future<Output = ()>,
+) -> Vec<WorkerTask> {
+    // Fair pool admission puts the test lease between unlocked scanning and
+    // the claim's second connection acquisition for its transaction.
+    let gate = one.pool().acquire().await.unwrap();
+    let claimed = claimant.claim_worker_tasks_with_authority(req);
+    tokio::pin!(claimed);
+    assert!(futures::poll!(claimed.as_mut()).is_pending());
+    let middle = one.pool().acquire();
+    tokio::pin!(middle);
+    assert!(futures::poll!(middle.as_mut()).is_pending());
+    drop(gate);
+    let lease=tokio::time::timeout(std::time::Duration::from_secs(10),async {
+        tokio::select! {lease=&mut middle=>lease.unwrap(),result=&mut claimed=>panic!("claim escaped the scan/commit barrier: {result:?}")}
+    }).await.expect("candidate scan did not release its connection");
+    between.await;
+    drop(lease);
+    tokio::time::timeout(std::time::Duration::from_secs(10), &mut claimed)
+        .await
+        .unwrap()
+        .unwrap()
+}
+#[cfg(feature = "postgres")]
+fn matching_request(caps: RuntimeCapabilities) -> WorkerClaimRequest {
+    WorkerClaimRequest::new(
+        Principal::Root {},
+        "noop".into(),
+        "worker".into(),
+        None,
+        Some("queue".into()),
+        Some(caps),
+        1,
+    )
+    .unwrap()
+}
+orch8_storage::backend_test!(kinds=[postgres,encrypted_postgres], async fn matching_claim_rechecks_parent_terminal_state_after_candidate_scan(b) {
+    let (one,claimant)=one_connection_claimant(&b).await;
+    for terminal in [InstanceState::Completed,InstanceState::Failed,InstanceState::Cancelled] {
+        let task=fixture(b.storage.as_ref(),false).await;let req=matching_request(capabilities());
+        let result=claim_with_scan_barrier(&one,claimant.as_ref(),&req,async {
+            b.storage.update_instance_state(task.instance_id,terminal,None).await.unwrap();
+            assert_eq!(b.storage.get_worker_task(task.id).await.unwrap().unwrap().state,WorkerTaskState::Pending);
+        }).await;
+        assert!(result.is_empty(),"parent became {terminal:?} after scanning but task was claimed");
+        let retained=b.storage.get_worker_task(task.id).await.unwrap().unwrap();assert_eq!(retained.state,WorkerTaskState::Pending);assert_eq!(retained.claim_epoch,0);assert!(retained.worker_id.is_none());
+    }
+});
+orch8_storage::backend_test!(kinds=[postgres,encrypted_postgres], async fn matching_claim_rechecks_current_requirements_and_backfills_healthy_candidates(b) {
+    let (one,claimant)=one_connection_claimant(&b).await;
+    let changed=fixture(b.storage.as_ref(),false).await;let healthy=fixture(b.storage.as_ref(),false).await;
+    let req=matching_request(capabilities());
+    let result=claim_with_scan_barrier(&one,claimant.as_ref(),&req,async {
+        sqlx::query("UPDATE worker_tasks SET requirements=$2 WHERE id=$1").bind(changed.id).bind(json!({"hardware":["not-advertised"]})).execute(b.pg_pool()).await.unwrap();
+    }).await;
+    assert_eq!(result.iter().map(|t|t.id).collect::<Vec<_>>(),vec![healthy.id]);
+    assert_eq!(b.storage.get_worker_task(changed.id).await.unwrap().unwrap().state,WorkerTaskState::Pending);
+});
+orch8_storage::backend_test!(kinds=[postgres,encrypted_postgres], async fn matching_claim_rechecks_browser_secret_exclusion_before_ownership(b) {
+    let (one,claimant)=one_connection_claimant(&b).await;
+    let changed=fixture(b.storage.as_ref(),false).await;let healthy=fixture(b.storage.as_ref(),false).await;
+    let mut caps=capabilities();caps.kind=orch8_types::continuity::RuntimeKind::Browser;let req=matching_request(caps);
+    let result=claim_with_scan_barrier(&one,claimant.as_ref(),&req,async {
+        sqlx::query("UPDATE worker_tasks SET carries_credentials=true WHERE id=$1").bind(changed.id).execute(b.pg_pool()).await.unwrap();
+    }).await;
+    assert_eq!(result.iter().map(|t|t.id).collect::<Vec<_>>(),vec![healthy.id]);
+    let retained=b.storage.get_worker_task(changed.id).await.unwrap().unwrap();assert_eq!(retained.state,WorkerTaskState::Pending);assert!(retained.carries_credentials);
+});
+orch8_storage::backend_test!(kinds=[postgres,encrypted_postgres], async fn matching_claim_rechecks_capability_expiry_after_scanning(b) {
+    let (one,claimant)=one_connection_claimant(&b).await;
+    let task=fixture(b.storage.as_ref(),false).await;
+    let mut caps=capabilities();let deadline=Utc::now()+chrono::Duration::seconds(8);caps.expires_at=deadline;let req=matching_request(caps);
+    let result=claim_with_scan_barrier(&one,claimant.as_ref(),&req,async {
+        assert!(Utc::now()<deadline,"expiry fixture elapsed before the scan barrier");
+        while let Ok(left)=(deadline-Utc::now()).to_std() {tokio::time::sleep(left+std::time::Duration::from_millis(1)).await;}
+    }).await;
+    assert!(result.is_empty(),"an expired capability observation acquired new work");
+    let retained=b.storage.get_worker_task(task.id).await.unwrap().unwrap();assert_eq!(retained.state,WorkerTaskState::Pending);assert_eq!(retained.claim_epoch,0);
+});

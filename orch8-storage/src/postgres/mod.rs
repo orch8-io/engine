@@ -61,6 +61,7 @@ mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_admission;
 mod worker_claim;
+mod worker_claim_candidates;
 mod worker_commands;
 mod worker_dispatch;
 mod worker_invocations;
