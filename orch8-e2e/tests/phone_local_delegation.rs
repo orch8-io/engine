@@ -365,6 +365,28 @@ fn assert_delegated_once(
     );
 }
 
+/// A completion acknowledgement durably accepts the result. Application can
+/// defer when scheduler recovery holds its native lock; wait for that same
+/// result rather than assuming the HTTP acknowledgement also won application.
+fn wait_server_delegation_completed(cloud: &Cloud, delegation_id: &str) {
+    wait_for("the accepted delegation result to be applied", LONG, || {
+        let (status, read) = cloud.root(
+            "GET",
+            &format!(
+                "/continuity/delegations/{delegation_id}?tenant_id={}",
+                cloud.tenant
+            ),
+            None,
+        );
+        assert_eq!(status, 200, "{}: {read}", cloud.backend);
+        match read["status"].as_str() {
+            Some("completed") => Some(()),
+            Some("pending" | "claimed") => None,
+            _ => panic!("{}: unexpected delegation outcome: {read}", cloud.backend),
+        }
+    });
+}
+
 /// (h) A phone-local parent delegates a sub-sequence to a desktop. Both
 /// sides lose the network repeatedly — the phone before the delegation is
 /// placed and again while parked, the desktop before claiming, mid-run and
@@ -490,15 +512,7 @@ fn run_disconnects(backend: &Backend) {
     );
 
     // The server has the outcome; the offline phone has not resumed.
-    let (_, read) = cloud.root(
-        "GET",
-        &format!(
-            "/continuity/delegations/{delegation_id}?tenant_id={}",
-            cloud.tenant
-        ),
-        None,
-    );
-    assert_eq!(read["status"], "completed", "{backend}: {read}");
+    wait_server_delegation_completed(&cloud, &delegation_id);
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(
         node.phone.local_state(&local),
@@ -608,16 +622,9 @@ fn run_kills(backend: &Backend) {
     drop_phone_and_wait(phone);
 
     // The desktop claims, runs and reports while the app is dead.
-    desktop.serve_one();
-    let (_, read) = cloud.root(
-        "GET",
-        &format!(
-            "/continuity/delegations/{delegation_id}?tenant_id={}",
-            cloud.tenant
-        ),
-        None,
-    );
-    assert_eq!(read["status"], "completed", "{backend}: {read}");
+    let task = desktop.serve_one();
+    assert_eq!(task["params"]["delegation_id"], delegation_id, "{backend}");
+    wait_server_delegation_completed(&cloud, &delegation_id);
 
     // Launch 3: the parked step resumes from the journal, exactly once.
     let phone = launch();
