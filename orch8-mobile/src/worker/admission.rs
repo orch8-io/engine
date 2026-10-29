@@ -3,7 +3,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use super::claims::ClaimKey;
@@ -33,6 +35,7 @@ struct State {
     limit: usize,
     active: HashMap<TaskScope, Active>,
     releasing: HashMap<TaskScope, BTreeSet<u64>>,
+    poll_after: Option<Instant>,
 }
 
 pub(super) struct Admission {
@@ -128,13 +131,33 @@ impl Admission {
 
     pub fn available(&self) -> usize {
         let state = self.lock();
-        if state.releasing.is_empty() {
+        if state.releasing.is_empty()
+            && state.poll_after.is_none_or(|until| until <= Instant::now())
+        {
             state.limit.saturating_sub(state.active.len())
         } else {
             // Do not accumulate another response batch while unstarted
             // releases from the last one are waiting or in flight.
             0
         }
+    }
+
+    /// Pace new polls after physical contention. Already delivered tasks still
+    /// use normal admission, so unrelated work need not wait for the timer.
+    pub fn defer_poll(&self, delay: Duration) {
+        let until = Instant::now() + delay.min(Duration::from_secs(30));
+        {
+            let mut state = self.lock();
+            state.poll_after = Some(state.poll_after.map_or(until, |prior| prior.max(until)));
+        }
+        self.wake.notify_waiters();
+        self.wake.notify_one();
+    }
+
+    pub fn poll_delay(&self) -> Duration {
+        self.lock().poll_after.map_or(Duration::ZERO, |until| {
+            until.saturating_duration_since(Instant::now())
+        })
     }
 
     pub fn in_flight(&self) -> usize {
@@ -207,6 +230,28 @@ mod tests {
             worker_id: "phone".into(),
             api_base: "https://control.example/api/v1".into(),
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn contention_paces_polls_without_aborting_or_refusing_delivered_work() {
+        let admission = Arc::new(Admission::default());
+        admission.configure(2);
+        let Decision::Execute(first) = admission.admit(&key()) else {
+            panic!("first claim")
+        };
+        admission.defer_poll(Duration::from_secs(1));
+        assert_eq!(admission.available(), 0);
+        let Decision::Execute(second) = admission.admit(&key()) else {
+            panic!("already delivered independent work must remain admissible")
+        };
+        assert!(!first.cancellation().is_cancelled());
+        drop(second);
+        admission.configure(3);
+        assert_eq!(admission.available(), 0);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(admission.available(), 2);
+        drop(first);
+        assert_eq!(admission.available(), 3);
     }
 
     #[test]
