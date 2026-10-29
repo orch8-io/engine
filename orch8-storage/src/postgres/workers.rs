@@ -306,7 +306,7 @@ async fn fill_pending_tenants(
 /// Upper bound on pending rows one `claim_matching` poll inspects.
 const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
 
-#[allow(clippy::too_many_lines)] // two-phase scan + fenced claim reads best as one unit
+#[allow(clippy::too_many_lines)] // Keep bounded discovery predicates and cursor pagination together.
 pub(super) async fn claim_matching(
     store: &PostgresStorage,
     handler_name: &str,
@@ -441,60 +441,23 @@ pub(super) async fn claim_matching(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    // Phase 2: lock only the chosen rows (re-checking `pending`, since the
-    // scan was unlocked) and claim at most `limit` of them, oldest first.
-    let mut tx = store.pool.begin().await?;
-    let result=async {
-    let rows = sqlx::query_as::<_, WorkerTaskRow>(concat!(
-        r"UPDATE worker_tasks SET state='claimed', worker_id=$1, claimed_at=NOW(),
-             heartbeat_at=NOW(), claim_epoch=claim_epoch+1,
-             lease_secs=$4, claimed_runtime_kind=$5
-           WHERE id IN (
-             SELECT id FROM worker_tasks
-             WHERE id = ANY($2) AND ($6::text IS NULL OR queue_name=$6) AND (NOT $7 OR queue_name IS NULL) AND ($8::text IS NULL OR tenant_id=$8) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
-             ORDER BY created_at, id
-             LIMIT $3
-             FOR UPDATE SKIP LOCKED
-           )
-           RETURNING ",
-        worker_task_columns!()
-    ))
-    .bind(worker_id)
-    .bind(&ids)
-    .bind(i64::from(limit))
-    .bind(
-        capabilities
-            .kind
-            .default_lease_secs()
-            .map(|secs| secs as i32),
+    super::worker_claim_candidates::claim(
+        store,
+        &ids,
+        super::worker_claim_candidates::Selection {
+            handler: handler_name,
+            worker: worker_id,
+            tenant: tenant_id,
+            queue: queue_name,
+            default_queue_only,
+            runtime: crate::worker_claim::ClaimRuntime {
+                capabilities,
+                principal,
+            },
+            limit,
+        },
     )
-    .bind(capabilities.kind.as_str())
-    .bind(queue_name)
-    .bind(default_queue_only)
-    .bind(tenant_id.map(orch8_types::TenantId::as_str))
-    .fetch_all(&mut *tx)
-    .await?;
-    let tasks = rows
-        .into_iter()
-        .map(WorkerTaskRow::into_task)
-        .collect::<Result<Vec<_>, _>>()?;
-    let events = tasks
-        .iter()
-        .map(|task| {
-            transition_event(
-                task.id,
-                task.claim_epoch,
-                task.worker_id.clone(),
-                WorkerAttemptEventKind::Claimed,
-                None,
-            )
-        })
-        .collect::<Vec<_>>();
-    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
-    insert_attempt_events(&mut tx, &events).await?;
-    Ok(tasks)
-    }.await;
-    super::finish_transaction(tx, result).await
+    .await
 }
 
 pub(super) async fn complete(
