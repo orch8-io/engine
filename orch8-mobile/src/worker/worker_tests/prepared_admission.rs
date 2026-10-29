@@ -150,9 +150,26 @@ async fn cancellation_before_journal_acquisition_drops_unpolled_native_reservati
     let request = tokio::spawn(async move {
         let mut started = false;
         let mut outcome = None;
-        worker
-            .execute_confirmed(&task, &request_key, &mut started, &mut outcome)
+        let lease = ConfirmedLease::acquire(Some(30), Duration::from_millis(100), || async {
+            LeaseResponse::Accepted
+        })
+        .await
+        .unwrap();
+        let authority = lease.authority();
+        lease
+            .run(
+                Duration::from_millis(100),
+                worker.execute_confirmed(
+                    &task,
+                    &request_key,
+                    &mut started,
+                    &mut outcome,
+                    authority,
+                ),
+                || async { LeaseResponse::Accepted },
+            )
             .await
+            .unwrap()
     });
     wait_for(|| slots.available_permits() == 0).await;
     assert!(h.inputs.lock().unwrap().is_empty());
@@ -232,4 +249,42 @@ async fn default_process_capacity_avoids_poll_churn_and_fences_capacity_lost_dur
     assert_eq!(starts(&h).await, 1);
     assert_eq!(h.inputs.lock().unwrap().len(), 1);
     println!("ORCH8_WORKER_CAPACITY_VERIFIED");
+}
+
+#[test]
+fn queued_worker_callback_cannot_enter_after_lease_expiry_while_runtime_is_stalled() {
+    use std::future::Future as _;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let server=spawn_control_plane(route_with(Vec::new(),200,200)).await;
+        let slots=Arc::new(Semaphore::new(1));let h=prepared_harness(&server,slots.clone()).await;
+        let (entered_tx,entered_rx)=std::sync::mpsc::channel();let (release_tx,release_rx)=std::sync::mpsc::channel();
+        let blocker=tokio::task::spawn_blocking(move||{entered_tx.send(()).unwrap();let _=release_rx.recv_timeout(Duration::from_secs(10));});
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let id=uuid::Uuid::new_v4();let mut task=task_json(id);task["lease_secs"]=json!(2);
+        let task:RemoteTask=serde_json::from_value(task).unwrap();
+        let mut execution=Box::pin(h.worker.execute(task,Duration::from_millis(100)));
+        let started=async {loop {if starts(&h).await==1{break}tokio::time::sleep(Duration::from_millis(1)).await;}};
+        tokio::select!{biased; result=tokio::time::timeout(Duration::from_secs(5),started)=>{result.unwrap();}, ()=&mut execution=>panic!("worker ended before native reservation")}
+        // Consume the committed journal response and queue the physical call.
+        for _ in 0..10 {
+            std::future::poll_fn(|cx|{assert!(execution.as_mut().poll(cx).is_pending());std::task::Poll::Ready(())}).await;
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(starts(&h).await,1);assert_eq!(slots.available_permits(),0);
+        // Neither the supervisor nor timer driver can progress in this window.
+        std::thread::sleep(Duration::from_millis(2100));
+        release_tx.send(()).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(h.inputs.lock().unwrap().is_empty(),"expired queued callback entered the host");
+        blocker.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5),execution).await.unwrap();
+        assert_eq!(server.count(&format!("{id}/complete")),0);assert_eq!(server.count(&format!("{id}/fail")),0);
+        assert_eq!(slots.available_permits(),1);
+    });
+    runtime.shutdown_timeout(Duration::from_secs(1));
 }

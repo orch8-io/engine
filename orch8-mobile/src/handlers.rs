@@ -49,6 +49,7 @@ struct Callback {
     legacy_capacity: Option<Arc<Semaphore>>,
     binding: Option<Arc<scoped::Binding>>,
     stop: CancellationToken,
+    remote_lease: Option<orch8_engine::remote_worker::lease::LeaseAuthority>,
 }
 
 /// Callback interface for host-registered step handlers.
@@ -142,22 +143,26 @@ fn register_with_capacity(
     capacity: Arc<Semaphore>,
 ) {
     let handler_name = name.to_string();
-    registry.register_prepared_with_deferred_effect_admission(name, move |ctx: StepContext| {
-        prepare_foreign_handler(
-            ctx,
-            Callback {
-                handler: Arc::clone(&handler),
-                name: handler_name.clone(),
-                timeout,
-                stragglers: Arc::clone(&stragglers),
-                tracking_key: handler_name.clone(),
-                permits: None,
-                legacy_capacity: Some(capacity.clone()),
-                binding: None,
-                stop: stop.clone(),
-            },
-        )
-    });
+    registry.register_lease_aware_prepared_with_deferred_effect_admission(
+        name,
+        move |ctx: StepContext, remote_lease| {
+            prepare_foreign_handler(
+                ctx,
+                Callback {
+                    handler: Arc::clone(&handler),
+                    name: handler_name.clone(),
+                    timeout,
+                    stragglers: Arc::clone(&stragglers),
+                    tracking_key: handler_name.clone(),
+                    permits: None,
+                    legacy_capacity: Some(capacity.clone()),
+                    binding: None,
+                    stop: stop.clone(),
+                    remote_lease,
+                },
+            )
+        },
+    );
 }
 
 fn callback_busy(ctx: &StepContext, message: String) -> StepError {
@@ -189,7 +194,12 @@ fn prepare_foreign_handler(
     ctx: StepContext,
     mut callback: Callback,
 ) -> Result<impl std::future::Future<Output = Result<Value, StepError>> + Send, StepError> {
-    if callback.stop.is_cancelled() {
+    if callback.stop.is_cancelled()
+        || callback
+            .remote_lease
+            .as_ref()
+            .is_some_and(|lease| lease.check().is_err())
+    {
         return Err(StepError::ClaimLost);
     }
     let permits = if ctx.is_dry_run() {
@@ -233,6 +243,7 @@ async fn invoke_reserved_handler(
         tracking_key,
         binding,
         stop,
+        remote_lease,
         ..
     } = callback;
     if stop.is_cancelled() {
@@ -264,6 +275,7 @@ async fn invoke_reserved_handler(
             _permits: permits,
             binding,
             stop,
+            remote_lease,
         },
     );
 
@@ -740,3 +752,6 @@ mod claim_entry_tests;
 
 #[cfg(test)]
 mod process_capacity_tests;
+
+#[cfg(test)]
+mod lease_entry_tests;

@@ -104,6 +104,7 @@ pub(super) enum InvocationPermit {
 }
 
 pub(super) struct NativeOwnership {
+    pub(super) remote_lease: Option<orch8_engine::remote_worker::lease::LeaseAuthority>,
     pub(super) claim: Option<NativeClaim>,
     pub(super) effect_admission: Option<orch8_engine::handlers::EffectAdmission>,
     pub(super) tracking_key: String,
@@ -174,7 +175,12 @@ fn invoke_native(
     input: String,
     runtime: tokio::runtime::Handle,
 ) -> Result<String, StepError> {
-    if ownership.stop.is_cancelled() {
+    if ownership.stop.is_cancelled()
+        || ownership
+            .remote_lease
+            .as_ref()
+            .is_some_and(|lease| lease.check().is_err())
+    {
         return Err(StepError::ClaimLost);
     }
     let claim = &ownership.claim;
@@ -188,6 +194,10 @@ fn invoke_native(
     // Cancellation may arrive while the database preflight is pending.
     // Check at host admission, after that await, before any native code.
     if ownership.stop.is_cancelled()
+        || ownership
+            .remote_lease
+            .as_ref()
+            .is_some_and(|lease| lease.check().is_err())
         || entry
             .state
             .lock()
@@ -204,6 +214,10 @@ fn invoke_native(
             runtime.block_on(claim.verify(effect_admission.as_ref()))?;
         }
         if ownership.stop.is_cancelled()
+            || ownership
+                .remote_lease
+                .as_ref()
+                .is_some_and(|lease| lease.check().is_err())
             || entry
                 .state
                 .lock()
@@ -227,6 +241,13 @@ fn invoke_native(
     // but cannot publish a successful result into expired logical work.
     if let Some(claim) = claim {
         runtime.block_on(claim.verify_lifetime(effect_admission.as_ref()))?;
+    }
+    if ownership
+        .remote_lease
+        .as_ref()
+        .is_some_and(|lease| lease.check().is_err())
+    {
+        return Err(StepError::ClaimLost);
     }
     result
 }
@@ -356,6 +377,7 @@ mod tests {
                 "{}".into(),
                 Arc::clone(&stragglers),
                 NativeOwnership {
+                    remote_lease: None,
                     claim: None,
                     effect_admission: None,
                     tracking_key: "queued".into(),

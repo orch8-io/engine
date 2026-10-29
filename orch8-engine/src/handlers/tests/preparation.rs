@@ -98,3 +98,64 @@ async fn mocks_replacement_and_retention_cannot_use_stale_native_preparation() {
     registry.get("native").unwrap()(ctx).await.unwrap();
     assert_eq!(constructions.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn lease_aware_preparation_requires_live_supervision_and_keeps_local_api_compatible() {
+    use crate::remote_worker::{LeaseResponse, lease::ConfirmedLease};
+    use std::{future::ready, sync::Mutex, time::Duration};
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let observations = seen.clone();
+    let mut registry = HandlerRegistry::new();
+    registry.register_lease_aware_prepared_with_deferred_effect_admission(
+        "native",
+        move |_ctx, lease| {
+            observations.lock().unwrap().push(lease.is_some());
+            Ok(async move {
+                if let Some(lease) = lease {
+                    lease.check().map_err(|_| StepError::ClaimLost)?;
+                }
+                Ok(serde_json::Value::Null)
+            })
+        },
+    );
+    let ctx = mk_ctx(mk_test_storage().await);
+    let lease = ConfirmedLease::acquire(Some(1), Duration::from_millis(100), || {
+        ready(LeaseResponse::Accepted)
+    })
+    .await
+    .unwrap();
+    let authority = lease.authority();
+    assert!(matches!(
+        registry
+            .prepare_native_handler_with_lease("native", ctx.clone(), authority.clone())
+            .unwrap(),
+        Err(StepError::ClaimLost)
+    ));
+    assert!(seen.lock().unwrap().is_empty());
+    assert!(
+        lease
+            .run(
+                Duration::from_millis(100),
+                async {
+                    registry
+                        .prepare_native_handler_with_lease("native", ctx.clone(), authority)
+                        .unwrap()
+                        .unwrap()
+                        .await
+                },
+                || ready(LeaseResponse::Accepted)
+            )
+            .await
+            .unwrap()
+            .is_ok()
+    );
+    assert!(
+        registry
+            .prepare_native_handler("native", ctx)
+            .unwrap()
+            .unwrap()
+            .await
+            .is_ok()
+    );
+    assert_eq!(*seen.lock().unwrap(), vec![true, false]);
+}

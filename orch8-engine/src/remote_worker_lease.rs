@@ -11,6 +11,9 @@ use std::time::Duration;
 use tokio::time::{Instant, sleep_until, timeout_at};
 
 use super::{DEFAULT_LEASE_SECS, LeaseResponse};
+#[path = "remote_worker_lease/authority.rs"]
+mod authority;
+pub use authority::LeaseAuthority;
 
 /// Why local execution no longer has confirmed server authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,9 +30,29 @@ pub enum LeaseEnd {
 pub struct ConfirmedLease {
     duration: Duration,
     until: Instant,
+    authority: LeaseAuthority,
+}
+impl Drop for ConfirmedLease {
+    fn drop(&mut self) {
+        self.authority.revoke(LeaseEnd::Unconfirmed);
+    }
 }
 
 impl ConfirmedLease {
+    fn confirmed(duration: Duration, until: Instant) -> Self {
+        Self {
+            duration,
+            until,
+            authority: LeaseAuthority::new(until),
+        }
+    }
+    /// Read-only liveness for queued provider entry. This is not a task/scope
+    /// identity proof: the runtime must bind it to the original authenticated
+    /// claim. It remains inactive until `run` is polled and cannot keep its
+    /// supervisor alive. Check it again at physical entry, not only at enqueue.
+    pub fn authority(&self) -> LeaseAuthority {
+        self.authority.clone()
+    }
     /// Check ownership before invoking a callback. Retry transient failures for
     /// at most one lease duration without starting any task work.
     ///
@@ -67,7 +90,7 @@ impl ConfirmedLease {
                     if Instant::now() >= until {
                         return Err(LeaseEnd::Expired);
                     }
-                    return Ok(Self { duration, until });
+                    return Ok(Self::confirmed(duration, until));
                 }
                 LeaseResponse::LostOwnership => return Err(LeaseEnd::LostOwnership),
                 LeaseResponse::Rejected | LeaseResponse::Unsupported => {
@@ -98,14 +121,35 @@ impl ConfirmedLease {
         F: Future<Output = LeaseResponse>,
         R: FnMut() -> F,
     {
+        self.authority.activate()?;
+        let authority = self.authority.clone();
+        let observed = authority.clone();
+        let mut renewals = Box::pin(self.watch(cadence, renew));
+        // A ready operation must not win simply because the timer driver has
+        // not processed its deadline yet. Inspect authority on every poll.
+        let watch = std::future::poll_fn(move |cx| match observed.check() {
+            Err(end) => std::task::Poll::Ready(end),
+            Ok(()) => renewals.as_mut().poll(cx),
+        });
+        let watcher = authority::RevokeOnDrop::new(watch, authority.clone());
+        let operation = authority::RevokeOnDrop::new(operation, authority);
         tokio::select! {
             biased;
-            end = self.watch(cadence, renew) => Err(end),
+            end = watcher => Err(end),
             result = operation => Ok(result),
         }
     }
 
     async fn watch<F, R>(mut self, cadence: Duration, mut renew: R) -> LeaseEnd
+    where
+        F: Future<Output = LeaseResponse>,
+        R: FnMut() -> F,
+    {
+        let end = self.watch_until_end(cadence, &mut renew).await;
+        self.authority.revoke(end);
+        end
+    }
+    async fn watch_until_end<F, R>(&mut self, cadence: Duration, renew: &mut R) -> LeaseEnd
     where
         F: Future<Output = LeaseResponse>,
         R: FnMut() -> F,
@@ -126,7 +170,13 @@ impl ConfirmedLease {
                 return LeaseEnd::Expired;
             }
             match response {
-                LeaseResponse::Accepted => self.until = started + self.duration,
+                LeaseResponse::Accepted => {
+                    let until = started + self.duration;
+                    if let Err(end) = self.authority.renew(until) {
+                        return end;
+                    }
+                    self.until = until;
+                }
                 LeaseResponse::LostOwnership => return LeaseEnd::LostOwnership,
                 LeaseResponse::Rejected | LeaseResponse::Unsupported => {
                     return LeaseEnd::Unconfirmed;
@@ -224,10 +274,10 @@ mod tests {
 
     #[tokio::test]
     async fn late_ready_renewal_cannot_revive_an_expired_local_lease() {
-        let lease = ConfirmedLease {
-            duration: Duration::from_secs(1),
-            until: Instant::now() + Duration::from_millis(100),
-        };
+        let lease = ConfirmedLease::confirmed(
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_millis(100),
+        );
         let result = lease
             .run(
                 Duration::from_millis(10),
