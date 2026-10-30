@@ -1617,8 +1617,7 @@ fn is_inside_decided_race(
             if parent.state.is_terminal() {
                 return true;
             }
-            let race_children = children_of(tree, parent_id, None);
-            if crate::handlers::race::race_outcome(&race_def.semantics, &race_children)
+            if crate::handlers::race::race_outcome(&race_def.semantics, tree.iter().filter(|n| n.parent_id == Some(parent_id)))
                 != crate::handlers::race::RaceOutcome::Undecided
             {
                 return true;
