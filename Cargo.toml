@@ -136,11 +136,11 @@ rskafka = { version = "0.6", default-features = false, features = ["transport-tl
 redis = { version = "1", default-features = false, features = ["tokio-comp", "streams", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 notify = { version = "8", features = ["serde"] }
-# 49.0.4 fixes the aarch64 br_table sandbox escape and component-stream panic.
+# 50.0.1 fixes the typed-function, cross-engine type-confusion and borrowed-resource advisories.
 # Preserve Wasmtime's runtime/compiler defaults except its unused disk cache.
 # wasm_plugin builds Config::new() with cache=None and keeps its own bounded
 # module cache. Wasmtime's optional disk-cache feature pulls vulnerable zstd 0.13.
-wasmtime = { version = "50.0.0", default-features = false, features = [
+wasmtime = { version = "50.0.1", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null",
     "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator",
     "demangle", "addr2line", "coredump", "debug-builtins", "runtime",
