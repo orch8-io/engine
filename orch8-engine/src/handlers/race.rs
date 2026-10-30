@@ -95,7 +95,10 @@ pub(crate) enum RaceOutcome {
 /// the evaluator's `is_inside_decided_race` dispatch guard. A branch decides
 /// the race only once the WHOLE branch has finished — a completed first block
 /// of a multi-block branch is not a win.
-pub(crate) fn race_outcome<'a>(semantics: &RaceSemantics, children: impl IntoIterator<Item = &'a ExecutionNode>) -> RaceOutcome {
+pub(crate) fn race_outcome<'a>(
+    semantics: &RaceSemantics,
+    children: impl IntoIterator<Item = &'a ExecutionNode>,
+) -> RaceOutcome {
     // (branch_index, branch_failed, branch_drained). Races have a handful of
     // branches, so a linear scan beats a map allocation on the dispatch path.
     let mut branches: Vec<(i16, bool, bool)> = Vec::with_capacity(4);
