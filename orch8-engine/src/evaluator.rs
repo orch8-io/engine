@@ -479,9 +479,7 @@ pub fn migration_snapshot_incompatibilities(
     blocks: &[BlockDefinition],
     tree: &[ExecutionNode],
 ) -> Vec<String> {
-    use std::collections::HashMap;
-
-    type Index<'a> = HashMap<&'a BlockId, (BlockType, Option<&'a BlockId>, Option<usize>)>;
+    type Index<'a> = Vec<(&'a BlockId, (BlockType, Option<&'a BlockId>, Option<usize>))>;
     fn walk<'a>(
         blocks: &'a [BlockDefinition],
         parent: Option<&'a BlockId>,
@@ -490,7 +488,7 @@ pub fn migration_snapshot_incompatibilities(
     ) {
         for block in blocks {
             let (id, block_type) = block_meta(block);
-            index.insert(id, (block_type, parent, branch));
+            index.push((id, (block_type, parent, branch)));
             for_each_child_slice(block, &mut |branch, children| {
                 walk(children, Some(id), branch, index);
             });
@@ -499,15 +497,17 @@ pub fn migration_snapshot_incompatibilities(
 
     let mut index = Index::new();
     walk(blocks, None, None, &mut index);
+    index.sort_unstable_by_key(|(id, _)| *id);
 
-    let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
+    let mut nodes: Vec<(ExecutionNodeId, &ExecutionNode)> = tree.iter().map(|n| (n.id, n)).collect();
+    nodes.sort_unstable_by_key(|(id, _)| *id);
     let mut problems = Vec::new();
     for node in tree {
         let live = matches!(
             node.state,
             NodeState::Pending | NodeState::Running | NodeState::Waiting
         );
-        let Some((block_type, parent, branch)) = index.get(&node.block_id) else {
+        let Ok(idx) = index.binary_search_by_key(&&node.block_id, |(id, _)| *id) else {
             if live {
                 problems.push(format!(
                     "block '{}' is {:?} in the instance's execution tree but does not exist in the target sequence",
@@ -516,6 +516,7 @@ pub fn migration_snapshot_incompatibilities(
             }
             continue;
         };
+        let (block_type, parent, branch) = &index[idx].1;
         if *block_type != node.block_type {
             problems.push(format!(
                 "block '{}' is a {:?} in the instance's execution tree but a {:?} in the target sequence",
@@ -534,7 +535,10 @@ pub fn migration_snapshot_incompatibilities(
         }
         let tree_parent = node
             .parent_id
-            .and_then(|p| nodes.get(&p))
+            .and_then(|p| match nodes.binary_search_by_key(&p, |(id, _)| *id) {
+                Ok(idx) => Some(nodes[idx].1),
+                Err(_) => None,
+            })
             .map(|p| &p.block_id);
         if tree_parent != *parent {
             problems.push(format!(
@@ -548,7 +552,7 @@ pub fn migration_snapshot_incompatibilities(
     if tree.is_empty()
         && instance.state == InstanceState::Waiting
         && let Some(step) = &instance.context.runtime.current_step
-        && !index.contains_key(step)
+        && index.binary_search_by_key(&step, |(id, _)| *id).is_err()
     {
         problems.push(format!(
             "the instance is waiting on step '{step}', which does not exist in the target sequence"
