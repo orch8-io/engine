@@ -1810,15 +1810,34 @@ pub fn children_of(
 /// behavior used by parallel and race execution.
 pub(crate) fn group_by_branch<'a>(
     children: &[&'a ExecutionNode],
-) -> std::collections::BTreeMap<i16, Vec<&'a ExecutionNode>> {
-    let mut branches = std::collections::BTreeMap::<i16, Vec<&'a ExecutionNode>>::new();
-    for child in children {
-        branches
-            .entry(child.branch_index.unwrap_or(0))
-            .or_default()
-            .push(*child);
+) -> Vec<(i16, Vec<&'a ExecutionNode>)> {
+    if children.is_empty() {
+        return Vec::new();
     }
-    branches
+    // ⚡ Bolt: Replace BTreeMap with a flat Vec and slice::chunk_by to avoid
+    // map allocation overhead on hot paths in parallel and race handlers.
+    let mut flat = Vec::with_capacity(children.len());
+    for (i, &c) in children.iter().enumerate() {
+        flat.push((i, c));
+    }
+    flat.sort_unstable_by(|a, b| {
+        let a_branch = a.1.branch_index.unwrap_or(0);
+        let b_branch = b.1.branch_index.unwrap_or(0);
+        a_branch.cmp(&b_branch).then(a.0.cmp(&b.0))
+    });
+
+    let mut result = Vec::with_capacity(4);
+    for chunk in
+        flat.chunk_by(|a, b| a.1.branch_index.unwrap_or(0) == b.1.branch_index.unwrap_or(0))
+    {
+        let branch_idx = chunk[0].1.branch_index.unwrap_or(0);
+        let mut group = Vec::with_capacity(chunk.len());
+        for &(_, n) in chunk {
+            group.push(n);
+        }
+        result.push((branch_idx, group));
+    }
+    result
 }
 
 /// Check if all nodes in a set are in a terminal state.
