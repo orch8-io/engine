@@ -33,3 +33,7 @@
 ## 2025-11-06 - [Avoid Intermediate Vec Allocation in Race Outcome]
 **Learning:** The `race_outcome` function in `orch8-engine/src/handlers/race.rs` took a slice of references (`&[&ExecutionNode]`) which forced callers (like `execute_race` and `is_inside_decided_race`) to collect elements into an intermediate `Vec` when they could have passed an iterator or a generated `Vec` directly. In hot paths (like the scheduler loops), this meant creating multiple `Vec` objects unnecessarily.
 **Action:** Modify internal handler function signatures in execution hot paths (such as `race_outcome`) to accept `impl IntoIterator<Item = &T>` instead of slice references (`&[&T]`). This allows callers to pass iterator chains directly (like `.filter()`) or pass existing `Vec`s without creating intermediate slices.
+
+## 2025-11-06 - [Avoid HashMap Allocation for Sibling/Parent Lookups in Evaluator]
+**Learning:** In functions that scan execution trees for properties or validation (such as `migration_snapshot_incompatibilities`), creating a `HashMap<ExecutionNodeId, &ExecutionNode>` to quickly find parents allocates strings and hashes keys unnecessarily.
+**Action:** When mapping tree relationships on hot loops, rely on a flat index `Vec<&ExecutionNode>` initialized via collection and sorting by ID, then query it using `.binary_search_by_key()`. This eliminates all heap map construction and hashing overhead.

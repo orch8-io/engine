@@ -500,7 +500,9 @@ pub fn migration_snapshot_incompatibilities(
     let mut index = Index::new();
     walk(blocks, None, None, &mut index);
 
-    let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
+    // ⚡ Bolt: Use a flat Vec sorted by ExecutionNodeId instead of a HashMap to avoid
+    // allocating and hashing strings on the hot path.
+    let nodes = build_node_index(tree);
     let mut problems = Vec::new();
     for node in tree {
         let live = matches!(
@@ -534,7 +536,7 @@ pub fn migration_snapshot_incompatibilities(
         }
         let tree_parent = node
             .parent_id
-            .and_then(|p| nodes.get(&p))
+            .and_then(|p| get_node(&nodes, p))
             .map(|p| &p.block_id);
         if tree_parent != *parent {
             problems.push(format!(
