@@ -57,9 +57,10 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "esbuild": "^0.28.2",
-    "eslint": "^10.12.0",
+    "eslint": "^10.14.0",
     "globals": "^17.13.0",
     "happy-dom": "^21.0.4",
+    "minimatch": "^11.0.5",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "typescript": "~6.0.3",
@@ -74,5 +75,10 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "pnpm": {
+    "overrides": {
+      "minimatch": "^11.0.1"
+    }
   }
 }
