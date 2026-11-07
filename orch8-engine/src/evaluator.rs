@@ -1809,8 +1809,8 @@ pub fn children_of(
 /// order within each branch. Untagged children retain the defensive branch-0
 /// behavior used by parallel and race execution.
 ///
-/// ⚡ Bolt: Replaced BTreeMap with a flat Vec using linear search and sort.
-/// BTreeMap introduces memory allocation and tree balancing overhead. Given the
+/// ⚡ Bolt: Replaced `BTreeMap` with a flat Vec using linear search and sort.
+/// `BTreeMap` introduces memory allocation and tree balancing overhead. Given the
 /// very small number of branches typically used, a flat Vec is ~2.5x faster.
 pub(crate) fn group_by_branch<'a>(
     children: &[&'a ExecutionNode],
