@@ -1810,15 +1810,32 @@ pub fn children_of(
 /// behavior used by parallel and race execution.
 pub(crate) fn group_by_branch<'a>(
     children: &[&'a ExecutionNode],
-) -> std::collections::BTreeMap<i16, Vec<&'a ExecutionNode>> {
-    let mut branches = std::collections::BTreeMap::<i16, Vec<&'a ExecutionNode>>::new();
-    for child in children {
-        branches
-            .entry(child.branch_index.unwrap_or(0))
-            .or_default()
-            .push(*child);
+) -> Vec<(i16, Vec<&'a ExecutionNode>)> {
+    if children.is_empty() {
+        return Vec::new();
     }
-    branches
+
+    // ⚡ Bolt: A sorted `Vec` combined with `chunk_by` is used instead of a `BTreeMap` to avoid
+    // tree balancing and allocation overhead on the evaluation hot path. The secondary sort by
+    // original index preserves the input order of the children as expected by race/parallel evaluation.
+    let mut flat: Vec<(i16, usize, &'a ExecutionNode)> = children
+        .iter()
+        .enumerate()
+        .map(|(idx, &node)| (node.branch_index.unwrap_or(0), idx, node))
+        .collect();
+
+    flat.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    let mut result = Vec::new();
+    for chunk in flat.chunk_by(|a, b| a.0 == b.0) {
+        let branch_idx = chunk[0].0;
+        let mut nodes = Vec::with_capacity(chunk.len());
+        for item in chunk {
+            nodes.push(item.2);
+        }
+        result.push((branch_idx, nodes));
+    }
+    result
 }
 
 /// Check if all nodes in a set are in a terminal state.
