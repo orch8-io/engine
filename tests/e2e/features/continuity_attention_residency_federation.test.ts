@@ -12,6 +12,7 @@
  */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readyDelegationProtocol } from "../delegation-protocol.ts";
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 
 import { ApiError, Orch8Client, step, testSequence, uuid } from "../client.ts";
@@ -1281,7 +1282,7 @@ describe("Continuity Attention, Residency, Disclosure, Federation", () => {
       const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId, true);
       await client.registerRuntime({ tenant_id: tenantId, capabilities: runtimeCaps(sourceRuntimeId) });
       const destRuntime = uuid();
-      await client.registerRuntime({ tenant_id: tenantId, capabilities: runtimeCaps(destRuntime) });
+      await client.registerRuntime({ tenant_id: tenantId, capabilities: runtimeCaps(destRuntime, { delegation_protocol: readyDelegationProtocol() }) });
       const subSeq = await client.createSequence(
         testSequence("deleg-sub", [step("s1", "noop")], { tenantId }),
       );

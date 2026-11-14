@@ -27,6 +27,7 @@
  */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readyDelegationProtocol } from "../delegation-protocol.ts";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -949,7 +950,7 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       );
       await registerRuntime(tenantId, sourceRuntimeId);
       const destRuntime = uuid();
-      await registerRuntime(tenantId, destRuntime);
+      await registerRuntime(tenantId, destRuntime, { delegation_protocol: readyDelegationProtocol() });
       const subSeq = await client.createSequence(
         testSequence("int-deleg-sub", [step("s1", "noop")], { tenantId }),
       );
@@ -1633,7 +1634,7 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantId);
       await registerRuntime(tenantId, sourceRuntimeId);
       const destRuntime = uuid();
-      await registerRuntime(tenantId, destRuntime);
+      await registerRuntime(tenantId, destRuntime, { delegation_protocol: readyDelegationProtocol() });
       const subSeq = await client.createSequence(
         testSequence("int-grant-deleg-sub", [step("s1", "noop")], { tenantId }),
       );
@@ -5620,7 +5621,7 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
       const { execution, runtimeId: sourceRuntimeId } = await setupExecution(tenantForDeleg);
       await registerRuntime(tenantForDeleg, sourceRuntimeId);
       const destRuntime = uuid();
-      await registerRuntime(tenantForDeleg, destRuntime);
+      await registerRuntime(tenantForDeleg, destRuntime, { delegation_protocol: readyDelegationProtocol() });
       const subSeq = await client.createSequence(
         testSequence("iso-deleg-sub", [step("s1", "noop")], { tenantId: tenantForDeleg }),
       );

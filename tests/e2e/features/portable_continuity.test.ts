@@ -1,6 +1,7 @@
 /** E2E: portable continuity identity, capabilities, preview, and handoff request. */
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readyDelegationProtocol } from "../delegation-protocol.ts";
 import {
   createCipheriv,
   createDecipheriv,
@@ -2153,6 +2154,7 @@ describe("Portable Continuity", () => {
       tenant_id: tenantId,
       capabilities: {
         ...cameraRuntimeCapabilities(destinationRuntimeId, observedAt, 5),
+        delegation_protocol: readyDelegationProtocol(),
         kind: "desktop",
         hardware: [],
       },

@@ -974,10 +974,7 @@ fn f_phone_delegates_to_a_desktop_across_disconnects() {
             .next()
             .expect("the desktop claims its mailbox task");
         assert_eq!(task["id"], mailbox.id.to_string(), "{backend_name}");
-        let (status, sequence) = desktop_rt
-            .block_on(desktop.get(&base, &format!("/sequences/{sub_sequence}")))
-            .unwrap();
-        assert_eq!(status, 200, "{backend_name}: {sequence}");
+        let prepared = desktop_rt.block_on(desktop.prepare_delegation(&base, &task));
 
         // Disconnect 2 (mid-run): heartbeats fail, the local run goes on.
         desktop_link.set_online(false);
@@ -985,7 +982,7 @@ fn f_phone_delegates_to_a_desktop_across_disconnects() {
             desktop_rt.block_on(desktop.lease_call(&base, &task, "heartbeat", json!({}))),
             Delivery::Unreachable
         );
-        let output = desktop_rt.block_on(desktop.run_delegation(sequence, &task));
+        let output = desktop_rt.block_on(desktop.run_delegation(prepared));
         assert_eq!(output["state"], "completed", "{backend_name}: {output}");
         desktop_link.set_online(true);
         assert_eq!(
