@@ -13,6 +13,8 @@ use tracing::warn;
 
 use orch8_engine::remote_worker::RemoteTask;
 
+mod context;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ClaimKey {
     pub task_id: uuid::Uuid,
@@ -51,6 +53,8 @@ pub(crate) struct ClaimRow {
     pub started: bool,
     pub outcome: Option<Outcome>,
     pub claimed_at: chrono::DateTime<chrono::Utc>,
+    #[allow(dead_code)] // Retained recovery context; scoped native bridge consumes it next.
+    pub delegation: Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
 }
 
 type LiveClaims = Arc<Mutex<HashSet<ClaimKey>>>;
@@ -88,10 +92,20 @@ const CREATE_JOURNAL: &str = "CREATE TABLE IF NOT EXISTS mobile_worker_claims (
     started INTEGER NOT NULL DEFAULT 0,
     outcome TEXT,
     claimed_at TEXT NOT NULL,
+    delegation_context TEXT CHECK(delegation_context IS NULL OR length(CAST(delegation_context AS BLOB))<=16384),
     PRIMARY KEY (api_base, worker_id, task_id, claim_epoch)
 )";
 
-type StoredClaim = (String, i64, String, String, i64, Option<String>, String);
+type StoredClaim = (
+    String,
+    i64,
+    String,
+    String,
+    i64,
+    Option<String>,
+    String,
+    Option<String>,
+);
 
 impl ClaimStore {
     pub fn new(pool: SqlitePool) -> Self {
@@ -139,6 +153,11 @@ impl ClaimStore {
                 "unexpected mobile worker journal primary key".into(),
             ));
         }
+        let has_context:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pragma_table_info('mobile_worker_claims') WHERE name='delegation_context')").fetch_one(&mut *tx).await?;
+        if !has_context {
+            sqlx::query("ALTER TABLE mobile_worker_claims ADD COLUMN delegation_context TEXT CHECK(delegation_context IS NULL OR length(CAST(delegation_context AS BLOB))<=16384)").execute(&mut *tx).await?;
+        }
+        sqlx::raw_sql("CREATE TRIGGER IF NOT EXISTS mobile_claim_context_immutable BEFORE UPDATE OF delegation_context ON mobile_worker_claims WHEN NEW.delegation_context IS NOT OLD.delegation_context BEGIN SELECT RAISE(ABORT,'mobile claim context is immutable'); END;").execute(&mut *tx).await?;
         tx.commit().await
     }
 
@@ -162,14 +181,25 @@ impl ClaimStore {
         api_base: &str,
     ) -> Result<bool, sqlx::Error> {
         let key = ClaimKey::for_task(task, worker_id, api_base);
-        let result = sqlx::query("INSERT INTO mobile_worker_claims
-            (task_id, claim_epoch, worker_id, handler_name, effect_id, api_base, started, outcome, claimed_at)
-            VALUES (?, ?, ?, ?, ?, ?, 0, NULL, ?)
-            ON CONFLICT (api_base, worker_id, task_id, claim_epoch) DO NOTHING")
-            .bind(key.task_id.to_string()).bind(key.database_epoch()?).bind(&key.worker_id)
-            .bind(&task.handler_name).bind(task.effect_id.as_deref()).bind(&key.api_base)
-            .bind(chrono::Utc::now().to_rfc3339()).execute(&self.pool).await?;
-        Ok(result.rows_affected() == 1)
+        let encoded = context::encode(task, worker_id)?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let result=sqlx::query("INSERT INTO mobile_worker_claims
+            (task_id,claim_epoch,worker_id,handler_name,effect_id,api_base,started,outcome,claimed_at,delegation_context)
+            VALUES (?1,?2,?3,?4,?5,?6,0,NULL,?7,?8)
+            ON CONFLICT(api_base,worker_id,task_id,claim_epoch) DO NOTHING")
+            .bind(key.task_id.to_string()).bind(key.database_epoch()?).bind(&key.worker_id).bind(&task.handler_name).bind(task.effect_id.as_deref()).bind(&key.api_base)
+            .bind(chrono::Utc::now().to_rfc3339()).bind(encoded.as_deref()).execute(&mut *tx).await?;
+        let inserted = result.rows_affected() == 1;
+        if !inserted {
+            let stored:Option<(Option<String>,)>=sqlx::query_as("SELECT CASE WHEN delegation_context IS NULL THEN NULL WHEN length(CAST(delegation_context AS BLOB))<=16384 THEN delegation_context ELSE '!' END FROM mobile_worker_claims WHERE api_base=?1 AND worker_id=?2 AND task_id=?3 AND claim_epoch=?4")
+                .bind(&key.api_base).bind(&key.worker_id).bind(key.task_id.to_string()).bind(key.database_epoch()?).fetch_optional(&mut *tx).await?;
+            let prior = context::decode(stored.ok_or_else(context::invalid)?.0, &key)?;
+            if prior != task.delegation {
+                return Err(context::invalid());
+            }
+        }
+        tx.commit().await?;
+        Ok(inserted)
     }
 
     pub async fn mark_started(&self, key: &ClaimKey) -> Result<bool, sqlx::Error> {
@@ -231,7 +261,7 @@ impl ClaimStore {
     }
 
     pub async fn get(&self, key: &ClaimKey) -> Result<Option<ClaimRow>, sqlx::Error> {
-        let row: Option<StoredClaim> = sqlx::query_as("SELECT task_id, claim_epoch, worker_id, api_base, started, outcome, claimed_at
+        let row: Option<StoredClaim> = sqlx::query_as("SELECT task_id, claim_epoch, worker_id, api_base, started, outcome, claimed_at, CASE WHEN delegation_context IS NULL THEN NULL WHEN length(CAST(delegation_context AS BLOB))<=16384 THEN delegation_context ELSE '!' END
             FROM mobile_worker_claims WHERE task_id = ? AND claim_epoch = ? AND worker_id = ? AND api_base = ?")
             .bind(key.task_id.to_string()).bind(key.database_epoch()?)
             .bind(&key.worker_id).bind(&key.api_base).fetch_optional(&self.pool).await?;
@@ -265,7 +295,7 @@ impl ClaimStore {
 
     #[cfg(test)]
     pub async fn list(&self) -> Result<Vec<ClaimRow>, sqlx::Error> {
-        let rows: Vec<StoredClaim> = sqlx::query_as("SELECT task_id, claim_epoch, worker_id, api_base, started, outcome, claimed_at
+        let rows: Vec<StoredClaim> = sqlx::query_as("SELECT task_id, claim_epoch, worker_id, api_base, started, outcome, claimed_at, CASE WHEN delegation_context IS NULL THEN NULL WHEN length(CAST(delegation_context AS BLOB))<=16384 THEN delegation_context ELSE '!' END
             FROM mobile_worker_claims ORDER BY claimed_at, api_base, worker_id, task_id, claim_epoch")
             .fetch_all(&self.pool).await?;
         rows.into_iter().map(decode_row).collect()
@@ -279,7 +309,7 @@ impl ClaimStore {
 }
 
 fn decode_row(
-    (id, epoch, worker_id, api_base, started, outcome, claimed_at): StoredClaim,
+    (id, epoch, worker_id, api_base, started, outcome, claimed_at, delegation): StoredClaim,
 ) -> Result<ClaimRow, sqlx::Error> {
     let task_id = uuid::Uuid::parse_str(&id)
         .map_err(|_| sqlx::Error::Protocol("invalid mobile worker journal task identity".into()))?;
@@ -291,13 +321,16 @@ fn decode_row(
         .map_err(|_| {
             sqlx::Error::Protocol("invalid mobile worker journal outcome encoding".into())
         })?;
+    let key = ClaimKey {
+        task_id,
+        claim_epoch,
+        worker_id,
+        api_base,
+    };
+    let delegation = context::decode(delegation, &key)?;
     Ok(ClaimRow {
-        key: ClaimKey {
-            task_id,
-            claim_epoch,
-            worker_id,
-            api_base,
-        },
+        key,
+        delegation,
         started: started != 0,
         outcome,
         claimed_at: chrono::DateTime::parse_from_rfc3339(&claimed_at)
@@ -380,10 +413,21 @@ mod tests {
             .unwrap();
         let store = ClaimStore::new(sqlite.pool().clone());
         assert!(store.init_tables().await.is_err());
-        let rows = store.list().await.unwrap();
+        // Initialization failed, so inspect the original schema directly.
+        // Current journal readers require the successfully upgraded schema.
+        let rows: Vec<(String, i64, String, String, i64, Option<String>)> = sqlx::query_as(
+            "SELECT task_id, claim_epoch, worker_id, api_base, started, outcome FROM mobile_worker_claims",
+        )
+        .fetch_all(sqlite.pool())
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].key.task_id, id);
-        assert_eq!(rows[0].outcome.as_ref(), Some(&outcome));
+        assert_eq!(rows[0].0, id.to_string());
+        assert_eq!(rows[0].1, 17);
+        assert_eq!(rows[0].2, "original-worker");
+        assert_eq!(rows[0].3, "https://control.example/api/v1");
+        assert_eq!(rows[0].4, 1);
+        assert_eq!(rows[0].5, Some(serde_json::to_string(&outcome).unwrap()));
         let key: i64 = sqlx::query_scalar(
             "SELECT pk FROM pragma_table_info('mobile_worker_claims') WHERE name = 'task_id'",
         )

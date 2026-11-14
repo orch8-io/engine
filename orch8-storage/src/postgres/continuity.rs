@@ -97,6 +97,21 @@ impl crate::ContinuityStore for PostgresStorage {
         .fetch_one(&self.pool)
         .await?)
     }
+    async fn get_published_delegation_input(
+        &self,
+        tenant: &TenantId,
+        task: uuid::Uuid,
+    ) -> Result<Option<crate::delegation_input::PublishedDelegationInput>, StorageError> {
+        super::delegation_inputs::read(self, tenant, task).await
+    }
+    async fn get_published_delegation_definition(
+        &self,
+        tenant: &TenantId,
+        task: uuid::Uuid,
+    ) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError>
+    {
+        super::delegation_publication::definition(self, tenant, task).await
+    }
     async fn get_delegation_publication(
         &self,
         tenant: &TenantId,

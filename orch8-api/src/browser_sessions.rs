@@ -383,6 +383,17 @@ impl BrowserSessionSigner {
 /// Routes a browser-session principal may call: the lease protocol only.
 #[must_use]
 pub fn route_allowed(method: &axum::http::Method, path: &str) -> bool {
+    if method == axum::http::Method::GET {
+        let path = path.strip_prefix(crate::API_V1_PREFIX).unwrap_or(path);
+        return path
+            .strip_prefix("/workers/tasks/")
+            .and_then(|s| {
+                s.strip_suffix("/definition")
+                    .or_else(|| s.strip_suffix("/input"))
+            })
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok());
+    }
+
     if method != axum::http::Method::POST {
         return false;
     }

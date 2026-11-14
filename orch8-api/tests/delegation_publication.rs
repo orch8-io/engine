@@ -82,7 +82,8 @@ async fn fixture_with_hooks(
     };
     s.create_continuity_execution(&owner).await.unwrap();
     for runtime in [source, destination] {
-        let caps:RuntimeCapabilities=serde_json::from_value(json!({"runtime_id":runtime,"kind":"server","trust":"registered","handlers":["noop","orch8.delegation"],"observed_at":now,"expires_at":now+chrono::Duration::minutes(2)})).unwrap();
+        let mut caps:RuntimeCapabilities=serde_json::from_value(json!({"runtime_id":runtime,"kind":"server","trust":"registered","handlers":["noop","orch8.delegation"],"observed_at":now,"expires_at":now+chrono::Duration::minutes(2)})).unwrap();
+        caps.delegation_protocol = Some(protocol_claims::ready_protocol());
         s.upsert_runtime_capabilities(&owner.tenant_id, &caps)
             .await
             .unwrap();
@@ -175,6 +176,10 @@ async fn fault(b: &TestBackend, table: &str, suppress: bool, install: bool) {
             "provenance_entries",
             "effect_receipts",
             "delegation_publications",
+            "delegation_definitions",
+            "delegation_definition_manifests",
+            "delegation_publication_inputs",
+            "worker_issued_delegation_contexts",
             "task_instances",
             "continuity_executions",
             "continuity_locations",
@@ -275,6 +280,12 @@ async fn failure_matrix(b: TestBackend) {
             ("provenance_entries", false),
             ("provenance_entries", true),
             ("delegation_publications", false),
+            ("delegation_definitions", false),
+            ("delegation_definitions", true),
+            ("delegation_definition_manifests", false),
+            ("delegation_definition_manifests", true),
+            ("delegation_publication_inputs", false),
+            ("delegation_publication_inputs", true),
             ("continuation_grants", true),
         ];
         if mode != Mode::Hosted {
@@ -302,6 +313,39 @@ async fn failure_matrix(b: TestBackend) {
                 "{mode:?}: failure at {table} was ignored"
             );
             assert_empty(b.storage.as_ref(), &f).await;
+            assert_eq!(
+                b.raw
+                    .count(
+                        "delegation_definitions",
+                        "tenant_id",
+                        f.owner.tenant_id.as_str()
+                    )
+                    .await,
+                0,
+                "failed publication leaked a frozen definition"
+            );
+            assert_eq!(
+                b.raw
+                    .count(
+                        "delegation_definition_manifests",
+                        "tenant_id",
+                        f.owner.tenant_id.as_str()
+                    )
+                    .await,
+                0,
+                "failed publication leaked a definition manifest"
+            );
+            assert_eq!(
+                b.raw
+                    .count(
+                        "delegation_publication_inputs",
+                        "tenant_id",
+                        f.owner.tenant_id.as_str()
+                    )
+                    .await,
+                0,
+                "failed publication leaked private input"
+            );
             assert_eq!(
                 b.storage
                     .list_provenance(&f.owner.tenant_id, f.owner.continuity_id, 100)
@@ -521,7 +565,11 @@ async fn delivery(b: TestBackend) {
             );
             let task = &tasks[0];
             assert_eq!(task["id"], published["mailbox_task_id"]);
-            assert_eq!(task["params"]["input"], f.request["input"]);
+            assert_eq!(task["params"], json!({}));
+            let context: orch8_types::delegation_definition::claim::DelegationClaimContext =
+                serde_json::from_value(task["delegation"].clone()).unwrap();
+            context.validate().unwrap();
+            assert_eq!(context.scope.worker_id, runtime.to_string());
             let response=reqwest::Client::new().post(format!("{}/workers/tasks/{}/complete",server.v1_url(),task["id"].as_str().unwrap())).header("x-api-key",ROOT)
                 .json(&json!({"worker_id":runtime,"claim_epoch":task["claim_epoch"],"output":{"done":true}})).send().await.unwrap();
             assert!(
@@ -674,6 +722,12 @@ orch8_storage::backend_test!(async fn published_mailbox_payload_cannot_change_be
 async fn empty_postgres_publication_migrations_round_trip(pool: &sqlx::PgPool) {
     let mut tx = pool.begin().await.unwrap();
     sqlx::raw_sql(include_str!(
+        "../../migrations/down/144_delegation_definitions.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
         "../../migrations/down/143_delegation_proxy_execution_fence.sql"
     ))
     .execute(&mut *tx)
@@ -694,6 +748,12 @@ async fn empty_postgres_publication_migrations_round_trip(pool: &sqlx::PgPool) {
     .unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/143_delegation_proxy_execution_fence.sql"
+    ))
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/144_delegation_definitions.sql"
     ))
     .execute(pool)
     .await
@@ -870,3 +930,27 @@ orch8_storage::backend_test!(async fn a_cross_tenant_grant_is_hidden_before_any_
 
 #[path = "delegation_publication/proxy_lifecycle.rs"]
 mod proxy_lifecycle;
+
+#[path = "delegation_publication/definition.rs"]
+mod definition;
+
+#[path = "delegation_publication/definition_bundle.rs"]
+mod definition_bundle;
+
+#[path = "delegation_publication/input.rs"]
+mod input;
+
+#[path = "delegation_publication/input_reads.rs"]
+mod input_reads;
+
+#[path = "delegation_publication/protocol_claims.rs"]
+mod protocol_claims;
+
+#[path = "delegation_publication/issued_context.rs"]
+mod issued_context;
+
+#[path = "delegation_publication/reconnect_context.rs"]
+mod reconnect_context;
+
+#[path = "delegation_publication/reconnect_stream.rs"]
+mod reconnect_stream;

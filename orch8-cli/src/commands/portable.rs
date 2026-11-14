@@ -279,6 +279,7 @@ fn worker_capabilities(
 ) -> RuntimeCapabilities {
     let rule = &compiled.policy.rules[0];
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id,
         kind: RuntimeKind::Desktop,
         // A local manifest is not an attestation. The server's verified

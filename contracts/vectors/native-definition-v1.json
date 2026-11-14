@@ -1,0 +1,100 @@
+{
+  "provenance": "Synthetic legacy SDK shape, independently encoded with Python hashlib; omitted defaulted step fields are intentional. Not exported from a released SDK.",
+  "account_id": "10000000-0000-4000-8000-000000000001",
+  "catalog_id": "10000000-0000-4000-8000-000000000002",
+  "columns": [
+    {
+      "name": "id",
+      "value": "10000000-0000-4000-8000-000000000003"
+    },
+    {
+      "name": "tenant_id",
+      "value": "mobile-account-10000000-0000-4000-8000-000000000001"
+    },
+    {
+      "name": "namespace",
+      "value": "delegated-bundle-10000000-0000-4000-8000-000000000004"
+    },
+    {
+      "name": "name",
+      "value": "legacy-flow"
+    },
+    {
+      "name": "version",
+      "value": "1"
+    },
+    {
+      "name": "deprecated",
+      "value": "0"
+    },
+    {
+      "name": "status",
+      "value": "production"
+    },
+    {
+      "name": "blocks",
+      "value": "[{\"type\":\"step\",\"id\":\"work\",\"handler\":\"noop\",\"params\":{\"private\":\"UPGRADE_CANARY\",\"unicode\":\"a\\u0000é\"}}]"
+    },
+    {
+      "name": "interceptors",
+      "value": null
+    },
+    {
+      "name": "input_schema",
+      "value": null
+    },
+    {
+      "name": "sla",
+      "value": null
+    },
+    {
+      "name": "on_failure",
+      "value": null
+    },
+    {
+      "name": "on_cancel",
+      "value": null
+    },
+    {
+      "name": "placement",
+      "value": null
+    },
+    {
+      "name": "created_at",
+      "value": "2026-10-29T00:00:00+00:00"
+    },
+    {
+      "name": "sub_tenant",
+      "value": null
+    },
+    {
+      "name": "embed",
+      "value": null
+    }
+  ],
+  "native_version": 1,
+  "native_sha256": "9a98ae15ed482ae0b352c6430353f1c18fd025dd1dd3b7e4744d6f37ddeecbef",
+  "native_bytes": 410,
+  "source_manifest_json": "{\"version\":1,\"root_sha256\":\"982e3dd4e1da1da57511253b8123da46ba6b5f3b00f7e451580aa8dd12d62140\",\"bindings\":[]}",
+  "source_definition_json": "{\"id\":\"20000000-0000-4000-8000-000000000003\",\"tenant_id\":\"fixture-remote\",\"namespace\":\"remote-private\",\"name\":\"legacy-flow\",\"version\":1,\"blocks\":[{\"type\":\"step\",\"id\":\"work\",\"handler\":\"noop\",\"params\":{\"private\":\"UPGRADE_CANARY\",\"unicode\":\"a\\u0000é\"}}],\"created_at\":\"2026-10-29T00:00:00Z\"}",
+  "envelope": {
+    "version": 1,
+    "scope": {
+      "tenant_id": "fixture-remote",
+      "task_id": "20000000-0000-4000-8000-000000000005",
+      "worker_id": "fixture-worker",
+      "claim_epoch": "18446744073709551615"
+    },
+    "reference": {
+      "version": 1,
+      "sequence_sha256": "982e3dd4e1da1da57511253b8123da46ba6b5f3b00f7e451580aa8dd12d62140",
+      "bundle_sha256": "b06fdedcab73dd9115d280272ef9952cf81cd9d14c772a176aaec6747dac0c41",
+      "payload_sha256": "d8938cb3bd806e0b51e05ea3b3800305f22785a492c22e2d41805291d42f80ec",
+      "payload_bytes": 538,
+      "definition_count": 1,
+      "selector_count": 0
+    },
+    "payload_encoding": "json_utf8_base64",
+    "payload_base64": "eyJtYW5pZmVzdCI6eyJ2ZXJzaW9uIjoxLCJyb290X3NoYTI1NiI6Ijk4MmUzZGQ0ZTFkYTFkYTU3NTExMjUzYjgxMjNkYTQ2YmE2YjVmM2IwMGY3ZTQ1MTU4MGFhOGRkMTJkNjIxNDAiLCJiaW5kaW5ncyI6W119LCJkZWZpbml0aW9ucyI6W3sidmVyc2lvbiI6MSwic2VxdWVuY2Vfc2hhMjU2IjoiOTgyZTNkZDRlMWRhMWRhNTc1MTEyNTNiODEyM2RhNDZiYTZiNWYzYjAwZjdlNDUxNTgwYWE4ZGQxMmQ2MjE0MCIsImRlZmluaXRpb24iOnsiaWQiOiIyMDAwMDAwMC0wMDAwLTQwMDAtODAwMC0wMDAwMDAwMDAwMDMiLCJ0ZW5hbnRfaWQiOiJmaXh0dXJlLXJlbW90ZSIsIm5hbWVzcGFjZSI6InJlbW90ZS1wcml2YXRlIiwibmFtZSI6ImxlZ2FjeS1mbG93IiwidmVyc2lvbiI6MSwiYmxvY2tzIjpbeyJ0eXBlIjoic3RlcCIsImlkIjoid29yayIsImhhbmRsZXIiOiJub29wIiwicGFyYW1zIjp7InByaXZhdGUiOiJVUEdSQURFX0NBTkFSWSIsInVuaWNvZGUiOiJhXHUwMDAww6kifX1dLCJjcmVhdGVkX2F0IjoiMjAyNi0xMC0yOVQwMDowMDowMFoifX1dfQ=="
+  }
+}

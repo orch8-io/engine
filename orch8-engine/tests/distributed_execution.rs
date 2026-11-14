@@ -112,6 +112,7 @@ async fn receipt_state(storage: &Arc<dyn StorageBackend>, task: &WorkerTask) -> 
 fn browser_caps(runtime_id: RuntimeId, handler: &str) -> RuntimeCapabilities {
     let now = Utc::now();
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id,
         kind: RuntimeKind::Browser,
         trust: RuntimeTrustLevel::Registered,

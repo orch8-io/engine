@@ -185,8 +185,10 @@ fault_impl! {
 
 fault_impl! {
     [WORKER_STORE_METHODS] impl WorkerStore {
+        async fn claim_worker_tasks_with_transport(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<crate::worker_claim::WorkerClaimBatch,StorageError>;
         async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<WorkerTask>,StorageError>;
-        async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
+        async fn get_worker_delegation_context(&self,tenant:&TenantId,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,StorageError>;
+    async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
 
         async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
         async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
@@ -226,6 +228,7 @@ fault_impl! {
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
 
         async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
+        async fn held_worker_tasks_with_transport(&self, request: &crate::worker_claim::WorkerReconnectRequest, protocol: Option<&orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError>;
         async fn held_worker_tasks_for_reporter(
         &self,
         request: &crate::worker_claim::WorkerReconnectRequest,
@@ -479,6 +482,8 @@ fault_impl! {
 fault_impl! {
     [CONTINUITY_STORE_METHODS] impl ContinuityStore {
     async fn is_delegation_proxy_quarantined(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
+    async fn get_published_delegation_input(&self,tenant:&orch8_types::ids::TenantId,task:uuid::Uuid)->Result<Option<crate::delegation_input::PublishedDelegationInput>,StorageError>;
+    async fn get_published_delegation_definition(&self,tenant:&orch8_types::ids::TenantId,task:uuid::Uuid)->Result<Option<crate::delegation_definition::PublishedDelegationDefinition>,StorageError>;
     async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
     async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>;
 

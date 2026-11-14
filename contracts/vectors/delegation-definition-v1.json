@@ -1,0 +1,25 @@
+{
+  "legacy_semantic_sha256": "88d6a65b711c24d06ce69b4a11295a48f7b0e166356a50c89edb943256cd14bc",
+  "retained_definition_json": "{\"schema_version\":1,\"id\":\"11111111-1111-4111-8111-111111111111\",\"tenant_id\":\"wire-account\",\"namespace\":\"catalog-a\",\"name\":\"lossless\",\"version\":1,\"deprecated\":false,\"status\":\"production\",\"blocks\":[{\"type\":\"step\",\"id\":\"work\",\"handler\":\"noop\",\"params\":{\"float\":1.0,\"max_u64\":18446744073709551615,\"negative_zero\":-0.0,\"nul\":\"a\\u0000b\",\"over53\":9007199254740993,\"subnormal\":5e-324,\"tiny\":1e-7,\"\":\"BMP\",\"𐀀\":\"non-BMP\"},\"cancellable\":true}],\"created_at\":\"2026-10-29T00:00:00Z\"}",
+  "retained_manifest_json": "{\"version\":1,\"root_sha256\":\"88d6a65b711c24d06ce69b4a11295a48f7b0e166356a50c89edb943256cd14bc\",\"bindings\":[]}",
+  "envelope": {
+    "version": 1,
+    "scope": {
+      "tenant_id": "wire-account",
+      "task_id": "22222222-2222-4222-8222-222222222222",
+      "worker_id": "33333333-3333-4333-8333-333333333333",
+      "claim_epoch": "18446744073709551615"
+    },
+    "reference": {
+      "version": 1,
+      "sequence_sha256": "88d6a65b711c24d06ce69b4a11295a48f7b0e166356a50c89edb943256cd14bc",
+      "bundle_sha256": "c1860c898e7c4518359149339255413440e86891e5a13fd6bfedc59077b1cc18",
+      "payload_sha256": "93bc7024452d30102300544c68544fa106fba80caef8700200d8d4523381b578",
+      "payload_bytes": 725,
+      "definition_count": 1,
+      "selector_count": 0
+    },
+    "payload_encoding": "json_utf8_base64",
+    "payload_base64": "eyJtYW5pZmVzdCI6eyJ2ZXJzaW9uIjoxLCJyb290X3NoYTI1NiI6Ijg4ZDZhNjViNzExYzI0ZDA2Y2U2OWI0YTExMjk1YTQ4ZjdiMGUxNjYzNTZhNTBjODllZGI5NDMyNTZjZDE0YmMiLCJiaW5kaW5ncyI6W119LCJkZWZpbml0aW9ucyI6W3sidmVyc2lvbiI6MSwic2VxdWVuY2Vfc2hhMjU2IjoiODhkNmE2NWI3MTFjMjRkMDZjZTY5YjRhMTEyOTVhNDhmN2IwZTE2NjM1NmE1MGM4OWVkYjk0MzI1NmNkMTRiYyIsImRlZmluaXRpb24iOnsic2NoZW1hX3ZlcnNpb24iOjEsImlkIjoiMTExMTExMTEtMTExMS00MTExLTgxMTEtMTExMTExMTExMTExIiwidGVuYW50X2lkIjoid2lyZS1hY2NvdW50IiwibmFtZXNwYWNlIjoiY2F0YWxvZy1hIiwibmFtZSI6Imxvc3NsZXNzIiwidmVyc2lvbiI6MSwiZGVwcmVjYXRlZCI6ZmFsc2UsInN0YXR1cyI6InByb2R1Y3Rpb24iLCJibG9ja3MiOlt7InR5cGUiOiJzdGVwIiwiaWQiOiJ3b3JrIiwiaGFuZGxlciI6Im5vb3AiLCJwYXJhbXMiOnsiZmxvYXQiOjEuMCwibWF4X3U2NCI6MTg0NDY3NDQwNzM3MDk1NTE2MTUsIm5lZ2F0aXZlX3plcm8iOi0wLjAsIm51bCI6ImFcdTAwMDBiIiwib3ZlcjUzIjo5MDA3MTk5MjU0NzQwOTkzLCJzdWJub3JtYWwiOjVlLTMyNCwidGlueSI6MWUtNywi7oCAIjoiQk1QIiwi8JCAgCI6Im5vbi1CTVAifSwiY2FuY2VsbGFibGUiOnRydWV9XSwiY3JlYXRlZF9hdCI6IjIwMjYtMTAtMjlUMDA6MDA6MDBaIn19XX0="
+  }
+}

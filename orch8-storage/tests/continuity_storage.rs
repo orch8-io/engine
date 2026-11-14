@@ -326,6 +326,7 @@ async fn stale_runtime_heartbeat_cannot_replace_newer_capabilities() {
     let runtime_id = RuntimeId::new();
     let now = Utc::now();
     let current = RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id,
         kind: RuntimeKind::Edge,
         trust: RuntimeTrustLevel::Registered,

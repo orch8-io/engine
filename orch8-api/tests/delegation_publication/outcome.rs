@@ -426,12 +426,13 @@ async fn proxy_metadata_cannot_turn_mailbox_into_native_work(b: TestBackend) {
 }
 orch8_storage::backend_test!(async fn proxy_classification_requires_immutable_publication_evidence(b){proxy_metadata_cannot_turn_mailbox_into_native_work(b).await;});
 
-struct GrpcWorker {
-    client: orch8_grpc::proto::orch8_service_client::Orch8ServiceClient<tonic::transport::Channel>,
-    stop: tokio_util::sync::CancellationToken,
-    server: tokio::task::JoinHandle<()>,
+pub(super) struct GrpcWorker {
+    pub(super) client:
+        orch8_grpc::proto::orch8_service_client::Orch8ServiceClient<tonic::transport::Channel>,
+    pub(super) stop: tokio_util::sync::CancellationToken,
+    pub(super) server: tokio::task::JoinHandle<()>,
 }
-async fn grpc_worker(b: &TestBackend) -> GrpcWorker {
+pub(super) async fn grpc_worker(b: &TestBackend) -> GrpcWorker {
     grpc_worker_with_limit(b, orch8_types::context::DEFAULT_MAX_CONTEXT_BYTES).await
 }
 async fn grpc_worker_with_limit(b: &TestBackend, max_context_bytes: u32) -> GrpcWorker {

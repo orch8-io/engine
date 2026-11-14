@@ -649,6 +649,7 @@ mod tests {
     fn runtime() -> RuntimeCapabilities {
         let now = Utc::now();
         RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind: RuntimeKind::Mobile,
             trust: RuntimeTrustLevel::Attested,

@@ -89,6 +89,73 @@ pub struct PrincipalContext {
     pub capabilities: Vec<ApiCapability>,
 }
 
+/// Non-secret authentication evidence used to recheck long reads after I/O.
+/// The hash is deliberately private and is never emitted through Debug or JSON.
+#[derive(Clone)]
+pub(crate) struct StoredKeyAuthority(orch8_types::api_key::ApiKeyRecord);
+
+pub(crate) async fn reauthorize_worker_read(
+    storage: &Arc<dyn StorageBackend>,
+    caller: &WorkerCaller,
+    key: Option<&StoredKeyAuthority>,
+    binding: Option<&crate::browser_sessions::RuntimeBinding>,
+    task: &orch8_types::worker::WorkerTask,
+) -> Result<(), ApiError> {
+    use orch8_storage::worker_claim::WorkerClaimPrincipal;
+    match &caller.0 {
+        WorkerClaimPrincipal::ApiKey { tenant_id, key_id } => {
+            let original = &key.ok_or(ApiError::Unauthorized)?.0;
+            let current = storage
+                .lookup_api_key_by_hash(&original.key_hash)
+                .await
+                .map_err(|e| ApiError::from_storage(e, "worker read authority"))?
+                .filter(|record| {
+                    record.id == *key_id
+                        && record.tenant_id == tenant_id.as_str()
+                        && record.id == original.id
+                        && record.tenant_id == original.tenant_id
+                        && record.is_active(chrono::Utc::now())
+                })
+                .ok_or(ApiError::Unauthorized)?;
+            let path = format!("/workers/tasks/{}/definition", task.id);
+            if !capabilities_allow(&current.capabilities, &axum::http::Method::GET, &path) {
+                return Err(ApiError::Forbidden(
+                    "worker read is no longer granted".into(),
+                ));
+            }
+        }
+        WorkerClaimPrincipal::Runtime {
+            tenant_id,
+            runtime_id,
+            runtime_kind,
+            device_id,
+        } => {
+            let binding = binding
+                .filter(|binding| {
+                    binding.tenant_id == *tenant_id
+                        && binding.runtime_id == *runtime_id
+                        && binding.kind == *runtime_kind
+                        && binding.device_id == *device_id
+                        && binding.expires_at > chrono::Utc::now()
+                })
+                .ok_or(ApiError::Unauthorized)?;
+            if !binding.allows_handler(&task.handler_name)
+                || task
+                    .queue_name
+                    .as_deref()
+                    .is_some_and(|queue| !binding.allows_queue(queue))
+            {
+                return Err(ApiError::Forbidden(
+                    "worker read exceeds runtime session scope".into(),
+                ));
+            }
+        }
+        WorkerClaimPrincipal::Root {} | WorkerClaimPrincipal::Unsecured {} => {}
+        _ => return Err(ApiError::Unauthorized),
+    }
+    Ok(())
+}
+
 /// For create/write endpoints: if a tenant header is present, enforce it matches
 /// the body's `tenant_id`. Returns the authoritative `tenant_id` to use.
 pub fn enforce_tenant_create(
@@ -234,6 +301,9 @@ pub async fn api_key_middleware(
                     "X-Tenant-Id does not match the authenticated API key".into(),
                 ));
             }
+            request
+                .extensions_mut()
+                .insert(StoredKeyAuthority(record.clone()));
             request.extensions_mut().insert(TenantContext {
                 tenant_id: TenantId::new(record.tenant_id.clone()).map_err(|error| {
                     tracing::error!(%error, key_id = %record.id, "stored API key has invalid tenant");

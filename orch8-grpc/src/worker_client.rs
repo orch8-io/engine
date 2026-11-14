@@ -431,6 +431,10 @@ impl GrpcLeaseTransport {
             self.config.drain.clone(),
             Arc::clone(&self.live_generation),
             generation,
+            (
+                self.config.worker_id.clone(),
+                capabilities.delegation_protocol,
+            ),
         ));
         info!(generation, "worker stream session open");
         Ok(Session {
@@ -528,6 +532,10 @@ async fn read_session(
     drain: CancellationToken,
     live_generation: Arc<AtomicU64>,
     generation: u64,
+    delivery: (
+        String,
+        Option<orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>,
+    ),
 ) {
     let _cleanup = SessionGuard {
         generation,
@@ -563,13 +571,14 @@ async fn read_session(
             };
             match message.payload {
                 Some(ServerPayload::Task(task)) => {
-                    match serde_json::from_str::<RemoteTask>(&task.task_json) {
-                        Ok(task) => {
-                            if tasks.send(task).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(error) => warn!(%error, "undecodable task on the worker stream"),
+                    let Ok(task) =
+                        decode_stream_task(&task.task_json, &delivery.0, delivery.1.as_ref())
+                    else {
+                        warn!("invalid task or delegation context on the worker stream");
+                        break;
+                    };
+                    if tasks.send(task).await.is_err() {
+                        break;
                     }
                 }
                 Some(ServerPayload::Ack(ack)) => match ack.operation.as_str() {
@@ -859,3 +868,21 @@ mod tests {
         assert!(GrpcLeaseTransport::new(bad).is_err());
     }
 }
+
+fn decode_stream_task(
+    wire: &str,
+    worker: &str,
+    protocol: Option<&orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>,
+) -> Result<RemoteTask, ()> {
+    let task: RemoteTask = serde_json::from_str(wire).map_err(|_| ())?;
+    task.validate_delegation(worker).map_err(|_| ())?;
+    if let Some(context) = &task.delegation
+        && !protocol.is_some_and(|p| p.accepts(&context.definition, context.usage))
+    {
+        return Err(());
+    }
+    Ok(task)
+}
+
+#[cfg(test)]
+mod delegation_tests;

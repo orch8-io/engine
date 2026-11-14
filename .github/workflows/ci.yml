@@ -66,6 +66,10 @@ jobs:
         run: ./scripts/check-sdk-versions.sh
       - name: SDK packaging contracts
         run: ./scripts/check-sdk-packaging.sh
+      - name: Definition wire protocol vectors
+        run: |
+          node --test scripts/test-delegation-definition-wire.mjs
+          python3 scripts/test-delegation-definition-wire.py
       - name: Verify all Rust lockfiles
         # Resolve the actual dependency graphs before compilation; --no-deps
         # skips lockfile validation and cannot detect standalone workspace drift.

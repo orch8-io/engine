@@ -356,6 +356,7 @@ async fn demand_finds_the_session_runtime_even_among_thousands_of_newer_phones()
     for _ in 0..1_100 {
         let now = chrono::Utc::now();
         let phone = RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind: orch8_types::continuity::RuntimeKind::Mobile,
             trust: RuntimeTrustLevel::Registered,

@@ -4,7 +4,7 @@ use super::{
     rows::{WorkerTaskRow, worker_task_columns},
 };
 use crate::worker_claim::ClaimRuntime;
-use orch8_types::{error::StorageError, ids::TenantId, worker::WorkerTask};
+use orch8_types::{error::StorageError, ids::TenantId};
 use sqlx::{Postgres, QueryBuilder};
 use uuid::Uuid;
 
@@ -22,9 +22,9 @@ pub(super) async fn claim(
     store: &PostgresStorage,
     ids: &[Uuid],
     selection: Selection<'_>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     if selection.limit == 0 {
-        return Ok(Vec::new());
+        return Ok(crate::worker_claim::WorkerClaimBatch::empty());
     }
     let mut tx = store.pool.begin().await?;
     let result = async {
@@ -42,8 +42,7 @@ pub(super) async fn claim(
                 .push_bind(page)
                 .push(") AND handler_name=")
                 .push_bind(selection.handler);
-            selectors(&mut query, &selection);
-            guards(&mut query, selection.tenant);
+            eligibility(&mut query, &selection);
             query.push(" ORDER BY created_at,id FOR UPDATE SKIP LOCKED");
             let rows = query
                 .build_query_as::<WorkerTaskRow>()
@@ -63,7 +62,7 @@ pub(super) async fn claim(
             }
         }
         if selected.is_empty() {
-            return Ok(Vec::new());
+            return Ok(crate::worker_claim::WorkerClaimBatch::empty());
         }
         // Selected task rows stay locked. Recheck parent/cut state and expiry
         // at the actual mutation, rather than renewing an expired observation.
@@ -86,8 +85,7 @@ pub(super) async fn claim(
             .push_bind(&selected)
             .push(") AND handler_name=")
             .push_bind(selection.handler);
-        selectors(&mut update, &selection);
-        guards(&mut update, selection.tenant);
+        eligibility(&mut update, &selection);
         update
             .push(" AND ")
             .push_bind(selection.runtime.capabilities.expires_at)
@@ -113,14 +111,19 @@ pub(super) async fn claim(
                 )
             })
             .collect::<Vec<_>>();
-        super::worker_claim::record_on(&mut tx, &tasks, selection.runtime.principal).await?;
+        let contexts = super::worker_claim::record_with_context_on(
+            &mut tx,
+            &tasks,
+            selection.runtime.principal,
+        )
+        .await?;
         super::workers::insert_attempt_events(&mut tx, &events).await?;
-        Ok(tasks)
+        crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
     }
     .await;
     super::finish_transaction(tx, result).await
 }
-fn selectors(query: &mut QueryBuilder<Postgres>, selection: &Selection<'_>) {
+fn eligibility(query: &mut QueryBuilder<Postgres>, selection: &Selection<'_>) {
     if let Some(queue) = selection.queue {
         query.push(" AND queue_name=").push_bind(queue);
     } else if selection.default_queue_only {
@@ -129,6 +132,8 @@ fn selectors(query: &mut QueryBuilder<Postgres>, selection: &Selection<'_>) {
     if let Some(tenant) = selection.tenant {
         query.push(" AND tenant_id=").push_bind(tenant.as_str());
     }
+    guards(query, selection.tenant);
+    super::delegation_claims::append(query, "worker_tasks", selection.runtime.capabilities);
 }
 fn guards(query: &mut QueryBuilder<Postgres>, tenant: Option<&TenantId>) {
     query.push(" AND state='pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch AND EXISTS(SELECT 1 FROM task_instances owner WHERE owner.id=worker_tasks.instance_id AND owner.state NOT IN ('completed','failed','cancelled')");

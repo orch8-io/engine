@@ -25,7 +25,7 @@ pub(super) async fn insert_task(
     awaiting_dispatch: bool,
 ) -> Result<Option<String>, StorageError> {
     let scoped: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE id=?1) OR EXISTS(SELECT 1 FROM task_instances i JOIN mobile_accounts a ON i.tenant_id='mobile-account-' || a.id WHERE i.id=?1)"
+        "SELECT EXISTS(SELECT 1 FROM mobile_remote_run_materializations WHERE instance_id=?1) OR EXISTS(SELECT 1 FROM mobile_remote_run_bindings WHERE local_run_id=?1) OR EXISTS(SELECT 1 FROM mobile_catalog_run_requests WHERE id=?1) OR EXISTS(SELECT 1 FROM task_instances i JOIN mobile_accounts a ON i.tenant_id='mobile-account-' || a.id WHERE i.id=?1)"
     ).bind(t.instance_id.to_string()).fetch_one(&mut *conn).await?;
     if scoped {
         return Err(StorageError::Unsupported(
@@ -171,7 +171,7 @@ pub(super) async fn claim(
     let result=async {
 
     let select_res = sqlx::query(
-        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND state='pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
+        "SELECT * FROM worker_tasks WHERE handler_name=?1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state='pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
          AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND json_extract(ce.record,'$.current_instance_id')=worker_tasks.instance_id) \
          ORDER BY created_at ASC LIMIT ?2",
     )
@@ -257,7 +257,7 @@ pub(super) async fn claim_for_tenant(
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
          JOIN task_instances ti ON ti.id = wt.instance_id
-         WHERE wt.handler_name=?1 AND wt.state='pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?4 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND ti.tenant_id=?3
+         WHERE wt.handler_name=?1 AND wt.handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=wt.id) AND wt.state='pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND wt.awaiting_dispatch=0 AND (wt.requirements='{}' OR (json_remove(wt.requirements,'$.prefer')='{}' AND (json_extract(wt.requirements,'$.prefer.worker_id')=?4 OR json_extract(wt.requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) AND ti.tenant_id=?3
            AND ti.state NOT IN ('completed', 'failed', 'cancelled') AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=wt.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=wt.instance_id) AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)
          ORDER BY wt.created_at ASC
          LIMIT ?2",
@@ -335,7 +335,7 @@ pub(super) async fn claim_matching(
     queue_name: Option<&str>,
     runtime: crate::worker_claim::ClaimRuntime<'_>,
     limit: u32,
-) -> Result<Vec<WorkerTask>, StorageError> {
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     let crate::worker_claim::ClaimRuntime {
         capabilities,
         principal,
@@ -348,7 +348,7 @@ pub(super) async fn claim_matching(
             Some(crate::worker_claim::WorkerClaimPrincipal::Runtime { .. })
         );
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(crate::worker_claim::WorkerClaimBatch::empty());
     }
     let mut conn = begin_immediate(&storage.pool).await?;
     let result=async {
@@ -417,6 +417,7 @@ pub(super) async fn claim_matching(
                 .push_bind(id)
                 .push("))");
         }
+        super::delegation_claims::append(&mut query, "wt", capabilities);
         query.push(" ORDER BY wt.created_at, wt.id LIMIT 256");
         let rows = query.build().fetch_all(&mut *conn).await?;
         if rows.is_empty() {
@@ -436,6 +437,7 @@ pub(super) async fn claim_matching(
                 .take(limit as usize - tasks.len()),
         );
     }
+    let mut contexts = Vec::new();
     if !tasks.is_empty() {
         let now_dt = Utc::now();
         let now_text = ts(now_dt);
@@ -467,7 +469,12 @@ pub(super) async fn claim_matching(
             ids.push_bind(task.id.to_string());
         }
         ids.push_unseparated(")");
-        update.build().execute(&mut *conn).await?;
+        super::delegation_claims::append(&mut update, "worker_tasks", capabilities);
+        update.push(" AND julianday(").push_bind(ts(capabilities.expires_at)).push(") > julianday('now') RETURNING *");
+        let changed = update.build().fetch_all(&mut *conn).await?;
+        let mut actual = changed.iter().map(row_to_worker_task).collect::<Result<Vec<_>, _>>()?
+            .into_iter().map(|task| (task.id, task)).collect::<HashMap<_, _>>();
+        tasks = tasks.into_iter().filter_map(|task| actual.remove(&task.id)).collect();
         let events = tasks
             .iter()
             .map(|task| {
@@ -480,10 +487,10 @@ pub(super) async fn claim_matching(
                 )
             })
             .collect::<Vec<_>>();
-        super::worker_claim::record_on(&mut conn, &tasks, principal).await?;
+        contexts = super::worker_claim::record_with_context_on(&mut conn, &tasks, principal).await?;
     insert_attempt_events(&mut conn, &events).await?;
     }
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
     }.await;
     super::finish_transaction(conn, result).await
 }

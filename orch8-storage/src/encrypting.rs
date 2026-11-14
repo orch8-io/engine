@@ -819,11 +819,18 @@ passthrough_impl! {
 passthrough_impl! {
     impl crate::ContinuityStore for EncryptingStorage {
     async fn is_delegation_proxy_quarantined(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
+    async fn get_published_delegation_input(&self,tenant:&orch8_types::ids::TenantId,task:uuid::Uuid)->Result<Option<crate::delegation_input::PublishedDelegationInput>,StorageError>{
+        let Some(mut input)=self.inner.get_published_delegation_input(tenant,task).await? else {return Ok(None)};
+        input.stored_input=self.decrypt_json_value(&input.stored_input).map_err(|_| crate::delegation_input::invalid())?;
+        Ok(Some(input))
+    }
+    async fn get_published_delegation_definition(&self,tenant:&orch8_types::ids::TenantId,task:uuid::Uuid)->Result<Option<crate::delegation_definition::PublishedDelegationDefinition>,StorageError>;
     async fn get_delegation_publication(&self,tenant:&orch8_types::ids::TenantId,id:uuid::Uuid)->Result<Option<crate::delegation_publication::DelegationPublication>,StorageError>;
     async fn publish_delegation(&self,intent:&crate::delegation_publication::DelegationPublishIntent)->Result<crate::delegation_publication::DelegationPublishResult,StorageError>{
         let task=self.encrypt_worker_task(&intent.task)?.into_owned();
         let parent=self.encrypt_instance(&intent.parent)?.into_owned();
-        self.inner.publish_delegation(&intent.clone().sealed(task,parent)?).await
+        let input=self.encrypt_json_value(&intent.stored_input)?;
+        self.inner.publish_delegation(&intent.clone().sealed(task,parent,input)?).await
     }
 
         async fn is_physical_instance_retired(&self, instance_id: orch8_types::ids::InstanceId) -> Result<bool, StorageError>;
@@ -2082,10 +2089,16 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::WorkerStore for EncryptingStorage {
+    async fn claim_worker_tasks_with_transport(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<crate::worker_claim::WorkerClaimBatch,StorageError> {
+        let (mut tasks,contexts)=self.inner.claim_worker_tasks_with_transport(request).await?.into_parts();
+        for task in &mut tasks {self.decrypt_worker_task(task)?;}
+        crate::worker_claim::WorkerClaimBatch::new(tasks,contexts)
+    }
     async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<orch8_types::worker::WorkerTask>,StorageError>{
         let mut tasks=self.inner.claim_worker_tasks_with_authority(request).await?;
         for task in &mut tasks{self.decrypt_worker_task(task)?;}Ok(tasks)
     }
+    async fn get_worker_delegation_context(&self,tenant:&TenantId,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,StorageError>;
     async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
 
     async fn create_worker_task(
@@ -2391,6 +2404,16 @@ passthrough_impl! {
 
     async fn cancel_worker_tasks_for_blocks(&self, instance_id: Uuid, block_ids: &[String]) -> Result<u64, StorageError>;
     async fn cancel_worker_tasks_for_block(&self, instance_id: Uuid, block_id: &str) -> Result<u64, StorageError>;
+
+    async fn held_worker_tasks_with_transport(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+        protocol: Option<&orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>,
+    ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
+        let (mut tasks, contexts) = self.inner.held_worker_tasks_with_transport(request, protocol).await?.into_parts();
+        for task in &mut tasks { self.decrypt_worker_task(task)?; }
+        crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
+    }
 
     async fn held_worker_tasks_for_reporter(
         &self,

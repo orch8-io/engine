@@ -204,3 +204,88 @@ bypass: reconciliation must not reuse a poisoned physical identity. Capsule and
 local-migration snapshots refuse relay records. The logical configuration/native
 instance archive cannot preserve relay authority and refuses to include relays;
 configuration-only exports remain available.
+
+
+## Frozen delegation bundles (144, staged)
+
+Migration 144 and SQLite schema 74 retain shared definition bodies and a separate
+immutable manifest for each published tenant/task. The manifest pins typed nested
+sequence selections; its identity is separate from the root definition hash.
+Capture commits atomically with the grant, mailbox, receipt and provenance. A
+complete serialized closure is capped at 4 MiB, leaving response-envelope room.
+
+No historical snapshot or dependency manifest is backfilled from the mutable
+catalog. Missing manifests are unavailable; missing/corrupt retained bodies fail
+integrity checks. PostgreSQL rollback refuses retained bodies or manifests. Full
+database backups must retain both tables. Acknowledgement-driven payload
+compaction remains separate work and must preserve compact publication/outcome
+receipts. Bundle capability negotiation and SDK execution are not activated by
+this staged server foundation.
+
+Wire version/hash/byte-count/definition-count/selector-count metadata is retained
+with each staged manifest. The byte identity is computed after shared-body
+deduplication from the exact retained row text. Readers compare this metadata
+before returning a scoped base64 envelope; current struct serialization is not a
+replacement for the original bytes. See the
+[staged protocol](../docs/definition-bundle-protocol.md) for the versioned codec.
+
+
+SQLite schema 74 also stages local claim-definition receipts and source-to-local
+sequence mappings. The composite claim key includes account/catalog/owner epoch,
+canonical server URL, remote tenant/task/worker and full-width decimal claim epoch.
+Foreign keys retain installed definitions while their receipt exists. This local
+cache is separate from server publication tables and has no PostgreSQL analogue.
+Its internal installer does not create runs or authorize effects. Cache payload
+compaction requires explicit acknowledgement semantics before activation.
+
+
+The staged SQLite-only cache also retains each authenticated manifest and a
+stable remote-task/local-run binding. The logical key excludes local session and
+remote claim generations; current claim metadata advances separately. Initial
+and current graph receipts remain pinned, and publication-request identity is
+retained independently of the definition hash. Binding records are compact
+identity evidence, not scheduler admission or authority to execute effects.
+
+A separate SQLite-only `mobile_remote_run_observations` row records the latest
+observed claim without allocating another graph receipt for every generation.
+The versioned record is bounded to 16 KiB and updates atomically with its binding.
+Readers reject corrupt, oversized and unsupported observations without replacing
+them. Older staged bindings can initialize this record only when the immutable
+receipt independently proves the complete old claim and owner epoch. Native cache
+codec checks remain required. This extends the unpublished schema-74 foundation;
+it does not establish released-SDK migration or activate a provider path. Explicit
+acknowledged archive/compaction remains required for completed history.
+
+
+Native cache receipts also retain an explicit fingerprint codec. Codec 1 binds
+fixed raw SQL fields, before current typed defaults are applied. Missing or unknown
+codecs fail closed and are not inferred by refreshing stored fingerprints. The
+[protocol reference](../docs/definition-bundle-protocol.md#native-cache-fingerprint-codec-1)
+defines framing and the separately authenticated source/wire identities. Older
+pre-codec staged caches are not silently migrated or adopted.
+
+Unpublished migration 144 also creates `delegation_publication_inputs`, keyed by
+its frozen tenant/task manifest. It retains measured definition/input charges and
+exact encrypted-or-plain input storage separately from the published v1 receipt.
+Updates/deletes are rejected, and rollback refuses retained input rows as well
+as definitions/manifests. Historical publications are not reconstructed from
+mutable data. Acknowledged archive and input-reader integration remain required.
+
+Unpublished migration 144 retains per-generation transport references in
+`worker_issued_delegation_contexts`, a bounded immutable sidecar referencing
+`worker_issued_claims`. It leaves published v1 claim receipt JSON unchanged.
+Rollback refuses retained contexts and must precede rollback of migration 140,
+whose issued-claim table is the sidecar's parent. Do not use cascading deletion
+to bypass this dependency or discard retained issuance evidence.
+
+
+The unpublished SQLite-74 foundation also includes credential-free
+`mobile_scoped_worker_peers`, with immutable account/catalog ownership, canonical
+backend scope, strict bounded records and global/account/catalog record limits.
+Its unique API/tenant/runtime tuple prevents local cross-scope aliases. Guards
+prevent legacy-global and scoped runtime identities from being reclassified,
+including UUID case variants. The legacy node identity table is created with its
+unchanged shape before these guards, so existing node IDs are preserved. This
+idempotent draft extension is separate from PostgreSQL publication schema and
+does not enable remote native execution. Upgrade evidence currently includes a
+synthetic earlier-development layout, not an actual released-SDK fixture.

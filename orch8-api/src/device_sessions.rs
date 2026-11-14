@@ -54,7 +54,8 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
     if *method == Method::GET {
         return match segments.as_slice() {
             ["runtimes"] => true,
-            ["continuity", "delegations", id] => uuid::Uuid::parse_str(id).is_ok(),
+            ["workers", "tasks", id, "definition" | "input"]
+            | ["continuity", "delegations", id] => uuid::Uuid::parse_str(id).is_ok(),
             _ => false,
         };
     }
@@ -62,7 +63,8 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
         return false;
     }
     match segments.as_slice() {
-        ["mobile", "sync"]
+        ["workers", "identity"]
+        | ["mobile", "sync"]
         | ["mobile", "devices", "register"]
         | ["workers", "tasks", "poll"]
         | ["workers", "tasks", "poll", "queue"]
@@ -134,11 +136,12 @@ pub fn clamp_advertisement(
 /// state, capsule keys); a device only needs to pick a live, delegation-
 /// capable destination that advertises the handler it delegates.
 ///
-/// Kept: `runtime_id`, `kind`, `handlers`, `observed_at`/`expires_at`
+/// Kept: `runtime_id`, `kind`, `handlers`, explicit decoder protocol limits,
+/// `observed_at`/`expires_at`
 /// (liveness), and `trust` normalized to `registered` (selection only
 /// requires *at least* registered). Dropped: the caller's own runtime,
 /// draining or expired runtimes, runtimes below registered trust or not
-/// accepting delegations, and every other fact.
+/// accepting delegations, and inventory facts.
 #[must_use]
 pub fn destination_view(
     runtimes: Vec<RuntimeCapabilities>,
@@ -153,11 +156,15 @@ pub fn destination_view(
                 && runtime.expires_at > now
                 && runtime.trust >= RuntimeTrustLevel::Registered
                 && runtime
+                    .delegation_protocol
+                    .is_some_and(|protocol| protocol.validate().is_ok())
+                && runtime
                     .handlers
                     .iter()
                     .any(|handler| handler == orch8_engine::delegation::DELEGATION_HANDLER)
         })
         .map(|runtime| RuntimeCapabilities {
+            delegation_protocol: runtime.delegation_protocol,
             runtime_id: runtime.runtime_id,
             kind: runtime.kind,
             trust: RuntimeTrustLevel::Registered,
@@ -427,6 +434,7 @@ mod tests {
             expires_at: now + chrono::Duration::seconds(60),
         };
         let mut caps = RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: binding.runtime_id,
             kind: RuntimeKind::Mobile,
             trust: RuntimeTrustLevel::Registered,

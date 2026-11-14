@@ -634,6 +634,11 @@ const MAX_RUNTIME_FACTS_PER_KIND: usize = 256;
 const MAX_RUNTIME_FACT_LENGTH: usize = 256;
 
 fn validate_runtime_facts(capabilities: &RuntimeCapabilities) -> Result<(), ApiError> {
+    if let Some(protocol) = capabilities.delegation_protocol {
+        protocol.validate().map_err(|_| {
+            ApiError::InvalidArgument("invalid delegation protocol capability contract".into())
+        })?;
+    }
     let fact_groups = [
         capabilities.handlers.as_slice(),
         capabilities.plugins.as_slice(),
@@ -7002,3 +7007,6 @@ async fn get_delegation(
         delegation,
     }))
 }
+
+#[cfg(test)]
+mod protocol_tests;

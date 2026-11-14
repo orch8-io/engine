@@ -157,6 +157,7 @@ async fn on(
         .find(|caps| caps.runtime_id == d.destination_runtime_id)
         .ok_or_else(conflict)?;
     sequence_on(conn, intent).await?;
+    freeze_definition_on(conn, intent, destination).await?;
     intent.runtimes(source, destination, now)?;
     parent_on(conn, intent).await?;
     effect_on(conn, intent).await?;
@@ -375,4 +376,74 @@ async fn runtime_snapshots(
         .collect::<Result<Vec<_>, StorageError>>()?;
 
     Ok(runtimes)
+}
+
+async fn freeze_definition_on(
+    conn: &mut sqlx::SqliteConnection,
+    intent: &DelegationPublishIntent,
+    destination: &RuntimeCapabilities,
+) -> Result<(), StorageError> {
+    let frozen = super::delegation_definitions::capture_on(conn, intent)
+        .await
+        .map_err(crate::delegation_definition::publication_error)?;
+    let usage = orch8_types::delegation_definition::protocol::DelegationResourceUsage::from_encoded(
+        frozen.wire(),
+        &intent.input,
+    );
+    if destination
+        .delegation_protocol
+        .is_none_or(|protocol| !protocol.accepts(frozen.wire().reference(), usage))
+        || frozen
+            .handler_names()
+            .iter()
+            .any(|handler| !destination.handlers.contains(handler))
+    {
+        return Err(conflict());
+    }
+    Ok(())
+}
+pub(super) async fn definition(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    task: Uuid,
+) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    definition_on(&mut conn, tenant, task).await
+}
+async fn definition_on(
+    conn: &mut sqlx::SqliteConnection,
+    tenant: &TenantId,
+    task: Uuid,
+) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError> {
+    let id: Option<String> = sqlx::query_scalar(
+        "SELECT delegation_id FROM delegation_publications WHERE tenant_id=?1 AND task_id=?2",
+    )
+    .bind(tenant.as_str())
+    .bind(task.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(id) = id else { return Ok(None) };
+    let publication = get_on(
+        conn,
+        tenant,
+        Uuid::parse_str(&id).map_err(|_| crate::delegation_definition::invalid())?,
+    )
+    .await?
+    .ok_or_else(crate::delegation_definition::invalid)?;
+    if publication.delegation.expires_at <= clock(conn).await? {
+        return Err(crate::delegation_publication::conflict());
+    }
+    let frozen = snapshot_on(conn, tenant, task, &publication).await?;
+    if publication.delegation.expires_at <= clock(conn).await? {
+        return Err(crate::delegation_publication::conflict());
+    }
+    Ok(frozen)
+}
+async fn snapshot_on(
+    conn: &mut sqlx::SqliteConnection,
+    tenant: &TenantId,
+    task: Uuid,
+    publication: &DelegationPublication,
+) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError> {
+    super::delegation_definitions::read_on(conn, tenant, task, publication).await
 }

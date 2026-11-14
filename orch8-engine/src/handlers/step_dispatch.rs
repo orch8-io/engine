@@ -1104,6 +1104,7 @@ mod tests {
         };
         let now = Utc::now();
         let capabilities = RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind: RuntimeKind::Desktop,
             trust: RuntimeTrustLevel::Registered,

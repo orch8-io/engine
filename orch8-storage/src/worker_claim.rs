@@ -188,6 +188,14 @@ impl WorkerClaimRequest {
     }
     pub(crate) fn validate(&self) -> Result<(), StorageError> {
         self.principal.validate()?;
+        if let Some(protocol) = self
+            .capabilities
+            .as_ref()
+            .and_then(|caps| caps.delegation_protocol)
+        {
+            protocol.validate()?;
+        }
+
         if matches!(self.principal, WorkerClaimPrincipal::Legacy {})
             || !identifier(&self.handler_name, 256)
             || !identifier(&self.worker_id, 128)
@@ -318,7 +326,8 @@ pub struct WorkerIssuedClaim {
     pub issued_at: chrono::DateTime<chrono::Utc>,
 }
 impl WorkerIssuedClaim {
-    pub(crate) fn validate_task_scope(
+    /// Check that the current hot task still matches this immutable issued generation.
+    pub fn validate_task_scope(
         &self,
         tenant: &TenantId,
         task: &WorkerTask,
@@ -406,4 +415,110 @@ impl WorkerIssuedClaim {
             && self.principal.has_authenticated_owner()
             && self.principal == *principal
     }
+}
+
+#[cfg(test)]
+mod protocol_tests;
+
+/// Leases and their exact issued transport references, assembled before commit.
+pub struct WorkerClaimBatch {
+    tasks: Vec<WorkerTask>,
+    contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+}
+impl WorkerClaimBatch {
+    pub fn empty() -> Self {
+        Self {
+            tasks: Vec::new(),
+            contexts: Vec::new(),
+        }
+    }
+    pub(crate) fn new(
+        mut tasks: Vec<WorkerTask>,
+        contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+    ) -> Result<Self, StorageError> {
+        let mut expected = tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.handler_name == "orch8.delegation")
+            .map(|(index, task)| (task.id, index))
+            .collect::<std::collections::HashMap<_, _>>();
+        for context in &contexts {
+            let index = expected
+                .remove(&context.scope.task_id)
+                .ok_or_else(invalid)?;
+            let task = &mut tasks[index];
+            context.validate()?;
+            if task.worker_id.as_deref() != Some(context.scope.worker_id.as_str())
+                || task.claim_epoch != context.scope.claim_epoch
+            {
+                return Err(invalid());
+            }
+            // New protocol consumers fetch exact input separately. The stored
+            // mailbox and its v1 receipt remain unchanged for factual history.
+            task.params = serde_json::json!({});
+            task.context = serde_json::json!({});
+        }
+        if !expected.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Self { tasks, contexts })
+    }
+    pub fn tasks(&self) -> &[WorkerTask] {
+        &self.tasks
+    }
+    pub fn into_tasks(self) -> Vec<WorkerTask> {
+        self.tasks
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<WorkerTask>,
+        Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+    ) {
+        (self.tasks, self.contexts)
+    }
+}
+
+impl std::fmt::Debug for WorkerClaimBatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WorkerClaimBatch")
+            .field("tasks", &self.tasks.len())
+            .field("delegation_contexts", &self.contexts.len())
+            .finish()
+    }
+}
+
+/// Decode only the immutable context selected with this held generation.
+pub(crate) fn reconnect_context(
+    tenant: &TenantId,
+    task: &WorkerTask,
+    record: Option<String>,
+    protocol: Option<&orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>,
+) -> Result<Option<orch8_types::delegation_definition::claim::DelegationClaimContext>, StorageError>
+{
+    if task.handler_name != "orch8.delegation" {
+        return if record.is_none() {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    let record = record.ok_or_else(crate::delegation_claim::invalid)?;
+    if record.len() > 16_384 {
+        return Err(crate::delegation_claim::invalid());
+    }
+    let context: orch8_types::delegation_definition::claim::DelegationClaimContext =
+        serde_json::from_str(&record).map_err(|_| crate::delegation_claim::invalid())?;
+    context.validate_scope(
+        &orch8_types::delegation_definition::wire::DefinitionReadScope {
+            tenant_id: tenant.clone(),
+            task_id: task.id,
+            worker_id: task.worker_id.clone().ok_or_else(invalid)?,
+            claim_epoch: task.claim_epoch,
+        },
+    )?;
+    if !protocol.is_some_and(|p| p.accepts(&context.definition, context.usage)) {
+        return Err(crate::delegation_claim::invalid());
+    }
+    Ok(Some(context))
 }

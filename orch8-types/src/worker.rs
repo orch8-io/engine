@@ -768,6 +768,7 @@ mod distribution_tests {
     fn caps(kind: RuntimeKind) -> RuntimeCapabilities {
         let now = Utc::now();
         RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind,
             trust: RuntimeTrustLevel::Registered,

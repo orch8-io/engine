@@ -380,16 +380,7 @@ async fn insert_checked(
     if fingerprint_definition(&definition)? != checked.body {
         return Err(invalid("catalog definition changed during materialization").into());
     }
-    let (global,account,catalog):(i64,i64,i64)=sqlx::query_as("SELECT COUNT(*),COALESCE(SUM(tenant_id=?1),0),COALESCE(SUM(tenant_id=?1 AND namespace=?2),0) FROM task_instances WHERE state IN ('scheduled','running','waiting','paused')")
-        .bind(definition.tenant_id.as_str()).bind(definition.namespace.as_str()).fetch_one(&mut **tx).await.map_err(StorageError::from)?;
-    if [
-        (global, limits.global),
-        (account, limits.account),
-        (catalog, limits.catalog),
-    ]
-    .iter()
-    .any(|(used, max)| u64::try_from(*used).unwrap_or(u64::MAX) >= u64::from(*max))
-    {
+    if !super::super::instance_capacity::available(tx, scope, limits).await? {
         return Err(MobileError::ResourceLimit {
             detail: "catalog active-instance allowance exhausted".into(),
         });

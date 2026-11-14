@@ -292,6 +292,11 @@ fn prepare_runtime_capabilities(
             "runtime capabilities exceed bounds or omit a session handler",
         ));
     }
+    if let Some(protocol) = capabilities.delegation_protocol {
+        protocol
+            .validate()
+            .map_err(|_| Status::invalid_argument("invalid delegation decoder profile"))?;
+    }
     let now = chrono::Utc::now();
     // Runtime self-reports may describe features, never elevate their own
     // trust. Signed/attested promotion remains a server-side control-plane act.
@@ -555,8 +560,8 @@ impl Orch8GrpcService {
     /// Re-attach tasks this `worker_id` already holds (claimed on a previous
     /// stream that dropped without releasing them) to a freshly opened stream.
     /// They are re-sent with their existing `claim_epoch`, so the fence is
-    /// unchanged: the new stream may complete/fail/heartbeat them, and the
-    /// previous (dead) stream can no longer act.
+    /// unchanged. Reconnect does not revoke another connection holding that
+    /// same claim; callback deduplication and lease confirmation still apply.
     async fn adopt_held_tasks(
         &self,
         open: &proto::WorkerStreamOpen,
@@ -574,24 +579,28 @@ impl Orch8GrpcService {
             max_in_flight,
         )
         .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let protocol = if open.runtime_capabilities_json.is_empty() {
+            None
+        } else {
+            prepare_runtime_capabilities(
+                &open.runtime_capabilities_json,
+                &open.handler_names,
+                None,
+            )?
+            .delegation_protocol
+        };
         let held = self
             .storage
-            .held_worker_tasks_for_reporter(&request)
+            .held_worker_tasks_with_transport(&request, protocol.as_ref())
             .await
             .map_err(storage_err)?;
-        for task in held {
-            if task.worker_id.as_deref() != Some(open.worker_id.as_str())
-                || !open.handler_names.contains(&task.handler_name)
-            {
-                continue;
-            }
-            let task_json = to_json_string(&task)?;
+        for (task_id, task_json) in worker_delivery::encode(held)? {
             if task_json.len()
                 > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
             {
                 continue;
             }
-            outstanding.insert(task.id);
+            outstanding.insert(task_id);
             sender
                 .send(Ok(worker_server_frame(
                     proto::worker_stream_server::Payload::Task(proto::WorkerStreamTask {
@@ -670,18 +679,19 @@ impl Orch8GrpcService {
                         limit,
                     )
                     .map_err(storage_err)?;
-                    let tasks = self
+                    let batch = self
                         .storage
-                        .claim_worker_tasks_with_authority(&request)
+                        .claim_worker_tasks_with_transport(&request)
                         .await
                         .map_err(storage_err)?;
-                    for task in tasks {
+                    for task in batch.tasks() {
                         orch8_engine::step_placement::record_placement_claimed(
                             self.storage.as_ref(),
-                            &task,
+                            task,
                         )
                         .await;
-                        let task_json = to_json_string(&task)?;
+                    }
+                    for (task_id, task_json) in worker_delivery::encode(batch)? {
                         if task_json.len()
                             > usize::try_from(WORKER_STREAM_MAX_MESSAGE_BYTES).unwrap_or(usize::MAX)
                         {
@@ -689,7 +699,7 @@ impl Orch8GrpcService {
                                 "worker task exceeds negotiated message limit",
                             ));
                         }
-                        outstanding.insert(task.id);
+                        outstanding.insert(task_id);
                         sender
                             .send(Ok(worker_server_frame(
                                 proto::worker_stream_server::Payload::Task(
@@ -2579,3 +2589,5 @@ mod telemetry_ingest_tests;
 mod worker_stream_protocol_tests;
 #[cfg(test)]
 mod worker_stream_reconnect_tests;
+
+mod worker_delivery;

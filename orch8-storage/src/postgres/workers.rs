@@ -171,7 +171,7 @@ pub(super) async fn claim(
               claim_epoch = claim_epoch + 1, lease_secs = NULL, claimed_runtime_kind = NULL
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch
+              WHERE handler_name = $1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch
                 AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
               ORDER BY created_at
@@ -237,7 +237,7 @@ pub(super) async fn claim_for_tenant(
           WHERE id IN (
               SELECT wt.id FROM worker_tasks wt
               JOIN task_instances ti ON ti.id = wt.instance_id
-              WHERE wt.handler_name = $1
+              WHERE wt.handler_name = $1 AND wt.handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=wt.id)
                 AND wt.tenant_id = $4
                 AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807
                 AND NOT wt.awaiting_dispatch
@@ -315,7 +315,7 @@ pub(super) async fn claim_matching(
     queue_name: Option<&str>,
     runtime: crate::worker_claim::ClaimRuntime<'_>,
     limit: u32,
-) -> Result<Vec<WorkerTask>, StorageError> {
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     let crate::worker_claim::ClaimRuntime {
         capabilities,
         principal,
@@ -328,7 +328,7 @@ pub(super) async fn claim_matching(
             Some(crate::worker_claim::WorkerClaimPrincipal::Runtime { .. })
         );
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(crate::worker_claim::WorkerClaimBatch::empty());
     }
     let now = chrono::Utc::now();
     // Phase 1: scan pending candidates WITHOUT row locks, filtering on the
@@ -414,6 +414,7 @@ pub(super) async fn claim_matching(
                 .push_bind(id)
                 .push(")");
         }
+        super::delegation_claims::append(&mut query, "wt", capabilities);
         query.push(" ORDER BY wt.created_at, wt.id LIMIT 256");
         let page: Vec<(Uuid, chrono::DateTime<chrono::Utc>, serde_json::Value, bool)> =
             query.build_query_as().fetch_all(&store.pool).await?;
@@ -439,7 +440,7 @@ pub(super) async fn claim_matching(
         }
     }
     if ids.is_empty() {
-        return Ok(Vec::new());
+        return Ok(crate::worker_claim::WorkerClaimBatch::empty());
     }
     super::worker_claim_candidates::claim(
         store,

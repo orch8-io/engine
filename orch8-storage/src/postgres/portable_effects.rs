@@ -32,7 +32,10 @@ pub(super) async fn lock_instance_on(
     Ok(())
 }
 
-fn instance_lock_key(tenant: &TenantId, instance: InstanceId) -> Result<String, StorageError> {
+pub(super) fn instance_lock_key(
+    tenant: &TenantId,
+    instance: InstanceId,
+) -> Result<String, StorageError> {
     Ok(serde_json::to_string(&(
         "orch8-continuity-instance",
         tenant.as_str(),

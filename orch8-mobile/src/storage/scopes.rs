@@ -9,6 +9,10 @@ use sqlx::{Sqlite, Transaction};
 use uuid::Uuid;
 
 mod credentials;
+mod definitions;
+mod instance_capacity;
+pub(crate) use definitions::BoundClaimRun;
+pub(crate) mod peers;
 pub(crate) mod runs;
 mod signed;
 mod transport;

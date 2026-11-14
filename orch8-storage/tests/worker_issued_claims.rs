@@ -308,9 +308,23 @@ async fn issued_claim_migration_roundtrip_is_empty_only() {
     };
     let down = include_str!("../../migrations/down/140_worker_issued_claims.sql");
     let up = include_str!("../../migrations/140_worker_issued_claims.sql");
+    // Dependent staged readers must be rolled back before their claim table.
+    assert!(sqlx::raw_sql(down).execute(b.pg_pool()).await.is_err());
     let mut tx = b.pg_pool().begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/144_delegation_definitions.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     sqlx::raw_sql(down).execute(&mut *tx).await.unwrap();
     sqlx::raw_sql(up).execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/144_delegation_definitions.sql"
+    ))
+    .execute(&mut *tx)
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     let task = fixture(b.storage.as_ref(), false).await;
     let held = b
