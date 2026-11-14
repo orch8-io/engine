@@ -259,6 +259,12 @@ async fn metadata_history_does_not_decode_private_input_or_native_context() {
     let id = scoped_run(&storage, "alice", "one").await;
     let scope = owner(&storage, "alice", "one").await;
     let foreign = scoped_run(&storage, "bob", "one").await;
+    // Deliberately simulate damaged storage beyond the write guard: the
+    // read path must isolate corrupt private context without decoding it.
+    sqlx::query("DROP TRIGGER delegation_proxy_runtime_update")
+        .execute(storage.pool())
+        .await
+        .unwrap();
     for id in [id, foreign] {
         sqlx::query("UPDATE task_instances SET context='invalid-json' WHERE id=?1")
             .bind(id.to_string())

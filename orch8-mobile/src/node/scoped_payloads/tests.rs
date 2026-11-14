@@ -415,6 +415,7 @@ async fn preparation_cold_and_cached_paths_keep_one_logical_run_and_fresh_identi
         .unwrap();
     assert_eq!(first.input.value()["wide"].as_u64(), Some(u64::MAX));
     assert_eq!(f.state.lock().unwrap().seen.len(), 5);
+    wait_for_preparation_capacity(&f).await;
     let mut replacement = f.task.clone();
     replacement.claim_epoch += 1;
     replacement.delegation.as_mut().unwrap().scope.claim_epoch = replacement.claim_epoch;
@@ -498,6 +499,7 @@ async fn cancelled_cached_preparation_keeps_shared_capacity_and_does_not_block_e
         .prepare(&f.task, "dst_alice", CancellationToken::new())
         .await
         .unwrap();
+    wait_for_preparation_capacity(&f).await;
     let gate = PreparationGate::install(&mut f.reader);
     let reader = f.reader.clone();
     let task = f.task.clone();
@@ -542,6 +544,7 @@ async fn account_retirement_during_cached_preparation_prevents_result_publicatio
         .prepare(&f.task, "dst_alice", CancellationToken::new())
         .await
         .unwrap();
+    wait_for_preparation_capacity(&f).await;
     let gate = PreparationGate::install(&mut f.reader);
     let reader = f.reader.clone();
     let task = f.task.clone();
@@ -575,6 +578,7 @@ async fn failed_cache_preparation_cannot_leak_private_rows_or_capacity() {
         .prepare(&f.task, "dst_alice", CancellationToken::new())
         .await
         .unwrap();
+    wait_for_preparation_capacity(&f).await;
     sqlx::query("DROP TRIGGER mobile_remote_input_update")
         .execute(f.reader.storage.pool())
         .await
@@ -692,6 +696,7 @@ async fn owned_initialization_is_paused_and_reuses_its_root_after_a_fresh_probe(
     );
     assert_eq!(first.instance.id, first.run.local_run_id);
     assert_eq!(first.instance.context.data["wide"].as_u64(), Some(u64::MAX));
+    wait_for_preparation_capacity(&f).await;
     let next = f
         .reader
         .initialize(
