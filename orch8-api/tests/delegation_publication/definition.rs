@@ -8,7 +8,7 @@ async fn definition_is_frozen(b: TestBackend) {
 }
 async fn assert_frozen(b: &TestBackend, server: &BackendTestServer, mode: Mode) {
     let (f, task, claim) = super::outcome::held_mailbox(b, server, mode).await;
-    let original = b
+    let mut original = b
         .storage
         .get_sequence(f.sequence_id())
         .await
@@ -71,6 +71,14 @@ async fn assert_frozen(b: &TestBackend, server: &BackendTestServer, mode: Mode) 
         response.text().await.unwrap()
     );
     let verified = verify_response(b, &f, task, &claim, response).await;
+    // PostgreSQL projects catalog timestamps to microseconds, while an inline
+    // root's retained wire document keeps its original nanoseconds.
+    assert_eq!(
+        verified.root().definition.created_at.timestamp_micros(),
+        original.created_at.timestamp_micros(),
+        "the frozen definition changed its catalog creation time"
+    );
+    original.created_at = verified.root().definition.created_at;
     assert_eq!(
         serde_json::to_value(&verified.root().definition).unwrap(),
         serde_json::to_value(original).unwrap(),

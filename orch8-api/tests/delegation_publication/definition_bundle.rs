@@ -218,6 +218,14 @@ async fn dependency_closure_survives_catalog_changes(b: TestBackend) {
     b.storage.replace_sequence(root.id, &root).await.unwrap();
     b.storage.create_sequence(&child).await.unwrap();
     b.storage.create_sequence(&grandchild).await.unwrap();
+    // Capture the same persisted catalog projection used by dependency resolution.
+    child = b.storage.get_sequence(child.id).await.unwrap().unwrap();
+    grandchild = b
+        .storage
+        .get_sequence(grandchild.id)
+        .await
+        .unwrap()
+        .unwrap();
     let publication = accepted(&server, &f.request).await;
     let task: Uuid = serde_json::from_value(publication["mailbox_task_id"].clone()).unwrap();
     let original_child = serde_json::to_value(&child).unwrap();
@@ -493,6 +501,7 @@ async fn postgres_dependency_selection_uses_one_cut_across_concurrent_catalog_ch
                 })));
             b.storage.replace_sequence(root.id, &root).await.unwrap();
             b.storage.create_sequence(&child).await.unwrap();
+            let child = b.storage.get_sequence(child.id).await.unwrap().unwrap();
             let mut lock = pool.begin().await.unwrap();
             sqlx::query("SELECT id FROM continuation_grants WHERE id=$1 FOR UPDATE")
                 .bind(f.grant_id.into_uuid())
