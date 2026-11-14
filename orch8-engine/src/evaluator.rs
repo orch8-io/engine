@@ -500,8 +500,7 @@ pub fn migration_snapshot_incompatibilities(
     let mut index = Index::new();
     walk(blocks, None, None, &mut index);
 
-    // ⚡ Bolt: Use a flat Vec sorted by ExecutionNodeId instead of a HashMap to avoid
-    // allocating and hashing strings on the hot path.
+    // Reuse the evaluator index for parent lookups.
     let nodes = build_node_index(tree);
     let mut problems = Vec::new();
     for node in tree {
@@ -1817,9 +1816,7 @@ pub(crate) fn group_by_branch<'a>(
         return Vec::new();
     }
 
-    // ⚡ Bolt: A sorted `Vec` combined with `chunk_by` is used instead of a `BTreeMap` to avoid
-    // tree balancing and allocation overhead on the evaluation hot path. The secondary sort by
-    // original index preserves the input order of the children as expected by race/parallel evaluation.
+    // Sort by branch, then original position to retain each branch's input order.
     let mut flat: Vec<(i16, usize, &'a ExecutionNode)> = children
         .iter()
         .enumerate()
@@ -1881,8 +1878,6 @@ pub async fn cancel_subtree(
     // per popped node is O(n²) on deep chains (large ForEach / nested
     // Parallel), and this runs on the cancellation hot path.
     // We build a sorted Vec instead of a HashMap to avoid allocation overhead.
-    // ⚡ Bolt: Replace `.filter_map().collect()` with a manual loop and `Vec::with_capacity`
-    // to avoid multiple reallocation overheads when collecting an unknown-sized iterator.
     let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = Vec::with_capacity(tree.len());
     for n in tree {
         if let Some(p) = n.parent_id {
@@ -1948,8 +1943,6 @@ pub async fn reset_subtree_to_pending(
 ) -> Result<(), EngineError> {
     // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
     // full tree scans on every popped parent during deep traversals.
-    // ⚡ Bolt: Replace `.filter_map().collect()` with a manual loop and `Vec::with_capacity`
-    // to avoid multiple reallocation overheads when collecting an unknown-sized iterator.
     let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = Vec::with_capacity(tree.len());
     for n in tree {
         if let Some(p) = n.parent_id {
@@ -2073,8 +2066,6 @@ pub async fn skip_subtrees(
         return Ok(());
     }
 
-    // ⚡ Bolt: Replace `.filter_map().collect()` with a manual loop and `Vec::with_capacity`
-    // to avoid multiple reallocation overheads when collecting an unknown-sized iterator.
     let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = Vec::with_capacity(tree.len());
     for n in tree {
         if let Some(parent) = n.parent_id {
@@ -2254,8 +2245,6 @@ pub async fn settle_live_descendants(
 ) -> Result<(), EngineError> {
     // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
     // full tree scans on every popped parent during deep traversals.
-    // ⚡ Bolt: Replace `.filter_map().collect()` with a manual loop and `Vec::with_capacity`
-    // to avoid multiple reallocation overheads when collecting an unknown-sized iterator.
     let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = Vec::with_capacity(tree.len());
     for n in tree {
         if let Some(p) = n.parent_id {
