@@ -302,7 +302,11 @@ fn run_happy_path(backend: &Backend, auth: Auth) {
     );
     assert_eq!(calls_of(&calls, "prepare"), 1, "{backend}");
     assert_eq!(calls_of(&calls, "finish"), 1, "{backend}");
-    let stats = device.phone.engine.worker_stats();
+    // Cloud completion can precede the phone processing its outcome acknowledgement.
+    let stats = wait_for("the phone outcome acknowledgement", LONG, || {
+        let stats = device.phone.engine.worker_stats();
+        (stats.completed > 0 || stats.lost > 0).then_some(stats)
+    });
     assert_eq!(
         (stats.claimed, stats.completed, stats.lost),
         (1, 1, 0),
