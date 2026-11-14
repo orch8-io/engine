@@ -578,11 +578,14 @@ impl Modify for EmbedSecurity {
         crate::queue_dispatch::list_dispatch,
         crate::queue_dispatch::delete_dispatch,
         // Workers
+        crate::workers::identity::read,
         crate::workers::poll_tasks,
         crate::workers::poll_tasks_from_queue,
         crate::workers::complete_task,
         crate::workers::reconciliation::reconcile_completion,
         crate::workers::upload_task_artifact,
+        crate::workers::definition::read,
+        crate::workers::input::read,
         crate::workers::fail_task,
         crate::workers::heartbeat_task,
         crate::workers::release_task,
@@ -701,6 +704,10 @@ impl Modify for EmbedSecurity {
         crate::continuity::product_api::validate_commercial_plan,
     ),
     components(schemas(
+        orch8_types::delegation_definition::wire::DefinitionWireEnvelope,
+        orch8_types::delegation_definition::wire::DefinitionReadScope,
+        orch8_types::delegation_definition::wire::DefinitionBundleReference,
+        orch8_types::delegation_definition::wire::DefinitionPayloadEncoding,
         crate::continuity::CreateCompensationRequest,
         orch8_types::continuity_advanced::CompensationRunRecord,
         // Findings & preflight

@@ -63,6 +63,7 @@ fn placed_step(id: &str, handler: &str, placement: Placement) -> BlockDefinition
 fn caps(handler: &str, runtime_labels: BTreeMap<String, String>) -> RuntimeCapabilities {
     let now = Utc::now();
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: RuntimeId::new(),
         kind: RuntimeKind::Server,
         trust: RuntimeTrustLevel::Registered,

@@ -1,3 +1,6 @@
+pub(crate) mod definition;
+pub(crate) mod identity;
+pub(crate) mod input;
 pub(crate) mod reconciliation;
 
 use axum::extract::{Path, Query, Request, State};
@@ -37,6 +40,8 @@ pub(crate) struct PollTasksResponse {
 pub(crate) struct ClaimedWorkerTask {
     #[serde(flatten)]
     task: orch8_types::worker::WorkerTask,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delegation: Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
     /// `$runtime.runtime_id`: the only node allowed to claim (mailbox).
     #[serde(skip_serializing_if = "Option::is_none")]
     target_runtime_id: Option<orch8_types::continuity::RuntimeId>,
@@ -72,10 +77,19 @@ async fn note_placed_claims(state: &AppState, tasks: &[orch8_types::worker::Work
     }
 }
 
-fn poll_response(state: &AppState, tasks: Vec<orch8_types::worker::WorkerTask>) -> Response {
+fn poll_response(
+    state: &AppState,
+    batch: orch8_storage::worker_claim::WorkerClaimBatch,
+) -> Response {
+    let (tasks, contexts) = batch.into_parts();
+    let mut contexts = contexts
+        .into_iter()
+        .map(|context| (context.scope.task_id, context))
+        .collect::<std::collections::HashMap<_, _>>();
     let tasks: Vec<_> = prepare_claimed_tasks(state, tasks)
         .into_iter()
         .map(|task| ClaimedWorkerTask {
+            delegation: contexts.remove(&task.id),
             target_runtime_id: task.requirements.runtime_id,
             runtime_kinds: task.requirements.runtime_kinds.clone(),
             task,
@@ -99,11 +113,17 @@ fn poll_response(state: &AppState, tasks: Vec<orch8_types::worker::WorkerTask>) 
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/workers/identity",
+            post(identity::read).layer(axum::extract::DefaultBodyLimit::max(4096)),
+        )
         .route("/workers", get(list_workers))
         .route("/handlers", get(list_handlers))
         .route("/workers/tasks", get(list_tasks))
         .route("/workers/tasks/stats", get(task_stats))
         .route("/workers/tasks/{id}/attempts", get(list_task_attempts))
+        .route("/workers/tasks/{id}/definition", get(definition::read))
+        .route("/workers/tasks/{id}/input", get(input::read))
         .route("/workers/tasks/poll", post(poll_tasks))
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
@@ -601,6 +621,7 @@ fn bind_poll_identity(
             capabilities
         }
         None => RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: binding.runtime_id,
             kind: binding.kind,
             trust: RuntimeTrustLevel::Registered,
@@ -710,7 +731,10 @@ pub(crate) async fn poll_tasks(
             scoped.as_ref(),
         )
         .await;
-        return Ok(poll_response(&state, Vec::new()));
+        return Ok(poll_response(
+            &state,
+            orch8_storage::worker_claim::WorkerClaimBatch::empty(),
+        ));
     }
 
     // When a tenant is scoped, route through the tenant-aware claim so
@@ -731,7 +755,7 @@ pub(crate) async fn poll_tasks(
     .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
     let tasks = state
         .storage
-        .claim_worker_tasks_with_authority(&request)
+        .claim_worker_tasks_with_transport(&request)
         .await
         .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
 
@@ -744,7 +768,7 @@ pub(crate) async fn poll_tasks(
         scoped.as_ref(),
     )
     .await;
-    note_placed_claims(&state, &tasks).await;
+    note_placed_claims(&state, tasks.tasks()).await;
 
     Ok(poll_response(&state, tasks))
 }
@@ -811,7 +835,10 @@ pub(crate) async fn poll_tasks_from_queue(
             scoped.as_ref(),
         )
         .await;
-        return Ok(poll_response(&state, Vec::new()));
+        return Ok(poll_response(
+            &state,
+            orch8_storage::worker_claim::WorkerClaimBatch::empty(),
+        ));
     }
 
     let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
@@ -826,7 +853,7 @@ pub(crate) async fn poll_tasks_from_queue(
     .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
     let tasks = state
         .storage
-        .claim_worker_tasks_with_authority(&request)
+        .claim_worker_tasks_with_transport(&request)
         .await
         .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
 
@@ -839,7 +866,7 @@ pub(crate) async fn poll_tasks_from_queue(
         scoped.as_ref(),
     )
     .await;
-    note_placed_claims(&state, &tasks).await;
+    note_placed_claims(&state, tasks.tasks()).await;
 
     Ok(poll_response(&state, tasks))
 }

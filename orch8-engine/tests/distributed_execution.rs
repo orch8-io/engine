@@ -112,6 +112,7 @@ async fn receipt_state(storage: &Arc<dyn StorageBackend>, task: &WorkerTask) -> 
 fn browser_caps(runtime_id: RuntimeId, handler: &str) -> RuntimeCapabilities {
     let now = Utc::now();
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id,
         kind: RuntimeKind::Browser,
         trust: RuntimeTrustLevel::Registered,
@@ -1200,11 +1201,163 @@ fn delegation_for(
     }
 }
 
+fn delegation_destination() -> RuntimeCapabilities {
+    use orch8_types::delegation_definition::{
+        DefinitionGraphLimits,
+        input::{MAX_INPUT_EXPANDED_BYTES, MAX_INPUT_PAYLOAD_BYTES},
+        protocol::DelegationProtocolCapabilities,
+    };
+
+    let mut caps = caps_of(
+        RuntimeKind::Desktop,
+        orch8_engine::delegation::DELEGATION_HANDLER,
+    );
+    caps.delegation_protocol = Some(
+        DelegationProtocolCapabilities::v1(
+            DefinitionGraphLimits {
+                definitions: 1,
+                selectors: 0,
+                ..Default::default()
+            },
+            MAX_INPUT_PAYLOAD_BYTES,
+            MAX_INPUT_EXPANDED_BYTES,
+        )
+        .unwrap(),
+    );
+    caps
+}
+
+// Exercise the same certified storage transaction as the API. The legacy
+// enqueue helper intentionally cannot authorize a protocol-ready claim.
+async fn publish_delegation_fixture(
+    storage: &Arc<dyn StorageBackend>,
+    parent: &orch8_types::instance::TaskInstance,
+    owner: &orch8_types::continuity::ContinuityExecution,
+    delegation: &orch8_types::continuity_advanced::DeviceDelegation,
+    destination: &RuntimeCapabilities,
+    input: serde_json::Value,
+    proxy: bool,
+) -> WorkerTask {
+    use orch8_storage::delegation_publication::{
+        DelegationPlan, DelegationPublishIntent, DelegationPublishResult, DelegationRequest,
+        mailbox_task, proxy_instance, proxy_owner,
+    };
+    use orch8_types::continuity::{
+        ContinuationGrant, ContinuationGrantState, EffectId, EffectReceipt, GrantAction,
+    };
+    let now = Utc::now();
+    let sequence = storage
+        .get_sequence(delegation.sub_sequence_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut source = caps_of(RuntimeKind::Mobile, "source");
+    source.runtime_id = owner.owner_runtime_id;
+    let mut destination = destination.clone();
+    destination.handlers.extend(sequence.handler_names());
+    for caps in [&source, &destination] {
+        storage
+            .upsert_runtime_capabilities(&parent.tenant_id, caps)
+            .await
+            .unwrap();
+    }
+    let grant = ContinuationGrant {
+        id: delegation.grant_id,
+        tenant_id: delegation.tenant_id.clone(),
+        continuity_id: owner.continuity_id,
+        expected_epoch: owner.epoch,
+        destination_runtime_id: destination.runtime_id,
+        subject: None,
+        allowed_actions: vec![GrantAction::Accept],
+        nonce_sha256: "a".repeat(64),
+        state: ContinuationGrantState::Active,
+        issued_at: now,
+        expires_at: delegation.expires_at,
+        consumed_at: None,
+        signing_key_id: "test".into(),
+    };
+    storage.create_continuation_grant(&grant).await.unwrap();
+    let request = DelegationRequest {
+        delegation: delegation.clone(),
+        nonce_sha256: grant.nonce_sha256.clone(),
+        grant,
+        input,
+        step: None,
+        actor: orch8_storage::worker_claim::WorkerClaimPrincipal::Root {},
+        authority_expires_at: None,
+    };
+    let parent = if proxy {
+        proxy_instance(owner, delegation, &sequence, None, now)
+    } else {
+        parent.clone()
+    };
+    let task_owner = if proxy {
+        proxy_owner(&parent.tenant_id, parent.id, now)
+    } else {
+        owner.clone()
+    };
+    let effect_id = EffectId::new();
+    let task = mailbox_task(
+        &parent,
+        delegation,
+        &sequence,
+        &request.input,
+        effect_id,
+        task_owner.epoch,
+        now,
+    );
+    let proof = orch8_storage::worker_admission::dispatch_effect(&task, effect_id);
+    let effect = EffectReceipt {
+        id: effect_id,
+        tenant_id: parent.tenant_id.clone(),
+        continuity_id: task_owner.continuity_id,
+        epoch: task_owner.epoch,
+        instance_id: parent.id,
+        block_id: task.block_id.clone(),
+        kind: proof.kind,
+        state: EffectState::Planned,
+        destination_fingerprint: proof.destination_fingerprint,
+        idempotency_key: None,
+        request_sha256: proof.request_sha256,
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at: now,
+        updated_at: now,
+    };
+    let previous = storage
+        .get_provenance_head(&owner.tenant_id, owner.continuity_id)
+        .await
+        .unwrap()
+        .map(|e| e.entry_sha256);
+    let entry = orch8_engine::continuity::build_provenance_entry(
+        owner,
+        "device_delegation",
+        request.request_sha256().unwrap(),
+        previous,
+        now,
+    );
+    let intent = DelegationPublishIntent::new(DelegationPlan {
+        request,
+        parent_owner: owner.clone(),
+        task_owner,
+        parent,
+        proxy,
+        sequence,
+        task: task.clone(),
+        effect,
+        entry,
+    })
+    .unwrap();
+    assert!(matches!(
+        storage.publish_delegation(&intent).await.unwrap(),
+        DelegationPublishResult::Published(_)
+    ));
+    task
+}
+
 #[tokio::test]
 async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
-    use orch8_engine::delegation::{
-        DELEGATION_HANDLER, enqueue_delegation_task, integrate_delegation_outcome,
-    };
+    use orch8_engine::delegation::{DELEGATION_HANDLER, integrate_delegation_outcome};
     for test_backend in backends().await {
         let (backend, storage) = (test_backend.name(), Arc::clone(&test_backend.storage));
         let handler = unique_handler("ext.parent");
@@ -1214,7 +1367,7 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
             .await
             .unwrap()
             .unwrap();
-        let destination = caps_of(RuntimeKind::Desktop, DELEGATION_HANDLER);
+        let destination = delegation_destination();
         let delegation = delegation_for(
             &parent,
             &execution,
@@ -1222,15 +1375,16 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
             seq.id,
             chrono::Duration::minutes(5),
         );
-        let task = enqueue_delegation_task(
-            storage.as_ref(),
+        let task = publish_delegation_fixture(
+            &storage,
             &parent,
+            &execution,
             &delegation,
-            &seq,
+            &destination,
             json!({"photo": "p1"}),
+            false,
         )
-        .await
-        .unwrap();
+        .await;
         assert_eq!(
             task.requirements.runtime_id,
             Some(destination.runtime_id),
@@ -1275,6 +1429,9 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
             .into_iter()
             .find(|t| t.id == task.id)
             .expect("destination claims its mailbox task");
+        // Transport claims redact frozen payloads; integration runs server-side
+        // against the retained task, after the claim has been fenced.
+        let claimed = storage.get_worker_task(claimed.id).await.unwrap().unwrap();
 
         let output = json!({"labels": ["cat"]});
         assert!(
@@ -1317,8 +1474,8 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
 #[tokio::test]
 async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
     use orch8_engine::delegation::{
-        DELEGATION_HANDLER, enqueue_delegation_task, ensure_delegation_proxy,
-        integrate_delegation_outcome, is_delegation_proxy, resume_local_parent,
+        DELEGATION_HANDLER, ensure_delegation_proxy, integrate_delegation_outcome,
+        is_delegation_proxy, resume_local_parent,
     };
     use orch8_types::worker::WorkerClaim;
     for test_backend in backends().await {
@@ -1339,7 +1496,7 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             .create_continuity_execution(&execution)
             .await
             .unwrap();
-        let destination = caps_of(RuntimeKind::Desktop, DELEGATION_HANDLER);
+        let destination = delegation_destination();
         let delegation = delegation_for(
             &phone_parent,
             &execution,
@@ -1347,6 +1504,16 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             seq.id,
             chrono::Duration::minutes(5),
         );
+        let task = publish_delegation_fixture(
+            &storage,
+            &phone_parent,
+            &execution,
+            &delegation,
+            &destination,
+            json!({}),
+            true,
+        )
+        .await;
         let proxy = ensure_delegation_proxy(storage.as_ref(), &execution, &delegation, &seq)
             .await
             .unwrap();
@@ -1357,9 +1524,6 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             .await
             .unwrap();
         assert_eq!(again.id, proxy.id, "{backend}: a retried claim reuses it");
-        let task = enqueue_delegation_task(storage.as_ref(), &again, &delegation, &seq, json!({}))
-            .await
-            .unwrap();
         let claimed = storage
             .claim_worker_tasks_matching(
                 DELEGATION_HANDLER,
@@ -1374,6 +1538,9 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             .into_iter()
             .find(|t| t.id == task.id)
             .expect("destination claims the proxy's mailbox task");
+        // Transport claims redact frozen payloads; integration runs server-side
+        // against the retained task, after the claim has been fenced.
+        let claimed = storage.get_worker_task(claimed.id).await.unwrap().unwrap();
         let output = json!({"labels": ["cat"]});
         assert!(
             storage

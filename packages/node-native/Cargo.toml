@@ -23,3 +23,7 @@ napi-build = "2"
 # invisible to cargo-machete.
 [package.metadata.cargo-machete]
 ignored = ["chrono", "tokio"]
+
+# Keep native/fuzz SQLite aligned with the root security patch.
+[patch.crates-io]
+sqlx-sqlite = { path = "../../vendor/sqlx-sqlite" }

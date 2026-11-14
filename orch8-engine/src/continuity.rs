@@ -728,6 +728,7 @@ mod tests {
                 ..CapsuleRequirements::default()
             },
             &RuntimeCapabilities {
+                delegation_protocol: None,
                 runtime_id: RuntimeId::new(),
                 kind: RuntimeKind::Mobile,
                 trust: RuntimeTrustLevel::Registered,
@@ -762,6 +763,7 @@ mod tests {
     fn compatibility_requires_declared_credential_bindings() {
         let now = Utc::now();
         let capabilities = RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind: RuntimeKind::Server,
             trust: RuntimeTrustLevel::Registered,

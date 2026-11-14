@@ -115,6 +115,7 @@ impl ExecutorIdentity {
         let now = chrono::Utc::now();
         let ttl = chrono::Duration::from_std(CAPABILITY_TTL).unwrap_or(chrono::Duration::MAX);
         RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: self.runtime_id,
             kind: RuntimeKind::Server,
             trust: RuntimeTrustLevel::Registered,

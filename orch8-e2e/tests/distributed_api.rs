@@ -1097,8 +1097,32 @@ fn run_device_session_scope(cloud: &Cloud, backend: &Backend) {
             ],
         ),
     ] {
-        let (status, body) = cloud.root("POST", "/runtimes/register",
-            Some(&json!({"tenant_id": tenant, "capabilities": runtime_caps(runtime, kind, &handlers)})));
+        let mut capabilities = runtime_caps(runtime, kind, &handlers);
+        if kind == "desktop" {
+            use orch8_types::delegation_definition::{
+                DefinitionGraphLimits,
+                input::{MAX_INPUT_EXPANDED_BYTES, MAX_INPUT_PAYLOAD_BYTES},
+                protocol::DelegationProtocolCapabilities,
+            };
+            capabilities["delegation_protocol"] = serde_json::to_value(
+                DelegationProtocolCapabilities::v1(
+                    DefinitionGraphLimits {
+                        definitions: 1,
+                        selectors: 0,
+                        ..Default::default()
+                    },
+                    MAX_INPUT_PAYLOAD_BYTES,
+                    MAX_INPUT_EXPANDED_BYTES,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let (status, body) = cloud.root(
+            "POST",
+            "/runtimes/register",
+            Some(&json!({"tenant_id": tenant, "capabilities": capabilities})),
+        );
         assert_eq!(status, 201, "{backend}: {body}");
     }
     let sub_sequence = cloud.create_sequence(

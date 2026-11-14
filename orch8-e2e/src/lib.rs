@@ -1740,8 +1740,15 @@ pub struct Desktop {
     key: String,
     http: reqwest::Client,
     pub engine: orch8::Engine,
-    /// Sub-sequence runs executed locally (delegation id → local instance).
+    /// Sub-sequence runs executed locally (mailbox task id → local instance).
     pub runs: Mutex<Vec<(String, orch8_types::ids::InstanceId)>>,
+}
+
+/// A fixture-only desktop run prepared from independently issued wire references.
+pub struct PreparedDesktopDelegation {
+    task_id: String,
+    definition: orch8_types::sequence::SequenceDefinition,
+    input: Value,
 }
 
 /// Outcome of one lease call as the desktop saw it.
@@ -1785,6 +1792,11 @@ impl Desktop {
         json!({
             "runtime_id": self.runtime_id, "kind": "desktop", "trust": "registered",
             "handlers": all, "offline_capable": true, "connectivity": "ethernet",
+            "delegation_protocol": orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities::v1(
+                Self::definition_limits(),
+                orch8_types::delegation_definition::input::MAX_INPUT_PAYLOAD_BYTES,
+                orch8_types::delegation_definition::input::MAX_INPUT_EXPANDED_BYTES,
+            ).expect("desktop fixture protocol"),
             "observed_at": now.to_rfc3339(),
             "expires_at": (now + chrono::Duration::seconds(240)).to_rfc3339(),
         })
@@ -1877,18 +1889,81 @@ impl Desktop {
         }
     }
 
-    /// Run a delegated sub-sequence (its definition, fetched earlier)
-    /// locally with the delegation's explicit input, and wait for a terminal
-    /// state. Needs no network. Returns the output to report.
-    pub async fn run_delegation(&self, sequence: Value, task: &Value) -> Value {
-        let definition: orch8_types::sequence::SequenceDefinition =
-            serde_json::from_value(sequence).expect("sub-sequence");
+    fn definition_limits() -> orch8_types::delegation_definition::DefinitionGraphLimits {
+        // These desktop scenarios execute one root, without child selectors.
+        orch8_types::delegation_definition::DefinitionGraphLimits {
+            definitions: 1,
+            selectors: 0,
+            ..Default::default()
+        }
+    }
+
+    /// Download and verify the exact issued definition and input before going offline.
+    pub async fn prepare_delegation(&self, base: &str, task: &Value) -> PreparedDesktopDelegation {
+        use orch8_types::delegation_definition::{
+            input::{DelegationInputEnvelope, InputLimits},
+            wire::DefinitionWireEnvelope,
+        };
+        let task: orch8_engine::remote_worker::RemoteTask =
+            serde_json::from_value(task.clone()).expect("claimed desktop task");
+        task.validate_delegation(&self.runtime_id.to_string())
+            .expect("desktop claim identity");
+        let context = task.delegation.expect("issued delegation context");
+        let query = format!(
+            "worker_id={}&claim_epoch={}",
+            self.runtime_id, context.scope.claim_epoch
+        );
+        let (status, definition) = self
+            .get(
+                base,
+                &format!("/workers/tasks/{}/definition?{query}", task.id),
+            )
+            .await
+            .expect("download frozen definition");
+        assert_eq!(status, StatusCode::OK, "{definition}");
+        let envelope: DefinitionWireEnvelope =
+            serde_json::from_value(definition).expect("definition envelope");
+        let verified = envelope
+            .verify(
+                &context.scope,
+                &context.definition,
+                Self::definition_limits(),
+            )
+            .expect("issued frozen definition identity");
+        let (status, input) = self
+            .get(base, &format!("/workers/tasks/{}/input?{query}", task.id))
+            .await
+            .expect("download frozen input");
+        assert_eq!(status, StatusCode::OK, "{input}");
+        let envelope: DelegationInputEnvelope =
+            serde_json::from_value(input).expect("input envelope");
+        let input = envelope
+            .verify(
+                &context.scope,
+                &context.request_sha256,
+                &context.input,
+                InputLimits::default(),
+            )
+            .expect("issued frozen input identity");
+        PreparedDesktopDelegation {
+            task_id: task.id.to_string(),
+            definition: verified.root().definition.clone(),
+            input: input.into_value(),
+        }
+    }
+
+    /// Run the fixture's verified root with its verified input, without a network.
+    pub async fn run_delegation(&self, prepared: PreparedDesktopDelegation) -> Value {
+        let PreparedDesktopDelegation {
+            task_id,
+            definition,
+            input,
+        } = prepared;
         let sequence_id = self
             .engine
             .upsert_sequence(definition)
             .await
             .expect("upsert sub-sequence");
-        let input = task["params"]["input"].clone();
         let local = self
             .engine
             .create_instance(
@@ -1903,13 +1978,7 @@ impl Desktop {
             )
             .await
             .expect("start sub-sequence");
-        self.runs.lock().expect("runs").push((
-            task["params"]["delegation_id"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned(),
-            local,
-        ));
+        self.runs.lock().expect("runs").push((task_id, local));
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let instance = self

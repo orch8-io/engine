@@ -108,6 +108,15 @@ async fn frozen(b: TestBackend, retired: bool) {
         vec![healthy.id],
         "frozen source consumed the recovery window"
     );
+    let batch = b
+        .storage
+        .held_worker_tasks_with_transport(&lookup, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        batch.tasks().iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![healthy.id]
+    );
     assert_eq!(
         serde_json::to_value(
             b.storage

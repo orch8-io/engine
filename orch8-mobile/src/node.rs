@@ -36,6 +36,9 @@ use orch8_engine::remote_worker::{
 use crate::credential::{Credential, CredentialSnapshot};
 use crate::error::MobileError;
 
+mod claim_payloads;
+pub(crate) mod scoped_payloads;
+
 /// Lifetime of one capability advertisement. The server caps it at five
 /// minutes; stay a little under so clock skew never makes it invalid.
 pub(crate) const CAPABILITY_TTL: Duration = Duration::from_secs(290);
@@ -336,6 +339,7 @@ impl NodeClient {
             hardware.push(device_fact);
         }
         RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: self.runtime_id,
             kind: RuntimeKind::Mobile,
             trust: RuntimeTrustLevel::Registered,
@@ -646,6 +650,10 @@ mod tests {
         let c = client();
         let caps = c.capabilities();
         assert_eq!(caps.kind, RuntimeKind::Mobile);
+        assert!(
+            caps.delegation_protocol.is_none(),
+            "the execution bridge is not activated"
+        );
         assert_eq!(caps.trust, RuntimeTrustLevel::Registered);
         assert_eq!(caps.handlers, vec!["scan".to_string()]);
         assert!(caps.hardware.contains(&"device:dev-1".to_string()));

@@ -7,6 +7,7 @@ WORKDIR /app
 
 # Copy manifests first for layer caching.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 COPY orch8/Cargo.toml orch8/Cargo.toml
 COPY orch8-types/Cargo.toml orch8-types/Cargo.toml
 COPY orch8-storage/Cargo.toml orch8-storage/Cargo.toml

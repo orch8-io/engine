@@ -168,19 +168,12 @@ impl DesktopNode {
             .block_on(self.desktop.lease_call(&self.base(), task, verb, extra))
     }
 
-    /// Fetch the task's sub-sequence and run it on the desktop's engine.
+    /// Verify the issued frozen payloads and run the root on the desktop's engine.
     fn run(&self, task: &Value) -> Value {
-        let sequence_id = task["params"]["sub_sequence_id"].as_str().unwrap();
-        let (status, sequence) = self
+        let prepared = self
             .rt
-            .block_on(
-                self.desktop
-                    .get(&self.base(), &format!("/sequences/{sequence_id}")),
-            )
-            .unwrap();
-        assert_eq!(status, 200, "{sequence}");
-        self.rt
-            .block_on(self.desktop.run_delegation(sequence, task))
+            .block_on(self.desktop.prepare_delegation(&self.base(), task));
+        self.rt.block_on(self.desktop.run_delegation(prepared))
     }
 
     /// Claim, run and report the next mailbox task (no fault injection).
@@ -471,21 +464,14 @@ fn run_disconnects(backend: &Backend) {
     );
     desktop.link.set_online(true);
     let output = {
-        // The sub-sequence was fetched while online; run it offline.
-        let sequence_id = task["params"]["sub_sequence_id"].as_str().unwrap();
-        let (status, sequence) = desktop
+        // Both payloads are fetched and verified while online, then run offline.
+        let prepared = desktop
             .rt
-            .block_on(
-                desktop
-                    .desktop
-                    .get(&desktop.base(), &format!("/sequences/{sequence_id}")),
-            )
-            .unwrap();
-        assert_eq!(status, 200);
+            .block_on(desktop.desktop.prepare_delegation(&desktop.base(), &task));
         desktop.link.set_online(false);
         desktop
             .rt
-            .block_on(desktop.desktop.run_delegation(sequence, &task))
+            .block_on(desktop.desktop.run_delegation(prepared))
     };
     desktop.link.set_online(true);
     assert_eq!(
@@ -623,7 +609,7 @@ fn run_kills(backend: &Backend) {
 
     // The desktop claims, runs and reports while the app is dead.
     let task = desktop.serve_one();
-    assert_eq!(task["params"]["delegation_id"], delegation_id, "{backend}");
+    assert_eq!(task["instance_id"], delegation_id, "{backend}");
     wait_server_delegation_completed(&cloud, &delegation_id);
 
     // Launch 3: the parked step resumes from the journal, exactly once.

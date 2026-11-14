@@ -12,6 +12,8 @@ use orch8_types::{
 
 /// Shared with the SDK's context-free projections. The trusted SQL alias is `i`.
 pub const LEGACY_MOBILE_OWNER_SQL: &str = "i.tenant_id = 'mobile'
+ AND NOT EXISTS (SELECT 1 FROM mobile_remote_run_materializations m WHERE m.instance_id=i.id)
+ AND NOT EXISTS (SELECT 1 FROM mobile_remote_run_bindings b WHERE b.local_run_id=i.id)
  AND NOT EXISTS (SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=i.id)
  AND NOT EXISTS (SELECT 1 FROM mobile_catalog_run_materializations m WHERE m.request_id=i.id)";
 
@@ -82,7 +84,7 @@ pub(super) async fn permits_capsule(
         selection(access, id, "i.id", true)
     } else {
         let mut query = sqlx::QueryBuilder::new("SELECT i.id FROM task_instances i WHERE i.id=");
-        query.push_bind(id.to_string()).push(" AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_materializations m WHERE m.request_id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_accounts a WHERE a.id=substr(i.tenant_id,16) AND i.tenant_id='mobile-account-' || a.id)");
+        query.push_bind(id.to_string()).push(" AND NOT EXISTS(SELECT 1 FROM mobile_remote_run_materializations m WHERE m.instance_id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_remote_run_bindings b WHERE b.local_run_id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_catalog_run_materializations m WHERE m.request_id=i.id) AND NOT EXISTS(SELECT 1 FROM mobile_accounts a WHERE a.id=substr(i.tenant_id,16) AND i.tenant_id='mobile-account-' || a.id)");
         query
     };
     query.push(" AND i.tenant_id=").push_bind(tenant.as_str());

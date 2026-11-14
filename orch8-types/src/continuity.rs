@@ -226,6 +226,11 @@ pub enum RuntimeConnectivity {
 /// Bounded facts used by compatibility and placement decisions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct RuntimeCapabilities {
+    /// Explicit opt-in to the frozen definition/input protocol, separate from
+    /// handler support and from permission to execute provider effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_protocol:
+        Option<crate::delegation_definition::protocol::DelegationProtocolCapabilities>,
     pub runtime_id: RuntimeId,
     pub kind: RuntimeKind,
     pub trust: RuntimeTrustLevel,
@@ -1071,6 +1076,7 @@ mod tests {
 
     fn browser_runtime(now: DateTime<Utc>) -> RuntimeCapabilities {
         RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind: RuntimeKind::Browser,
             trust: RuntimeTrustLevel::Registered,
@@ -1352,6 +1358,7 @@ mod placement_requirement_tests {
 
     fn runtime(kind: RuntimeKind, now: DateTime<Utc>) -> RuntimeCapabilities {
         RuntimeCapabilities {
+            delegation_protocol: None,
             runtime_id: RuntimeId::new(),
             kind,
             trust: RuntimeTrustLevel::Registered,

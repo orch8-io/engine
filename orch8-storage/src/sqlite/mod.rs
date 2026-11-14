@@ -45,6 +45,10 @@ mod cluster;
 mod continuity;
 mod credentials;
 mod cron;
+mod delegation_claim_contexts;
+mod delegation_claims;
+mod delegation_definitions;
+mod delegation_inputs;
 mod delegation_publication;
 mod effect_attempt;
 mod effect_dispatch;
@@ -670,6 +674,12 @@ impl SqliteStorage {
         sqlx::query("UPDATE task_instances SET state=CASE WHEN state='running' OR EXISTS(SELECT 1 FROM delegation_proxy_native_history history WHERE history.instance_id=task_instances.id) THEN 'paused' ELSE 'waiting' END,claimed_at=NULL,next_fire_at=NULL,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state IN ('running','scheduled') AND EXISTS(SELECT 1 FROM delegation_proxy_instances relay WHERE relay.instance_id=task_instances.id)")
             .execute(&mut *retirement).await?;
         sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(73)")
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(include_str!("delegation_definitions.sql"))
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(74)")
             .execute(&mut *retirement)
             .await?;
         let reconciliation_schema: bool =
@@ -2186,6 +2196,14 @@ impl crate::WorkerStore for SqliteStorage {
         &self,
         request: &crate::worker_claim::WorkerClaimRequest,
     ) -> Result<Vec<WorkerTask>, StorageError> {
+        self.claim_worker_tasks_with_transport(request)
+            .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
+    }
+    async fn claim_worker_tasks_with_transport(
+        &self,
+        request: &crate::worker_claim::WorkerClaimRequest,
+    ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
         request.validate()?;
         let principal = Some(&request.principal);
         if let Some(capabilities) = &request.capabilities {
@@ -2249,6 +2267,18 @@ impl crate::WorkerStore for SqliteStorage {
                 .await
             }
         }
+        .and_then(|tasks| crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new()))
+    }
+    async fn get_worker_delegation_context(
+        &self,
+        tenant: &TenantId,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<
+        Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+        StorageError,
+    > {
+        delegation_claim_contexts::get(self, tenant, task_id, claim).await
     }
     async fn get_worker_issued_claim(
         &self,
@@ -2346,6 +2376,7 @@ impl crate::WorkerStore for SqliteStorage {
             limit,
         )
         .await
+        .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn get_worker_accepted_outcome(
@@ -2595,11 +2626,23 @@ impl crate::WorkerStore for SqliteStorage {
         workers::cancel_for_blocks(self, instance_id, block_ids).await
     }
 
+    async fn held_worker_tasks_with_transport(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+        protocol: Option<
+            &orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities,
+        >,
+    ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
+        worker_claim::reconnect(self, request, protocol).await
+    }
+
     async fn held_worker_tasks_for_reporter(
         &self,
         request: &crate::worker_claim::WorkerReconnectRequest,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        worker_claim::reconnect(self, request).await
+        Ok(worker_claim::reconnect(self, request, None)
+            .await?
+            .into_tasks())
     }
 
     async fn list_worker_tasks(

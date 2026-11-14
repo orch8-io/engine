@@ -1,6 +1,7 @@
 //! Durable grant-authorized mailbox publication, distinct from native step admission.
 use crate::worker_claim::WorkerClaimPrincipal;
 use chrono::{DateTime, Utc};
+use orch8_types::delegation_definition::input::{EncodedDelegationInput, InputLimits};
 use orch8_types::{
     continuity::{
         ContinuationGrant, ContinuityExecution, EffectReceipt, EffectState, GrantAction,
@@ -45,6 +46,13 @@ pub struct DelegationRequest {
 }
 impl DelegationRequest {
     pub fn validate(&self) -> Result<(), StorageError> {
+        EncodedDelegationInput::validate_value(&self.input, InputLimits::default()).map_err(
+            |_| {
+                StorageError::Conflict(
+                    "delegation input is invalid or exceeds supported limits".into(),
+                )
+            },
+        )?;
         self.actor.validate()?;
         let d = &self.delegation;
         if self
@@ -196,18 +204,20 @@ pub struct DelegationPublishIntent {
     pub(crate) entry: ProvenanceEntry,
     pub(crate) receipt: DelegationPublication,
     stored_task_sha256: String,
+    pub(crate) input: std::sync::Arc<EncodedDelegationInput>,
+    pub(crate) stored_input: Value,
 }
 pub fn sequence_sha256(sequence: &SequenceDefinition) -> Result<String, StorageError> {
-    let mut value = serde_json::to_value(sequence)?;
-    value
-        .as_object_mut()
-        .ok_or_else(conflict)?
-        .remove("created_at");
-    digest(&value)
+    orch8_types::delegation_definition::sequence_sha256(sequence)
 }
 impl DelegationPublishIntent {
     pub fn new(plan: DelegationPlan) -> Result<Self, StorageError> {
         plan.request.validate()?;
+        let input = std::sync::Arc::new(EncodedDelegationInput::from_value(
+            &plan.request.input,
+            InputLimits::default(),
+        )?);
+        let stored_input = Value::String(input.payload_base64());
         let d = &plan.request.delegation;
         let owner = &plan.parent_owner;
         let task = &plan.task;
@@ -288,6 +298,8 @@ impl DelegationPublishIntent {
             entry: plan.entry,
             receipt,
             stored_task_sha256,
+            input,
+            stored_input,
         })
     }
     pub(crate) fn validate_stored(&self) -> Result<(), StorageError> {
@@ -303,6 +315,7 @@ impl DelegationPublishIntent {
         mut self,
         task: WorkerTask,
         parent: TaskInstance,
+        stored_input: Value,
     ) -> Result<Self, StorageError> {
         let mut expected_task = self.task.clone();
         expected_task.params = task.params.clone();
@@ -317,6 +330,7 @@ impl DelegationPublishIntent {
         self.receipt.stored_spec_sha256 = crate::worker_admission::task_spec(&task);
         self.task = task;
         self.parent = parent;
+        self.stored_input = stored_input;
         self.stored_task_sha256 = digest(&self.task)?;
         Ok(self)
     }

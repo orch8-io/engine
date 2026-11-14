@@ -19,6 +19,7 @@ pub mod contract;
 pub mod credential;
 pub mod cron;
 pub mod dedupe;
+pub mod delegation_definition;
 pub mod diagnosis;
 pub mod dlq;
 pub mod encryption;
@@ -287,3 +288,5 @@ mod tests {
         );
     }
 }
+
+pub mod worker_identity;

@@ -14,7 +14,7 @@ use orch8_types::{
     error::StorageError,
     ids::TenantId,
 };
-use sqlx::Row;
+use sqlx::{Connection as _, Row};
 use uuid::Uuid;
 
 pub(super) async fn get(
@@ -49,20 +49,54 @@ pub(super) async fn publish(
     intent: &DelegationPublishIntent,
 ) -> Result<Publication, StorageError> {
     intent.validate_stored()?;
-    let mut tx = store.pool.begin().await?;
-    match on(&mut tx, intent).await {
-        Ok(result @ Publication::Published(_)) => {
-            tx.commit().await?;
-            Ok(result)
+    // Retrying the whole SQL-only transaction is safe: the immutable receipt
+    // handles an already committed publication, including an ambiguous commit.
+    for attempt in 0..3 {
+        let result = publish_once(store, intent).await;
+        if attempt < 2 && result.as_ref().is_err_and(StorageError::is_transient) {
+            continue;
         }
-        Ok(other) => {
-            tx.rollback().await?;
-            Ok(other)
+        return result;
+    }
+    unreachable!("bounded publication retry always returns")
+}
+async fn publish_once(
+    store: &PostgresStorage,
+    intent: &DelegationPublishIntent,
+) -> Result<Publication, StorageError> {
+    let mut locks = super::publication_locks::PublicationLocks::acquire(
+        &store.pool,
+        &intent.request.delegation.tenant_id,
+        vec![intent.parent_owner.current_instance_id, intent.parent.id],
+    )
+    .await?;
+    let result = async {
+        let mut tx = locks.connection().begin().await?;
+        // Select one catalog cut only after namespace waits. Row locks still
+        // fence current authority/ownership; changed rows abort for a retry.
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+        match on(&mut tx, intent).await {
+            Ok(result @ Publication::Published(_)) => {
+                tx.commit().await?;
+                Ok(result)
+            }
+            Ok(other) => {
+                tx.rollback().await?;
+                Ok(other)
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                Err(error)
+            }
         }
-        Err(error) => {
-            tx.rollback().await?;
-            Err(error)
-        }
+    }
+    .await;
+    let released = locks.release().await;
+    match (result, released) {
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(result), Ok(())) => Ok(result),
     }
 }
 async fn clock(conn: &mut sqlx::PgConnection) -> Result<DateTime<Utc>, StorageError> {
@@ -98,12 +132,7 @@ async fn on(
     let d = &intent.request.delegation;
     let tenant = &d.tenant_id;
     let expiry = authority(conn, intent).await?;
-    let mut ids = vec![intent.parent_owner.current_instance_id, intent.parent.id];
-    ids.sort();
-    ids.dedup();
-    for id in ids {
-        super::portable_effects::lock_instance_on(conn, tenant, id).await?;
-    }
+    // Namespace mutexes were acquired before the transaction snapshot.
     // Lock logical ownership before grant/native rows, as handoff and GC do.
     let owner:Option<String>=sqlx::query_scalar("SELECT record::text FROM continuity_executions WHERE tenant_id=$1 AND continuity_id=$2::uuid AND epoch=$3 AND owner_runtime_id=$4::uuid AND state='owned' FOR UPDATE").bind(tenant.as_str()).bind(d.parent_continuity_id.to_string()).bind(i64::try_from(d.parent_epoch.get()).map_err(|_|conflict())?).bind(d.source_runtime_id.to_string()).fetch_optional(&mut *conn).await?;
     let grant=sqlx::query("SELECT record::text AS record,expires_at,nonce_sha256,state,continuity_id::text AS continuity_scope FROM continuation_grants WHERE tenant_id=$1 AND id=$2::uuid FOR UPDATE").bind(tenant.as_str()).bind(d.grant_id.to_string()).fetch_optional(&mut *conn).await?;
@@ -150,6 +179,7 @@ async fn on(
         .find(|caps| caps.runtime_id == d.destination_runtime_id)
         .ok_or_else(conflict)?;
     sequence_on(conn, intent).await?;
+    freeze_definition_on(conn, intent, destination).await?;
     intent.runtimes(source, destination, now)?;
     parent_on(conn, intent).await?;
     effect_on(conn, intent).await?;
@@ -373,4 +403,70 @@ async fn runtime_snapshots(
         .collect::<Result<Vec<_>, StorageError>>()?;
 
     Ok(runtimes)
+}
+
+async fn freeze_definition_on(
+    conn: &mut sqlx::PgConnection,
+    intent: &DelegationPublishIntent,
+    destination: &RuntimeCapabilities,
+) -> Result<(), StorageError> {
+    let frozen = super::delegation_definitions::capture_on(conn, intent)
+        .await
+        .map_err(crate::delegation_definition::publication_error)?;
+    let usage = orch8_types::delegation_definition::protocol::DelegationResourceUsage::from_encoded(
+        frozen.wire(),
+        &intent.input,
+    );
+    if destination
+        .delegation_protocol
+        .is_none_or(|protocol| !protocol.accepts(frozen.wire().reference(), usage))
+        || frozen
+            .handler_names()
+            .iter()
+            .any(|handler| !destination.handlers.contains(handler))
+    {
+        return Err(conflict());
+    }
+    Ok(())
+}
+pub(super) async fn definition(
+    store: &PostgresStorage,
+    tenant: &TenantId,
+    task: Uuid,
+) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    definition_on(&mut conn, tenant, task).await
+}
+async fn definition_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    task: Uuid,
+) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError> {
+    let id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT delegation_id FROM delegation_publications WHERE tenant_id=$1 AND task_id=$2",
+    )
+    .bind(tenant.as_str())
+    .bind(task)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(id) = id else { return Ok(None) };
+    let publication = get_on(conn, tenant, id)
+        .await?
+        .ok_or_else(crate::delegation_definition::invalid)?;
+    if publication.delegation.expires_at <= clock(conn).await? {
+        return Err(crate::delegation_publication::conflict());
+    }
+    let frozen = snapshot_on(conn, tenant, task, &publication).await?;
+    if publication.delegation.expires_at <= clock(conn).await? {
+        return Err(crate::delegation_publication::conflict());
+    }
+    Ok(frozen)
+}
+async fn snapshot_on(
+    conn: &mut sqlx::PgConnection,
+    tenant: &TenantId,
+    task: Uuid,
+    publication: &DelegationPublication,
+) -> Result<Option<crate::delegation_definition::PublishedDelegationDefinition>, StorageError> {
+    super::delegation_definitions::read_on(conn, tenant, task, publication).await
 }

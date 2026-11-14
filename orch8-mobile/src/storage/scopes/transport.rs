@@ -23,7 +23,7 @@ impl CatalogTransport {
     }
 }
 
-fn endpoint(url: &str, insecure: bool) -> Result<(), StorageError> {
+pub(super) fn endpoint(url: &str, insecure: bool) -> Result<(), StorageError> {
     super::validate(url)?;
     let parsed = reqwest::Url::parse(url).map_err(|_| invalid("invalid catalog endpoint"))?;
     if parsed.as_str() != url

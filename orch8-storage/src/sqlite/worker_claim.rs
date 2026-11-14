@@ -13,6 +13,16 @@ pub(super) async fn record_on(
     tasks: &[WorkerTask],
     principal: Option<&WorkerClaimPrincipal>,
 ) -> Result<(), StorageError> {
+    record_with_context_on(conn, tasks, principal)
+        .await
+        .map(|_| ())
+}
+pub(super) async fn record_with_context_on(
+    conn: &mut sqlx::SqliteConnection,
+    tasks: &[WorkerTask],
+    principal: Option<&WorkerClaimPrincipal>,
+) -> Result<Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>, StorageError> {
+    let mut contexts = Vec::new();
     // Bound statement parameters and avoid a read roundtrip per claimed task.
     for batch in tasks.chunks(128) {
         let tasks: std::collections::HashMap<_, _> =
@@ -113,8 +123,17 @@ pub(super) async fn record_on(
                 .push_bind(super::helpers::ts(claim.issued_at));
         });
         insert.build().execute(&mut *conn).await?;
+        for (claim, _, _) in &records {
+            if claim
+                .invocation
+                .as_ref()
+                .is_some_and(crate::worker_invocation::WorkerInvocation::is_published_mailbox)
+            {
+                contexts.push(super::delegation_claim_contexts::capture_on(conn, claim).await?);
+            }
+        }
     }
-    Ok(())
+    Ok(contexts)
 }
 pub(super) async fn get(
     store: &super::SqliteStorage,
@@ -146,13 +165,17 @@ pub(super) async fn get(
 pub(super) async fn reconnect(
     store: &super::SqliteStorage,
     request: &crate::worker_claim::WorkerReconnectRequest,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    protocol: Option<&orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     request.validate()?;
+    if let Some(protocol) = protocol {
+        protocol.validate()?;
+    }
     if request.limit == 0 {
-        return Ok(Vec::new());
+        return Ok(crate::worker_claim::WorkerClaimBatch::empty());
     }
     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT wt.*,ti.tenant_id AS actual_tenant,c.record AS issued_record FROM worker_tasks wt JOIN task_instances ti ON ti.id=wt.instance_id LEFT JOIN worker_issued_claims c ON c.task_id=wt.id AND c.claim_epoch=wt.claim_epoch WHERE wt.state='claimed' AND wt.worker_id=",
+        "SELECT wt.*,ti.tenant_id AS actual_tenant,c.record AS issued_record,CASE WHEN length(CAST(d.record AS BLOB))<=16384 THEN d.record END AS delegation_record FROM worker_tasks wt JOIN task_instances ti ON ti.id=wt.instance_id LEFT JOIN worker_issued_claims c ON c.task_id=wt.id AND c.claim_epoch=wt.claim_epoch LEFT JOIN worker_issued_delegation_contexts d ON d.task_id=c.task_id AND d.claim_epoch=c.claim_epoch AND d.tenant_id=c.tenant_id AND d.worker_id=c.worker_id WHERE wt.state='claimed' AND wt.worker_id=",
     );
     query.push_bind(&request.worker_id);
     if let Some(tenant) = &request.tenant_id {
@@ -185,11 +208,14 @@ pub(super) async fn reconnect(
         .push(") EXCEPT ")
         .push(source)
         .push("))");
+    query.push(")))");
+    super::delegation_claims::append_protocol(&mut query, "wt", protocol);
     query
-        .push("))) ORDER BY wt.created_at,wt.id LIMIT ")
+        .push(" ORDER BY wt.created_at,wt.id LIMIT ")
         .push_bind(i64::from(request.limit));
     let rows = query.build().fetch_all(&store.pool).await?;
     let mut tasks = Vec::with_capacity(rows.len());
+    let mut contexts = Vec::new();
     for row in rows {
         let task = super::helpers::row_to_worker_task(&row)?;
         let tenant = TenantId::unchecked(row.get::<String, _>("actual_tenant"));
@@ -205,9 +231,17 @@ pub(super) async fn reconnect(
                 return Err(invalid());
             }
         }
+        if let Some(context) = crate::worker_claim::reconnect_context(
+            &tenant,
+            &task,
+            row.get::<Option<String>, _>("delegation_record"),
+            protocol,
+        )? {
+            contexts.push(context);
+        }
         tasks.push(task);
     }
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
 }
 
 // Screening a held row is not lease renewal or provider admission.

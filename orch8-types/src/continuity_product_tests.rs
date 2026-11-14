@@ -5,6 +5,7 @@ use super::*;
 fn capabilities(kind: RuntimeKind, trust: RuntimeTrustLevel) -> RuntimeCapabilities {
     let now = Utc::now();
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: RuntimeId::new(),
         kind,
         trust,
@@ -713,4 +714,21 @@ fn profile_names_and_each_commercial_invariant_are_fail_closed() {
     plan.allowed_protocol_majors.clear();
     candidates.push(plan);
     assert!(candidates.into_iter().all(|plan| plan.validate().is_err()));
+}
+
+#[test]
+fn delegation_protocol_advertisement_survives_runtime_roundtrip() {
+    let mut value = serde_json::to_value(capabilities(
+        RuntimeKind::Mobile,
+        RuntimeTrustLevel::Registered,
+    ))
+    .unwrap();
+    let descriptor = serde_json::json!({"version":1,"definition_wire_version":1,"max_definition_payload_bytes":4_194_304,"max_definitions":256,"max_selectors":1024,"max_definition_expanded_bytes":16_777_216,"input_wire_version":1,"max_input_payload_bytes":4_194_304,"max_input_expanded_bytes":16_777_216});
+    value["delegation_protocol"] = descriptor.clone();
+    let decoded: RuntimeCapabilities = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["delegation_protocol"],
+        descriptor,
+        "the runtime advertisement discarded the delegated execution contract"
+    );
 }

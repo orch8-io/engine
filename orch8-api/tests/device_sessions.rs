@@ -244,6 +244,7 @@ fn runtime(
     use orch8_types::continuity::{RuntimeCapabilities, RuntimeConnectivity, RuntimeTrustLevel};
     let now = chrono::Utc::now();
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: orch8_types::continuity::RuntimeId::from_uuid(id),
         kind,
         trust: RuntimeTrustLevel::Attested,
@@ -282,6 +283,7 @@ async fn device_sessions_see_only_live_delegation_destinations_reduced_to_matchi
         let destination = Uuid::now_v7();
         let draining = Uuid::now_v7();
         let no_delegation = Uuid::now_v7();
+        let unready_decoder = Uuid::now_v7();
         let unverified = Uuid::now_v7();
         let expired = Uuid::now_v7();
 
@@ -289,7 +291,16 @@ async fn device_sessions_see_only_live_delegation_destinations_reduced_to_matchi
             runtime(own, RuntimeKind::Mobile, &[DELEGATION, "scan"]),
             runtime(destination, RuntimeKind::Server, &[DELEGATION, "scan"]),
             runtime(no_delegation, RuntimeKind::Server, &["scan"]),
+            runtime(unready_decoder, RuntimeKind::Server, &[DELEGATION, "scan"]),
         ];
+        let protocol =
+            orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities::v1(
+                orch8_types::delegation_definition::DefinitionGraphLimits::default(),
+                4 * 1024 * 1024,
+                16 * 1024 * 1024,
+            )
+            .unwrap();
+        rows[1].delegation_protocol = Some(protocol);
         let mut row = runtime(draining, RuntimeKind::Server, &[DELEGATION, "scan"]);
         row.draining = true;
         rows.push(row);
@@ -344,7 +355,14 @@ async fn device_sessions_see_only_live_delegation_destinations_reduced_to_matchi
             .iter()
             .map(|runtime| runtime["runtime_id"].as_str().unwrap())
             .collect();
-        for id in [own, destination, draining, no_delegation, unverified] {
+        for id in [
+            own,
+            destination,
+            draining,
+            no_delegation,
+            unready_decoder,
+            unverified,
+        ] {
             assert!(ids.contains(&id.to_string().as_str()), "{backend}: {id}");
         }
         assert!(
@@ -374,6 +392,7 @@ async fn device_sessions_see_only_live_delegation_destinations_reduced_to_matchi
         assert_eq!(
             seen,
             json!({
+                "delegation_protocol": protocol,
                 "runtime_id": destination.to_string(),
                 "kind": "server",
                 "trust": "registered",

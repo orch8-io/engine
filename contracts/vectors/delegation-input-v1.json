@@ -1,0 +1,27 @@
+{
+  "description": "Input codec 1 exact UTF-8 bytes. SHA-256 and logical expansion count independently calculated with Python; no published grant or execution authority.",
+  "reference": {
+    "version": 1,
+    "payload_sha256": "c51df79d81aefeb09711cc76934733a762b858068c00619ddb31e2fe2f4b2d81",
+    "payload_bytes": 158,
+    "expanded_bytes": 908
+  },
+  "envelope": {
+    "version": 1,
+    "scope": {
+      "tenant_id": "tenant",
+      "task_id": "00000000-0000-0000-0000-000000000001",
+      "worker_id": "worker",
+      "claim_epoch": "18446744073709551615"
+    },
+    "request_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "reference": {
+      "version": 1,
+      "payload_sha256": "c51df79d81aefeb09711cc76934733a762b858068c00619ddb31e2fe2f4b2d81",
+      "payload_bytes": 158,
+      "expanded_bytes": 908
+    },
+    "payload_encoding": "json_utf8_base64",
+    "payload_base64": "eyJhYm92ZV9qc19zYWZlIjo5MDA3MTk5MjU0NzQwOTkzLCJleHBvbmVudCI6MWUtNSwibGFyZ2UiOjE4NDQ2NzQ0MDczNzA5NTUxNjE1LCJuZWdhdGl2ZV96ZXJvIjotMC4wLCJwcml2YXRlIjoiSU5QVVRfUFJJVkFURV9DQU5BUlkg8J+Yulx1MDAwMCIsInRpbnkiOjVlLTMyNH0="
+  }
+}

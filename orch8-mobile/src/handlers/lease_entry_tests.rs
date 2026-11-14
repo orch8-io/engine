@@ -58,10 +58,11 @@ async fn unstarted_supervision_cannot_reserve_a_native_callback() {
     let calls = Arc::new(AtomicUsize::new(0));
     let slots = Arc::new(Semaphore::new(1));
     let registry = registry(calls.clone(), slots.clone());
+    let ctx = context().await;
     let lease = lease().await;
     assert!(matches!(
         registry
-            .prepare_native_handler_with_lease("native", context().await, lease.authority())
+            .prepare_native_handler_with_lease("native", ctx, lease.authority())
             .unwrap(),
         Err(StepError::ClaimLost)
     ));
@@ -73,9 +74,9 @@ async fn a_prepared_native_callback_cannot_outlive_its_supervisor() {
     let calls = Arc::new(AtomicUsize::new(0));
     let slots = Arc::new(Semaphore::new(1));
     let registry = registry(calls.clone(), slots.clone());
+    let ctx = context().await;
     let lease = lease().await;
     let authority = lease.authority();
-    let ctx = context().await;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     lease
         .run(

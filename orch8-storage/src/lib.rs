@@ -5,6 +5,9 @@ mod child_lookup;
 mod compensation_start;
 mod compensation_update;
 mod current_outputs;
+mod delegation_claim;
+pub mod delegation_definition;
+pub mod delegation_input;
 pub mod delegation_publication;
 mod effect_attempt;
 pub mod effect_resolution;
@@ -98,7 +101,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 143;
+pub const STORAGE_SCHEMA_VERSION: u32 = 144;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -1988,11 +1991,29 @@ pub trait SignalStore: Send + Sync + 'static {
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait WorkerStore: Send + Sync + 'static {
-    /// Claim and retain the authenticated owner in the same transaction.
+    /// Claim and retain authenticated ownership and transport references atomically.
+    async fn claim_worker_tasks_with_transport(
+        &self,
+        request: &worker_claim::WorkerClaimRequest,
+    ) -> Result<worker_claim::WorkerClaimBatch, StorageError>;
+    /// Task-only compatibility view. Delegated payloads are omitted; use the
+    /// transport batch when consuming independently retained payload references.
     async fn claim_worker_tasks_with_authority(
         &self,
         request: &worker_claim::WorkerClaimRequest,
     ) -> Result<Vec<WorkerTask>, StorageError>;
+    /// Bounded references for the exact verified tenant and issued generation.
+    /// Missing history is unavailable, never reconstructed from mutable work.
+    /// This metadata is not authorization to perform provider operations.
+    async fn get_worker_delegation_context(
+        &self,
+        tenant: &TenantId,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<
+        Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+        StorageError,
+    >;
     /// Original issued claim, retained after hot task/native history cleanup.
     /// Scoped callers must supply their verified tenant. `None` is reserved for
     /// trusted root lookup when the native instance no longer exists; finding
@@ -2344,6 +2365,16 @@ pub trait WorkerStore: Send + Sync + 'static {
         block_ids: &[String],
         claim_token: DateTime<Utc>,
     ) -> Result<Option<u64>, StorageError>;
+
+    /// Recover the same issued references and compact projection in one bounded query.
+    /// Decoder admission precedes LIMIT; this never mints or refreshes a claim.
+    async fn held_worker_tasks_with_transport(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+        protocol: Option<
+            &orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities,
+        >,
+    ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError>;
 
     /// Filter recorded issuer, tenant, worker and handlers before the delivery limit.
     /// Legacy unattributed rows retain the pre-journal rollout behavior.
@@ -4193,6 +4224,16 @@ pub trait ContinuityStore: Send + Sync + 'static {
         &self,
         instance_id: orch8_types::ids::InstanceId,
     ) -> Result<bool, StorageError>;
+    async fn get_published_delegation_input(
+        &self,
+        tenant: &TenantId,
+        task: uuid::Uuid,
+    ) -> Result<Option<delegation_input::PublishedDelegationInput>, StorageError>;
+    async fn get_published_delegation_definition(
+        &self,
+        tenant: &TenantId,
+        task: uuid::Uuid,
+    ) -> Result<Option<delegation_definition::PublishedDelegationDefinition>, StorageError>;
     async fn get_delegation_publication(
         &self,
         tenant: &TenantId,

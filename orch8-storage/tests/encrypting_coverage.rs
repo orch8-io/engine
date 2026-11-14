@@ -1521,12 +1521,27 @@ async fn context_ciphertext_is_bound_to_its_instance_and_rejects_transplant() {
     // Transplant instance A's ciphertext onto instance B's row directly at
     // the storage layer (bypassing the wrapper, as an attacker with DB
     // write access would).
+    let mut transplanted = sqlite.get_instance(b.id).await.unwrap().unwrap().context;
+    transplanted.data = raw_a.context.data.clone();
     sqlx::query("UPDATE task_instances SET context = ?1 WHERE id = ?2")
-        .bind(raw_a.context.data.as_str().unwrap())
+        .bind(serde_json::to_string(&transplanted).unwrap())
         .bind(b.id.into_uuid().to_string())
         .execute(sqlite.pool())
         .await
         .unwrap();
+
+    // The stored context remains valid; the encrypted read must reject AAD,
+    // rather than merely failing to deserialize a malformed context column.
+    assert_eq!(
+        sqlite
+            .get_instance(b.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .context
+            .data,
+        raw_a.context.data
+    );
 
     // Reading instance B back through the wrapper must fail to decrypt --
     // the ciphertext was sealed under A's AAD, not B's.

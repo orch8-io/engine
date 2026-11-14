@@ -57,6 +57,15 @@ async fn hidden(b: &TestBackend, blocked: &WorkerTask) {
         vec![healthy.id],
         "blocked work consumed the reconnect window"
     );
+    let batch = b
+        .storage
+        .held_worker_tasks_with_transport(&request, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        batch.tasks().iter().map(|t| t.id).collect::<Vec<_>>(),
+        vec![healthy.id]
+    );
     let after = b
         .storage
         .get_worker_task(blocked.id)

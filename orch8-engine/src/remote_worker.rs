@@ -81,8 +81,10 @@ pub struct PollResponse {
 /// A claimed worker task, parsed leniently: only the fields a node needs
 /// are required, and every distributed-execution field is optional so nodes
 /// work against servers with and without the v1 contract additions.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct RemoteTask {
+    #[serde(default)]
+    pub delegation: Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
     pub id: uuid::Uuid,
     pub instance_id: uuid::Uuid,
     pub block_id: String,
@@ -105,6 +107,49 @@ pub struct RemoteTask {
     pub lease_secs: Option<u32>,
     #[serde(default)]
     pub resume_checkpoint: Option<Value>,
+}
+
+impl RemoteTask {
+    /// Validate the retained reference context against this delivery and the
+    /// actual transport worker. Account/catalog and lease authority are separate.
+    pub fn validate_delegation(
+        &self,
+        worker_id: &str,
+    ) -> Result<(), orch8_types::error::StorageError> {
+        let Some(context) = &self.delegation else {
+            if self.handler_name == "orch8.delegation" {
+                return Err(orch8_types::error::StorageError::Constraint(
+                    "delegation delivery has no issued context".into(),
+                ));
+            }
+            return Ok(());
+        };
+        context.validate()?;
+        if self.handler_name != "orch8.delegation"
+            || self.attempt != 0
+            || context.scope.task_id != self.id
+            || context.scope.worker_id != worker_id
+            || context.scope.claim_epoch != self.claim_epoch
+            || self.params != serde_json::json!({})
+            || self.context != serde_json::json!({})
+        {
+            return Err(orch8_types::error::StorageError::Constraint(
+                "delegation delivery scope or representation changed".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+impl std::fmt::Debug for RemoteTask {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RemoteTask")
+            .field("id", &self.id)
+            .field("instance_id", &self.instance_id)
+            .field("handler_name", &self.handler_name)
+            .field("claim_epoch", &self.claim_epoch)
+            .field("delegation", &self.delegation)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Serialize)]
@@ -400,12 +445,23 @@ impl HttpLeaseClient {
         let resp = expect_success("poll tasks", resp).await?;
         let bytes = read_capped(resp).await?;
         let mut response: PollResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("poll tasks: invalid response: {e}"))?;
+            .map_err(|_| "poll tasks: invalid response".to_owned())?;
         let default_lease = valid_poll_lease(response.lease_secs);
         for task in &mut response.tasks {
             // A task carries its actual lease; the response is only a default
             // for legacy records. Keep the grant with the task after batching.
             task.lease_secs = task.lease_secs.filter(|lease| *lease > 0).or(default_lease);
+            task.validate_delegation(&self.worker_id)
+                .map_err(|_| "poll tasks: invalid delegation identity".to_owned())?;
+            if let Some(context) = &task.delegation
+                && !capabilities
+                    .delegation_protocol
+                    .is_some_and(|protocol| protocol.accepts(&context.definition, context.usage))
+            {
+                return Err(
+                    "poll tasks: delegation protocol was not advertised or is insufficient".into(),
+                );
+            }
         }
         Ok(response)
     }
@@ -899,3 +955,6 @@ mod tests {
         assert_eq!(*requests.lock().unwrap(), vec!["old"]);
     }
 }
+
+#[cfg(test)]
+mod delegated_tests;

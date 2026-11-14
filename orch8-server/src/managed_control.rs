@@ -45,6 +45,7 @@ fn client_frame(payload: ClientPayload) -> WorkerStreamClient {
 fn safe_capabilities(config: &ManagedControlConfig, draining: bool) -> RuntimeCapabilities {
     let now = chrono::Utc::now();
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: config.runtime_id,
         kind: config.kind,
         trust: RuntimeTrustLevel::Unverified,

@@ -1,11 +1,12 @@
 //! Additional execution fences for explicitly registered mobile account owners.
 //! This is a necessary storage boundary, not scoped dispatch authorization.
-//! No production API materializes scoped requests until handler ownership is ready.
+//! Signed catalog dispatch has its own proof; remote roots need separate forward authority.
 //!
 //! Non-retired legacy instances remain unaffected. A registered account tenant requires its
 //! immutable request proof; changing tenant/catalog/definition cannot turn an
 //! owned request into legacy work. PK lookups keep this out of history scans.
 pub(super) const ALLOWED: &str = "(CASE
+    WHEN EXISTS (SELECT 1 FROM mobile_remote_run_materializations m WHERE m.instance_id=task_instances.id) OR EXISTS (SELECT 1 FROM mobile_remote_run_bindings b WHERE b.local_run_id=task_instances.id) THEN 0
     WHEN EXISTS (SELECT 1 FROM mobile_catalog_run_requests r WHERE r.id = task_instances.id)
     THEN EXISTS (
         SELECT 1 FROM mobile_catalog_run_requests r

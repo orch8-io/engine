@@ -110,6 +110,7 @@ fn make_sequence(tenant: &str) -> SequenceDefinition {
 
 fn distributed_runtime(now: chrono::DateTime<Utc>, region: &str) -> RuntimeCapabilities {
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: RuntimeId::new(),
         kind: RuntimeKind::Desktop,
         trust: RuntimeTrustLevel::Registered,
@@ -612,6 +613,7 @@ async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
     );
 
     let mut runtime = RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: RuntimeId::new(),
         kind: RuntimeKind::Desktop,
         trust: RuntimeTrustLevel::Registered,

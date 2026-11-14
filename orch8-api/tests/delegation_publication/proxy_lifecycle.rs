@@ -84,7 +84,8 @@ async fn scheduled_proxy_cannot_take_native_slot(b: TestBackend) {
 orch8_storage::backend_test!(async fn scheduled_proxies_never_consume_native_claim_slots(b){scheduled_proxy_cannot_take_native_slot(b).await;});
 
 pub(super) const DROP_SQLITE_FENCE: &str =
-    "DROP TRIGGER IF EXISTS delegation_proxy_quarantine_capture_insert;
+    "DROP TABLE IF EXISTS worker_issued_delegation_contexts; DROP TABLE IF EXISTS delegation_publication_inputs; DROP TABLE IF EXISTS delegation_definition_manifests; DROP TABLE IF EXISTS delegation_definitions; DELETE FROM schema_versions WHERE version=74;
+ DROP TRIGGER IF EXISTS delegation_proxy_quarantine_capture_insert;
  DROP TRIGGER IF EXISTS delegation_proxy_quarantine_capture_delete;
  DROP TRIGGER IF EXISTS delegation_proxy_quarantine_update;
  DROP TRIGGER IF EXISTS delegation_proxy_quarantine_delete;

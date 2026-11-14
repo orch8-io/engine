@@ -6694,3 +6694,1556 @@ Rust/integration cases. Production trust policy was not relaxed.
 The [relay execution fence review](2026-10-28-delegation-relay-execution-fence.md) records reproduced wrong-runtime execution through proxy resume/native admission, quarantine loss through hot cleanup and cold restore, and relay acceptance as a native migration snapshot. Migration 143 / SQLite schema 73 exclude relays from native execution, preserve compact immutable quarantine and protect ownership through cleanup. Capsule/local-migration readers reject relays; logical instance backup refuses relay state it cannot restore, while configuration export remains usable.
 
 Validation passed 1,471 distinct Rust tests, 34 freshly rebuilt Node/Python native tests, both actual SDK schema-72-to-73 reopen probes, and 250 fresh-server end-to-end cases with zero failures or skips. Strict lint passed across nine crates, plus mobile/SQLite-only builds and formatting. The published-base CI unit failure was a stale SQLite schema-version assertion; its repaired reconciliation test passed locally while retaining decision immutability checks. The focused report and validation manifest distinguish the full matrix from affected-case reruns. Original open gates remain open; PR #365 remains a draft.
+
+
+## Frozen delegation closure follow-up (2026-10-29, unpublished)
+
+The [frozen-definition review](2026-10-28-frozen-delegation-definitions.md) records
+server-side capture of typed nested workflows, immutable per-publication
+manifests and a claim-scoped HTTP bundle reader. Four-backend regressions exposed
+missing retained children and admission that ignored child handlers. PostgreSQL
+catalog-cut testing also caught a regression in the first unpublished isolation
+change: a pre-lock snapshot hid retirement committed while waiting. Namespace
+mutexes now precede snapshot creation, with pooled-session cleanup verified on
+cancellation and timeout. None of this foundation is published yet.
+
+Selected validation passes 162 delegation cases, 370 API unit cases, eight
+bounded-definition units, two PostgreSQL lock-lifecycle units and 15 migration
+cases. Affected test-helper refinements were rechecked separately; the focused
+review records the distinction. Nine-crate strict lint, mobile/SQLite-only
+compilation and formatting pass. PostgreSQL migration 144 / SQLite schema 74
+remain staged; actual SDK reopen/execution validation is pending.
+
+The published CI fixture repair (`1f8fac73`) now passes GitHub E2E; the remaining
+Unit Tests job was still running at this checkpoint. PR #365 stays draft.
+Runtime protocol/resource negotiation, private account/catalog/server
+materialization, durable remote-claim-to-local-run binding and forward-execution
+fences after restart are required before bundle execution is activated. Shared
+gRPC read guards, claim-bound binary artifacts, acknowledged compaction,
+historical/failure/late-fact reconciliation, continuing handoff/revocation,
+complete coordinator/older-writer enforcement, scoped quotas, history/key/backup
+compatibility and public SDK/platform integration all remain original open gates.
+
+
+## Exact-byte definition transport (2026-10-29, unpublished)
+
+The [wire protocol](../definition-bundle-protocol.md) and shared no-database
+verifier preserve retained workflow bytes across Rust, Node/WebCrypto and Python.
+The existing semantic receipt hash stays unchanged; a separate persisted byte
+reference avoids language JSON rendering differences. Claim epochs use decimal
+text. The HTTP reader now returns this scoped bounded envelope, with final
+reporter/ownership rechecks preserved. The frozen-definition review records the
+162 delegation cases, six protocol units, eight capture units, 370 API units,
+15 migration cases, four cross-language checks and passing lint/WASM/mobile builds.
+
+The isolated CI repair `cb33f158` aligns dev/test debug settings and permits a
+100-minute cold workspace job. The previous 70-minute job timed out while tests
+were progressing with no failed assertions; its server and test compile phases
+used about 35 minutes. Fresh CI is running. The unpublished wire-vector CI step
+and all protocol/schema changes are excluded from that commit.
+
+Capability/resource negotiation, claim-side reference delivery, private scoped
+installation and restart forward-admission fences remain required. No SDK bundle
+execution is activated. All historical/failure reconciliation, late-fact,
+revocation/handoff, complete older-writer enforcement, binary artifacts,
+acknowledged compaction, scoped quota, history/key/backup and public-platform
+integration gates remain open; PR #365 remains draft.
+
+
+## Bounded decoding and PR integration checkpoint (2026-10-29, unpublished)
+
+PRs #365–#369 are merged into main at `c83199157ff3699588acf3db6fa2291a3a2c8c3d`.
+Their current-head applicable checks passed before merge; their remote branches
+and the two repair worktrees were removed. Earlier notes about draft PR #365 and
+pending repair CI are superseded by this checkpoint. No release was published.
+The definition foundation remains local on `review/definition-delivery-wip`.
+
+The staged decoder now enforces collection limits before reading excess elements
+and a separate shared 16 MiB logical expansion budget for definition JSON. Public
+errors and model debug output redact private values. Oversized/invalid closure
+capture returns a conflict, preserving transient backend errors. Four-backend
+regressions prove atomic rollback and corrected retry using the same grant;
+dynamic input does not consume the definition budget. This does not establish a
+whole-task memory bound. A single adversarial unit-test process, including fixture
+creation, measured peak RSS falling from 63,717,376 to 32,964,608 bytes. That
+measurement is not a general engine or device memory guarantee.
+
+Validation: 717 pure type units, 8 storage capture units, 174 delegation API cases,
+370 API units and 15 migration cases pass. Nine-crate strict all-target lint,
+WebAssembly, mobile and SQLite-only compilation pass. Node and Python exact-byte
+contracts, formatting and documentation checks pass. PostgreSQL tests use a real
+isolated PostgreSQL 17 instance with required-backend enforcement. Current
+source hashes and log paths are recorded in
+`/private/tmp/orch8-definition-bounded-validation.json`; this supersedes the older
+wire-validation evidence path.
+
+The next integration uses one shared Rust materializer with private local IDs,
+atomic scoped mappings and durable claim-to-run bindings; see the
+[protocol requirements](../definition-bundle-protocol.md#required-execution-integration).
+Capability negotiation, actual claim reference delivery, SDK schema-74 reopen and
+execution, restart forward-authority fencing, and all previously open review
+gates remain incomplete. This checkpoint does not activate delegated execution
+or complete the distributed/mobile/embedded review.
+
+
+## Private graph preparation checkpoint (2026-10-29, unpublished)
+
+The shared pure Rust verifier now provides `prepare_local`: a consumed verified
+graph becomes an ephemeral plan with fresh local sequence IDs and a fresh private
+namespace under the caller's trusted local tenant. Remote embedding ownership is
+cleared. Every typed dependency, including branches, lifecycle cleanup and saga
+compensation, is pinned to its manifest-selected version. Opaque handler JSON is
+unchanged; original semantic hashes remain separate from relocated definitions.
+
+Four new regressions cover complete typed traversal, account/namespace isolation,
+explicit older child versions alongside an unversioned selection, and rejection
+of an unchecked empty tenant. The initial unimplemented preparation failed both
+starting regressions. Final pure type tests pass all 721 cases; strict all-target
+no-default-feature type lint and actual WebAssembly compilation pass. Evidence:
+`/private/tmp/orch8-definition-materialize-validation.json`.
+
+This is preparation, not persistent installation or execution authority. Each
+new preparation intentionally creates new IDs. Durable account/catalog/server
+receipts must atomically retain mappings and reuse them on retry. Claim binding,
+capability negotiation, current authority/restart checks, execution policy and
+credentials/placement admission remain required before use. No public SDK or
+remote claim path invokes preparation yet; all previously open gates remain open.
+
+
+## Durable local definition installation (2026-10-29, unpublished)
+
+SQLite schema 74 now stages claim-definition receipts and source/local mappings.
+The internal mobile installer verifies independently supplied scope/reference,
+canonical HTTPS server identity, and the active local account/catalog epoch.
+Definitions, native fingerprints and the receipt commit atomically. Retrying the
+same claim verifies the retained graph and returns its existing local IDs;
+changed references or corrupt/missing mappings fail without replacement. Foreign
+keys pin the graph. Separate accounts, catalogs, servers, workers, tasks and claim
+epochs cannot share physical rows. Full-width remote epochs are stored as text.
+
+An editor-metadata regression exposed a native representation mismatch: SQLite
+omits `$schema`, so pre-insert fingerprints rejected unchanged cached rows.
+Fingerprints now describe rows read back inside the transaction; original source
+and exact-wire identities remain separate. Another reproduced gap allowed large
+remote identity metadata outside definition-byte accounting. The installer now
+bounds identity descriptors and rejects control characters before installation.
+
+Twelve installation cases pass, covering rollback/retry, two independent database
+connections, count/byte quotas, existing retry at capacity, account retirement,
+linked pinned dependencies, protected rows, source-mapping corruption, endpoint
+and identity rejection, full-width epochs, database reopen and a synthesized
+schema-73 upgrade preserving account identity. The full network-enabled mobile
+suite passed 712 cases before the final two identity-validation calls; all 12
+affected installation cases were rerun after that change. The 701 other mobile
+cases do not call this staged installer. Strict no-default-feature all-target
+mobile lint also passes. The initial sandboxed full run could not bind local TCP
+fixtures; rerunning with network permission passed. Source-bound evidence:
+`/private/tmp/orch8-claim-definition-validation.json`.
+
+Quota accounting covers serialized native definitions, not an exact disk/heap
+bound: global 128 receipts/64 MiB, account 64/32 MiB, catalog 32/16 MiB, individual
+graph 8 MiB. Older epochs remain charged. Explicit acknowledged cache compaction
+is still required for long-running operation. Reopen tests supply the verified
+envelope again; they do not establish offline receipt-only loading or actual
+Swift/Android SDK execution.
+
+No run or provider work is created by installation. The entry remains internal
+and unused by the production claim path. Capability/resource negotiation,
+claim-side reference delivery, durable remote-task/local-run binding across claim
+changes, offline/restart authority fencing, native platform probes, acknowledged
+compaction and all original open review gates remain incomplete. The next step
+must bind an existing logical run across claim generations without duplicating
+provider effects, and gate every forward attempt on current authority.
+
+
+## Durable claim binding checkpoint (2026-10-29, unpublished)
+
+The [binding checkpoint](2026-10-28-frozen-delegation-definitions.md#durable-claim-binding)
+adds authenticated manifest retention, cache loading without another envelope,
+and stable logical run identity across claim and sign-in generations. Trusted
+publication-request identity is pinned independently of definitions. Full mobile
+validation passes 726 cases, including 25 installation/binding cases; strict
+all-target mobile lint passes. Evidence:
+`/private/tmp/orch8-claim-binding-validation.json`. This remains local and creates
+no native instance or provider work. All original execution/integration gates
+remain open.
+
+### DME200 native cache fingerprint upgrade compatibility (open)
+
+Code inspection identifies another liveness gate before platform activation:
+local fingerprints currently hash `serde_json::to_vec` of today's typed native
+row. A future compatible field/default may change reserialization of an older
+row and make retained evidence unavailable even when source/wire identity is
+unchanged. The existing wire compatibility vector does not prove native-cache
+upgrade compatibility. Add a versioned persisted projection or another explicit
+compatible native encoding, and test real old-cache fixtures across upgrades.
+This risk is identified from the fingerprint code; an old-writer reproduction
+and fix are still required. Rejecting corrupt data remains mandatory. Do not
+silently refresh fingerprints from mutable rows to make upgrade tests pass.
+
+
+### DME200 implementation checkpoint (native codec 1, unpublished)
+
+The [native cache checkpoint](2026-10-28-frozen-delegation-definitions.md#native-cache-codec-checkpoint)
+reproduces the typed-default fingerprint mismatch and replaces current-model
+rehashing with an explicit fixed raw-SQL projection. Corruption is checked before
+typed JSON parsing; missing/future codecs are not restamped. All 731 mobile cases
+and strict all-target lint pass, including five new codec regressions. Evidence:
+`/private/tmp/orch8-native-projection-validation.json`. Shared-code behavior is
+verified with a synthetic legacy shape; actual released-platform upgrade probes
+and the original execution gates remain open. No provider path is activated.
+
+
+### DME201 worker claim counter exhaustion and lossy fence conversion (implementation)
+
+Admission tracing found signed-database boundary hazards. A pending task at the
+last signed 64-bit epoch could poison a claim batch instead of allowing healthy
+work behind it. Separately, `u64` values outside that range were clamped to
+`i64::MAX` on some worker mutations. The plain and encrypted SQLite reproductions
+showed an oversized token renewing the last valid generation, silent clamping on
+task creation, and a poisoned poll. These are storage-fence findings; independent
+HTTP principal/issuance checks remain separate authorization layers.
+
+SQL task counters and attempt evidence now use checked conversions. All queue,
+tenant and capability claim paths exclude exhausted epochs before LIMIT/scan
+windows; PostgreSQL rechecks the bound in its locked claim phase. SQLite's
+returned state uses checked increment. The mobile delegation pump applies the
+same discovery and final-update guards, including a generation change after its
+snapshot. Exhausted rows retain their state, identity and evidence; nothing
+resets a generation to make it claimable. The last representable generation can
+still be heartbeated, checkpointed and resolved by its legitimate owner. Wire
+`u64` scope representation is unchanged; these bounds describe current SQL stores.
+
+Boundary coverage includes all five claim selectors, plain/encrypted backends,
+a 4,097-row exhausted prefix beyond the capability scan window, rejection of
+non-round-trippable task counters and attempt events, invalid-token rejection and
+valid last-generation mutation. Mobile regressions cover discovery-page
+starvation and final-update rechecking after a stale snapshot. Final verification
+and evidence are recorded in the next checkpoint; capability/resource negotiation
+and the original execution/integration gates remain open.
+
+
+DME201 verification checkpoint: 76 issued-claim and 223 related storage cases pass
+with required real PostgreSQL 17 plus plain/encrypted SQLite/PostgreSQL; all 733
+mobile cases and nine-crate strict all-target lint pass in the review tree. The
+isolated branch based on main independently passes 76 issued-claim cases, all
+703 mainline mobile cases, and strict all-target storage/mobile lint. Its nine
+files contain no frozen-definition/schema changes. [PR #370](https://github.com/orch8-io/engine/pull/370)
+(head `b81202df993b6297d9303c3c77f82b4000797a42`) is open with CI running; it has
+not been merged at this checkpoint. The original workspace's 66 tracked/untracked
+work-in-progress files were byte-for-byte preserved during isolation. The owned
+temporary PostgreSQL database was stopped and removed. Evidence:
+`/private/tmp/orch8-worker-claim-validation.json`. Definition-protocol capability
+negotiation, actual runtime activation and all other original open gates remain
+incomplete.
+
+
+DME201 published checkpoint: PR #370 merged into main as
+`e69021b83a0e30ecc4bc20f7722acac83502a622` after all 25 current-head checks and
+both CI/Mobile workflows completed successfully. The clean merged worktree and
+both counter-fix branches were removed. The original review branch and unfinished
+frozen-definition work remain preserved.
+
+### DME202 PostgreSQL claim eligibility changes between scan and mutation
+
+A fair one-connection pool barrier deterministically pauses capability matching
+between unlocked candidate discovery and its separate claim transaction. On clean
+main, all eight plain/encrypted PostgreSQL cases fail: a parent becomes terminal,
+requirements become incompatible, a browser candidate becomes credential-bearing,
+or the capability advertisement expires, yet the old snapshot still acquires
+ownership. Hardware/credential changes also prevent healthy backfill at LIMIT 1.
+No actual credential-material disclosure is asserted by these fixtures; they
+prove the secret-exclusion admission policy was not revalidated.
+
+The fix locks bounded candidate pages, applies the shared claim predicate to
+current rows, skips changed candidates and backfills from healthy ones. It checks
+parent existence/state, tenant, retirement/cut and compensating-owner guards at
+selection and mutation, plus capability expiry at mutation. Issuance and attempt
+evidence still commit with the lease. All 84 issued-claim and 486 related storage
+cases pass with PostgreSQL required, plus strict all-target storage lint.
+
+[PR #371](https://github.com/orch8-io/engine/pull/371), head
+`512518da262503650567ee170735cb3a0e519797`, contains only four storage/test files,
+with no schema/public SDK changes. CI is running; it is not merged at this
+checkpoint. The test database was stopped and removed. The active isolated
+worktree is `/private/tmp/engine-worker-eligibility`; its build reused dependency
+artifacts while workspace entry points were invalidated after switching trees to
+avoid incompatible path-package artifacts. Evidence:
+`/private/tmp/orch8-worker-eligibility-validation.json`.
+
+This corrects current task/capability revalidation, not frozen-definition format
+negotiation or native execution authority. Those and all other original open
+review gates remain incomplete. No release or delegated execution activation was
+published.
+
+
+DME202 publication checkpoint: PR #371 merged into main as
+`46df79302c3b0dd777e0c8c7694a6bf2a8e04638`. The auto-merge command merged
+immediately with 17 checks successful and Unit Tests / Check & Lint still running;
+this is not an all-green publication checkpoint. Remaining CI is being verified.
+The clean merged worktree and local/remote branches were removed. All original
+frozen-definition work remains preserved in the review workspace.
+
+
+### DME203 SQLite returned and persisted lease anchors disagree (local only)
+
+Plain/encrypted SQLite regressions reproduce both a returned claim timestamp
+different from the committed value and a persisted lease anchor sampled before a
+connection wait. A one-connection barrier proves the latter without sleep-based
+race scheduling. All five selectors now derive the SQL text and returned fields
+from one timestamp sampled after row selection under the write transaction.
+The four failing reproductions now pass, as do all 40 SQLite issued-claim cases,
+171 related SQLite cases and strict no-default all-target storage lint.
+This change remains local and is not part of PR #371. Evidence:
+`/private/tmp/orch8-worker-lease-time-validation.json`. Capability expiry during
+a long scan and other backends' transaction-time semantics require separate
+coverage; this finding establishes anchor consistency and database-wait freshness.
+
+DME203 additional local verification: all 733 mobile library tests pass with
+loopback networking allowed, and workspace formatting passes. The first sandboxed
+mobile attempt failed to bind test HTTP servers (PermissionDenied); the rerun
+resolved all 143 resulting failures. The three-file fix remains unpublished.
+
+DME203 isolated checkpoint: unchanged main fails all four reproductions. The
+three-file fix independently passes 40 issued-claim and 171 related SQLite tests,
+strict all-target storage lint and formatting. [PR #372](https://github.com/orch8-io/engine/pull/372)
+(head `4936ae1ca53eef6d0421c4aa83472f9762149596`) is open with CI running; it is
+not merged. The original definition workspace remains preserved.
+
+
+### DME204 mobile replacement worker identity bypasses per-task admission (in progress)
+
+The shared mobile admission map keyed physical tasks by control plane, worker ID
+and task UUID. Two deterministic regressions fail before the fix: the unit limiter
+grants a second slot, and the loopback worker harness invokes the same task twice
+when the replacement runtime has a different worker ID, a newer claim epoch and
+spare global capacity. This does not require exhausting the concurrency limit.
+
+Physical admission now keys by control-plane URL and task UUID. Journal/reporter
+identity is unchanged. A newer generation cancels and defers behind its live
+predecessor; same-epoch competing identity is ignored, and the release reservation
+survives predecessor completion. An independent-control-plane case prevents
+over-broad task coalescing. Full mobile validation is running. Logs:
+`/private/tmp/orch8-worker-identity-overlap-red.log`,
+`/private/tmp/orch8-worker-replacement-identity-red.log`, and
+`/private/tmp/orch8-worker-identity-overlap-green.log`. This change is local only.
+
+DME204 full local verification: all 736 mobile library tests pass with loopback
+networking enabled. This closes the reproduced bypass within the shared engine
+admission domain; it does not certify cross-process exactly-once provider work.
+Strict mobile lint is running. Evidence:
+`/private/tmp/orch8-worker-identity-overlap-validation.json`.
+
+DME204 isolated checkpoint: both regressions fail against unchanged main. The
+two-file fix passes all 706 mainline mobile tests, strict all-target mobile lint
+and formatting, independently of the 30 staged definition cases in the review
+workspace. [PR #373](https://github.com/orch8-io/engine/pull/373), head
+`ad4d17eff7a4699332b4dd6718e1beb3f2d49497`, is open with CI running and is not
+merged. The original review workspace and definition work remain preserved.
+
+
+### DME205 SQLite named-queue selectors omit physical-source eligibility guards
+
+Eight plain/encrypted SQLite cases reproduce poll failure at LIMIT 1 when a
+captured source, or a permanently retired source after history GC, precedes
+healthy named-queue work. Existing database triggers refuse the frozen UPDATE,
+but the whole poll fails instead of reaching the healthy row. Four further
+plain/encrypted cases show both named-queue selectors actually acquiring a lease
+on a quarantined native relay. These prove lease admission, not provider execution
+or credential disclosure. The earlier poll-path tests omitted explicit queues.
+
+Both named-queue SELECTs now exclude relay native history, permanent physical
+retirement and captured/sealed source cuts before LIMIT, matching the unscoped
+and capability selectors. No trigger is weakened and no protected evidence is
+removed. All 12 targeted cases pass, preserving pending state and epoch zero on
+the blocked rows while backfilling the healthy task. Broader storage validation
+is running. The changes remain local. Logs:
+`/private/tmp/orch8-named-queue-frozen-red.log`,
+`/private/tmp/orch8-named-queue-relay-red.log`, and
+`/private/tmp/orch8-named-queue-guards-green.log`.
+
+DME202 final CI checkpoint: all 25 checks at head
+`512518da262503650567ee170735cb3a0e519797` passed. CI run 40853503867 and Mobile
+run 40853503724 both completed successfully, resolving the incomplete CI
+verification recorded at merge. The merged branch and worktree are already
+removed; evidence is updated in the eligibility validation manifest.
+
+DME205 isolated checkpoint: all 12 regressions fail independently against
+PR #372's unmodified commit. The three-file fix passes all 240 selected SQLite
+storage cases, strict all-target storage lint and formatting.
+[PR #374](https://github.com/orch8-io/engine/pull/374), head
+`18759339692ecbcaca5b4e45b0824619468e7bc9`, is based on #372 to keep the guard
+diff separate. CI targets main only, so this dependent PR has no CI checks yet.
+After #372 merges, retarget #374 to main and ensure a fresh CI run before merging;
+an empty check list is not approval. Evidence:
+`/private/tmp/orch8-queue-source-guards-validation.json`.
+
+
+### DME206 cached logical-run rebinding must not consume a graph per claim
+
+Two staged mobile regressions fail before the change: a higher claim generation
+at the 32-receipt catalog limit cannot bind without another installation, and
+signing back into the same account requires a duplicate physical graph. The
+cache now separates one bounded latest claim observation from immutable graph
+receipts. A trusted higher claim can reuse the original authenticated manifest,
+native fingerprints and stable logical run without a new envelope or quota
+charge. Completed history and graph receipts are not automatically archived.
+
+The observation and binding update commit together under the account fence.
+The observation codec covers local owner epoch, full remote claim scope, complete
+definition reference, publication request hash and graph receipt identity. Its
+16 KiB stored-byte bound is checked before fetching/decoding JSON. Unsupported or
+changed observations fail without replacement. Older staged bindings lacking an
+observation are supported only if their immutable receipt independently matches
+the complete prior claim and owner epoch; missing advanced evidence stays
+unavailable even after a fresh download. This is not a released-SDK upgrade proof.
+
+`try_bind_claim_run` returns None only when a new logical run has no installed
+graph. Retained corruption is an error, not a cache miss or repair permission.
+The first 39 focused cases pass, covering 64 reclaims at full capacity, repeated
+sign-in, reopen without a generation-specific graph, rollback on insert/update
+failure, changed identity/reference/request fields, missing/future/oversized
+observations and private-value error redaction. Additional full-width/concurrent
+reclaim cases and the full mobile suite are running. No provider execution or
+public SDK path is activated; trusted claim/request delivery, raw input validation,
+forward authority fencing, explicit acknowledged archive and actual-platform
+probes remain required. Evidence logs begin `/private/tmp/orch8-cached-run-`.
+
+DME206 validation checkpoint: all 747 mobile tests passed. After the final checked
+conversion of the constant SQL byte bound, all 41 affected cache cases, strict
+all-target storage/mobile lint and formatting passed again. Documentation checks
+pass across 157 Markdown files. The concurrency case uses independent SQLite
+connections and proves a monotonic highest claim with one graph/binding/observation;
+the legacy staged proof case retains canonical u64::MAX. No quotas are raised, no
+completed history is evicted, and no provider execution is activated. Source-bound
+evidence: `/private/tmp/orch8-cached-run-rebind-validation.json`. The foundation
+remains unpublished; the original integration, acknowledgement and platform gates
+remain open.
+
+DME203 published checkpoint: PR #372 merged as
+`cf678374688ab5907eaf13e1be40846fcfa9c64c` after all 25 exact-head checks and both
+workflows completed successfully. Its clean merged worktree and local/remote
+branches were removed.
+
+DME205 main-targeted checkpoint: PR #374 now targets main, synchronized at head
+`dcbf793cf2bb30931828f8bf9533626237fe7938`. Its source tree is identical to the
+independently validated three-file guard fix. CI runs 40866151498 and 40866151606
+are running; no merge has occurred. The empty-check dependent state is resolved.
+
+DME204 published checkpoint: PR #373 merged as
+`23ee728b8e62bf646c7d3a414f53c70bfca58d1a` after all 25 exact-head checks and
+both workflows completed successfully (40859871071 / 40859871204). The clean
+merged worktree and local/remote branches were removed. Only PR #374 remains open
+at this checkpoint; its full main-targeted CI is running.
+
+### DME207 explicit protocol capability and independently bounded input contracts
+
+The runtime round-trip regression originally discarded the proposed delegation
+contract. A typed optional descriptor now retains explicit definition/input codec
+versions and independent byte/count/expansion budgets. Legacy advertisements remain
+opted out. API registration and authenticated storage claim requests reject invalid
+contracts; device destination projection preserves decoder limits without exposing
+inventory or expanding session handler/placement authority. All Rust capability
+constructors initialize the new member explicitly; the mobile node remains None
+until its full bridge is ready.
+
+The standalone input codec binds exact UTF-8 bytes and decoded charge to a trusted
+claim scope, original publication-request SHA and independent input reference. It
+bounds escaping during serialization and checks metadata/length/hash before bounded
+JSON decoding. Private values are absent from errors and Debug. The independent
+input vector has byte SHA `c51df79d81aefeb09711cc76934733a762b858068c00619ddb31e2fe2f4b2d81`,
+158 bytes and logical charge 908; Node/WebCrypto and Python each pass four combined
+definition/input cases. All 741 type tests, four API protocol cases, two storage
+request cases, the mobile opt-out case and a required real PostgreSQL tenant-claim
+regression pass. All-target workspace compilation and strict lint pass. Representative
+Rust/JavaScript clients pass after regenerating OpenAPI fingerprint
+`79aaa1dd0e7dcd747e244d4db6ebd37d73568ffe48f3d6bf1f8e5c33a9be67ea`. The owned
+temporary database was stopped and removed. Actual WASM target verification is
+running.
+
+This is contract/verifier work, not atomic claim negotiation. Immutable expanded
+usage and encrypted input retention at publication, SQL filtering before LIMIT
+and under locks, trusted claim reference/request delivery, bounded input transport,
+scoped native materialization, per-forward authority and physical admission,
+cancellation/late facts, acknowledged compaction and actual-platform upgrade/
+execution probes remain required. No provider path or release is activated.
+
+### PR merge checkpoint — 2026-10-29 12:46 UTC
+
+PRs #370–#374 are merged into main. The final PR, #374, passed all 25
+checks at exact head `dcbf793cf2bb30931828f8bf9533626237fe7938`; CI run
+40866151606 and Mobile run 40866151498 both completed successfully. Its merge
+commit is `f498fe2535da6ac5e54de6308adff537936063e2`. The clean merged worktree
+and local/remote branch were removed. An organization-wide GitHub search found
+no open PRs. The root foundation work remains preserved and unpublished.
+
+The final staged protocol validation also completed: 742 type tests and 747
+mobile tests passed, together with workspace all-target strict lint, the actual
+WASM target check and formatting. The integration gates listed above remain open.
+
+### DME208 — publication-owned input/resource retention (staged)
+
+Publication now validates input wire and decoded budgets before cloning input
+into request-hash/mailbox representations. The preflight serializer counts bytes
+without accumulating a serialized copy. Intent construction retains one shared
+exact-byte encoded input; encryption seals its base64 storage string separately
+from the existing mailbox. Logical input hashes and charges remain independent
+of storage ciphertext. Oversized input is a publication precondition conflict,
+rather than an internal error.
+
+Both transaction-local capture implementations insert a versioned
+`delegation_publication_inputs` row linked to the frozen tenant/task manifest,
+with original request identity, measured raw definition expansion and independent
+input codec/hash/wire/decoded charges. Failed or suppressed insertion aborts the
+transaction. Immutable storage guards and the 8 MiB stored-body cap apply; down
+migration refuses retained rows. Historical publications are not reconstructed.
+
+New backend-matrix tests exercise exact Unicode/NUL/wide-integer/float bytes,
+encrypted storage, measured charges, immutable updates/deletes, replay and
+oversized input. The existing fault matrix also covers rejected and suppressed
+input insertion and checks for leaked bodies. Simulated older-schema fixtures
+remove child rows/tables before manifests; the separate accepted-input versus
+frozen-definition budget case stays within the new independent input budget.
+The first full regression run exposed those fixture dependencies and the input
+error classification; they were corrected. Final validation is running.
+
+An input reader/endpoint, atomic protocol/resource claim filtering, trusted poll
+references, native execution authority and acknowledged archival remain required.
+This foundation does not activate a provider path.
+
+DME208 final validation: all 182 publication API regressions passed with
+`ORCH8_REQUIRE_PG=1` against a real owned PostgreSQL instance, including all
+plain/encrypted backend legs; 747 mobile tests and 10 focused input tests passed.
+All-target strict lint for types/storage/API and workspace formatting passed.
+The database was stopped and its owned temporary directory removed. Source
+hashes and log paths are retained in the temporary DME208 validation manifest.
+The reader/admission/native/archive/platform integration gates above remain open.
+
+### DME209 — bounded claim-scoped input delivery (staged)
+
+Added a separate input reader over immutable publication-owned bytes, including
+EncryptingStorage and fault-injecting storage adapters. SQL bounds body and receipt
+bytes before fetching. Metadata must match tenant/task/original request identity;
+unknown versions and unsupported charges fail closed. The stored JSON body is
+parsed directly as a string, so malformed dense arrays/objects cannot allocate a
+large Value tree. Exact-byte storage reconstruction and transport verification
+share the same bounded decoder without JSON reserialization.
+
+The new input endpoint shares issued reporter and ownership checks with definition
+reads, reauthorizes key/session access after response encoding, enforces publication
+expiry before/after encoding, and returns no-store scoped envelopes. Session route
+allowlists grant only exact UUID GET reads. Tests cover all publication modes and
+plain/encrypted backends, stale/different claims, foreign tenants, different same-
+tenant reporters, owner changes, key revocation/expiry/downscope during a paused
+read, corrupt storage strings/arrays/objects, missing evidence, and private-error
+redaction. Workspace all-target compilation passed; final runtime/lint/client
+validation is running. Atomic claim resource filtering, independently trusted poll
+references, scoped native provider admission and acknowledged archive remain open.
+
+DME209 final validation: 744 type tests, 12 worker API unit tests and all
+194 publication API regressions passed. PostgreSQL was required and exercised
+with plain/encrypted SQLite/PostgreSQL legs. Workspace all-target strict lint,
+actual WASM target compilation, generated Rust/JavaScript clients and formatting
+passed. The OpenAPI fingerprint is now
+`0c356ade4c2df0891447d5bc07dee085a3d9abcdbcc8eedbe4488db30895f80f`.
+The owned database was stopped and its directory removed. Source hashes and logs
+are recorded in the temporary DME209 validation manifest. The claim, native,
+archive and actual-platform integration gates above remain open.
+
+### DME210 — atomic publication/claim protocol and resource admission (staged)
+
+A new HTTP regression reproduced both SQLite variants issuing delegated leases
+to workers with no decoder descriptor. PostgreSQL was not available in that RED
+run and is required for the final matrix. Shared backend SQL predicates now use
+immutable publication/manifest/input usage before scan LIMIT, with locked
+PostgreSQL and mutation-time rechecks. Missing historical evidence and expired
+publications are excluded. All four legacy selectors exclude reserved delegation
+work and publication-owned identities; mutable task requirements cannot supply a
+replacement decoder certificate. SQLite returns only actual guarded updates,
+preserving selection order, and also rechecks runtime advertisement expiry.
+
+Destination readiness and actual measured usage are checked inside publication
+before grant redemption commits. Missing/insufficient support leaves the grant
+unspent and rolls back all captured rows. Existing fixture destinations explicitly
+model a ready decoder; shipping mobile remains opted out. Tests cover independent
+wire/decoded input/definition limits, document/selector limits and exact acceptance
+boundaries, all legacy selectors, missing immutable input with stable receipt
+replay, publication expiry, and 4,097 older uncertified tasks before eligible work.
+Runtime, regression and strict validation are running. Independently trusted poll
+references, native bridge/admission/authority, late facts and acknowledged archive
+remain required; no provider path is activated.
+
+DME210 destination discovery now also excludes absent/invalid decoder contracts
+for device sessions while preserving the operator's complete runtime inventory.
+The matching-facts projection retains the valid protocol limits. Registration
+readiness alone still does not prove that a particular workflow fits those limits;
+transactional publication checks the actual frozen closure/input. The discovery
+integration test includes a live handler-advertising runtime with no decoder,
+which remains visible to operators and is hidden from device destination choices.
+
+Follow-up review evidence: the PostgreSQL named-queue selectors in `postgres/misc.rs`
+still lack the retirement, captured-source and native-relay predicates present in
+the matching selectors and SQLite twins. Existing named-queue regression macros
+cover only SQLite variants. Verify this with the backend-generic fixtures before
+changing those guards; this is separate from DME210 decoder/resource admission.
+
+DME210 final validation: 218 publication API regressions and 92 worker issuance
+regressions passed with required real PostgreSQL and plain/encrypted backends;
+747 mobile tests passed. After extracting the common PostgreSQL eligibility
+helper to meet the function-length lint, both publication and issuance suites
+were rerun successfully. Four device-session integration tests passed on SQLite
+and PostgreSQL, plus five protocol API unit tests after discovery alignment.
+Workspace all-target strict lint and formatting passed. All owned temporary
+databases were stopped and removed. Current source hashes and log paths are
+recorded in the temporary DME210 validation manifest. The PostgreSQL named-queue
+review gap and the remaining claim/native/archive/platform gates above remain open.
+
+### DME211 — PostgreSQL named-queue source guards
+
+Expanded six existing named-queue regression fixtures to PostgreSQL and encrypted
+PostgreSQL. All twelve new PostgreSQL legs reproduced failures both in the staged
+root and independently on current main: eight captured/retired-source legs failed
+the whole poll at the database guard, and four quarantined-relay legs actually
+issued the forbidden lease. SQLite controls continued to pass.
+
+Both PostgreSQL named-queue selectors now exclude captured/sealed source cuts,
+physical retirement markers and native relay history before ORDER BY/LIMIT.
+Database fences remain unchanged. The healthy later row must receive the lease;
+the blocked row stays pending at epoch zero. The staged root passes all 24
+targeted cases. An isolated main-based branch contains only the two SQL predicate
+lines and the fixture matrix expansion; full source-cut/claim regressions and
+strict lint are running there before publication.
+
+DME211 isolated validation passed: all 205 source-cut and 96 worker issuance tests
+with required real PostgreSQL, strict all-target storage lint and formatting.
+PR #375 (`00baaa7f499e2e84860876ce92720e05841f6ebf`) is open against main with
+only three files. Require all exact-head CI checks before merging, then remove
+its clean merged branch/worktree. The owned temporary databases are stopped and
+removed. Completed test executables and Swift review output totaling about
+2.9 GiB of generated file data were removed; source, logs and dependency caches
+remain. Broader protocol/native/archive/platform work remains unpublished.
+
+### DME212 — references captured with issuance and compact poll delivery (staged)
+
+Added typed codec-1 issued reference contexts and immutable bounded sidecars under
+the existing issued-generation identity. Original v1 claim receipts are unchanged.
+The claimant scope includes a decimal-text full-width epoch, original publication
+request SHA/expiry and exact independently retained payload references/resource
+usage. Capture and validation happen before the lease transaction commits.
+
+The capability-aware backend returns an opaque validated `WorkerClaimBatch` with
+its contexts, avoiding post-commit metadata queries and their undelivered-lease
+failure window. API polls carry the context and omit duplicated input/context
+from new delegated task projections; ordinary tasks retain their current shape.
+Encrypted storage preserves the context and does not decrypt a discarded mailbox
+input. Getter reads are bounded, scope checked and independent of hot task rows.
+Unknown/malformed/missing sidecars are not refreshed from mutable data.
+
+Workspace all-target compilation, 746 type tests and 226 publication API cases
+passed. New cases use the poll's independent references to verify both endpoints
+with Unicode/NUL/wide integer input, keep a 512 KiB input out of the compact poll,
+retain contexts after hot task cleanup, and prove rejected/suppressed context
+insertion rolls back all issuance state. Remaining worker/mobile/lint/WASM/client
+validation is running. The stored mailbox still duplicates v1 input; compact
+publication storage, checkpoint transport/aggregate byte bounds, reconnect
+projection, scoped native execution, acknowledged archive and platform probes
+remain required. No provider path is activated.
+
+DME212 intermediate validation also passed all 96 worker issuance and 747 mobile
+tests. The old migration-140 empty rollback test now asserts dependency refusal
+and rolls back staged migration 144 before the parent table, then reinstalls both
+in forward order. The dependency/immutability guards remain intact. Strict lint
+requested method-pointer cleanup and a shorter PostgreSQL record function; the
+batch insert was extracted without changing its SQL. API/issuance regressions
+and final lint/WASM/client checks are being rerun after that cleanup.
+
+DME212 final validation passed: 746 type tests, 226 publication API tests, 96
+worker issuance tests and 747 mobile tests. PostgreSQL was required and the
+publication/issuance matrices exercised plain/encrypted SQLite/PostgreSQL.
+After the lint cleanup, API/issuance regressions, workspace all-target strict
+lint, actual WASM target, representative generated Rust/JavaScript clients and
+formatting passed. OpenAPI fingerprint:
+`69c3ed843c01374b0afe16f50f7a850d88d7486e4a17bc8fea3bc89bc71b7872`.
+All owned temporary databases were stopped and removed. Source hashes and
+validation logs are recorded in the temporary DME212 manifest. PR #375 remains
+separate at 24/25 passing checks, with Unit Tests confirmed running; do not merge
+until every check and both exact-head workflows succeed. The client/native,
+reconnect, compact-storage/transport, acknowledged archive and platform gates
+above remain open.
+
+
+DME211 merge checkpoint: PR #375 merged on 2026-10-29 at
+`191d6d7edf39c27915fe4d833b7e8e805b4f05ec` after all 25 checks and both
+exact-head workflows (40886380394 and 40886380490) succeeded. The clean merged
+worktree and local/remote branch were removed. Main points at the merge commit;
+the dirty root review branch remains preserved.
+
+PR-priority audit (2026-10-29): direct pull-request API reads for all 33
+repositories visible in `orch8-io` returned zero open PRs. This includes engine
+and every SDK repository. Search results were independently checked against the
+repository endpoints. No pending PR was closed or merged during this audit.
+The ongoing unpublished foundation remains separate from those completed PRs.
+
+
+### DME213 — SDK context retention and fixed-origin payload reads (staged)
+
+Shared `RemoteTask` retains and validates the issued delegation context against
+its task ID, worker and claim epoch, rejects missing context for the reserved
+handler and rejects inline payload shadowing. Poll delivery requires an explicit
+compatible decoder profile. Debug output omits opaque task payloads, and malformed
+poll responses return static errors.
+
+The mobile journal stores a bounded immutable context alongside its existing
+claim identity. Insert and duplicate validation are transactional; duplicate
+claims cannot restamp absent, changed or corrupt context. Recovery reads validate
+retained identity and do not repair records from new deliveries. Tests cover
+started/outcome preservation, file reopen, legacy records and corrupt private
+values. A failed-upgrade test now inspects the preserved old schema directly;
+current readers correctly require successful initialization.
+
+The native client can separately read definitions and inputs from fixed internal
+claim paths on its configured control-plane origin. It verifies the independent
+references against retained issued context, preserves wide epochs and opaque
+Unicode/NUL/wide-integer input, rejects foreign-worker requests before networking,
+and omits private HTTP error bodies. These helpers do not authorize execution or
+select local accounts/catalogs. Mobile protocol advertisement remains disabled.
+
+Validation passed: all-target workspace compilation, 18 transport/lease tests,
+27 executor tests, all 751 mobile tests, workspace all-target Clippy with warnings
+denied, actual WASM compilation and formatting. The initial executor filter
+selected zero tests and was corrected to `remote_executor::tests`; the reported
+27 are the corrected run. Logs and source hashes are retained in
+`/private/tmp/orch8-sdk-context-validation.json`. No local native driver remains
+running. Explicit account/catalog/peer execution admission, reconnect, compact
+stored payload/transport limits, acknowledged archive and actual platform probes
+remain required. This foundation is unpublished.
+
+
+### DME214 — retained-context gRPC delivery and reconnect (staged)
+
+Closed a transport gap: stream demand used a task-only claim adapter, discarding
+issued references, while reconnect replayed the original mailbox with inline
+input. Stream demand now consumes the atomic transport batch, and protocol-v2
+JSON adds the same optional delegation context as HTTP. Ordinary frames retain
+their shape; delegated params/context remain empty.
+
+Added a transport-aware held-claim query on SQLite/PostgreSQL and encryption/fault
+wrappers. It joins the bounded immutable context with the held generation and
+original issued identity in the same query. Existing reporter/tenant/worker/
+handler filtering remains before LIMIT; certified decoder/resource admission is
+also applied there. Legacy task-only reads opt out of delegated delivery. Full
+context validation compares the retained scope with actual tenant/task/worker/
+epoch; absent, oversized, corrupt or changed context fails without reconstruction.
+No lease mutation or new generation is issued by recovery.
+
+The gRPC client validates reserved-task context and its original advertised
+profile before admitting a frame. A malformed delivery ends the session with a
+static warning, avoiding parser diagnostics containing private values. Corrected
+an older comment: reattaching the same epoch does not revoke another connection
+holding that epoch; current-lease confirmation and durable callback deduplication
+remain required.
+
+New regressions exercise all four plain/encrypted SQLite/PostgreSQL variants:
+remote/hosted/inline recovery preserves exact references and epoch; input stays
+out of reconnect; opt-out/undersized decoders and foreign reporters receive no
+delegated task; missing/corrupt sidecars are not repaired; incompatible older
+rows cannot consume the delivery window ahead of ordinary work. The PostgreSQL
+legacy-row fixture explicitly seeds worker_id because dispatch inserts do not
+create held leases on that backend.
+
+An actual authenticated gRPC probe publishes through HTTP, claims by stream
+Demand, verifies both payload endpoints using the delivered references, reconnects
+without minting an epoch, and proves a decoder opt-out receives no replay. It
+runs all three publication modes on every storage variant. This verifies the
+wire projection as well as storage/decoder units.
+
+Validation passed: 242 publication/recovery cases, 160 gRPC unit tests, 96 worker
+issuance cases, workspace all-target Clippy with warnings denied, actual WASM
+compilation and formatting. Test-only explicit-default lint corrections were
+compiled by final strict checks. Owned PostgreSQL instances were stopped and
+removed on both successful and failed drivers. Source hashes and logs are in
+`/private/tmp/orch8-reconnect-context-validation.json`; no local driver remains.
+The changes are unpublished and mobile still opts out of the protocol.
+
+Remaining end-state gates include explicit account/catalog/peer native admission,
+reconnect source-cut/retirement/terminal-state screening plus current-lease
+confirmation, compact stored mailbox/input and aggregate/checkpoint byte bounds,
+acknowledged archive after physical quiescence, text-safe HTTP mutation epochs
+and actual SDK platform upgrade/execution probes. Do not treat transport
+verification or retained context as provider execution authority.
+
+
+### DME215 — reconnect forward eligibility and known deadlines
+
+Reproduced 28 reconnect-screening failures across plain/encrypted SQLite and
+PostgreSQL: 20 issuer/history/deadline test legs and eight captured/retired source
+legs. Repeated the same 28 failures against clean main `191d6d7e`, independently
+of the staged definition/input protocol foundation. The initial baseline command
+ran from the review worktree by mistake and was rejected by the RED verifier;
+its output is not used as main evidence. The corrected baseline prints its
+isolated worktree and compiled main sources before reproducing assertion failures.
+
+Both backend reconnect selectors now screen forward eligibility before LIMIT:
+terminal parent states, immutable native-relay history, permanent physical
+retirement, captured/sealed source cuts and compensating continuity ownership.
+An explicit lease must have a positive duration and an unexpired heartbeat/claim
+anchor. An explicit task timeout must not have elapsed since creation. This is a
+read-side screen: it does not finalize, release, renew or remint the held task,
+and preserves the original issuance record and payload/outcome evidence.
+
+NULL lease duration still denotes the separately configured server default; this
+query does not invent a duration. It retains the legacy confirmation policy.
+Screening is an observation at read time, not execution authority or a substitute
+for current-lease confirmation, per-forward fences and physical callback admission.
+Known-deadline screening and historical outcome reporting remain separate paths.
+
+Regressions prove blocked rows do not crowd healthy work out of a one-task
+reconnect window, retired IDs remain blocked without cut history, and explicit
+unsealed abort restores the original eligible held claim without changing epoch.
+Root validation passed all 116 issuance, 213 source-cut, 242 publication/recovery
+and 160 gRPC tests (731 total), workspace all-target strict lint, actual WASM and
+formatting. The source-cut fixture helper was extracted and its outer future
+boxed to satisfy strict lint, then its full suite and strict checks were rerun.
+
+The fix is isolated in `/private/tmp/engine-worker-reconnect-forward-guards` on
+`fix/worker-reconnect-forward-guards`, with only two production queries and test
+modules. Its standalone main validation is running before publication. Keep the
+larger root foundation and explicit native/account/catalog/peer/archive/platform
+gates separate. Completed test executables (757,912,864 bytes), then completed
+workspace library/metadata/test outputs (4,276,196,610 bytes), were removed only
+after native drivers exited; root source and external dependency caches remain.
+
+
+DME215 isolation checkpoint: all 333 main storage tests (120 issuance and 213
+source-cut), strict all-target storage lint and formatting passed. Added an
+extreme-timeout regression after reproducing two PostgreSQL interval-overflow
+failures in the first deadline implementation. Numeric epoch arithmetic avoids
+that overflow while retaining the `claimed_at` fallback when heartbeat is absent;
+the new boundary passes on all four storage variants.
+
+PR #376 is open at `d0cf98439e8f241194787fe9651935b323bdf0ad` against main
+`191d6d7e`, with exactly six files and 321 inserted lines. Full CI and Mobile
+workflows (40909523375 / 40909523370) are running. Do not merge until all checks
+and both exact-head workflows complete successfully. Final root validation is
+running after touching root package entry-point mtimes to invalidate artifacts
+from the isolated workspace. The broader protocol/native/archive foundation
+remains unpublished and must be preserved during branch/worktree cleanup.
+
+
+DME215 final local checkpoint: the final numeric arithmetic passed all 120
+issuance, 213 source-cut, 242 publication/recovery and 160 gRPC tests in the root
+worktree (735 total), followed by workspace all-target strict lint, actual WASM
+and formatting. All owned databases are stopped and removed. The shared target
+currently belongs to root; invalidate package entry-point mtimes before switching
+back to an isolated workspace. The isolated branch/worktree remains clean.
+
+PR #376 is still OPEN at the exact published head. Latest authoritative GitHub
+checkpoint reports nine successful checks out of 15 currently registered, with
+no failures. Three iOS jobs, bindings generation, Check & Lint and Unit Tests
+remain queued/running; dependent jobs can register later. Both workflow IDs and
+the live watcher handle (35410) are retained in the temporary validation manifest.
+Do not merge or remove this unmerged branch/worktree before complete CI success.
+The broader scoped-native execution, archive, byte-budget and platform gates
+remain open; the active review objective is not complete.
+
+
+### DME216 — explicit catalog worker peer ownership (staged)
+
+Added opaque host-selected peer bindings under the existing account/catalog
+handles. A binding pins canonical public HTTPS API base, remote tenant and a
+backend-assigned UUID worker identity. Remote task or payload fields never choose
+the local scope. The same API/tenant/worker tuple cannot be aliased by a different
+local account, catalog or peer key in this database. Each binding requires a
+worker identity distinct from the legacy database-wide node ID. Case variants of
+that legacy UUID cannot bypass the SQL guards.
+
+Bindings are immutable, credential-free and bounded: 128 global records, 64 per
+account and 16 per catalog, with an 8 KiB serialized record ceiling. Retired
+owners remain charged; identical retries and fresh sign-in handles reuse the
+record rather than consuming another slot. Current use separately fences the
+account epoch and catalog and validates the complete retained record. Corrupt or
+unknown codecs are not restamped. Missing/current-state mismatch fails the
+captured handle. Reopen and concurrent independent pools converge on one binding.
+Debug output omits the descriptor. Peer configuration is not authentication,
+proof of a current remote lease or native provider admission.
+
+The new SQLite-74 draft extension creates the legacy node identity table before
+installing peer guards, preserving its original shape and existing values. The
+first full test attempt exposed that bootstrap dependency and left two physical
+capacity tests waiting after setup failed; the owned test process was interrupted
+and its handle reaped before changing source. After fixing initialization, the
+full mobile suite passed all 760 tests. A final synthetic earlier-development
+layout upgrade test was added, then all ten focused peer tests passed, followed
+by strict workspace all-target lint, actual WASM and formatting. All 55 SQLite
+storage unit tests passed as well. The last full suite predates that extra test;
+do not call it a full 761-test run. This is not released-SDK migration evidence.
+
+No remote worker/provider path is enabled. The next integration still requires a
+peer-bound credential/identity check before HTTP, scoped remote graph/input
+materialization, per-forward account/catalog/peer/lease authority and physical
+capacity, explicit acknowledged remote archive, and real platform upgrade probes.
+The existing local signed-catalog execution/archive APIs remain separate from
+this unfinished remote-delegation bridge. Source hashes/logs are recorded in
+`/private/tmp/orch8-worker-peers-validation.json`; all local native drivers exited.
+
+PR #376 remains independent at head `d0cf9843`. Mobile attempt 1 failed because
+two macOS ARM64 jobs never acquired a hosted runner (GitHub annotations report
+capacity constraints), so their dependent jobs were skipped. Requested a failed-
+job retry: attempt 2 has acquired the iOS simulator runner; bindings generation
+was still queued at the last check. Main CI still awaited Unit Tests. The previous
+successful Unit Tests job took about 50 minutes, so runtime alone is not failure
+or terminal evidence. Require complete successful checks and both exact-head
+workflows before merging; keep the unmerged worktree/branch. Watcher 35410 remains
+live. No releases were requested or performed.
+
+
+DME215 merge checkpoint: PR #376 merged at `8e23c258e439ca432212fa809fd7892a33a5397f`
+on 2026-10-29T17:11:42Z. All 25 exact-head checks and both complete workflows
+passed at `d0cf98439e8f241194787fe9651935b323bdf0ad`, after retrying the two jobs
+cancelled by macOS ARM64 runner capacity constraints. Before merging, the head,
+base and current main ref were checked; main was still `191d6d7e`. Post-merge
+`git diff d0cf9843 main` exited zero, proving the merge tree matches tested code.
+The watcher's terminal summary aggregated historical polling snapshots (including
+repeated cancelled jobs); those totals were not used as the merge gate. The final
+authoritative rollup was 25 SUCCESS checks and both workflow conclusions SUCCESS.
+
+Verified the clean isolated branch head is an ancestor of origin/main, removed
+its worktree and local/remote branch, and advanced local main without checking out
+or resetting the dirty root. Only the preserved root review worktree remains.
+The watcher and all local native drivers have exited. DME216 peer ownership work
+remains separately unpublished with its validation manifest. The active objective
+is incomplete: peer-bound credential verification, scoped remote graph/input/native
+execution including captured dependency/lifecycle semantics, per-forward remote
+lease and physical admission, acknowledged remote archive and actual SDK platform
+upgrade/execution probes remain required. A verified cache/binding must not be
+used as a signed-catalog entry or execution permission.
+
+
+### DME217 — fresh peer-bound device proof for private payload reads
+
+Added a staged scoped payload reader that requires a host-selected account/catalog
+worker peer and explicit expected device. Each definition/input read probes the
+fixed peer `/workers/identity` endpoint with a fresh canonical nonce. The API derives
+tenant, runtime, device, runtime kind and expiry from the authenticated device
+session, accepts no caller-supplied scope, and bounds proof lifetime to 60 seconds
+and the original session expiry. Operator keys and browser sessions cannot obtain
+this proof. Both request and response reject unknown fields. Responses use no-store.
+
+The reader checks the returned tenant/runtime/device and nonce and uses the exact
+same frozen device-session token for the following fixed-origin payload GET. It
+never calls an ambient credential provider or refreshes between the probe and GET.
+A different token on a subsequent operation must obtain another fresh proof. The
+proof authenticates the backend session tuple; it does not assert an app OAuth
+issuer/subject. The local host owns the separate account/catalog binding.
+
+An immutable bounded local device record is pinned only after a successful proof;
+it grants no durable authentication. Current account/catalog/peer/device and claim
+expiry are checked around I/O and verification. Two process-wide read slots cover
+body download and blocking validation. Cancellation detaches the owned operation
+and keeps physical verification charged until it actually exits. Redirects remain
+disabled, response sizes are bounded, and malformed private content is redacted.
+
+Local verification: all 768 mobile tests passed, including seven new scoped-reader
+cases for exact-token use, account retirement during probe/body, foreign identity,
+private error redaction and cancellation while a real verification thread is held.
+Three validator tests passed, covering canonical/non-nil nonce, replay, identity,
+version/kind, expiry/skew, unknown fields and extreme timestamps. The API integration
+case passed on all four real plain/encrypted SQLite/PostgreSQL backends with required
+PostgreSQL enabled. Strict workspace all-target Clippy, actual WASM target check,
+representative generated Rust/JavaScript clients and formatting passed. OpenAPI
+fingerprint is `90a0f59d956f68fef7f1c796c0714a24dc50b622669fd288b23276d2e4f6cdda`.
+The final source fingerprint manifest is `/private/tmp/orch8-scoped-identity-validation.json`.
+
+The temporary PostgreSQL instance stopped and its data directory was removed.
+After all native drivers exited, lsof confirmed no selected completed executable
+was open; removing those outputs recovered 1,576,349,824 file bytes. No source or
+unmerged worktree was removed. Root remains dirty and this foundation unpublished.
+
+This completes a transport authentication boundary, not the distributed/mobile
+objective. Remote logical-run input retention and quotas, persistent scoped native
+admission, captured dependencies/lifecycle/compensation, per-forward lease fencing,
+acknowledged remote archive, and actual SDK platform upgrade/execution probes remain.
+The negotiated worker delivery profile stays disabled until that path is complete.
+
+
+### DME218 — immutable input retention per logical remote run
+
+Added local exact-byte input retention keyed by the persistent remote logical run,
+independent of both remote claim generations and local sign-in epochs. It requires
+an existing current binding; account/catalog, server, tenant, task, owner epoch,
+worker, claim epoch, publication request, retained definition receipt and claim
+observation must agree in the same writer-fenced transaction. This is cached data
+and provenance equality only, not a current remote lease or provider authority.
+
+Installation verifies the separately authenticated expected input reference and
+keeps the exact base64 payload. Restart loads bound stored lengths before copying
+fields from SQLite and rechecks codec, reference, expansion charge and payload
+hash/JSON limits. Future codec, altered bytes/reference/charge or inconsistent run
+observation fail closed; a new download cannot repair those rows. Suppressed
+inserts cannot publish an unretained input. The staged scoped payload reader now
+returns the exact verified input envelope, analogous to its definition envelope,
+so retention does not reserialize JSON or lose original byte identity.
+
+Quotas include retired scope data: 128 MiB / 512 inputs per database, 64 MiB / 256
+per account, 32 MiB / 128 per catalog. Each input is charged its encoded bytes plus
+measured decoded expansion. An exact existing retry works at capacity without
+adding a generation-specific copy. SQL update/delete triggers protect retained
+input until a future explicit acknowledged archive design supplies the removal
+boundary. No automatic quota reset on retirement or sign-in is allowed.
+
+Six added tests cover claim replacement through u64::MAX, worker and sign-in
+changes, foreign account/server, corrupt body/reference/charge, unknown codec,
+immutable rows, suppressed insertion, byte and count boundaries, exact retry at
+capacity, and actual database close/reopen without network or native admission.
+The catalog count fixture uses synthetic independent receipt/binding rows only to
+exercise accounting; it is not execution or provenance proof. Existing binding
+and definition tests still cover independent-pool fences and staged schema upgrade.
+
+Validation: 47 definition/binding/input tests, seven scoped reader tests and all
+122 SQLite unit regressions passed. Strict all-target workspace Clippy, actual
+WASM target and formatting passed. No full 774-test mobile run was performed at
+this source state; the prior 768-test result belongs to DME217. Source hashes and
+logs are recorded in `/private/tmp/orch8-retained-input-validation.json`. All native
+drivers are terminal. This code remains unpublished with the preserved root WIP.
+
+Next integration gate: shared processing capacity must span cached graph/input
+verification and installation (including cancellation), before remote native
+materialization can expose the path. Current cache methods still decode within
+async storage operations; do not treat the reader's download-only slots as a bound
+on the whole preparation path. Scoped native provider/child/lifecycle admission,
+per-forward lease fences, acknowledged remote archive and real SDK execution and
+upgrade probes remain required. Negotiated delivery stays disabled by default.
+
+
+### DME219 — owned capacity across the complete remote preparation path
+
+Connected the peer-bound reader, retained graph, stable logical-run binding and
+retained input through a single internal preparation coordinator. Cold preparation
+fetches/verifies/installs missing data; a later claim generation reuses the same
+local logical run, original graph and exact input. Every preparation, including a
+complete cache hit, first obtains a fresh device-session identity proof using its
+explicit frozen token. No token refresh or ambient credential provider is invoked.
+Current scope/peer/device and expiry are rechecked before and after storage phases
+and before publishing a result. Private storage failures are mapped to static errors;
+corrupt cache evidence never causes a repair download.
+
+A process-wide two-slot budget now covers both standalone payload reads and the
+whole preparation path. The coordinator's reserved reader borrows that same opaque
+physical permit rather than reacquiring another slot. A permit from an unrelated
+budget is refused. Aborting the caller or reaching its deadline cancels logical
+progress but leaves the physical owner charged until transactions and CPU work
+settle; abandoned result destruction also happens before that charge is released.
+The coordinator has a 90-second caller deadline, shortened internally by the fresh
+proof's expiry; each HTTP read retains its own 30-second limit. No in-flight SQL
+transaction is abandoned merely because the waiting caller disappears.
+
+Graph/input decoding, verification, materialization into cache rows and native
+fingerprint checks run on the coordinator's capacity-bound dedicated Rust thread,
+which polls the existing async storage futures with the active runtime handle.
+This avoids blocking runtime executor threads. It also avoids occupying Tokio's
+blocking pool while awaiting payload verification or DNS/filesystem jobs from the
+same pool: an initial spawn_blocking coordinator design would deadlock when that
+pool has only one worker. At most two preparation owners can perform retained work via
+the shared production budget. Only bounded claim context is captured, not the
+remote task's arbitrary checkpoint/body. No provider callback runs here.
+
+New tests cover cold/warm preparation, a fresh proof after token change, persistent
+logical IDs through a higher claim generation, no native task creation, cache
+corruption without private error leakage or repair, cancellation while physical
+cache preparation remains held, current-thread executor responsiveness, account
+retirement before cached-result publication, foreign permit rejection, panic
+cleanup and successful preparation with one Tokio blocking worker. The shared
+budget test proves that cloning/dropping one logical permit cannot free its slot
+while another physical owner still holds it.
+
+All 782 mobile tests passed. Strict lint then requested explicit imports in the
+new preparation module; that import-only correction was followed by all 14 scoped
+reader/preparation tests and the shared capacity test passing again, strict
+all-target workspace Clippy, actual WASM target and formatting passing. Final
+source hashes/logs are in `/private/tmp/orch8-preparation-validation.json`. Every
+native validation driver is terminal. This foundation remains unpublished in the
+preserved dirty root; no release or negotiated capability was enabled.
+
+Preparation returns data/provenance equality only. It cannot admit native provider
+execution, prove a current remote lease, replace a signed catalog request, or bypass
+physical callback capacity. The next required gate is durable remote materialization
+with explicit remote ownership, captured child/lifecycle/compensation semantics,
+per-forward scope and remote-lease validation and persistent physical run identity.
+Acknowledged remote archive with compact dedup/outcome receipts and actual SDK
+platform execution/upgrade probes also remain. The existing public signed-catalog
+local SDK is a separate working execution path and must retain its own trust checks.
+
+
+### DME220 — durable remote root materialization and legacy downgrade guards
+
+Added a distinct internal storage initializer for a remote native root. It requires
+the host-selected peer, current account/catalog, latest bound claim/request,
+retained exact input and the original verified graph receipt. Peer equality and
+account retirement are checked in the same writer-fenced transaction. The stable
+logical-run ID becomes the native instance ID. Initial native state is paused,
+with no claim or next-fire timestamp; the input preserves full-width integers.
+No signed-catalog request is fabricated and no scheduler/provider permission is
+created. The initializer is not yet wired into the owned preparation coordinator
+or any public SDK method; its storage work must run under that coordinator before
+exposing a remote execution path.
+
+Native instance and immutable codec-1 materialization receipt are inserted
+atomically. The receipt records original graph/claim/owner provenance, data
+references and creation identity. A retry or later sign-in/claim generation reuses
+the original instance and original provenance. Missing, oversized or future
+receipts, changed identity, suppressed inserts or altered initial native body fail
+without adopting/recreating unverified work. Initial persisted fields are compared
+to the complete expected instance, not only a selected metadata subset.
+
+A separate immutable physical ownership index pins each configured canonical API
+base and remote task UUID to one native root across accounts/catalogs/workers.
+A different local scope cannot initialize a second physical root or inherit the
+first scope's private native data. Original-scope recovery reuses its root. Missing
+physical ownership evidence is an error, never silently reconstructed from native
+rows. This is a durable dedup boundary, not remote lease confirmation; backend
+handoff/outcome reconciliation must still honor its authority and retained results.
+
+SQLite generic execution, claim-bound credentials, legacy worker dispatch,
+context-free mobile read/write projections and descriptor-free capsule selection
+now reject remote materializations and stable logical-run IDs. Keeping the logical
+binding check means removing one materialization receipt cannot turn the native
+row into legacy work. Changing mutable tenant, namespace or scheduling state also
+cannot regain legacy authority. These extra owner lookups use primary-key indexes;
+existing execution/coordination query-plan tests still pass without history scans.
+
+Signed-catalog and remote initialization share active-instance quota accounting.
+It includes durable catalog requests and remote bindings, so mutable native
+identity changes cannot reset account/catalog charges. Existing exact retries can
+reuse their root even when admission limits are full. Retired scope state remains
+charged while physically retained nonterminal instances exist.
+
+Ten new tests cover paused/idempotent initialization through u64::MAX claim epochs,
+real database close/reopen, independent-pool concurrent initialization, a new
+sign-in reusing the original provenance, cross-account duplicate/adoption refusal,
+missing/future receipts, immutable receipt deletion, suppressed/altered inserts,
+legacy scheduling/credential/worker/mobile access after native-row mutation,
+quota charges after mutable identity changes, and stopped/expired/retired or
+out-of-capacity initialization leaving no native instance.
+
+Final validation at the recorded source hashes: all 792 mobile tests and all
+122 SQLite regressions passed; strict all-target workspace Clippy, actual WASM
+target and formatting passed. `/private/tmp/orch8-remote-root-validation.json`
+records exact sources and logs. All native drivers are terminal. The root review
+worktree remains dirty and preserved; this foundation is unpublished, no release
+was made, and negotiated worker delivery remains disabled.
+
+The objective is still incomplete. Next integrate paused initialization under the
+owned preparation reservation, then implement explicit remote runtime admission
+and per-forward lease/account checks rather than relaxing generic scheduler SQL.
+Captured dependency/child/lifecycle/compensation semantics, remote business-attempt
+recovery, physically owned callback/outcome handling, acknowledged remote archive
+with compact dedup/outcome evidence, and actual SDK platform execution/upgrade
+probes remain required. Archive must account for the new immutable/FK ownership
+records; generic purge is not an acknowledgement boundary. No released-SDK upgrade
+claim is inferred from local staged-schema reopen tests.
+
+
+### DME221 — connect paused initialization to owned preparation
+
+The peer-bound reader now has two distinct internal results: verified preparation
+data, and a paused initialized native root. Both use the same owned preparation
+observer and physical reservation. Initialization runs after the graph/input have
+been authenticated, installed and bound, on the existing dedicated preparation
+thread. Decoded input from the preparation result is dropped before the writer-
+fenced initializer reads its own snapshot, avoiding a second retained decoded copy.
+No host callback or workflow-supplied closure is accepted by this internal observer.
+
+The storage initializer now takes the exact prepared BoundClaimRun. It rejects a
+changed/noncanonical/nil local run ID, graph identity, worker or claim generation
+before allocating or globally pinning a native root. The coordinator also checks
+returned native IDs against its prepared run. This closes a stale preparation
+snapshot boundary rather than silently choosing a different current database run.
+Scope/peer/device/expiry checks surround initialization; SQL transactions still
+settle under physical ownership when the logical caller disappears. Private storage
+errors are redacted at the preparation boundary. InitializedClaim is not a native
+execution grant and its Debug output omits private data.
+
+Four new integration tests cover cold/warm owned initialization with fresh proofs,
+cancellation at the preparation-to-initialization boundary while capacity stays
+occupied, account retirement after preparation preventing any native row, and a
+private database failure rolling back the root and allowing a clean later retry.
+The one-Tokio-blocking-worker regression now exercises initialization too, proving
+that cache validation and native-root SQL do not recursively occupy that pool.
+An additional storage test refuses a changed prepared identity without allocating
+an instance or physical owner; its final cases cover ID, graph, worker and epoch.
+
+All 797 mobile tests passed. After expanding the existing prepared-identity test
+with the extra mismatch cases (no production logic change), all 11 remote-root
+tests passed again. Strict all-target workspace Clippy, actual WASM target and
+formatting passed. Final source hashes/logs are recorded in
+`/private/tmp/orch8-initialization-validation.json`. All native drivers are terminal.
+The earlier 122 SQLite regression result remains scoped to unchanged storage SQL;
+this milestone did not rerun or modify those SQL sources.
+
+Cleanup audit found top-level hard links left after earlier deps-only binary
+removal. After checking no compiler or selected artifact was open, removed eight
+completed server/CLI/SDK/test build artifacts and all discovered target aliases.
+Unique file bytes removed were 1,221,274,752; the measured available-space increase
+was 1,120,833,536 bytes. The manifest distinguishes logical bytes, inode block
+estimates and measured free space, rather than equating unlinked names with space
+reclaimed. Sources and the dirty root worktree remain preserved.
+
+The reviewed ConfirmedLease helper in `orch8-engine/src/remote_worker_lease.rs`
+supervises one owned future with conservative monotonic heartbeat deadlines. It
+does not itself expose a task/scope-bound per-forward native-entry capability.
+Initialization therefore leaves the instance paused and generic remote scheduling
+blocked. The next execution gate must bind a live supervised remote claim to its
+explicit peer, current local scope and original task/generation, enforce authority
+again at each physical provider entry, and revoke it on expiry/loss/teardown.
+Remote business-attempt identity must be considered separately from claim epochs;
+preparation intentionally carries publication data rather than execution authority.
+Captured child/lifecycle/compensation semantics, durable start/outcome recovery,
+acknowledged remote archive and actual SDK platform execution/upgrade probes remain
+required. No public remote-worker API, negotiated capability, merge or release was
+introduced by this milestone.
+
+
+### DME222 — fence physical native entry with observable lease liveness
+
+Reproduced a real worker failure on isolated main: a callback queued behind the
+single Tokio blocking worker could enter the host after its remote lease expired
+while the executor and timer driver were stalled. The regression failed with
+`expired queued callback entered the host` on base 8e23c258, then passed with the
+fix. This is a physical callback-entry boundary, not just timer-task cancellation.
+
+ConfirmedLease now supplies a read-only LeaseAuthority observer. It is pending
+until supervision starts, checks conservative monotonic deadlines directly, and
+permanently revokes on expiry, loss, cancellation, panic or supervisor teardown.
+Accepted renewals publish deadlines anchored to request start. Operation and
+renewal futures revoke authority before their destructors run. Poisoned observer
+state fails closed. Supervision checks authority before each operation poll, so a
+ready operation cannot bypass expiry when timer delivery is starved.
+
+An additive lease-aware preparation registration passes this observer from the
+same supervisor that owns the actual remote worker heartbeat. Mobile handlers
+check it through preparation, native preflight, awaited admission checks and
+physical invocation, and before publishing callback success. Existing local and
+legacy registration interfaces remain compatible. Already-running foreign effects
+still require the existing physical ownership and ambiguous-outcome handling;
+revoking logical authority cannot stop an arbitrary foreign callback.
+
+The main-based isolated checkout passed 16 lease tests, 3 registry tests, 27
+executor regressions, all 711 mobile tests, strict all-target workspace Clippy,
+actual WASM compilation and formatting. Four native-entry tests and the real
+queued-worker regression cover the new mobile boundary. These are main-checkout
+results, not a claim that the surrounding unpublished root foundation has passed
+a new full suite. Selected fix sources match the root's reviewed source hashes.
+PR #377, tested head 66331d36da459cc8e940ddc1257659571a1783a1, merged as
+863da181578dcb56e2f42373fe804d4b789839ef after all 25 checks and both complete
+CI/Mobile workflows succeeded. The merged tree exactly matches the tested head.
+Its clean worktree and local/remote branch were removed, local main was advanced
+without checking out or resetting the dirty root, and the organization open-PR
+audit returned zero. Exact source hashes, workflow evidence and merged-tree proof
+are recorded in /private/tmp/orch8-lease-entry-publication/manifest.json and
+merge-audit.json.
+
+This observer proves liveness only. Scoped remote execution must still bind the
+original authenticated peer/backend/task/worker/generation to the current local
+account/catalog epoch. The initialized scoped root remains paused. Process-wide
+same-task physical exclusion across independent MobileEngine instances also
+requires a separate test and implementation: the current admission map is shared
+within one engine, while a foreign callback may outlive that engine. Captured
+child/lifecycle/compensation execution, business-attempt identity, acknowledged
+remote archive and real SDK upgrade/execution probes remain outstanding. No
+negotiated remote capability or release is enabled by this fix.
+
+The final review cleanup removed six completed, unopened native test/SDK build
+outputs after checking no compiler was active. Unique file bytes were 996,089,832;
+measured available space increased from 122,331,136 to 1,115,234,304 bytes. The
+cleanup manifest is /private/tmp/orch8-lease-entry-cleanup.json. Sources and
+unmerged work remain preserved; dependency libraries were retained.
+
+### DME223 — retain remote task exclusion across independent engines
+
+A new real-worker regression reproduced overlapping host callbacks: after cancelling
+one engine's logical invocation while its callback remained physically blocked, a
+second independently constructed worker/SQLite backend entered a newer claim for
+the same remote task. Per-engine Admission and Stragglers did not cover this case.
+The original test failed with `a second engine entered the same remote task while
+its predecessor was physically running`; the identical test passes with the fix.
+The initial sandbox attempt could not bind the local mock server and is not the
+red behavior evidence; the escalated run reached the intended overlap assertion.
+
+A private process-wide reservation now serializes native callbacks by canonical
+backend API URL and remote task UUID, independently of worker identity, database,
+engine or claim generation. Canonical host/default-port/trailing-slash aliases
+share the key. Different task IDs and backends remain independent. Invalid,
+credential-bearing, query-bearing or fragment-bearing scopes fail closed. The
+reservation is acquired before native preparation and the durable started marker;
+contention releases the newer claim as unstarted without reporting business
+failure. No workflow-supplied JSON provides or selects this reservation.
+
+LeaseAuthority has an additive opaque physical-owner retention method. It does
+not activate or renew liveness. Enriched observer clones retain runtime-owned
+resources until the last enriched observer drops, even after lease revocation or
+supervisor destruction. The supervisor's state does not retain these resources.
+The worker binds its own reservation to the observer it hands to native
+preparation. NativeOwnership drops this observer after its other owners, retaining
+same-task exclusion through foreign binding destruction. This separates revoked
+logical authority from the lifetime of a callback that cannot be forcibly stopped.
+
+Two integration tests cover independent-engine overlap, unstarted refusal, other
+task progress, retry after physical return, engine destruction and a blocked
+foreign callback destructor. Three reservation tests cover clone ownership,
+changed workers/full-width epochs, canonical aliases, independent scopes and
+invalid/credential-bearing endpoints. A core observer test verifies both retained
+owners survive revocation and are released only with the final enriched clone.
+
+All 70 worker tests, all 807 mobile tests, all 17 core lease tests, strict all-target
+workspace Clippy, actual WASM target and formatting passed on the dirty root
+foundation. An initial core filter selected zero tests and was not counted; the
+corrected module filter ran all 17. The exact eight-file portable patch, source
+hashes and logs are recorded in /private/tmp/orch8-process-native-ownership.
+Clean-main reproduction also failed at the intended overlap assertion. Applying
+the exact eight-file fix on main 863da181 then passed all 716 mobile tests, all 17
+core lease tests, strict all-target workspace Clippy, actual WASM target and
+formatting. PR #378 is published at head
+2db700705e07b67dafb098ce58ebf08e39719f13. All 25 checks and both complete workflows succeeded. PR #378 merged as
+876749836eaeba5635726f8b2bc758527be147e6; its tree exactly matches the tested
+head. Its clean worktree and local/remote branch were removed while preserving
+the dirty root. Merge evidence is retained in the publication manifest. No
+release was made.
+
+This is process-local physical exclusion for one canonical backend/task, not a
+persistent execution grant or backend-alias identity proof. Scoped remote native
+roots remain paused. Explicit peer/account/catalog/generation admission, direct
+supersession checks at queued physical entry, captured child/lifecycle/compensation
+execution, durable late outcome handling, acknowledged remote archive with compact
+receipts, and actual SDK upgrade/execution probes remain outstanding. The overall
+review objective remains incomplete.
+
+
+### DME224 — observe supersession at queued physical entry
+
+The public stop_worker contract deliberately drains admitted tasks. That is
+preserved: the new positive regression stops the worker after durable dispatch
+and proves its queued native callback still runs and settles. Stopping future
+claims must not be confused with revoking an existing claim generation.
+
+A separate real-worker regression reproduced the actual gap. A newer claim goes
+through the worker's synchronous task_future admission path, which cancels the
+predecessor's supersession token. While the current-thread executor is stalled,
+the queued predecessor could still enter the host under an unexpired lease. The
+red run passed graceful draining but failed with `superseded queued callback
+entered the host`. This is not an expiry test: the lease remains valid for 30s.
+
+The owned lease observer now accepts runtime-bound revocation tokens and reasons.
+Its final check inspects them directly and publishes the first observed terminal
+refusal to the shared state. Clones preserve the checks; renewal cannot revive
+ended authority. A refusal never releases retained physical owners early. The
+worker binds its existing authenticated-claim supersession token with
+LostOwnership; it intentionally does not bind the graceful stop token. Tokens and
+reasons are supplied by the runtime, not workflow JSON, and are not bearer or
+account authentication. The locked tokio-util 0.7.20 cancellation implementation
+releases its tree locks before waking waiters; these checks do not run foreign
+callbacks under the lease-state mutex.
+
+The test holds the sole blocking thread until the callback is queued, requests
+supersession synchronously without polling its release future, then releases the
+thread while still withholding executor progress. It waits for the owned physical
+admission permit to return, proving physical settlement without relying on a
+fixed delay or blocking-pool queue ordering. The rejected predecessor never enters
+the host or sends complete/fail; the successor is released unstarted. The graceful
+control enters once and completes. Both now pass. Three core tests cover direct
+revocation without supervisor progress, clone/physical-owner lifetime while
+pending, and preservation of an earlier terminal reason.
+
+All 20 core lease tests and all 809 mobile tests passed. Strict lint then found
+two missing assertion semicolons in the test fixture. After that test-only style
+correction, the two new regressions, strict all-target workspace Clippy, actual
+WASM target and formatting passed. Production source hashes did not change after
+the full suite. Exact five-file sources, hashes, parent PR #378 dependency and
+logs are saved in /private/tmp/orch8-superseded-native-entry/manifest.json. This
+fix was then reproduced on isolated parent head 2db70070: the supersession case
+failed at the intended host-entry assertion while graceful draining passed. The
+exact five-file fix passed all 20 lease tests, all 718 parent-based mobile tests,
+strict all-target workspace Clippy, actual WASM target and formatting. It is
+committed locally as 18cb6dcf74369c545f2a0fd1579955ca99a5cf70 with tested tree
+851e81839545863b1ef8f6b9a461a7236f73305f. After PR #378 merged, a history-only rebase onto main preserved this tested
+tree and every selected source hash. PR #379 published head
+970fa6b25e0c17fe29de958ea0abad03ec773e79 and merged as
+2e3180f73944a4b5eb63c8a8f5c7001bbb4a42a6 after both complete workflows and all
+25 checks succeeded. The merge tree equals the tested tree and retains the tested
+head as a parent. Its clean worktree and local/remote branches were removed;
+the dirty root was preserved. No release was published.
+
+This binding observes the Admission supersession token shared within one engine.
+Process-wide physical same-task exclusion remains provided separately by DME223;
+it is not a process-wide generation-notification service. Explicit scoped remote
+execution still needs authenticated peer/account/catalog/generation binding,
+captured dependency/lifecycle/compensation execution, durable late outcomes,
+acknowledged remote archive with compact receipts, and actual SDK upgrade probes.
+Initialized scoped roots remain paused and negotiated delivery remains disabled.
+The overall review objective is incomplete.
+
+
+### DME225 — enforce the published mailbox attempt invariant
+
+Source review resolves the v1 mailbox business-attempt question: publication
+validation requires both its worker task and dispatch effect to use attempt 0.
+The mailbox is a published unbound invocation, not an ordinary flat/tree business
+retry. Its claim generation can advance while the logical request remains stable.
+Ordinary worker retry construction is separate and creates a new task UUID with
+its next business attempt. These identities must not be conflated in a future
+scoped executor or dedup/archive key.
+
+Two regressions found the inbound mismatch. RemoteTask validation accepted a
+nonzero mailbox attempt with otherwise valid issued references, and the real
+ScopedPayloadReader initialization pipeline fetched its payload and initialized
+a native paused root. Both red runs reached their intended assertions. Validation
+now requires attempt 0 whenever issued delegation context is present. It rejects
+noncanonical attempts before data preparation, identity/payload HTTP, budget
+reservation or native allocation. Existing ordinary worker attempts are unchanged.
+The protocol document records this invariant explicitly.
+
+The validator regression rejects 1, 2 and u32::MAX, accepts a renewed full-width
+claim epoch for attempt 0, and retains ordinary attempt-2 compatibility. The
+integration regression rejects those values without HTTP or a native row,
+retains preparation capacity, then initializes the valid attempt-0 retry.
+All 35 remote-worker tests, all 810 mobile tests, strict all-target workspace
+Clippy, actual WASM target, formatting and documentation checks passed. Source
+hashes, logs and both red assertions are recorded in
+/private/tmp/orch8-mailbox-attempt/manifest.json. This change belongs to the
+unpublished frozen-delegation foundation, not a standalone published main fix.
+
+This closes the raw mailbox-attempt admission ambiguity for v1; it does not add
+execution authority or collapse native graph step retries into claim epochs.
+Scoped native roots remain paused. The remaining execution work still needs an
+explicit authenticated peer/account/catalog/generation grant, scoped claim/write
+and credential boundaries, frozen child/lifecycle/compensation execution,
+durable late outcomes, acknowledged remote archive with compact receipts, and
+actual SDK execution/upgrade probes. Process-wide physical retry exclusion for
+new task UUIDs remains a distinct review case from DME223's same-task guard.
+No negotiated capability or release was enabled. The overall objective remains
+incomplete.
+
+
+### DME226 — serialize physical business retries and bound contention polling
+
+Ordinary worker retry construction creates a fresh task UUID for the next
+business attempt. A real two-engine regression proved task-ID-only exclusion was
+insufficient: the retry entered the same workflow instance/block while the older
+callback remained physically blocked. The same regression failed at the intended
+host-overlap assertion on isolated parent head 970fa6b2, independently of the
+unpublished root foundation.
+
+The process reservation now atomically owns both canonical backend/task identity
+and backend/instance/block identity. The task key still prevents evasion by
+changing instance/block metadata; the invocation key prevents fresh retry UUIDs,
+workers, effects or generations from overlapping a live predecessor. Claim-key
+and task UUID/generation must agree before either domain is reserved. Both keys
+remain held through callback and foreign destructor completion and are released
+together after the last owner drops. Other backends, instances and blocks remain
+independent. These are runtime-supplied transport identities, not workflow JSON
+or an authentication grant.
+
+A second functional regression found contention caused 167 actual poll/release
+cycles in 200ms after overlap was refused. Admission now defers new polls by the
+worker's idle cadence, clamped to 1–30s, and wakes the loop to rebuild its timer.
+The delay survives worker reconfiguration, does not cancel predecessors, and does
+not refuse independently delivered work. It expires using the same monotonic
+clock as the loop. This is client pacing, not a server-side task exclusion or
+parking protocol; polling of unrelated not-yet-delivered work can also be delayed
+by that bounded interval.
+
+Coverage includes fresh retry UUIDs, canonical backend aliases, full-width claim
+epochs, changed task metadata, mismatched identity/generation, independent scopes,
+clone lifetime, engine teardown and blocked foreign destruction. The network
+contention test proves at most two polls in its 200ms observation window, no
+premature callback, and eventual execution after the predecessor returns. The
+admission test proves already delivered independent work remains admissible while
+polling is deferred and that capacity returns after the deadline.
+
+All 77 worker tests and all 815 mobile tests passed on the dirty root; strict
+all-target workspace Clippy, actual WASM target and formatting passed. The exact
+four-file patch then passed all 723 mobile tests, strict Clippy, WASM and formatting
+on isolated parent source. It is committed locally as
+8e6f58db6eaf0ce52dad6c54357eb8858b668238 with tested tree
+4c48dc163fa2cf67009a925170e1dea5caa59afc. Source hashes, both red regressions,
+poll measurements and validation logs are recorded in
+/private/tmp/orch8-business-retry-ownership/manifest.json. Parent PR #379 merged as
+2e3180f73944a4b5eb63c8a8f5c7001bbb4a42a6 after all 25 checks and both complete CI
+and Mobile workflows passed. Its merged tree exactly matches tested tree
+851e81839545863b1ef8f6b9a461a7236f73305f; its clean worktree and local/remote
+branches were removed with the dirty root preserved.
+
+The retry fix was rebased onto that merged main as
+d6edf1a96b05874b8b1cc24892394dd03de9703f. Its validated tree and all four source
+hashes are unchanged. PR #380 merged as
+bcd5a8156c7604510b7a22bee1b004d18c24ea44 after all 25 checks and both complete CI
+and Mobile workflows passed. Its merge tree exactly equals tested tree
+4c48dc163fa2cf67009a925170e1dea5caa59afc and retains the tested head as a parent.
+Cleanup separately verifies ancestry, clean status, unchanged branch head and
+stopped native build drivers; it is waiting for DME227 local validation to finish.
+No release was published.
+
+Process-local exclusion does not authenticate a scoped root or guarantee that
+an external effect did not happen. Scoped native roots remain paused. The
+remaining work still needs exact peer/account/catalog/generation execution grants,
+scoped native claim/write/credential boundaries, frozen child/lifecycle/saga
+execution, durable late outcomes, acknowledged remote archive with compact
+receipts and actual SDK execution/upgrade probes. Negotiated delivery remains
+disabled and the overall objective remains incomplete.
+
+### DME227 — bind scoped lease authority and close handoff and return races
+
+The new internal scoped claim lease preserves the original immutable transport
+object and binds its observer to the exact database, peer, account/catalog epoch,
+device and endpoint. A fresh nonce-bound device identity proof precedes the first
+accepted heartbeat for the exact task, worker and full-width claim generation.
+Both acquisition and renewals use one captured credential, without refresh or an
+ambient legacy client. Reconstructed task metadata, another database or another
+peer/device/endpoint cannot borrow the observer. Diagnostics redact the objects.
+This is confirmed scoped claim authority, not native execution permission.
+
+The acquisition regression first failed because the generic request waiter
+cancelled the same child token after successfully returning the confirmed lease.
+A dedicated acquisition guard now cancels abandoned requests and disarms only
+when ownership transfers successfully. The physical acquisition permit remains
+with its owned task until settlement and is released before subsequent preparation;
+it is not retained for the entire lease or confused with native admission.
+
+After that correction, actual HTTP tests separately reproduced two missing
+wakeups: cancellation and fixed logical expiry waited for a long heartbeat cadence.
+Both now independently wake supervision. Direct per-poll checks still refuse
+expired work when the timer driver is stalled. Logical expiry is permanent across
+observer clones, including a wall-clock rollback; the monotonic bound is anchored
+before the wall-time conversion. Scope checks surround the actual database read,
+and local scope refusal permanently cancels the claim's child token.
+
+Two additional regressions returned Ok(7) after expiry or account retirement
+inside a ready work poll. The operation now rechecks authority and durable scope
+before returning a result. Renewals also recheck scope after the RPC, so a late
+successful response cannot override retirement. The work closure is invoked only
+inside activated supervision; an unpolled lease cannot invoke it, and observer
+clones cannot retain authority after supervision finishes or is dropped.
+
+Fifteen scoped HTTP/authority tests cover these cases, wrong identity proof fields,
+initial and renewal 401/409 rejection, stale or malformed mailbox context, nonzero
+mailbox attempts, frozen authentication, full-width mutation epochs, exact task
+identity, different databases/peers/devices/endpoints and abandoned identity or
+heartbeat requests. The first full-root run passed 828 tests and exposed two
+fixture assumptions: a one-second native test lease was acquired before database
+setup, and a new test incorrectly required exactly two requests despite legitimate
+renewal. Database setup now precedes the test lease, and every subsequent request
+is validated as a correctly authenticated heartbeat. Production lease durations
+and negative expiry assertions are unchanged. The native fixture differs from
+current main by exactly these two setup-order changes.
+
+The final complete validation is in progress; no passing full-suite result or
+publication is claimed here. Exact source hashes, the three distinct red runs,
+fixture/lint diagnostics and current validation commands are retained in
+/private/tmp/orch8-scoped-claim-lease/manifest.json.
+
+The claim lease is internal and staged. The next boundary must connect owned
+preparation and paused initialization using the same captured credential and
+supervisor lifetime. Native root/descendant claims, writes, credentials, frozen
+child/lifecycle/saga resolution, durable late outcomes, acknowledged remote archive
+and actual SDK execution/upgrade probes remain required. Scoped roots remain
+paused and negotiated delivery remains disabled. The overall objective is not
+complete.

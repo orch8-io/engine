@@ -23,6 +23,7 @@ mod manifest_callback_tests;
 mod memory;
 mod node;
 mod notifier;
+mod preparation;
 mod privacy;
 mod runtime;
 mod scoped_sdk;

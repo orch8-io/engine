@@ -711,6 +711,7 @@ async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
     }
 
     let capabilities = RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: RuntimeId::new(),
         kind: RuntimeKind::Desktop,
         trust: RuntimeTrustLevel::Registered,
@@ -2314,6 +2315,31 @@ async fn delete_sequence_refuses_live_instances_on_postgres() {
     assert!(s.get_sequence(seq_id).await.unwrap().is_none());
 }
 
+fn desktop_poll_capabilities(handler: &str) -> RuntimeCapabilities {
+    let now = Utc::now();
+    RuntimeCapabilities {
+        delegation_protocol: None,
+        runtime_id: RuntimeId::new(),
+        kind: RuntimeKind::Desktop,
+        trust: RuntimeTrustLevel::Registered,
+        handlers: vec![handler.to_owned()],
+        plugins: Vec::new(),
+        credentials: Vec::new(),
+        regions: Vec::new(),
+        hardware: Vec::new(),
+        offline_capable: false,
+        connectivity: Some(RuntimeConnectivity::Ethernet),
+        battery_percent: None,
+        estimated_cost_microunits: None,
+        estimated_latency_ms: None,
+        draining: false,
+        capsule_signing_public_key: None,
+        labels: std::collections::BTreeMap::new(),
+        observed_at: now,
+        expires_at: now + chrono::Duration::minutes(5),
+    }
+}
+
 /// L4-03: worker tasks carry their tenant, so a tenant-scoped poll filters on
 /// it directly; a row written without it (pre-103 binary during a rolling
 /// deploy) is filled in by the poll and stays claimable.
@@ -2394,26 +2420,7 @@ async fn tenant_worker_claim_uses_denormalised_tenant_on_postgres() {
             "w2",
             Some(&tasks[0].0),
             None,
-            &RuntimeCapabilities {
-                runtime_id: RuntimeId::new(),
-                kind: RuntimeKind::Desktop,
-                trust: RuntimeTrustLevel::Registered,
-                handlers: vec![handler.clone()],
-                plugins: Vec::new(),
-                credentials: Vec::new(),
-                regions: Vec::new(),
-                hardware: Vec::new(),
-                offline_capable: false,
-                connectivity: Some(RuntimeConnectivity::Ethernet),
-                battery_percent: None,
-                estimated_cost_microunits: None,
-                estimated_latency_ms: None,
-                draining: false,
-                capsule_signing_public_key: None,
-                labels: std::collections::BTreeMap::new(),
-                observed_at: Utc::now(),
-                expires_at: Utc::now() + chrono::Duration::minutes(5),
-            },
+            &desktop_poll_capabilities(&handler),
             10,
         )
         .await

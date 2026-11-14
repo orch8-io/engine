@@ -14,6 +14,7 @@ use orch8_types::ids::TenantId;
 fn caps(kind: RuntimeKind, observed_ago_secs: i64, ttl_secs: i64) -> RuntimeCapabilities {
     let observed_at = Utc::now() - Duration::seconds(observed_ago_secs);
     RuntimeCapabilities {
+        delegation_protocol: None,
         runtime_id: RuntimeId::new(),
         kind,
         trust: RuntimeTrustLevel::Registered,

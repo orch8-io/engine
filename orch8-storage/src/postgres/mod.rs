@@ -18,6 +18,10 @@ mod compensation_start;
 mod continuity;
 mod credentials;
 mod cron;
+mod delegation_claim_contexts;
+mod delegation_claims;
+mod delegation_definitions;
+mod delegation_inputs;
 mod delegation_publication;
 mod effect_attempt;
 mod effect_dispatch;
@@ -42,6 +46,7 @@ mod plugins;
 mod pools;
 mod portable_effects;
 mod progress_shares;
+mod publication_locks;
 mod push_outbox;
 mod queue_dispatch;
 mod queue_routing;
@@ -1702,6 +1707,14 @@ impl crate::WorkerStore for PostgresStorage {
         &self,
         request: &crate::worker_claim::WorkerClaimRequest,
     ) -> Result<Vec<WorkerTask>, StorageError> {
+        self.claim_worker_tasks_with_transport(request)
+            .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
+    }
+    async fn claim_worker_tasks_with_transport(
+        &self,
+        request: &crate::worker_claim::WorkerClaimRequest,
+    ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
         request.validate()?;
         let principal = Some(&request.principal);
         if let Some(capabilities) = &request.capabilities {
@@ -1765,6 +1778,18 @@ impl crate::WorkerStore for PostgresStorage {
                 .await
             }
         }
+        .and_then(|tasks| crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new()))
+    }
+    async fn get_worker_delegation_context(
+        &self,
+        tenant: &TenantId,
+        task_id: Uuid,
+        claim: &WorkerClaim,
+    ) -> Result<
+        Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+        StorageError,
+    > {
+        delegation_claim_contexts::get(self, tenant, task_id, claim).await
     }
     async fn get_worker_issued_claim(
         &self,
@@ -1862,6 +1887,7 @@ impl crate::WorkerStore for PostgresStorage {
             limit,
         )
         .await
+        .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn get_worker_accepted_outcome(
@@ -2057,11 +2083,23 @@ impl crate::WorkerStore for PostgresStorage {
         workers::cancel_for_blocks(self, instance_id, block_ids).await
     }
 
+    async fn held_worker_tasks_with_transport(
+        &self,
+        request: &crate::worker_claim::WorkerReconnectRequest,
+        protocol: Option<
+            &orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities,
+        >,
+    ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
+        worker_claim::reconnect(self, request, protocol).await
+    }
+
     async fn held_worker_tasks_for_reporter(
         &self,
         request: &crate::worker_claim::WorkerReconnectRequest,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        worker_claim::reconnect(self, request).await
+        Ok(worker_claim::reconnect(self, request, None)
+            .await?
+            .into_tasks())
     }
 
     async fn list_worker_tasks(

@@ -302,7 +302,11 @@ fn run_happy_path(backend: &Backend, auth: Auth) {
     );
     assert_eq!(calls_of(&calls, "prepare"), 1, "{backend}");
     assert_eq!(calls_of(&calls, "finish"), 1, "{backend}");
-    let stats = device.phone.engine.worker_stats();
+    // Cloud completion can precede the phone processing its outcome acknowledgement.
+    let stats = wait_for("the phone outcome acknowledgement", LONG, || {
+        let stats = device.phone.engine.worker_stats();
+        (stats.completed > 0 || stats.lost > 0).then_some(stats)
+    });
     assert_eq!(
         (stats.claimed, stats.completed, stats.lost),
         (1, 1, 0),
@@ -970,10 +974,7 @@ fn f_phone_delegates_to_a_desktop_across_disconnects() {
             .next()
             .expect("the desktop claims its mailbox task");
         assert_eq!(task["id"], mailbox.id.to_string(), "{backend_name}");
-        let (status, sequence) = desktop_rt
-            .block_on(desktop.get(&base, &format!("/sequences/{sub_sequence}")))
-            .unwrap();
-        assert_eq!(status, 200, "{backend_name}: {sequence}");
+        let prepared = desktop_rt.block_on(desktop.prepare_delegation(&base, &task));
 
         // Disconnect 2 (mid-run): heartbeats fail, the local run goes on.
         desktop_link.set_online(false);
@@ -981,7 +982,7 @@ fn f_phone_delegates_to_a_desktop_across_disconnects() {
             desktop_rt.block_on(desktop.lease_call(&base, &task, "heartbeat", json!({}))),
             Delivery::Unreachable
         );
-        let output = desktop_rt.block_on(desktop.run_delegation(sequence, &task));
+        let output = desktop_rt.block_on(desktop.run_delegation(prepared));
         assert_eq!(output["state"], "completed", "{backend_name}: {output}");
         desktop_link.set_online(true);
         assert_eq!(

@@ -535,6 +535,12 @@ async fn legacy_listener_callbacks_do_not_deliver_catalog_run_data_or_pending_st
                 sqlite.update_instance_state(id, state, None).await.unwrap();
             }
         }
+        // Deliberately simulate damaged storage beyond the write guard: the
+        // read path must isolate corrupt private context without decoding it.
+        sqlx::query("DROP TRIGGER delegation_proxy_runtime_update")
+            .execute(mobile.pool())
+            .await
+            .unwrap();
         let corrupt = scoped_run(&mobile, "corrupt", "one").await;
         sqlx::query("UPDATE task_instances SET context='invalid-json',state=?2 WHERE id=?1")
             .bind(corrupt.to_string())
