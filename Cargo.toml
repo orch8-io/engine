@@ -15,7 +15,7 @@ members = [
     "orch8-e2e",
 ]
 resolver = "2"
-exclude = ["packages/node-native", "packages/python-native"]
+exclude = ["packages/node-native", "packages/python-native", "vendor/sqlx-sqlite"]
 
 [workspace.package]
 version = "0.7.1"
@@ -198,3 +198,7 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 option_if_let_else = "allow"
 duration_suboptimal_units = "allow"
+
+# Temporary SQLx compatibility patch; see vendor/sqlx-sqlite/PATCH.md.
+[patch.crates-io]
+sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
