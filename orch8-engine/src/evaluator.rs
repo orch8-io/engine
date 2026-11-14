@@ -500,7 +500,8 @@ pub fn migration_snapshot_incompatibilities(
     let mut index = Index::new();
     walk(blocks, None, None, &mut index);
 
-    let nodes: HashMap<ExecutionNodeId, &ExecutionNode> = tree.iter().map(|n| (n.id, n)).collect();
+    // Reuse the evaluator index for parent lookups.
+    let nodes = build_node_index(tree);
     let mut problems = Vec::new();
     for node in tree {
         let live = matches!(
@@ -534,7 +535,7 @@ pub fn migration_snapshot_incompatibilities(
         }
         let tree_parent = node
             .parent_id
-            .and_then(|p| nodes.get(&p))
+            .and_then(|p| get_node(&nodes, p))
             .map(|p| &p.block_id);
         if tree_parent != *parent {
             problems.push(format!(
@@ -1810,15 +1811,30 @@ pub fn children_of(
 /// behavior used by parallel and race execution.
 pub(crate) fn group_by_branch<'a>(
     children: &[&'a ExecutionNode],
-) -> std::collections::BTreeMap<i16, Vec<&'a ExecutionNode>> {
-    let mut branches = std::collections::BTreeMap::<i16, Vec<&'a ExecutionNode>>::new();
-    for child in children {
-        branches
-            .entry(child.branch_index.unwrap_or(0))
-            .or_default()
-            .push(*child);
+) -> Vec<(i16, Vec<&'a ExecutionNode>)> {
+    if children.is_empty() {
+        return Vec::new();
     }
-    branches
+
+    // Sort by branch, then original position to retain each branch's input order.
+    let mut flat: Vec<(i16, usize, &'a ExecutionNode)> = children
+        .iter()
+        .enumerate()
+        .map(|(idx, &node)| (node.branch_index.unwrap_or(0), idx, node))
+        .collect();
+
+    flat.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+
+    let mut result = Vec::new();
+    for chunk in flat.chunk_by(|a, b| a.0 == b.0) {
+        let branch_idx = chunk[0].0;
+        let mut nodes = Vec::with_capacity(chunk.len());
+        for item in chunk {
+            nodes.push(item.2);
+        }
+        result.push((branch_idx, nodes));
+    }
+    result
 }
 
 /// Check if all nodes in a set are in a terminal state.
@@ -1862,10 +1878,12 @@ pub async fn cancel_subtree(
     // per popped node is O(n²) on deep chains (large ForEach / nested
     // Parallel), and this runs on the cancellation hot path.
     // We build a sorted Vec instead of a HashMap to avoid allocation overhead.
-    let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = tree
-        .iter()
-        .filter_map(|n| n.parent_id.map(|p| (p, n.id)))
-        .collect();
+    let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = Vec::with_capacity(tree.len());
+    for n in tree {
+        if let Some(p) = n.parent_id {
+            children_of.push((p, n.id));
+        }
+    }
     children_of.sort_unstable_by_key(|&(p, _)| p);
 
     let mut to_cancel: Vec<ExecutionNodeId> = Vec::new();
@@ -1925,10 +1943,12 @@ pub async fn reset_subtree_to_pending(
 ) -> Result<(), EngineError> {
     // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
     // full tree scans on every popped parent during deep traversals.
-    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
-        .iter()
-        .filter_map(|n| n.parent_id.map(|p| (p, n)))
-        .collect();
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = Vec::with_capacity(tree.len());
+    for n in tree {
+        if let Some(p) = n.parent_id {
+            children_of.push((p, n));
+        }
+    }
     children_of.sort_unstable_by_key(|&(p, _)| p);
 
     let mut frontier = vec![root_id];
@@ -2046,10 +2066,12 @@ pub async fn skip_subtrees(
         return Ok(());
     }
 
-    let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = tree
-        .iter()
-        .filter_map(|n| n.parent_id.map(|parent| (parent, n.id)))
-        .collect();
+    let mut children_of: Vec<(ExecutionNodeId, ExecutionNodeId)> = Vec::with_capacity(tree.len());
+    for n in tree {
+        if let Some(parent) = n.parent_id {
+            children_of.push((parent, n.id));
+        }
+    }
     children_of.sort_unstable_by_key(|&(parent, _)| parent);
 
     let mut subtree_ids = root_ids.to_vec();
@@ -2223,10 +2245,12 @@ pub async fn settle_live_descendants(
 ) -> Result<(), EngineError> {
     // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
     // full tree scans on every popped parent during deep traversals.
-    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = tree
-        .iter()
-        .filter_map(|n| n.parent_id.map(|p| (p, n)))
-        .collect();
+    let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = Vec::with_capacity(tree.len());
+    for n in tree {
+        if let Some(p) = n.parent_id {
+            children_of.push((p, n));
+        }
+    }
     children_of.sort_unstable_by_key(|&(p, _)| p);
 
     let mut to_skip: Vec<ExecutionNodeId> = Vec::new();
