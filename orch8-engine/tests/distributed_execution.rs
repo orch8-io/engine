@@ -1201,6 +1201,32 @@ fn delegation_for(
     }
 }
 
+fn delegation_destination() -> RuntimeCapabilities {
+    use orch8_types::delegation_definition::{
+        DefinitionGraphLimits,
+        input::{MAX_INPUT_EXPANDED_BYTES, MAX_INPUT_PAYLOAD_BYTES},
+        protocol::DelegationProtocolCapabilities,
+    };
+
+    let mut caps = caps_of(
+        RuntimeKind::Desktop,
+        orch8_engine::delegation::DELEGATION_HANDLER,
+    );
+    caps.delegation_protocol = Some(
+        DelegationProtocolCapabilities::v1(
+            DefinitionGraphLimits {
+                definitions: 1,
+                selectors: 0,
+                ..Default::default()
+            },
+            MAX_INPUT_PAYLOAD_BYTES,
+            MAX_INPUT_EXPANDED_BYTES,
+        )
+        .unwrap(),
+    );
+    caps
+}
+
 #[tokio::test]
 async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
     use orch8_engine::delegation::{
@@ -1215,7 +1241,7 @@ async fn delegation_is_a_mailbox_task_whose_result_resumes_the_parent() {
             .await
             .unwrap()
             .unwrap();
-        let destination = caps_of(RuntimeKind::Desktop, DELEGATION_HANDLER);
+        let destination = delegation_destination();
         let delegation = delegation_for(
             &parent,
             &execution,
@@ -1340,7 +1366,7 @@ async fn runtime_hosted_parent_uses_a_proxy_and_resumes_the_local_step_once() {
             .create_continuity_execution(&execution)
             .await
             .unwrap();
-        let destination = caps_of(RuntimeKind::Desktop, DELEGATION_HANDLER);
+        let destination = delegation_destination();
         let delegation = delegation_for(
             &phone_parent,
             &execution,
