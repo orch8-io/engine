@@ -1,4 +1,5 @@
 import { ScopedClient, type AccountIdentity, type Orch8Account } from "./scoped";
+import { BackgroundProgress, type BackgroundDiagnostics } from "./offlineWorkflow";
 import type {
   BackgroundRunResult,
   DelegateRequest,
@@ -268,6 +269,7 @@ export class Orch8Client {
   private stepSubscription: Subscription | null = null;
   private tokenSubscription: Subscription | null = null;
   private tokenFetcher: TokenFetcher | null = null;
+  private background = new BackgroundProgress();
 
   constructor(
     private readonly native: NativeOrch8,
@@ -288,6 +290,7 @@ export class Orch8Client {
 
   async initialize(config: Orch8Config = {}): Promise<void> {
     this.scopes.reset();
+    this.background = new BackgroundProgress();
     await this.native.initialize(config);
     this.setupStepDispatch();
   }
@@ -316,10 +319,24 @@ export class Orch8Client {
 
   /** Drain work inside an OS-granted background window. */
   async runUntilIdle(maxTicks: number, timeBudgetMs: number): Promise<BackgroundRunResult> {
-    return this.native.runUntilIdle(
-      positiveInt("maxTicks", maxTicks),
-      positiveInt("timeBudgetMs", timeBudgetMs)
-    );
+    const ticks = positiveInt("maxTicks", maxTicks);
+    const budget = positiveInt("timeBudgetMs", timeBudgetMs);
+    const progress = this.background;
+    const start = Date.now();
+    try {
+      const result = await this.native.runUntilIdle(ticks, budget);
+      progress.observe("local", start, Date.now(), result.instancesAdvanced > 0 || result.stepsExecuted > 0,
+        result.budgetExhausted, result.hasPendingWork);
+      return result;
+    } catch (error) {
+      progress.observe("local", start, Date.now(), false, false, false, true);
+      throw error;
+    }
+  }
+
+  /** Last observed local or worker background window for this client lifecycle. */
+  getBackgroundDiagnostics(): BackgroundDiagnostics {
+    return this.background.snapshot();
   }
 
   reportPowerState(state: PowerState): Promise<void> {
@@ -482,7 +499,18 @@ export class Orch8Client {
 
   /** Claim and run remote tasks inside a bounded background window (claims even while paused). */
   async runWorkerWindow(timeBudgetMs: number): Promise<WorkerWindowResult> {
-    return this.native.runWorkerWindow(positiveInt("timeBudgetMs", timeBudgetMs));
+    const budget = positiveInt("timeBudgetMs", timeBudgetMs);
+    const progress = this.background;
+    const start = Date.now();
+    try {
+      const result = await this.native.runWorkerWindow(budget);
+      progress.observe("worker", start, Date.now(), result.completed > 0 || result.failed > 0,
+        result.budgetExhausted, result.stillRunning > 0);
+      return result;
+    } catch (error) {
+      progress.observe("worker", start, Date.now(), false, false, false, true);
+      throw error;
+    }
   }
 
   workerStats(): Promise<WorkerStats> {

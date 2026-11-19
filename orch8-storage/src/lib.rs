@@ -14,6 +14,7 @@ pub mod effect_resolution;
 pub mod local_migration;
 pub mod worker_admission;
 pub mod worker_claim;
+pub mod worker_inventory;
 pub mod worker_invocation;
 pub mod worker_outcome;
 pub mod worker_reconciliation;
@@ -1415,6 +1416,13 @@ pub trait ExecutionTreeStore: Send + Sync + 'static {
 // Sub-trait 4: OutputStore
 // ============================================================================
 
+/// Metadata for a selected replay output, without its stored payload.
+pub struct ReplayOutputKey {
+    pub id: Uuid,
+    pub block_id: BlockId,
+    pub output_ref: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait OutputStore: Send + Sync + 'static {
@@ -1716,6 +1724,53 @@ pub trait OutputStore: Send + Sync + 'static {
         limit: u32,
         offset: u64,
     ) -> Result<Vec<BlockOutput>, StorageError>;
+
+    /// Latest substantive replay row for each block. Return `None` when
+    /// raw history exceeds the caller's bound. Metadata reads omit payloads.
+    async fn get_replay_output_keys(
+        &self,
+        instance_id: InstanceId,
+        max_history_rows: u32,
+    ) -> Result<Option<Vec<ReplayOutputKey>>, StorageError> {
+        let mut outputs = self.get_all_outputs(instance_id).await?;
+        if outputs.len() > max_history_rows as usize {
+            return Ok(None);
+        }
+        outputs.sort_unstable_by_key(|row| (row.created_at, row.id));
+        let mut seen = std::collections::HashSet::new();
+        Ok(Some(
+            outputs
+                .into_iter()
+                .rev()
+                .filter(|row| {
+                    !row.block_id.as_str().starts_with('_')
+                        && !matches!(
+                            row.output_ref.as_deref(),
+                            Some("__error__" | "__retry__" | "__in_progress__")
+                        )
+                        && seen.insert(row.block_id.clone())
+                })
+                .map(|row| ReplayOutputKey {
+                    id: row.id,
+                    block_id: row.block_id,
+                    output_ref: row.output_ref,
+                })
+                .collect(),
+        ))
+    }
+
+    /// Load an inline output by history row ID, scoped to its owning instance.
+    async fn get_inline_output_by_id(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        Ok(self
+            .get_all_outputs(instance_id)
+            .await?
+            .into_iter()
+            .find(|row| row.id == id && row.output_ref.is_none()))
+    }
 
     /// Copy `block_outputs` rows for the given block IDs from `src` to `dst`,
     /// inserting new rows (fresh primary keys, `instance_id = dst`) that
@@ -2412,6 +2467,12 @@ pub trait WorkerStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<orch8_types::placement::QueueDepthRow>, StorageError>;
 
+    /// Queue backlog and oldest pending task for a tenant's placement preview.
+    async fn placement_queue_evidence(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+    ) -> Result<Vec<orch8_types::placement::PlacementQueueEvidence>, StorageError>;
+
     // === Task Queue Routing ===
 
     /// Claim worker tasks from a specific named queue.
@@ -2436,6 +2497,18 @@ pub trait WorkerStore: Send + Sync + 'static {
     ) -> Result<Vec<WorkerTask>, StorageError>;
 
     // === Worker Registry ===
+
+    async fn record_worker_observation(
+        &self,
+        observation: &worker_inventory::WorkerObservation<'_>,
+    ) -> Result<(), StorageError>;
+
+    async fn close_worker_observation(&self, session_id: Uuid) -> Result<(), StorageError>;
+
+    async fn worker_route_observations(
+        &self,
+        route: &worker_inventory::WorkerRoute<'_>,
+    ) -> Result<Vec<worker_inventory::RouteObservation>, StorageError>;
 
     /// Upsert a worker registration (one row per `worker_id` +
     /// `handler_name`), refreshing `last_seen_at`. Called on every poll, so
@@ -2634,7 +2707,30 @@ pub trait WorkerStore: Send + Sync + 'static {
 
     // === Worker Version Pins ===
 
-    /// Create-or-update a `(tenant, handler)` minimum-version pin.
+    /// List active and staged worker version rollouts, optionally scoped to a tenant.
+    async fn list_worker_version_rollouts(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::worker::WorkerVersionRollout>, StorageError>;
+
+    /// Stage a candidate without changing the enforced minimum.
+    async fn stage_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+        min_version: &str,
+    ) -> Result<orch8_types::worker::WorkerVersionRollout, StorageError>;
+
+    /// Apply one action against the supplied revision. Returns `None` if it no longer applies.
+    async fn change_worker_version_rollout(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+        revision: uuid::Uuid,
+        action: orch8_types::worker::WorkerVersionRolloutAction,
+    ) -> Result<Option<orch8_types::worker::WorkerVersionRollout>, StorageError>;
+
+    /// Immediately set the minimum version and reset any staged rollout.
     async fn upsert_worker_version_pin(
         &self,
         pin: &orch8_types::worker::WorkerVersionPin,
@@ -4699,6 +4795,14 @@ pub trait ContinuityStore: Send + Sync + 'static {
         tenant_id: &TenantId,
         continuity_id: ContinuityId,
         limit: u32,
+    ) -> Result<Vec<EffectReceipt>, StorageError>;
+
+    /// List unresolved effects for one tenant, oldest first.
+    async fn list_unknown_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        limit: u32,
+        after: Option<(DateTime<Utc>, orch8_types::continuity::EffectId)>,
     ) -> Result<Vec<EffectReceipt>, StorageError>;
 
     /// Read complete compensation evidence from one SELECT snapshot. Decode

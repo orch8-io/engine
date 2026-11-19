@@ -27,6 +27,7 @@ struct Stream {
     outstanding: std::collections::HashSet<Uuid>,
     runtime_id: Option<RuntimeId>,
     draining: bool,
+    demand_state: WorkerStreamDemandState,
     sender: mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
     receiver: mpsc::Receiver<Result<proto::WorkerStreamServer, Status>>,
 }
@@ -40,6 +41,7 @@ fn stream_on(storage: Arc<dyn StorageBackend>, features: &[&str]) -> Stream {
         outstanding: std::collections::HashSet::new(),
         runtime_id: None,
         draining: false,
+        demand_state: WorkerStreamDemandState::default(),
         sender,
         receiver,
     }
@@ -66,10 +68,11 @@ impl Stream {
                 &self.open,
                 self.tenant.as_ref(),
                 &orch8_storage::worker_claim::WorkerClaimPrincipal::Unsecured {},
-                4,
+                self.open.max_in_flight,
                 &mut self.outstanding,
                 &mut self.runtime_id,
                 &mut self.draining,
+                &mut self.demand_state,
                 &self.sender,
             )
             .await
@@ -193,6 +196,124 @@ async fn claim_via_demand(stream: &mut Stream) -> WorkerTask {
         panic!("demand must deliver a task");
     };
     serde_json::from_str(&frame.task_json).unwrap()
+}
+
+#[tokio::test]
+async fn capacity_one_demand_rotates_past_a_busy_handler() {
+    let storage = fresh_storage().await;
+    let sequence = "00000000-0000-0000-0000-000000000211";
+    let first = seed(&storage, sequence, "00000000-0000-0000-0000-000000000212").await;
+    let next_payment = "00000000-0000-0000-0000-000000000213";
+    let report = "00000000-0000-0000-0000-000000000214";
+    for instance in [next_payment, report] {
+        storage
+            .create_instance(&task_instance(instance, sequence))
+            .await
+            .unwrap();
+    }
+    let mut next = pending_task(next_payment, "payments");
+    next.created_at = first.created_at + chrono::Duration::seconds(1);
+    storage.create_worker_task(&next).await.unwrap();
+    let report_task = pending_task(report, "reports");
+    storage.create_worker_task(&report_task).await.unwrap();
+
+    let mut stream = stream_on(storage, &["task_delivery", "completion"]);
+    stream.open.handler_names.push("reports".into());
+    stream.open.max_in_flight = 1;
+    assert_eq!(claim_via_demand(&mut stream).await.id, first.id);
+    stream
+        .dispatch(proto::worker_stream_client::Payload::Demand(
+            proto::WorkerStreamDemand { capacity: 1 },
+        ))
+        .await
+        .unwrap();
+    stream.assert_no_frames();
+    stream
+        .dispatch(proto::worker_stream_client::Payload::Complete(
+            proto::CompleteTaskRequest {
+                task_id: first.id.to_string(),
+                worker_id: stream.open.worker_id.clone(),
+                output_json: "{}".into(),
+                claim_epoch: 1,
+            },
+        ))
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream.next_frame(),
+        proto::worker_stream_server::Payload::Ack(_)
+    ));
+    assert_eq!(claim_via_demand(&mut stream).await.id, report_task.id);
+}
+
+#[tokio::test]
+async fn stream_and_unary_claims_follow_staged_version_promotion_and_rollback() {
+    use orch8_types::worker::WorkerVersionRolloutAction;
+
+    let storage = fresh_storage().await;
+    let task = seed(
+        &storage,
+        "00000000-0000-0000-0000-000000000221",
+        "00000000-0000-0000-0000-000000000222",
+    )
+    .await;
+    let mut stream = stream_on(Arc::clone(&storage), &["task_delivery"]);
+    stream.demand_state.version = Some("1.9.0".into());
+    let staged = storage
+        .stage_worker_version_pin("test", "payments", "1.10.0")
+        .await
+        .unwrap();
+    let active = storage
+        .change_worker_version_rollout(
+            "test",
+            "payments",
+            staged.revision.unwrap(),
+            WorkerVersionRolloutAction::Promote,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    stream
+        .dispatch(proto::worker_stream_client::Payload::Demand(
+            proto::WorkerStreamDemand { capacity: 1 },
+        ))
+        .await
+        .unwrap();
+    stream.assert_no_frames();
+
+    let poll = |version: Option<&'static str>| {
+        let mut request = Request::new(proto::PollTasksRequest {
+            handler_name: "payments".into(),
+            worker_id: "unary-worker".into(),
+            limit: 1,
+        });
+        request
+            .extensions_mut()
+            .insert(crate::auth::CallerTenant(TenantId::unchecked("test")));
+        if let Some(version) = version {
+            request.metadata_mut().insert(
+                "x-orch8-worker-version",
+                tonic::metadata::MetadataValue::from_static(version),
+            );
+        }
+        request
+    };
+    for version in [None, Some("1.9.0")] {
+        let result = stream.service.poll_tasks(poll(version)).await.unwrap();
+        assert!(result.into_inner().tasks_json.is_empty());
+    }
+
+    storage
+        .change_worker_version_rollout(
+            "test",
+            "payments",
+            active.revision.unwrap(),
+            WorkerVersionRolloutAction::Rollback,
+        )
+        .await
+        .unwrap()
+        .expect("rollback restores the unpinned state");
+    assert_eq!(claim_via_demand(&mut stream).await.id, task.id);
 }
 
 #[tokio::test]

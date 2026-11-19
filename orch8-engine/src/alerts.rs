@@ -624,6 +624,7 @@ mod tests {
                 version: None,
                 tenant_id: Some("acme".into()),
                 last_seen_at: Utc::now(),
+                available_poll_slots: None,
             })
             .await
             .unwrap();

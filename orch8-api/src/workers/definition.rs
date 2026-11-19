@@ -8,9 +8,11 @@ use axum::{
     response::IntoResponse,
 };
 use orch8_storage::worker_claim::{RecordedReporter, recorded_reporter};
-use orch8_types::delegation_definition::wire::{DefinitionReadScope, DefinitionWireEnvelope};
+use orch8_types::delegation_definition::{
+    claim::DelegationClaimContext, wire::DefinitionWireEnvelope,
+};
 use orch8_types::worker::{WorkerClaim, WorkerTaskState};
-use orch8_types::{continuity::OwnershipState, ids::TenantId, worker::WorkerTask};
+use orch8_types::{continuity::OwnershipState, worker::WorkerTask};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -34,7 +36,7 @@ pub(crate) async fn read(
     Query(query): Query<DefinitionQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let claim = WorkerClaim::new(query.worker_id, query.claim_epoch);
-    let (task, scope) = current(&state, &tenant, &caller, id, &claim).await?;
+    let (task, context) = current(&state, &tenant, &caller, id, &claim).await?;
     crate::auth::reauthorize_worker_read(
         &state.storage,
         &caller,
@@ -45,7 +47,7 @@ pub(crate) async fn read(
     .await?;
     let frozen = state
         .storage
-        .get_published_delegation_definition(&scope, id)
+        .get_published_delegation_definition(&context.scope.tenant_id, id)
         .await
         .map_err(|e| ApiError::from_storage(e, "delegation definition"))?
         .ok_or_else(|| {
@@ -53,20 +55,20 @@ pub(crate) async fn read(
                 "no certified frozen definition is retained for this publication".into(),
             )
         })?;
-    let envelope = DefinitionWireEnvelope::new(
-        DefinitionReadScope {
-            tenant_id: scope,
-            task_id: id,
-            worker_id: claim.worker_id.clone(),
-            claim_epoch: claim.claim_epoch,
-        },
-        frozen.wire(),
-    )
-    .map_err(|e| ApiError::from_storage(e, "delegation definition"))?;
+    if frozen.wire().reference() != &context.definition
+        || frozen.wire().expanded_bytes() != context.usage.definition_expanded_bytes
+    {
+        return Err(stale());
+    }
+    let envelope = DefinitionWireEnvelope::new(context.scope.clone(), frozen.wire())
+        .map_err(|e| ApiError::from_storage(e, "delegation definition"))?;
     drop(frozen);
     let response = ([(header::CACHE_CONTROL, "no-store")], Json(envelope)).into_response();
     // Recheck after storage and response encoding: ownership or reporter authority may have changed.
-    let (task, _) = current(&state, &tenant, &caller, id, &claim).await?;
+    let (task, latest) = current(&state, &tenant, &caller, id, &claim).await?;
+    if latest != context {
+        return Err(stale());
+    }
     crate::auth::reauthorize_worker_read(
         &state.storage,
         &caller,
@@ -75,6 +77,7 @@ pub(crate) async fn read(
         &task,
     )
     .await?;
+    check_expiry(&context)?;
     Ok(response)
 }
 pub(super) async fn current(
@@ -83,7 +86,7 @@ pub(super) async fn current(
     caller: &crate::auth::WorkerCaller,
     id: Uuid,
     claim: &WorkerClaim,
-) -> Result<(WorkerTask, TenantId), ApiError> {
+) -> Result<(WorkerTask, DelegationClaimContext), ApiError> {
     let task = state
         .storage
         .get_worker_task(id)
@@ -161,9 +164,22 @@ pub(super) async fn current(
         return Err(stale());
     }
     enforce_ownership_fence(state, &instance.tenant_id, &task, claim, "definition read").await?;
-    Ok((task, instance.tenant_id))
+    let context = state
+        .storage
+        .get_worker_delegation_context(&instance.tenant_id, id, claim)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "delegation claim context"))?
+        .ok_or_else(stale)?;
+    check_expiry(&context)?;
+    Ok((task, context))
 }
-fn stale() -> ApiError {
+pub(super) fn check_expiry(context: &DelegationClaimContext) -> Result<(), ApiError> {
+    if context.expires_at <= chrono::Utc::now() {
+        return Err(stale());
+    }
+    Ok(())
+}
+pub(super) fn stale() -> ApiError {
     ApiError::Conflict("worker definition claim or ownership changed".into())
 }
 
@@ -191,7 +207,10 @@ mod tests {
     }
     #[tokio::test]
     async fn refreshed_runtime_sessions_keep_their_expiry_handler_and_queue_limits() {
-        use orch8_types::continuity::{RuntimeId, RuntimeKind};
+        use orch8_types::{
+            continuity::{RuntimeId, RuntimeKind},
+            ids::TenantId,
+        };
         let storage: std::sync::Arc<dyn orch8_storage::StorageBackend> = std::sync::Arc::new(
             orch8_storage::sqlite::SqliteStorage::in_memory()
                 .await

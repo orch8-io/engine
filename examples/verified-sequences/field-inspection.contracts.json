@@ -1,0 +1,24 @@
+{
+  "cases": [
+    {
+      "name": "resubmit inspection after a temporary disconnect",
+      "input": {"site_id": "A-12"},
+      "mocks": [
+        {"block": "capture", "type": "success", "output": {"inspection_id": "i-1"}},
+        {"block": "submit", "type": "attempts", "attempts": [
+          {"kind": "failure", "message": "connection unavailable", "retryable": true},
+          {"kind": "success", "output": {"synced": true}}
+        ]}
+      ],
+      "expect": {
+        "terminal_state": "completed",
+        "path": {"traversed": ["capture", "submit"], "ordered": true},
+        "assertions": [{"output": {"block": "submit", "path": "synced"}, "op": "equals", "value": true}],
+        "call_counts": [
+          {"handler": "capture_inspection", "min": 1, "max": 1},
+          {"handler": "submit_inspection", "min": 2, "max": 2}
+        ]
+      }
+    }
+  ]
+}

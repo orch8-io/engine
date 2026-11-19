@@ -229,6 +229,9 @@ impl FcmProvider {
         }
 
         let client = reqwest::Client::builder()
+            // Keep request retries inside the provider or its durable outbox.
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| PushError::Config(format!("failed to create HTTP client: {e}")))?;
@@ -384,6 +387,8 @@ impl FcmProvider {
         &self,
         token: &str,
         metadata: Option<&SignedWakeMetadata>,
+        max_attempts: u32,
+        http_attempts: &mut u32,
     ) -> Result<(), PushError> {
         if token.len() > MAX_TOKEN_LEN {
             return Err(PushError::InvalidToken);
@@ -396,7 +401,7 @@ impl FcmProvider {
         let payload = Self::wake_payload(token, metadata)?;
 
         let mut last_err = String::from("no attempts made");
-        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
+        for attempt in 0..max_attempts {
             let access_token = match self.get_or_refresh_token().await {
                 Ok(token) => token,
                 // Misconfigured credentials will never succeed — fail fast.
@@ -407,7 +412,7 @@ impl FcmProvider {
                 Err(e) => {
                     last_err = e.to_string();
                     warn!(attempt, error = %last_err, "FCM token exchange failed, will retry");
-                    if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         tokio::time::sleep(retry_backoff(attempt)).await;
                         continue;
                     }
@@ -415,12 +420,13 @@ impl FcmProvider {
                 }
             };
 
+            *http_attempts += 1;
             let (status, body) = match self.request_message(&url, &access_token, &payload).await {
                 Ok(response) => response,
                 Err(error) => {
                     last_err = error.to_string();
                     warn!(attempt, error = %last_err, "FCM request failed, will retry");
-                    if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         tokio::time::sleep(retry_backoff(attempt)).await;
                     }
                     continue;
@@ -462,12 +468,12 @@ impl FcmProvider {
                     );
                     *self.cached_token.lock().await = None;
                     last_err = format!("FCM returned {status} (access token rejected)");
-                    if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         continue;
                     }
                     break;
                 }
-                FcmOutcome::Retryable if attempt + 1 < MAX_DELIVERY_ATTEMPTS => {
+                FcmOutcome::Retryable if attempt + 1 < max_attempts => {
                     last_err = format!("FCM returned {status}");
                     warn!(attempt, status = %status, "FCM server error, will retry");
                     tokio::time::sleep(retry_backoff(attempt)).await;
@@ -485,7 +491,7 @@ impl FcmProvider {
         }
 
         Err(PushError::Retryable(format!(
-            "FCM delivery failed after {MAX_DELIVERY_ATTEMPTS} attempts: {last_err}"
+            "FCM delivery failed after {max_attempts} attempts: {last_err}"
         )))
     }
 }
@@ -493,7 +499,7 @@ impl FcmProvider {
 #[async_trait]
 impl PushProvider for FcmProvider {
     async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
-        self.send(token, None).await
+        self.send(token, None, MAX_DELIVERY_ATTEMPTS, &mut 0).await
     }
 
     async fn send_signed_wake(
@@ -502,7 +508,18 @@ impl PushProvider for FcmProvider {
         _platform: &str,
         metadata: &SignedWakeMetadata,
     ) -> Result<(), PushError> {
-        self.send(token, Some(metadata)).await
+        self.send(token, Some(metadata), MAX_DELIVERY_ATTEMPTS, &mut 0)
+            .await
+    }
+
+    async fn send_outbox_wake(
+        &self,
+        token: &str,
+        _platform: &str,
+        metadata: Option<&SignedWakeMetadata>,
+        http_attempts: &mut Option<u32>,
+    ) -> Result<(), PushError> {
+        self.send(token, metadata, 1, http_attempts.insert(0)).await
     }
 }
 

@@ -243,9 +243,19 @@ struct Cli {
     insecure_storage: bool,
 }
 
-#[tokio::main]
+fn main() -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // A blocking task that outlives the process drain must not extend it when
+    // dropping the runtime. Normal service and telemetry joins are in run().
+    runtime.shutdown_background();
+    result
+}
+
 #[allow(clippy::too_many_lines)]
-async fn main() -> anyhow::Result<()> {
+async fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
     // L-6: --insecure is shorthand for accepting both risks; the two
     // specific flags let an operator accept just one.
@@ -533,36 +543,32 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Engine ready");
 
-    let http_shutdown = shutdown_token.clone();
-    let served = axum::serve(
+    let http = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async move {
-        http_shutdown.cancelled().await;
-        tracing::info!("Shutting down gracefully...");
-    })
-    .await
-    .context("HTTP server error");
-    // An HTTP serve error must still stop and drain the engine, gRPC and
-    // background workers instead of dropping them mid-flight.
-    shutdown_token.cancel();
-
-    drain_shutdown(
-        engine_handle,
-        grpc_handle,
-        push_outbox_handle,
-        managed_control_handle,
-        cb_registry,
+    .with_graceful_shutdown(begin_http_drain(
+        shutdown_token.clone(),
+        engine_ready.clone(),
+    ));
+    let budget = tokio::time::Duration::from_secs(30);
+    serve_with_shutdown(
+        std::future::IntoFuture::into_future(http),
+        &shutdown_token,
+        &engine_ready,
+        drain_shutdown(
+            engine_handle,
+            grpc_handle,
+            push_outbox_handle,
+            managed_control_handle,
+            cb_registry.flush(),
+            budget,
+        ),
+        otel.shutdown(),
+        budget,
     )
-    .await;
-
-    // Flush any spans still buffered in the OTLP batch exporter. After the
-    // engine has drained so the last step spans make it out. Best-effort: a
-    // dead collector logs a warning, never fails shutdown.
-    otel.shutdown().await;
-
-    served?;
+    .await
+    .context("HTTP server error")?;
     if ENGINE_FAILED.load(std::sync::atomic::Ordering::SeqCst) {
         // L2-01/L2-04: the engine stopped (panic, startup failure, or an
         // unexpected return) while the server was still up. Exit non-zero so
@@ -1554,21 +1560,83 @@ fn spawn_push_outbox_worker(
     })
 }
 
+async fn begin_http_drain(
+    shutdown: CancellationToken,
+    engine_ready: Arc<std::sync::atomic::AtomicBool>,
+) {
+    shutdown.cancelled().await;
+    engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    tracing::info!("Shutting down gracefully...");
+}
+
+async fn serve_with_shutdown(
+    http: impl std::future::Future<Output = std::io::Result<()>>,
+    shutdown: &CancellationToken,
+    engine_ready: &std::sync::atomic::AtomicBool,
+    services: impl std::future::Future<Output = ()>,
+    telemetry: impl std::future::Future<Output = ()>,
+    budget: tokio::time::Duration,
+) -> std::io::Result<()> {
+    let mut http = std::pin::pin!(http);
+    let served = tokio::select! {
+        result = &mut http => Some(result),
+        () = shutdown.cancelled() => None,
+    };
+    let deadline = tokio::time::Instant::now() + budget;
+    engine_ready.store(false, std::sync::atomic::Ordering::Relaxed);
+    shutdown.cancel();
+    finish_process_drain(
+        deadline,
+        async {
+            match served {
+                Some(result) => result,
+                None => http.await,
+            }
+        },
+        services,
+        telemetry,
+    )
+    .await
+}
+
+async fn finish_process_drain(
+    deadline: tokio::time::Instant,
+    http: impl std::future::Future<Output = std::io::Result<()>>,
+    services: impl std::future::Future<Output = ()>,
+    telemetry: impl std::future::Future<Output = ()>,
+) -> std::io::Result<()> {
+    // Give telemetry only the time left after both the HTTP server and the
+    // background services have drained.
+    let mut http_result = None;
+    let mut services_drained = false;
+    if tokio::time::timeout_at(deadline, async {
+        tokio::join!(async { http_result = Some(http.await) }, async {
+            services.await;
+            services_drained = true;
+        });
+        telemetry.await;
+    })
+    .await
+    .is_err()
+    {
+        tracing::warn!(
+            http_drained = http_result.is_some(),
+            services_drained,
+            "Process shutdown deadline elapsed"
+        );
+    }
+    http_result.unwrap_or(Ok(()))
+}
+
 async fn drain_shutdown(
     engine_handle: Option<tokio::task::JoinHandle<()>>,
     grpc_handle: Option<tokio::task::JoinHandle<()>>,
     push_outbox_handle: Option<tokio::task::JoinHandle<()>>,
     managed_control_handle: Option<tokio::task::JoinHandle<()>>,
-    cb_registry: Arc<CircuitBreakerRegistry>,
+    flush_breakers: impl std::future::Future<Output = ()>,
+    drain_timeout: tokio::time::Duration,
 ) {
-    // Wait for engine and gRPC to finish draining (with timeout).
-    // Circuit-breaker persistence lives inside a TaskTracker owned by
-    // `cb_registry`; we drain it *after* the engine stops so no new
-    // transitions land during the flush. Without this flush, fire-and-forget
-    // upserts could be aborted when the Tokio runtime tore down, leaving
-    // persisted breaker state lagging the in-memory state the next process
-    // rehydrated against at boot.
-    let drain_timeout = tokio::time::Duration::from_secs(30);
+    let mut phase = "service tasks";
     if tokio::time::timeout(drain_timeout, async {
         let wait = |handle: Option<tokio::task::JoinHandle<()>>| async move {
             if let Some(handle) = handle {
@@ -1593,17 +1661,16 @@ async fn drain_shutdown(
                 tracing::error!(%error, %service, "service task failed while draining shutdown");
             }
         }
+        // Flush only after the writers have stopped, using the time left in
+        // the original drain budget.
+        phase = "circuit-breaker persistence";
+        flush_breakers.await;
     })
     .await
     .is_err()
     {
-        tracing::warn!("Shutdown drain timed out after {drain_timeout:?}, forcing exit");
+        tracing::warn!(%phase, ?drain_timeout, "Shutdown drain timed out, forcing exit");
     }
-    // Flush unconditionally, *after* the timed join: if a task hung and the
-    // timeout fired, this is exactly the pathological shutdown where the
-    // persisted breaker state matters most. Best-effort and non-blocking by
-    // design, so it is safe to run even after a forced drain.
-    cb_registry.flush().await;
 }
 
 /// Maximum config file size (1 MiB). Prevents local `DoS` from a maliciously
@@ -2129,6 +2196,190 @@ fn build_cors_layer(origins: &str, embed_origins: &str) -> CorsLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn http_graceful_shutdown_clears_readiness_before_reporting_drain() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let ready = Arc::new(AtomicBool::new(true));
+        let shutdown = CancellationToken::new();
+        let drain = tokio::spawn(begin_http_drain(shutdown.clone(), ready.clone()));
+        tokio::task::yield_now().await;
+        assert!(ready.load(Ordering::Relaxed));
+        assert!(!drain.is_finished());
+        shutdown.cancel();
+        drain.await.unwrap();
+        assert!(!ready.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn process_shutdown_deadline_drains_one_http_request_and_bounds_another() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        use tokio::sync::Notify;
+        use tokio::time::{Duration, Instant, timeout};
+
+        let stalled = Arc::new(Notify::new());
+        let healthy = Arc::new(Notify::new());
+        let release_healthy = Arc::new(Notify::new());
+        let router = axum::Router::new()
+            .route(
+                "/stall",
+                axum::routing::get({
+                    let stalled = Arc::clone(&stalled);
+                    move || async move {
+                        stalled.notify_one();
+                        std::future::pending::<&'static str>().await
+                    }
+                }),
+            )
+            .route(
+                "/healthy",
+                axum::routing::get({
+                    let healthy = Arc::clone(&healthy);
+                    let release_healthy = Arc::clone(&release_healthy);
+                    move || async move {
+                        healthy.notify_one();
+                        release_healthy.notified().await;
+                        "ok"
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let engine_ready = Arc::new(AtomicBool::new(true));
+        let budget = Duration::from_secs(2);
+        let server = tokio::spawn({
+            let shutdown = shutdown.clone();
+            let engine_ready = Arc::clone(&engine_ready);
+            async move {
+                let http = axum::serve(listener, router).with_graceful_shutdown(begin_http_drain(
+                    shutdown.clone(),
+                    Arc::clone(&engine_ready),
+                ));
+                serve_with_shutdown(
+                    std::future::IntoFuture::into_future(http),
+                    &shutdown,
+                    &engine_ready,
+                    std::future::ready(()),
+                    std::future::ready(()),
+                    budget,
+                )
+                .await
+            }
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let stalled_request = tokio::spawn(client.get(format!("http://{addr}/stall")).send());
+        let healthy_request = tokio::spawn(client.get(format!("http://{addr}/healthy")).send());
+        timeout(Duration::from_secs(5), async {
+            tokio::join!(stalled.notified(), healthy.notified());
+        })
+        .await
+        .unwrap();
+
+        let started = Instant::now();
+        shutdown.cancel();
+        release_healthy.notify_one();
+        let response = timeout(budget, healthy_request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "ok");
+        timeout(budget + Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() >= budget);
+        assert!(!engine_ready.load(std::sync::atomic::Ordering::Relaxed));
+        stalled_request.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_shutdown_deadline_bounds_stalled_http_while_services_drain() {
+        use tokio::time::{Duration, Instant, sleep};
+
+        let budget = Duration::from_secs(30);
+        let started = Instant::now();
+        let mut services_finished = false;
+        let mut telemetry_started = false;
+        finish_process_drain(
+            started + budget,
+            std::future::pending(),
+            async {
+                sleep(Duration::from_secs(1)).await;
+                services_finished = true;
+            },
+            async { telemetry_started = true },
+        )
+        .await
+        .unwrap();
+
+        assert!(services_finished);
+        assert!(!telemetry_started);
+        assert_eq!(started.elapsed(), budget);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn process_shutdown_deadline_also_bounds_telemetry() {
+        use tokio::time::{Duration, Instant, sleep};
+
+        let started = Instant::now();
+        let budget = Duration::from_secs(30);
+        let mut telemetry_started = false;
+        let http = async {
+            sleep(Duration::from_secs(7)).await;
+            Err(std::io::Error::other("serve failed"))
+        };
+        let error = finish_process_drain(started + budget, http, std::future::ready(()), async {
+            telemetry_started = true;
+            std::future::pending::<()>().await;
+        })
+        .await
+        .unwrap_err();
+        assert!(telemetry_started);
+        assert_eq!(error.to_string(), "serve failed");
+        assert_eq!(started.elapsed(), budget);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_persistence_uses_the_remaining_drain_budget() {
+        let budget = tokio::time::Duration::from_secs(30);
+        let started = tokio::time::Instant::now();
+        let engine = tokio::spawn(async {
+            tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+        });
+        let mut flush_started = false;
+        let mut flush_finished = false;
+        let flush = async {
+            flush_started = true;
+            tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+            flush_finished = true;
+        };
+        drain_shutdown(Some(engine), None, None, None, flush, budget).await;
+        assert!(flush_started);
+        assert!(!flush_finished);
+        assert_eq!(started.elapsed(), budget);
+    }
+
+    #[tokio::test]
+    async fn shutdown_awaits_breaker_persistence_when_it_finishes_in_budget() {
+        let mut persisted = false;
+        drain_shutdown(
+            None,
+            None,
+            None,
+            None,
+            async {
+                tokio::task::yield_now().await;
+                persisted = true;
+            },
+            tokio::time::Duration::from_secs(30),
+        )
+        .await;
+        assert!(persisted);
+    }
 
     /// `orch8_grpc::worker_client` releases a task over the unary
     /// `ReleaseTask` RPC (the stream has no release frame), and falls back to

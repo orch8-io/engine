@@ -162,6 +162,7 @@ pub struct WorkerClaimRequest {
     pub(crate) queue_name: Option<String>,
     pub(crate) capabilities: Option<RuntimeCapabilities>,
     pub(crate) limit: u32,
+    pub(crate) version: Option<String>,
 }
 impl WorkerClaimRequest {
     pub fn new(
@@ -182,10 +183,18 @@ impl WorkerClaimRequest {
             queue_name,
             capabilities,
             limit,
+            version: None,
         };
         value.validate()?;
         Ok(value)
     }
+    /// Attach the build identifier supplied by the worker transport.
+    pub fn with_version(mut self, version: Option<String>) -> Result<Self, StorageError> {
+        self.version = version;
+        self.validate()?;
+        Ok(self)
+    }
+
     pub(crate) fn validate(&self) -> Result<(), StorageError> {
         self.principal.validate()?;
         if let Some(protocol) = self
@@ -200,6 +209,9 @@ impl WorkerClaimRequest {
             || !identifier(&self.handler_name, 256)
             || !identifier(&self.worker_id, 128)
             || self.limit > 1000
+            || self.version.as_ref().is_some_and(|version| {
+                !identifier(version, orch8_types::worker::MAX_WORKER_VERSION_BYTES)
+            })
             || self
                 .tenant_id
                 .as_ref()
@@ -230,9 +242,15 @@ impl WorkerClaimRequest {
         Ok(())
     }
 }
+pub(crate) fn claim_principal(
+    request: Option<&WorkerClaimRequest>,
+) -> Option<&WorkerClaimPrincipal> {
+    request.map(|request| &request.principal)
+}
+
 pub(crate) struct ClaimRuntime<'a> {
     pub capabilities: &'a RuntimeCapabilities,
-    pub principal: Option<&'a WorkerClaimPrincipal>,
+    pub request: Option<&'a WorkerClaimRequest>,
 }
 
 /// Validated reconnect scope. Actor and handler filtering must precede LIMIT.
@@ -423,15 +441,30 @@ mod protocol_tests;
 /// Leases and their exact issued transport references, assembled before commit.
 pub struct WorkerClaimBatch {
     tasks: Vec<WorkerTask>,
+    version_blocked: bool,
     contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
 }
 impl WorkerClaimBatch {
     pub fn empty() -> Self {
         Self {
             tasks: Vec::new(),
+            version_blocked: false,
             contexts: Vec::new(),
         }
     }
+    pub(crate) fn version_blocked() -> Self {
+        Self {
+            version_blocked: true,
+            ..Self::empty()
+        }
+    }
+
+    /// A denied poll supplies no usable capacity observation.
+    pub fn available_poll_slots(&self, limit: u32) -> Option<u32> {
+        (!self.version_blocked)
+            .then(|| limit.saturating_sub(u32::try_from(self.tasks.len()).unwrap_or(u32::MAX)))
+    }
+
     pub(crate) fn new(
         mut tasks: Vec<WorkerTask>,
         contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
@@ -461,11 +494,19 @@ impl WorkerClaimBatch {
         if !expected.is_empty() {
             return Err(invalid());
         }
-        Ok(Self { tasks, contexts })
+        Ok(Self {
+            tasks,
+            contexts,
+            version_blocked: false,
+        })
     }
     pub fn tasks(&self) -> &[WorkerTask] {
         &self.tasks
     }
+    pub(crate) fn tasks_mut(&mut self) -> &mut [WorkerTask] {
+        &mut self.tasks
+    }
+
     pub fn into_tasks(self) -> Vec<WorkerTask> {
         self.tasks
     }
@@ -484,6 +525,7 @@ impl std::fmt::Debug for WorkerClaimBatch {
         f.debug_struct("WorkerClaimBatch")
             .field("tasks", &self.tasks.len())
             .field("delegation_contexts", &self.contexts.len())
+            .field("version_blocked", &self.version_blocked)
             .finish()
     }
 }

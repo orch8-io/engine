@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "name": "authorized work advances",
+      "mocks": [
+        {"block": "open", "type": "success", "output": {"request_id": "m-1"}},
+        {"block": "approve", "type": "success", "output": {}},
+        {"block": "authorize", "type": "success", "output": {"authorized": true}}
+      ],
+      "signals": [{"signal_type": "custom:human_input:approve", "payload": {"value": "yes"}}],
+      "expect": {
+        "terminal_state": "completed",
+        "path": {"traversed": ["open", "approve", "authorize"], "ordered": true},
+        "assertions": [{"output": {"block": "authorize", "path": "authorized"}, "op": "equals", "value": true}]
+      }
+    },
+    {
+      "name": "request cancelled during review",
+      "mocks": [{"block": "open", "type": "success", "output": {"request_id": "m-2"}}],
+      "signals": [{"signal_type": "cancel"}],
+      "expect": {"terminal_state": "cancelled", "skipped_blocks": ["authorize"]}
+    },
+    {
+      "name": "review expires before authorization",
+      "mocks": [{"block": "open", "type": "success", "output": {"request_id": "m-3"}}],
+      "expect": {"terminal_state": "failed", "skipped_blocks": ["authorize"]}
+    }
+  ]
+}

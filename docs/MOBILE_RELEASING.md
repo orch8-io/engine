@@ -31,6 +31,20 @@ after `maven`, because `orch8-kmp`'s Android variant depends on
 the local `orch8-io/maven` checkout, so it does not wait for
 raw.githubusercontent.com caches.
 
+The **Verify fresh installs from public registries** job runs after SwiftPM and
+Maven publish. It copies the standalone inspection starter to a clean directory,
+pins the requested version, and runs the native reopen tests against public
+packages on both simulators. When a publishing secret is absent, the corresponding
+consumer check is skipped. Run **Published mobile starter** directly to verify
+any published version without publishing credentials. This check gates the
+distribution workflow result after the immutable packages are uploaded.
+
+The native scoped SDK CI fixture exercises account opening, active account
+switches, restarting with pending work, and explicit retirement through the
+public Swift API. The fixture uses same-build bindings and a native library.
+Check the same flow with public artifacts after publishing the coordinated
+scoped SDK release.
+
 The JVM target of `packages/kmp` runs the common tests but is not published:
 it has no packaged host library.
 

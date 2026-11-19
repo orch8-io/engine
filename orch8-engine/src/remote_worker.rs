@@ -27,6 +27,8 @@ use orch8_types::ids::{BlockId, InstanceId, TenantId};
 
 use crate::handlers::StepContext;
 
+#[path = "remote_worker/delegation_receiver.rs"]
+pub mod delegation_receiver;
 #[path = "remote_worker_lease.rs"]
 pub mod lease;
 

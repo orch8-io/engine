@@ -1,5 +1,5 @@
 //! Claim-scoped reads of immutable input, separate from definition transport.
-use super::definition::{DefinitionQuery, current};
+use super::definition::{DefinitionQuery, check_expiry, current, stale};
 use crate::{AppState, error::ApiError};
 use axum::{
     Json,
@@ -7,10 +7,7 @@ use axum::{
     http::header,
     response::IntoResponse,
 };
-use orch8_types::{
-    delegation_definition::{input::DelegationInputEnvelope, wire::DefinitionReadScope},
-    worker::WorkerClaim,
-};
+use orch8_types::{delegation_definition::input::DelegationInputEnvelope, worker::WorkerClaim};
 use uuid::Uuid;
 
 #[utoipa::path(get,path="/workers/tasks/{id}/input",tag="workers",
@@ -27,7 +24,7 @@ pub(crate) async fn read(
     Query(query): Query<DefinitionQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let claim = WorkerClaim::new(query.worker_id, query.claim_epoch);
-    let (task, scope) = current(&state, &tenant, &caller, id, &claim).await?;
+    let (task, context) = current(&state, &tenant, &caller, id, &claim).await?;
     crate::auth::reauthorize_worker_read(
         &state.storage,
         &caller,
@@ -38,26 +35,29 @@ pub(crate) async fn read(
     .await?;
     let frozen = state
         .storage
-        .get_published_delegation_input(&scope, id)
+        .get_published_delegation_input(&context.scope.tenant_id, id)
         .await
         .map_err(|e| ApiError::from_storage(e, "delegation input"))?
         .ok_or_else(|| {
             ApiError::Conflict("no certified input is retained for this publication".into())
         })?;
-    let expires_at = frozen.expires_at();
-    check_expiry(expires_at)?;
+    if frozen.request_sha256() != context.request_sha256
+        || frozen.reference() != &context.input
+        || frozen.usage() != context.usage
+        || frozen.expires_at() != context.expires_at
+    {
+        return Err(stale());
+    }
     let envelope = frozen
-        .envelope(DefinitionReadScope {
-            tenant_id: scope,
-            task_id: id,
-            worker_id: claim.worker_id.clone(),
-            claim_epoch: claim.claim_epoch,
-        })
+        .envelope(context.scope.clone())
         .map_err(|e| ApiError::from_storage(e, "delegation input"))?;
     drop(frozen);
     let response = ([(header::CACHE_CONTROL, "no-store")], Json(envelope)).into_response();
     // Recheck after storage and response encoding: ownership or reporter authority may have changed.
-    let (task, _) = current(&state, &tenant, &caller, id, &claim).await?;
+    let (task, latest) = current(&state, &tenant, &caller, id, &claim).await?;
+    if latest != context {
+        return Err(stale());
+    }
     crate::auth::reauthorize_worker_read(
         &state.storage,
         &caller,
@@ -66,26 +66,6 @@ pub(crate) async fn read(
         &task,
     )
     .await?;
-    check_expiry(expires_at)?;
+    check_expiry(&context)?;
     Ok(response)
-}
-
-fn check_expiry(expires_at: chrono::DateTime<chrono::Utc>) -> Result<(), ApiError> {
-    if expires_at <= chrono::Utc::now() {
-        return Err(ApiError::Conflict(
-            "delegation input publication expired".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn publication_deadline_remains_a_read_fence() {
-        let now = chrono::Utc::now();
-        assert!(check_expiry(now - chrono::Duration::seconds(1)).is_err());
-        assert!(check_expiry(now + chrono::Duration::minutes(1)).is_ok());
-    }
 }

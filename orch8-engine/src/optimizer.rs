@@ -789,6 +789,7 @@ mod tests {
             ),
             (
                 BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                    child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                     id: BlockId::new("sub"),
                     sequence_name: "child".into(),
                     version: None,
@@ -861,6 +862,7 @@ mod tests {
     fn distinct_constants_occupy_distinct_pool_entries() {
         let sub = |id: &str, input: Value| {
             BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                 id: BlockId::new(id),
                 sequence_name: "child".into(),
                 version: None,

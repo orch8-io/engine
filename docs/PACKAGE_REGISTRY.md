@@ -76,6 +76,13 @@ Before displaying or installing a discovered version:
 3. Fetch the content-addressed package URL and call `verify_package`.
 4. Apply a `TrustPolicy` to the embedded publisher key before installation.
 
+An install validates the sequence definitions, packaged contracts, and target
+name/version conflicts before it publishes any sequence. If interrupted, rerun
+the same package version against the same server and tenant from the same
+directory. Keep `.orch8-package-installs/` in place so the CLI can verify and
+reuse sequences already created during that install. For a registry install,
+pass the original `--version` if a newer version has since been published.
+
 Every transparency entry signs its canonical entry hash and commits to the
 previous hash, tenant, namespace, package identity, content hash, package
 signature, and publication time. This detects modified discovery metadata,

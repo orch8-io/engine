@@ -1,0 +1,16 @@
+{
+  "name": "delivery-evidence",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "version": 1,
+  "blocks": [
+    {"type": "step", "id": "capture", "handler": "capture_delivery_evidence"},
+    {
+      "type": "router", "id": "route",
+      "routes": [{"condition": "requires_review == true", "blocks": [
+        {"type": "step", "id": "review", "handler": "record_delivery_exception"}
+      ]}],
+      "default": [{"type": "step", "id": "confirm", "handler": "confirm_delivery"}]
+    }
+  ]
+}

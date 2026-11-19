@@ -8,7 +8,7 @@
 //! didn't (`+ added`), and blocks the old run had that the new version skips
 //! (`- removed`). It never executes real handlers — safe to run anywhere.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -50,13 +50,19 @@ pub enum TestCmd {
         /// `checkout.json`).
         #[arg(long)]
         sequence: Option<PathBuf>,
+        /// Supply the local definition of a pinned child. Repeat for nested children.
+        #[arg(long = "child-sequence")]
+        child_sequences: Vec<PathBuf>,
         /// Recorded outputs fixture (JSON object `{block_id: output}`) for
         /// mocks with `"type": "recorded"`.
         #[arg(long)]
         recorded: Option<PathBuf>,
-        /// Report format: human, json, or junit.
+        /// Report format: human, json, junit, or coverage.
         #[arg(long, default_value = "human")]
         report: ReportFormat,
+        /// Fail if declared steps were not executed by any passing case.
+        #[arg(long)]
+        require_coverage: bool,
     },
     /// Record a draft contract fixture from an executed instance, with
     /// secrets redacted. Review before committing — recorded values may
@@ -90,6 +96,7 @@ pub enum ReportFormat {
     Human,
     Json,
     Junit,
+    Coverage,
 }
 
 pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputFormat) -> Result<()> {
@@ -101,14 +108,18 @@ pub async fn run(client: &Client, base: &str, cmd: TestCmd, _format: OutputForma
         TestCmd::Run {
             contract_file,
             sequence,
+            child_sequences,
             recorded,
             report,
+            require_coverage,
         } => {
             run_contracts(
                 &contract_file,
                 sequence.as_deref(),
+                &child_sequences,
                 recorded.as_deref(),
                 report,
+                require_coverage,
             )
             .await
         }
@@ -224,8 +235,10 @@ fn default_sequence_path(contract_path: &Path) -> Option<PathBuf> {
 async fn run_contracts(
     contract_file: &Path,
     sequence: Option<&Path>,
+    child_sequences: &[PathBuf],
     recorded: Option<&Path>,
     report_format: ReportFormat,
+    require_coverage: bool,
 ) -> Result<()> {
     let suite: ContractSuite = serde_json::from_value(crate::seqdoc::read_document(contract_file)?)
         .context("contract file is not a valid suite")?;
@@ -237,10 +250,23 @@ async fn run_contracts(
              `.contracts.json` / `.contracts.yaml`); pass --sequence",
         )?,
     };
-    let seq_json = crate::seqdoc::read_document(&seq_path)?;
-    let seq = decode_test_sequence(&seq_json)?;
+    let seq = decode_authoring_sequence(crate::seqdoc::read_document(&seq_path)?)?;
 
     let mut opts = orch8::contract::RunOptions::default();
+    for child in child_sequences {
+        let mut document = crate::seqdoc::read_document(child)?;
+        if let Some(object) = document.as_object_mut() {
+            object
+                .entry("tenant_id")
+                .or_insert_with(|| serde_json::json!(seq.tenant_id));
+            object
+                .entry("namespace")
+                .or_insert_with(|| serde_json::json!(seq.namespace));
+        }
+        let definition = decode_authoring_sequence(document)
+            .with_context(|| format!("invalid child sequence file {}", child.display()))?;
+        opts.child_sequences.push(definition);
+    }
     if let Some(recorded_path) = recorded {
         let map: HashMap<String, Value> =
             serde_json::from_value(crate::seqdoc::read_document(recorded_path)?)
@@ -249,26 +275,93 @@ async fn run_contracts(
     }
 
     let report = orch8::contract::run_suite(&seq, &suite, &opts).await?;
+    let coverage = (require_coverage || matches!(report_format, ReportFormat::Coverage))
+        .then(|| step_coverage(&seq, &report));
 
     match report_format {
         ReportFormat::Human => print_human_report(&report),
-        ReportFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        ReportFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&contract_report(&report))?
+        ),
         ReportFormat::Junit => println!("{}", junit_xml(&report)),
+        ReportFormat::Coverage => println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "suite": contract_report(&report),
+                "coverage": coverage,
+            }))?
+        ),
     }
 
-    if report.passed {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "contract suite failed: {} case(s) failed",
-            report.failed_cases().len()
+    anyhow::ensure!(
+        report.passed,
+        "contract suite failed: {} case(s) failed",
+        report.failed_cases().len()
+    );
+    if require_coverage && let Some(coverage) = coverage {
+        anyhow::ensure!(
+            coverage.uncovered.is_empty(),
+            "{} sequence step(s) were not covered: {}",
+            coverage.uncovered.len(),
+            coverage.uncovered.join(", ")
         );
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct StepCoverage<'a> {
+    total: usize,
+    covered: Vec<&'a str>,
+    uncovered: Vec<&'a str>,
+}
+
+fn step_coverage<'a>(sequence: &'a SequenceDefinition, report: &SuiteReport) -> StepCoverage<'a> {
+    let mut declared = BTreeSet::new();
+    for block in &sequence.blocks {
+        orch8_types::sequence::visit_steps(block, &mut |step| {
+            declared.insert(step.id.as_str());
+        });
+    }
+    let observed: HashSet<_> = report
+        .cases
+        .iter()
+        .filter(|case| case.passed)
+        .flat_map(|case| {
+            case.executed_blocks
+                .iter()
+                .chain(&case.attempted_blocks)
+                .map(String::as_str)
+        })
+        .collect();
+    let total = declared.len();
+    let (covered, uncovered) = declared.into_iter().partition(|id| observed.contains(id));
+    StepCoverage {
+        total,
+        covered,
+        uncovered,
+    }
+}
+
+const CONTRACT_VERIFICATION_SCOPE: &str = "mocked_contract_sandbox";
+
+fn contract_report(report: &SuiteReport) -> impl serde::Serialize + '_ {
+    #[derive(serde::Serialize)]
+    struct ScopedReport<'a> {
+        verification_scope: &'static str,
+        #[serde(flatten)]
+        report: &'a SuiteReport,
+    }
+    ScopedReport {
+        verification_scope: CONTRACT_VERIFICATION_SCOPE,
+        report,
     }
 }
 
 fn print_human_report(report: &SuiteReport) {
     println!(
-        "contract suite for {} v{}\n",
+        "contract suite for {} v{} (sandbox with mocked handlers)\n",
         report.sequence_name, report.sequence_version
     );
     for case in &report.cases {
@@ -314,6 +407,10 @@ fn junit_xml(report: &SuiteReport) -> String {
             report.sequence_name, report.sequence_version
         )),
         report.cases.len(),
+    );
+    let _ = writeln!(
+        out,
+        "  <properties><property name=\"verification_scope\" value=\"{CONTRACT_VERIFICATION_SCOPE}\"/></properties>"
     );
     for case in &report.cases {
         if case.passed {
@@ -538,6 +635,53 @@ fn decode_test_sequence(value: &Value) -> Result<SequenceDefinition> {
     Ok(sequence)
 }
 
+pub(super) fn authoring_defaults(mut value: Value) -> Value {
+    if let Some(sequence) = value.as_object_mut() {
+        sequence
+            .entry("id")
+            .or_insert_with(|| serde_json::json!(Uuid::now_v7()));
+        sequence.entry("version").or_insert(1.into());
+        sequence.entry("namespace").or_insert("default".into());
+        sequence.entry("tenant_id").or_insert("default".into());
+        sequence
+            .entry("created_at")
+            .or_insert_with(|| serde_json::json!(chrono::Utc::now()));
+    }
+    value
+}
+
+pub(super) fn decode_authoring_sequence(value: Value) -> Result<SequenceDefinition> {
+    decode_test_sequence(&authoring_defaults(value))
+}
+
+pub(super) async fn verify_recipe(sequence: &str, contract: &str, quick_start: &str) -> Result<()> {
+    let sequence = decode_authoring_sequence(serde_json::from_str(sequence)?)?;
+    let suite: ContractSuite = serde_json::from_str(contract)?;
+    let report =
+        orch8::contract::run_suite(&sequence, &suite, &orch8::contract::RunOptions::default())
+            .await?;
+    let coverage = step_coverage(&sequence, &report);
+    let handlers = sequence
+        .handler_names()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "verification": "offline_contract",
+            "quick_start": quick_start,
+            "required_handlers": handlers,
+            "suite": report,
+            "coverage": coverage,
+        }))?
+    );
+    anyhow::ensure!(
+        report.passed && coverage.uncovered.is_empty(),
+        "recipe contract failed or left steps uncovered"
+    );
+    Ok(())
+}
+
 async fn replay(client: &Client, base: &str, instance_id: Uuid, against: i32) -> Result<()> {
     // 1. The recorded instance: its input data + sequence identity.
     let inst = get_json(client, format!("{base}/instances/{instance_id}")).await?;
@@ -664,6 +808,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn contract_cli_loads_a_pinned_child_in_the_root_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("example.json");
+        let child = dir.path().join("leaf.json");
+        let contract = dir.path().join("example.contracts.json");
+        std::fs::write(
+            &root,
+            r#"{"name":"example","namespace":"custom","blocks":[
+                {"type":"sub_sequence","id":"child","sequence_name":"leaf","version":2}
+            ]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &child,
+            r#"{"name":"leaf","version":2,"blocks":[
+                {"type":"step","id":"leaf_step","handler":"worker","params":{}}
+            ]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &contract,
+            r#"{"cases":[{"name":"invoke child",
+                "mocks":[{"handler":"worker","type":"success","output":{}}],
+                "expect":{"terminal_state":"completed",
+                          "call_counts":[{"handler":"worker","min":1,"max":1}]}}]}"#,
+        )
+        .unwrap();
+        run_contracts(
+            &contract,
+            Some(&root),
+            &[child],
+            None,
+            ReportFormat::Json,
+            false,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn contract_failure_returns_error_for_every_report_format() {
         let dir = tempfile::tempdir().unwrap();
         let sequence = dir.path().join("example.json");
@@ -690,7 +874,7 @@ mod tests {
             )
             .unwrap();
             for format in [ReportFormat::Human, ReportFormat::Json, ReportFormat::Junit] {
-                let result = run_contracts(&contract, None, None, format).await;
+                let result = run_contracts(&contract, None, &[], None, format, false).await;
                 if expected == "failed" {
                     assert!(
                         result
@@ -779,16 +963,19 @@ mod tests {
             passed,
             cases: vec![
                 CaseReport {
+                    child_executions: Vec::new(),
                     name: "happy".into(),
                     passed: true,
                     failures: vec![],
                     final_state: "completed".into(),
                     executed_blocks: vec!["a".into()],
+                    attempted_blocks: Vec::new(),
                     handler_calls: std::collections::BTreeMap::new(),
                     ticks: 4,
                     logical_duration_ms: 12,
                 },
                 CaseReport {
+                    child_executions: Vec::new(),
                     name: "declined & retried".into(),
                     passed,
                     failures: if passed {
@@ -798,6 +985,7 @@ mod tests {
                     },
                     final_state: "completed".into(),
                     executed_blocks: vec![],
+                    attempted_blocks: Vec::new(),
                     handler_calls: std::collections::BTreeMap::new(),
                     ticks: 9,
                     logical_duration_ms: 3000,
@@ -807,9 +995,22 @@ mod tests {
     }
 
     #[test]
+    fn contract_json_identifies_scope_and_preserves_existing_fields() {
+        let report = sample_report(true);
+        let mut encoded = serde_json::to_value(contract_report(&report)).unwrap();
+        let scope = encoded
+            .as_object_mut()
+            .unwrap()
+            .remove("verification_scope");
+        assert_eq!(scope, Some(serde_json::json!("mocked_contract_sandbox")));
+        assert_eq!(encoded, serde_json::to_value(&report).unwrap());
+    }
+
+    #[test]
     fn junit_xml_escapes_and_counts_failures() {
         let xml = junit_xml(&sample_report(false));
         assert!(xml.contains("tests=\"2\" failures=\"1\""), "{xml}");
+        assert!(xml.contains("name=\"verification_scope\" value=\"mocked_contract_sandbox\""));
         // Suite name is escaped.
         assert!(xml.contains("checkout &lt;fast&gt;"), "{xml}");
         // Failure message quotes are escaped.

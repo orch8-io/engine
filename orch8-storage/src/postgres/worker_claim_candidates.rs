@@ -18,6 +18,7 @@ pub(super) struct Selection<'a> {
     pub limit: u32,
 }
 
+#[allow(clippy::too_many_lines)] // Keep task selection and the fenced journal write in one transaction.
 pub(super) async fn claim(
     store: &PostgresStorage,
     ids: &[Uuid],
@@ -28,6 +29,12 @@ pub(super) async fn claim(
     }
     let mut tx = store.pool.begin().await?;
     let result = async {
+        if let Some(request) = selection.runtime.request
+            && !super::worker_version_pins::admits_claim(&mut tx, request).await?
+        {
+            return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+        }
+
         let mut selected = Vec::new();
         // Keep each decoding page bounded. Skip stale/incompatible rows and
         // backfill from the over-collected candidates before applying LIMIT.
@@ -114,7 +121,7 @@ pub(super) async fn claim(
         let contexts = super::worker_claim::record_with_context_on(
             &mut tx,
             &tasks,
-            selection.runtime.principal,
+            crate::worker_claim::claim_principal(selection.runtime.request),
         )
         .await?;
         super::workers::insert_attempt_events(&mut tx, &events).await?;

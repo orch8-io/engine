@@ -113,6 +113,39 @@ Only actions legal in the current state are enabled. The console does not expose
 forced promotion; use the CLI `--force` flag when an explicit, auditable override
 is required.
 
+## Replay regression fixtures
+
+Open the candidate sequence editor, load release validation in the runtime
+overlay, and select a divergent execution. **Create regression fixture**
+prepares the pinned candidate definition and a contract that expects the
+recorded path and terminal state.
+
+Historical values are omitted by default. Supply exact top-level input keys or
+`block.field` pairs if the replay needs a small set of historical values.
+For names with commas or block IDs with dots, use a JSON array of input keys
+or an output mapping such as `{"review.final":["score.total","a,b"]}`.
+The export redacts recognized secrets. Choose fields suitable for sharing.
+The dashboard reports whether the exported files reproduce the saved divergence.
+
+Save the sequence and contract JSON in the same directory and run
+`orch8 test run replay-<release>-<execution>.contracts.json`. The runner
+uses local mocks. When a fixture reproduces the divergence, the contract
+fails against the exported candidate. Run the same contract against the
+edited sequence to check the fix.
+
+For a local contract that invokes pinned child sequences, pass each referenced
+definition with `--child-sequence <path>`, including nested children. All
+definitions share the root's tenant and namespace. Child handlers use the same
+mock rules as root handlers. Use handler mocks when block IDs repeat between
+definitions. Path and block coverage describe the root, while handler call
+counts include its children.
+
+To run the browser-to-CLI regression, build the dashboard and run
+`npm --prefix dashboard run test:replay-browser` with Chromium and Playwright
+available. Set `ORCH8_BIN` to the built CLI's absolute path and
+`PLAYWRIGHT_MODULE` to the Playwright module path if it is installed elsewhere.
+Use `CHROMIUM_PATH` to select an existing Chromium executable.
+
 ## Operational rules
 
 - Treat `side_effect_risk` and `incompatible` diff entries as release blockers.
@@ -126,3 +159,16 @@ is required.
   in-flight executions on the version where they started.
 
 See the generated `/swagger-ui` reference for exact response schemas.
+
+## Promote a signed sequence across environments
+
+Use the same signed package and archive member in each target context. Create a release with the candidate installed in that context, then run:
+
+```sh
+orch8 --context staging deploy --package checkout.orch8pkg \
+  --package-sequence sequences/checkout.json --release-id "$STAGING_RELEASE" --promote
+orch8 --context production deploy --package checkout.orch8pkg \
+  --package-sequence sequences/checkout.json --release-id "$PRODUCTION_RELEASE" --promote
+```
+
+The CLI checks the signed definition against the target release candidate before starting the canary. Each environment may assign its own sequence ID, namespace, tenant, and version. Execution fields, including placement, must match. JSON evidence includes the package hash and verified candidate ID.

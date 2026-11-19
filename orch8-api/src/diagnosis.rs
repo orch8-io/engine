@@ -6,6 +6,8 @@
 //! `orch8_engine::doctor`. Strictly read-only: recovery actions are only
 //! *described* in the response.
 
+pub(crate) mod timeline;
+
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -33,6 +35,10 @@ const WORKER_LIVENESS_SECS: i64 = 120;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/instances/{id}/diagnosis", get(get_diagnosis))
+        .route(
+            "/instances/{id}/runtime-timeline",
+            get(timeline::get_timeline),
+        )
         .route("/instances/{id}/remediations", get(preview_remediations))
         .route(
             "/instances/{id}/remediations/apply",

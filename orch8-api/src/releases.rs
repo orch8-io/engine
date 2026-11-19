@@ -30,6 +30,8 @@ use orch8_types::sequence::SequenceDefinition;
 use crate::AppState;
 use crate::error::ApiError;
 
+pub(crate) mod replay_fixture;
+
 /// Historical instances replayed per validation run.
 const DEFAULT_VALIDATION_SAMPLE: u32 = 10;
 const MAX_VALIDATION_SAMPLE: u32 = 50;
@@ -43,6 +45,10 @@ pub fn routes() -> Router<AppState> {
         .route("/releases/{id}/decisions", get(list_decisions))
         .route("/releases/{id}/diff", get(diff_release))
         .route("/releases/{id}/validate", post(validate_release))
+        .route(
+            "/releases/{id}/divergences/{instance_id}/fixture",
+            post(replay_fixture::export_replay_fixture),
+        )
         .route("/releases/{id}/canary", post(start_canary))
         .route("/releases/{id}/evaluate", post(evaluate_release))
         .route("/releases/{id}/promote", post(promote_release))
@@ -476,10 +482,7 @@ async fn run_validation(
         let mut recorded_blocks: Vec<String> = Vec::new();
         for o in outputs {
             let bid = o.block_id.as_str();
-            if bid.starts_with('_')
-                || o.output_ref.as_deref() == Some("__error__")
-                || o.output_ref.as_deref() == Some("__retry__")
-            {
+            if !is_replay_output(bid, o.output_ref.as_deref()) {
                 continue;
             }
             match recorded.entry(bid.to_string()) {
@@ -623,6 +626,14 @@ async fn rollback_validating(state: &AppState, release: &WorkflowRelease) {
 /// candidate, or skipped in the recorded run) return a stub `{}` so the
 /// path divergence is *observed and reported* rather than aborting the
 /// replay.
+fn is_replay_output(block: &str, reference: Option<&str>) -> bool {
+    !block.starts_with('_')
+        && !matches!(
+            reference,
+            Some("__error__" | "__retry__" | "__in_progress__")
+        )
+}
+
 async fn replay_one(
     candidate: &SequenceDefinition,
     context_data: &serde_json::Value,
@@ -639,6 +650,7 @@ async fn replay_one(
                 }
             };
             orch8_types::contract::MockDef {
+                definition: None,
                 handler: None,
                 block: Some(block),
                 policy,
@@ -675,32 +687,18 @@ async fn replay_one(
 
 /// Every step block id in the candidate (blocks that dispatch a handler).
 fn candidate_step_blocks(seq: &SequenceDefinition) -> Vec<String> {
-    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
-        match value {
-            serde_json::Value::Object(map) => {
-                if let (Some(serde_json::Value::String(id)), Some(serde_json::Value::String(_))) =
-                    (map.get("id"), map.get("handler"))
-                    && !out.contains(id)
-                {
-                    out.push(id.clone());
-                }
-                for v in map.values() {
-                    walk(v, out);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for v in items {
-                    walk(v, out);
-                }
-            }
-            _ => {}
-        }
+    let mut ids = Vec::new();
+    for block in seq
+        .blocks
+        .iter()
+        .chain(seq.on_failure.iter().flatten())
+        .chain(seq.on_cancel.iter().flatten())
+    {
+        orch8_types::sequence::visit_steps(block, &mut |step| {
+            ids.push(step.id.to_string());
+        });
     }
-    let mut out = Vec::new();
-    if let Ok(v) = serde_json::to_value(seq) {
-        walk(&v, &mut out);
-    }
-    out
+    ids
 }
 
 // ---------------------------------------------------------------------------

@@ -113,6 +113,7 @@ fn contract_suite(sequence_name: &str, handler: &str, case_names: &[&str]) -> Co
                 initial_outputs: std::collections::BTreeMap::new(),
                 config: None,
                 mocks: vec![MockDef {
+                    definition: None,
                     handler: Some(handler.to_string()),
                     block: None,
                     policy: MockPolicy::Success {

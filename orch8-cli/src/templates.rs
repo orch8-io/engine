@@ -55,6 +55,21 @@ const DEFAULT_JSON: &str = r#"{
 /// Registry of all built-in templates, in display order.
 pub const TEMPLATES: &[Template] = &[
     Template {
+        name: "field-inspection",
+        description: "Capture an inspection and retry submission after a disconnect.",
+        json: include_str!("../../examples/verified-sequences/field-inspection.json"),
+    },
+    Template {
+        name: "delivery-evidence",
+        description: "Capture delivery evidence and route exceptions to review.",
+        json: include_str!("../../examples/verified-sequences/delivery-evidence.json"),
+    },
+    Template {
+        name: "maintenance-approval",
+        description: "Await a supervisor decision before authorizing maintenance.",
+        json: include_str!("../../examples/verified-sequences/maintenance-approval.json"),
+    },
+    Template {
         name: "default",
         description: "Minimal hello-world sequence: greet, delayed wait, complete.",
         json: DEFAULT_JSON,
@@ -80,6 +95,21 @@ pub const TEMPLATES: &[Template] = &[
         json: include_str!("../../docs/agent-patterns/multi-agent-delegation.json"),
     },
 ];
+
+pub fn bundled_contract(name: &str) -> Option<&'static str> {
+    match name {
+        "field-inspection" => Some(include_str!(
+            "../../examples/verified-sequences/field-inspection.contracts.json"
+        )),
+        "delivery-evidence" => Some(include_str!(
+            "../../examples/verified-sequences/delivery-evidence.contracts.json"
+        )),
+        "maintenance-approval" => Some(include_str!(
+            "../../examples/verified-sequences/maintenance-approval.contracts.json"
+        )),
+        _ => None,
+    }
+}
 
 /// Look up a template by name, or fail with an error that lists every
 /// available template so the user can self-correct.

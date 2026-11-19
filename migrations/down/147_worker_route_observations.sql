@@ -1,0 +1,2 @@
+DROP INDEX idx_worker_registrations_route;
+DROP TABLE worker_route_observations;

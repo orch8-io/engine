@@ -289,8 +289,9 @@ impl DurableEngine {
     }
 
     /// Drive the scheduler until the instance is completed, failed,
-    /// cancelled, paused or waiting (for a signal/event), or `timeout`
-    /// elapses. Returns the snapshot JSON either way.
+    /// cancelled, paused or waiting (for a signal/event), or the scheduling
+    /// budget elapses. Initialization and snapshot reads can continue beyond
+    /// that budget. Returns the snapshot JSON either way.
     pub async fn run(&self, id: &str, timeout: Option<Duration>) -> Result<String, String> {
         let id = parse_instance_id(id)?;
         let now = Instant::now();

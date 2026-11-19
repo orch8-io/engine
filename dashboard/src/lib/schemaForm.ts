@@ -158,7 +158,7 @@ export const BLOCK_SCHEMAS: Record<string, Schema> = {
     required: ["id", "collection"],
     properties: {
       id: { type: "string" },
-      collection: { type: "string", description: "Path to the array, e.g. data.items." },
+      collection: { type: "string", description: "Context array path or a template resolving to an array." },
       item_var: { type: "string", description: "Default item." },
       max_iterations: { type: "integer" },
       retain_iterations: { type: "integer" },

@@ -935,6 +935,7 @@ passthrough_impl! {
         async fn dispatch_effect_receipt_owned(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt, fence: &crate::EffectDispatchFence, at_most_once: bool) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn dispatch_effect_receipt_at_most_once(&self, tenant_id: &orch8_types::ids::TenantId, next: &orch8_types::continuity::EffectReceipt) -> Result<orch8_types::continuity::EffectDispatchOutcome, StorageError>;
         async fn list_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
+        async fn list_unknown_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, limit: u32, after: Option<(chrono::DateTime<chrono::Utc>, orch8_types::continuity::EffectId)>) -> Result<Vec<orch8_types::continuity::EffectReceipt>, StorageError>;
         async fn collect_compensation_effects(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Vec<crate::CompensationEffect>, StorageError>;
         async fn summarize_effect_receipts(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<crate::EffectLedgerStatus, StorageError>;
         async fn audit_effect_at_most_once(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, kind: orch8_types::continuity::EffectKind, candidate: Option<&orch8_types::continuity::EffectReceipt>) -> Result<crate::EffectAtMostOnceAudit, StorageError>;
@@ -1985,6 +1986,20 @@ passthrough_impl! {
     async fn delete_sentinel_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
     async fn delete_block_output_by_id(&self, id: Uuid) -> Result<(), StorageError>;
 
+    async fn get_replay_output_keys(&self, instance_id: InstanceId, max_history_rows: u32) -> Result<Option<Vec<crate::ReplayOutputKey>>, StorageError>;
+
+    async fn get_inline_output_by_id(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+    ) -> Result<Option<orch8_types::output::BlockOutput>, StorageError> {
+        let mut output = self.inner.get_inline_output_by_id(instance_id, id).await?;
+        if let Some(row) = &mut output {
+            self.decrypt_block_output(row)?;
+        }
+        Ok(output)
+    }
+
     async fn get_outputs_page(
         &self,
         instance_id: InstanceId,
@@ -2090,9 +2105,11 @@ passthrough_impl! {
 passthrough_impl! {
     impl crate::WorkerStore for EncryptingStorage {
     async fn claim_worker_tasks_with_transport(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<crate::worker_claim::WorkerClaimBatch,StorageError> {
-        let (mut tasks,contexts)=self.inner.claim_worker_tasks_with_transport(request).await?.into_parts();
-        for task in &mut tasks {self.decrypt_worker_task(task)?;}
-        crate::worker_claim::WorkerClaimBatch::new(tasks,contexts)
+        let mut batch = self.inner.claim_worker_tasks_with_transport(request).await?;
+        for task in batch.tasks_mut() {
+            self.decrypt_worker_task(task)?;
+        }
+        Ok(batch)
     }
     async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<orch8_types::worker::WorkerTask>,StorageError>{
         let mut tasks=self.inner.claim_worker_tasks_with_authority(request).await?;
@@ -2478,6 +2495,9 @@ passthrough_impl! {
         Ok(tasks)
     }
 
+    async fn record_worker_observation(&self, observation: &crate::worker_inventory::WorkerObservation<'_>) -> Result<(), StorageError>;
+    async fn close_worker_observation(&self, session_id: Uuid) -> Result<(), StorageError>;
+    async fn worker_route_observations(&self, route: &crate::worker_inventory::WorkerRoute<'_>) -> Result<Vec<crate::worker_inventory::RouteObservation>, StorageError>;
     async fn upsert_worker_registration(&self, registration: &orch8_types::worker::WorkerRegistration) -> Result<(), StorageError>;
     async fn list_worker_registrations(&self, seen_within_secs: Option<i64>) -> Result<Vec<orch8_types::worker::WorkerRegistration>, StorageError>;
     async fn claimed_task_counts_by_worker(&self, tenant_id: Option<&orch8_types::TenantId>) -> Result<Vec<(String, i64)>, StorageError>;
@@ -2504,6 +2524,11 @@ passthrough_impl! {
     async fn enqueue_worker_command(&self, command: &orch8_types::worker::WorkerCommand) -> Result<(), StorageError>;
     async fn list_worker_commands(&self, worker_id: &str) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError>;
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError>;
+    async fn list_worker_version_rollouts(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::worker::WorkerVersionRollout>, StorageError>;
+    async fn stage_worker_version_pin(&self, tenant_id: &str, handler_name: &str, min_version: &str) -> Result<orch8_types::worker::WorkerVersionRollout, StorageError>;
+    async fn change_worker_version_rollout(&self, tenant_id: &str, handler_name: &str, revision: uuid::Uuid, action: orch8_types::worker::WorkerVersionRolloutAction) -> Result<Option<orch8_types::worker::WorkerVersionRollout>, StorageError>;
+    async fn placement_queue_evidence(&self, tenant_id: &orch8_types::ids::TenantId) -> Result<Vec<orch8_types::placement::PlacementQueueEvidence>, StorageError>;
+
     async fn upsert_worker_version_pin(&self, pin: &orch8_types::worker::WorkerVersionPin) -> Result<(), StorageError>;
     async fn get_worker_version_pin(&self, tenant_id: &str, handler_name: &str) -> Result<Option<orch8_types::worker::WorkerVersionPin>, StorageError>;
     async fn list_worker_version_pins(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::worker::WorkerVersionPin>, StorageError>;

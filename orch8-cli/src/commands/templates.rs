@@ -41,6 +41,11 @@ pub enum TemplatesCmd {
         #[arg(long)]
         catalog_url: Option<String>,
     },
+    /// Run a built-in recipe's bundled offline contract.
+    Verify {
+        /// Built-in recipe name.
+        name: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +194,17 @@ pub async fn run(cmd: TemplatesCmd) -> Result<()> {
             let rendered = convert_template(&text, crate::seqdoc::DocumentFormat::from_path(&out))?;
             atomic_write(&out, rendered.as_bytes())?;
             println!("downloaded {name} → {}", out.display());
+        }
+        TemplatesCmd::Verify { name } => {
+            let template = templates::find(&name)?;
+            let contract = templates::bundled_contract(&name)
+                .with_context(|| format!("template '{name}' has no bundled contract"))?;
+            super::test_cmd::verify_recipe(
+                template.json,
+                contract,
+                &format!("orch8 init my-workflow --template {name}"),
+            )
+            .await?;
         }
     }
     Ok(())

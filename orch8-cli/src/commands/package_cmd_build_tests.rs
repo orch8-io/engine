@@ -7,6 +7,7 @@
 use super::*;
 
 use ed25519_dalek::SigningKey;
+use orch8_publisher::package::{check_upgrade, contract_files, sequence_files};
 
 fn seed_bytes(seed: u8) -> [u8; 32] {
     [seed; 32]

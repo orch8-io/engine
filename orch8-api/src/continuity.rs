@@ -2,6 +2,7 @@
 
 mod delegation;
 mod effect_resolution;
+pub(crate) mod effect_review;
 use delegation::claim_delegation;
 mod local_recovery;
 
@@ -92,6 +93,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/continuity/executions/{id}/effects", get(list_effects))
         .route("/instances/{id}/effects", get(list_instance_effects))
+        .route(
+            "/continuity/effects/review",
+            get(effect_review::list_review),
+        )
         .route(
             "/continuity/effects/{id}/resolve",
             post(effect_resolution::resolve),
@@ -3919,6 +3924,7 @@ fn scenario_mocks(
                 .get(&block)
                 .cloned()
                 .map(|output| orch8_types::contract::MockDef {
+                    definition: None,
                     handler: None,
                     block: Some(block),
                     policy: orch8_types::contract::MockPolicy::Success { output },
@@ -4428,6 +4434,7 @@ fn build_extracted_contract(
         .filter(|output| output.created_at > checkpoint.created_at)
         .filter(|output| !output.block_id.as_str().starts_with('_'))
         .map(|output| orch8_types::contract::MockDef {
+            definition: None,
             handler: None,
             block: Some(output.block_id.as_str().to_owned()),
             policy: orch8_types::contract::MockPolicy::Success {

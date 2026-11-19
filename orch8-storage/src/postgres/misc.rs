@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 use orch8_types::error::StorageError;
 use orch8_types::ids::{InstanceId, TenantId};
 use orch8_types::instance::TaskInstance;
-use orch8_types::worker::{WorkerAttemptEventKind, WorkerTask};
+use orch8_types::worker::WorkerAttemptEventKind;
 
 use super::PostgresStorage;
 use super::rows::{InstanceRow, WorkerTaskRow};
@@ -240,10 +240,17 @@ pub(super) async fn claim_worker_tasks_from_queue(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     let mut tx = store.pool.begin().await?;
+    let principal = crate::worker_claim::claim_principal(request);
     let result=async {
+    if let Some(request) = request
+        && !super::worker_version_pins::admits_claim(&mut tx, request).await?
+    {
+        return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+    }
+
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
@@ -289,7 +296,7 @@ pub(super) async fn claim_worker_tasks_from_queue(
         .collect();
     super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     super::workers::insert_attempt_events(&mut tx, &events).await?;
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
     }.await;
     super::finish_transaction(tx, result).await
 }
@@ -304,10 +311,17 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     worker_id: &str,
     tenant_id: &orch8_types::TenantId,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     let mut tx = store.pool.begin().await?;
+    let principal = crate::worker_claim::claim_principal(request);
     let result=async {
+    if let Some(request) = request
+        && !super::worker_version_pins::admits_claim(&mut tx, request).await?
+    {
+        return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+    }
+
     let rows = sqlx::query_as::<_, WorkerTaskRow>(
         r"
         UPDATE worker_tasks
@@ -357,7 +371,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
         .collect();
     super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
     super::workers::insert_attempt_events(&mut tx, &events).await?;
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
     }.await;
     super::finish_transaction(tx, result).await
 }
@@ -611,7 +625,7 @@ pub(super) async fn delete_expired_auxiliary(
     limit: u32,
 ) -> Result<u64, StorageError> {
     // (table, predicate on $1 = cutoff). Constants only — never input.
-    let sweeps: [(Option<DateTime<Utc>>, &str, &str); 8] = [
+    let sweeps: [(Option<DateTime<Utc>>, &str, &str); 9] = [
         (
             retention.worker_attempt_events_before,
             "worker_task_attempt_events",
@@ -650,6 +664,11 @@ pub(super) async fn delete_expired_auxiliary(
         (
             retention.worker_registrations_before,
             "worker_registrations",
+            "last_seen_at < $1",
+        ),
+        (
+            retention.worker_registrations_before,
+            "worker_route_observations",
             "last_seen_at < $1",
         ),
     ];

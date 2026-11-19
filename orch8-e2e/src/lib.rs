@@ -984,9 +984,17 @@ pub fn server_build_args(profile_dir: &std::path::Path) -> Vec<String> {
         }
         _ => (parent, None),
     };
-    let mut args: Vec<String> = ["build", "-q", "-p", "orch8-server", "--bin", "orch8-server"]
-        .map(String::from)
-        .into();
+    let mut args: Vec<String> = [
+        "build",
+        "--locked",
+        "-q",
+        "-p",
+        "orch8-server",
+        "--bin",
+        "orch8-server",
+    ]
+    .map(String::from)
+    .into();
     args.push("--target-dir".into());
     args.push(target_dir.display().to_string());
     if let Some(triple) = triple {
@@ -2111,6 +2119,7 @@ mod server_binary_tests {
         let args = server_build_args(&profile);
 
         assert_eq!(args[0], "build");
+        assert!(args.iter().any(|arg| arg == "--locked"));
         assert_eq!(arg_after(&args, "-p"), Some("orch8-server"));
         assert_eq!(arg_after(&args, "--bin"), Some("orch8-server"));
     }

@@ -271,6 +271,7 @@ async fn sub_sequence_spawns_child_and_enters_waiting() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,

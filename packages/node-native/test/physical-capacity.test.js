@@ -102,3 +102,25 @@ test('physical promise capacity survives step timeouts and engine replacement', 
   }
   assert.equal(active, 0)
 })
+
+
+test('run rejects invalid budgets and keeps zero-budget reads non-dispatching', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'orch8-budget-'))
+  const engine = await Engine.open(join(directory, 'app.db'))
+  let calls = 0
+  engine.handler('host', () => { calls++; return true })
+  try {
+    await engine.deploy({ name: 'budget', blocks: [{ type: 'step', id: 'work', handler: 'host' }] })
+    const id = await engine.start('budget')
+    for (const timeoutMs of [-1, 0.5, NaN, Infinity, 4294967296]) {
+      await assert.rejects(engine.run(id, { timeoutMs }), /timeoutMs/)
+    }
+    assert.equal((await engine.run(id, { timeoutMs: 0 })).state, 'scheduled')
+    assert.equal(calls, 0)
+    assert.equal((await engine.run(id, { timeoutMs: 4294967295 })).state, 'completed')
+    assert.equal(calls, 1)
+  } finally {
+    await engine.close()
+    rmSync(directory, { recursive: true, force: true })
+  }
+})

@@ -200,6 +200,53 @@ pub(super) async fn get_after_created_at(
     rows.iter().map(row_to_output).collect()
 }
 
+pub(super) async fn replay_keys(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    max_history_rows: u32,
+) -> Result<Option<Vec<crate::ReplayOutputKey>>, StorageError> {
+    type Row = (Option<String>, Option<String>, Option<String>, i64);
+    let limit = i64::from(max_history_rows) + 1;
+    let rows: Vec<Row> = sqlx::query_as(crate::current_outputs::REPLAY_KEYS_QUERY)
+        .bind(instance_id.into_uuid().to_string())
+        .bind(limit)
+        .fetch_all(&storage.pool)
+        .await?;
+    if rows.first().is_some_and(|row| row.3 >= limit) {
+        return Ok(None);
+    }
+    let mut keys = Vec::with_capacity(rows.len());
+    for (id, block, reference, _) in rows {
+        let (Some(id), Some(block)) = (id, block) else {
+            continue;
+        };
+        let id =
+            uuid::Uuid::parse_str(&id).map_err(|error| StorageError::Query(error.to_string()))?;
+        keys.push(crate::ReplayOutputKey {
+            id,
+            block_id: BlockId::new(block),
+            output_ref: reference,
+        });
+    }
+    Ok(Some(keys))
+}
+
+pub(super) async fn inline_by_id(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    id: uuid::Uuid,
+) -> Result<Option<BlockOutput>, StorageError> {
+    let row = sqlx::query(
+        "SELECT * FROM block_outputs WHERE instance_id = ?1 AND id = ?2
+         AND output_ref IS NULL",
+    )
+    .bind(instance_id.into_uuid().to_string())
+    .bind(id.to_string())
+    .fetch_optional(&storage.pool)
+    .await?;
+    row.as_ref().map(row_to_output).transpose()
+}
+
 /// One page of an instance's outputs in execution order. Backs the timeline
 /// endpoint — see `OutputStore::get_outputs_page`.
 pub(super) async fn get_page(

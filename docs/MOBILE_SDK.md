@@ -42,10 +42,13 @@ other's file locks ([SQLite documentation](https://www.sqlite.org/howtocorrupt.h
 
 ## 10-minute install
 
-Every channel resolves the same native engine, pinned to the same version
-(`0.7.1` below). Pick your platform, add one dependency, build once, and make
-the first call. Each section ends with a check that proves the native engine
-was resolved rather than left for a runtime crash.
+The native install examples use engine release `0.7.1`. Pick your platform,
+add its dependency, and build with the matching native version. Each section
+includes a check that the native dependency resolved.
+
+For a standalone app, use the [offline inspection starter](../examples/mobile-inspection).
+The [compatibility matrix](MOBILE_COMPATIBILITY.md) lists the published install
+and matched source-build requirements by platform.
 
 | Platform                   | Package                        | Registry                                                                        |
 | -------------------------- | ------------------------------ | ------------------------------------------------------------------------------- |
@@ -169,9 +172,9 @@ with a config plugin. It contains native code, so it runs in a
 [development build](https://docs.expo.dev/develop/development-builds/introduction/)
 or a prebuilt app, not in Expo Go.
 
-```bash
-npx expo install @orch8.io/expo
-```
+Install a compatible wrapper build before prebuild. The public npm package
+currently ends at `0.7.0`, which has the packaging issue below. A working
+`0.7.1` wrapper needs a corrected source build or package archive.
 
 ```jsonc
 // app.json
@@ -190,8 +193,9 @@ plugin adds Orch8's Maven repository to `android.extraMavenRepos` in
 it is lower. Check: `ios/Podfile.lock` contains `Orch8Mobile (0.7.1)` and
 `Orch8Expo`, and `android/gradle.properties` contains the Maven URL.
 
-> `@orch8.io/expo` 0.7.0 shipped without its podspec and with an unresolvable
-> Android dependency. Use 0.7.1 or later.
+`@orch8.io/expo` 0.7.0 shipped without its podspec and with an unresolvable
+Android dependency. The package registry currently has no later release.
+[npm registry](https://registry.npmjs.org/@orch8.io%2fexpo)
 
 Quick start: load a sequence, start it offline, and answer its
 `wait_for_input` step from React:
@@ -1499,3 +1503,19 @@ artifact backend (`orch8-storage/artifacts`), no SMTP/`email` builtin
 (`orch8-engine/email`), no APNs/FCM senders (`orch8-push/providers`), and only
 the Tokio features it uses. Server crates enable these features explicitly, so
 their builds are unchanged.
+
+## Signed first-launch catalogs
+
+Development builds expose `installBundledCatalog` for app-bundled signed
+`.orch8pkg` content. Build the package with the app's configured
+`root_public_key` signing authority. Its `sequences/` members must be complete
+definitions in tenant `mobile` and namespace `default`.
+
+Installation seeds missing sequence names in a single transaction. Once a
+remote signed manifest has been accepted, manifest sync owns the catalog.
+The package can then stay embedded across app upgrades without restoring
+withdrawn definitions. Install the bundle from the foreground on first launch
+before starting any sequence. This method targets the default local catalog.
+Use `installBundledCatalogWithResult` for the disposition and installed and
+skipped counts. `manifestOwned` means signed manifest sync owns the catalog.
+`alreadyPresent` means every bundled name already exists locally.

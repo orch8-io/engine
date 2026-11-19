@@ -37,6 +37,7 @@ import {
   type Checkpoint,
   type ForkPreview,
 } from "../api";
+import { RuntimeTimeline, WaitReason } from "../components/RuntimeTimeline";
 import { TimeScrubber } from "../components/TimeScrubber";
 import { CopyAsMenu } from "../components/CopyAsMenu";
 import {
@@ -132,7 +133,7 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
   },
 ];
 
-type DetailTab = "tree" | "timeline" | "artifacts" | "audit";
+type DetailTab = "tree" | "timeline" | "runtimes" | "artifacts" | "audit";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -830,6 +831,10 @@ export default function InstanceDetail() {
           {error && <div className="notice notice-warn">{error}</div>}
           {toast && <div className="notice notice-ok">{toast}</div>}
 
+          {(instance?.state === "waiting" || instance?.state === "paused") && (
+            <WaitReason key={id} instanceId={id} />
+          )}
+
           {notFound && (
             <Section
               eyebrow="Not found"
@@ -1406,7 +1411,7 @@ export default function InstanceDetail() {
           >
             <div>
               <div className="flex gap-0 border-b border-rule mb-6">
-                {(["tree", "timeline", "artifacts", "audit"] as DetailTab[]).map((tab) => (
+                {(["tree", "timeline", "runtimes", "artifacts", "audit"] as DetailTab[]).map((tab) => (
                   <button
                     key={tab}
                     onClick={() => setActiveTab(tab)}
@@ -1469,6 +1474,8 @@ export default function InstanceDetail() {
                   }}
                 />
               )}
+
+              {activeTab === "runtimes" && <RuntimeTimeline key={id} instanceId={id} />}
 
               {activeTab === "artifacts" && (
                 <Table>

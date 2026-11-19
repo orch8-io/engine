@@ -105,6 +105,9 @@ enum Commands {
     Bootstrap(BootstrapCmd),
     /// Diagnose configuration, connectivity, compatibility, workers, continuity, and an optional instance.
     Doctor(DoctorCmd),
+    /// Plan placement against the live worker fleet.
+    #[command(subcommand)]
+    Placement(commands::placement::PlacementCmd),
     /// Export a strictly redacted operational support bundle.
     SupportBundle(SupportBundleCmd),
     /// Explain in plain language why an instance is stuck or failed: likely
@@ -755,6 +758,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Health => commands::health::run(&client, base, format).await?,
         Commands::Doctor(cmd) => commands::doctor::run(&client, base, cmd, format).await?,
+        Commands::Placement(cmd) => commands::placement::run(&client, base, cmd, format).await?,
         Commands::SupportBundle(cmd) => commands::support_bundle::run(&client, base, cmd).await?,
         Commands::Explain(cmd) => commands::explain::run(&client, base, cmd, format).await?,
         Commands::Instance(cmd) => {

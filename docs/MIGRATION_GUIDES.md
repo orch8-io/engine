@@ -135,3 +135,21 @@ determinism, and side-effect semantics. Orch8 therefore ships format-upgrade,
 validation, and source-importer tooling (above), not a misleading drop-in
 runtime: importers translate mechanically safe constructs and emit explicit
 TODOs and `unmapped` entries for semantic gaps.
+
+## Replay source-run evidence after import
+
+Pass `--report` for the translation inventory and `--parity-from` to map
+observed source steps into an offline contract suite:
+
+```sh
+orch8 import stepfunctions original.json --out imported.json --report report.json \
+  --parity-from source-run.json --parity-out imported.contracts.json
+orch8 test run imported.contracts.json --report coverage
+```
+
+Each entry in the evidence file's `cases` array needs a `name`, a sequence
+`input`, ordered `observed_nodes` from the source execution, and a
+`terminal_state`. Supply `mocks` and `signals` as needed by the translated
+sequence. The importer requires each observed node to name exactly one
+translated executable step. Parent branches, repeated loop iterations, and
+manual stubs need a contract case authored against the converted sequence.

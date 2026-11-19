@@ -111,6 +111,7 @@ async fn seed_worker(
             version: version.map(ToString::to_string),
             tenant_id: tenant.map(ToString::to_string),
             last_seen_at,
+            available_poll_slots: None,
         })
         .await
         .unwrap();

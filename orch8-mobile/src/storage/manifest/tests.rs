@@ -185,3 +185,53 @@ async fn evaluation_cannot_rewrite_acceptance_or_mislabel_its_applied_version() 
     );
     trust.check_candidate(1, &digest).unwrap();
 }
+
+#[tokio::test]
+async fn accepted_remote_catalog_prevents_reseeding_after_restart() {
+    use orch8_storage::SequenceStore;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("catalog.db");
+    let path = path.to_str().unwrap();
+    let sqlite = Arc::new(SqliteStorage::file_mobile(path).await.unwrap());
+    let storage = MobileStorage::new(sqlite.clone());
+    let seed: orch8_types::sequence::SequenceDefinition =
+        serde_json::from_value(serde_json::json!({
+            "id": "ca2059f7-6839-43c2-a8eb-000000000001",
+            "tenant_id":"mobile", "namespace":"default", "version":1, "name":"withdrawn",
+            "created_at":"2026-01-01T00:00:00Z",
+            "blocks":[{"type":"step","id":"start","handler":"noop"}]
+        }))
+        .unwrap();
+    let seeded = storage
+        .install_legacy_seed(std::slice::from_ref(&seed), 1)
+        .await
+        .unwrap();
+    assert_eq!(seeded.disposition, crate::BundledCatalogDisposition::Seeded);
+    assert_eq!((seeded.installed, seeded.skipped), (1, 0));
+    storage
+        .accept_manifest_trust(&[], 9, &"9".repeat(64))
+        .await
+        .unwrap();
+    sqlite.delete_sequence(seed.id).await.unwrap();
+    drop(storage);
+    drop(sqlite);
+
+    let storage = MobileStorage::new(Arc::new(SqliteStorage::file_mobile(path).await.unwrap()));
+    assert!(storage.manifest_trust().await.unwrap().pending());
+    let outcome = storage.install_legacy_seed(&[seed], 1).await.unwrap();
+    assert_eq!(
+        outcome.disposition,
+        crate::BundledCatalogDisposition::ManifestOwned
+    );
+    assert_eq!((outcome.installed, outcome.skipped), (0, 1));
+    let versions = storage
+        .list_local_sequence_versions(
+            &crate::mobile_tenant_id(),
+            &orch8_types::ids::Namespace::new("default"),
+            5,
+        )
+        .await
+        .unwrap();
+    assert!(versions.is_empty());
+}

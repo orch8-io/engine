@@ -92,9 +92,14 @@ pub(super) async fn node(
     let Some(mut tx) = begin(store, instance_id, claim_token).await? else {
         return Ok(false);
     };
-    let changed =
-        super::execution_tree::update_node_state_on(&mut tx, node_id, state, Some(instance_id))
-            .await?;
+    let changed = super::execution_tree::update_node_state_on(
+        &mut tx,
+        node_id,
+        state,
+        Some(instance_id),
+        store.execution_tree_clock.now(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(changed)
 }
@@ -139,7 +144,13 @@ pub(super) async fn nodes_state(
         tx.rollback().await?;
         return Ok(false);
     }
-    super::execution_tree::update_nodes_state_on(&mut tx, node_ids, state).await?;
+    super::execution_tree::update_nodes_state_on(
+        &mut tx,
+        node_ids,
+        state,
+        store.execution_tree_clock.now(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(true)
 }
@@ -157,7 +168,12 @@ pub(super) async fn activate_nodes(
         tx.rollback().await?;
         return Ok(false);
     }
-    super::execution_tree::batch_activate_nodes_on(&mut tx, node_ids).await?;
+    super::execution_tree::batch_activate_nodes_on(
+        &mut tx,
+        node_ids,
+        store.execution_tree_clock.now(),
+    )
+    .await?;
     tx.commit().await?;
     Ok(true)
 }

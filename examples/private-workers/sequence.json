@@ -1,0 +1,22 @@
+{
+  "name": "private-worker-sandbox",
+  "blocks": [
+    { "type": "step", "id": "start", "handler": "log", "params": { "message": "Starting private worker sandbox" } },
+    {
+      "type": "step",
+      "id": "prepare",
+      "handler": "private_prepare",
+      "params": { "chunks": 3 },
+      "placement": { "labels": { "site": "private" } },
+      "timeout": 30000
+    },
+    {
+      "type": "step",
+      "id": "compute",
+      "handler": "private_compute",
+      "params": { "chunks": 5 },
+      "placement": { "labels": { "site": "private" } },
+      "timeout": 30000
+    }
+  ]
+}

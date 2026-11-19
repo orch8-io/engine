@@ -10,10 +10,12 @@ import {
   setSequenceStatus,
   type SequenceDefinition,
 } from "../api";
+import { SequenceDependencies } from "../components/SequenceDependencies";
+import { SequenceBlockEvidence, SequenceRuntime } from "../components/SequenceRuntime";
 import { SequenceEditor } from "../components/SequenceEditor";
 import { CopyAsMenu } from "../components/CopyAsMenu";
 import { createInstanceRequest, createSequenceRequest } from "../lib/requests";
-import { parseSequenceText, prepareNewVersion, serializeSequence } from "../lib/sequenceModel";
+import { blockSlots, getAt, isObject, parseSequenceText, prepareNewVersion, ROOT_LISTS, serializeSequence, walkBlocks } from "../lib/sequenceModel";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
 import { Glossary, type GlossaryItem } from "../components/ui/Glossary";
@@ -41,22 +43,6 @@ function schemaDefaults(schema: Record<string, unknown> | null | undefined): Rec
       t === "string" ? "" : t === "integer" || t === "number" ? 0 : t === "boolean" ? false : t === "array" ? [] : t === "object" ? {} : null;
   }
   return out;
-}
-
-interface BlockLike {
-  type?: string;
-  id?: string;
-  handler?: string;
-  branches?: BlockLike[][];
-  body?: BlockLike[];
-  try_block?: BlockLike[];
-  catch_block?: BlockLike[];
-  finally_block?: BlockLike[];
-  routes?: Array<{ condition: string; blocks: BlockLike[] }>;
-  default?: BlockLike[];
-  variants?: Array<{ name: string; weight: number; blocks: BlockLike[] }>;
-  blocks?: BlockLike[];
-  [k: string]: unknown;
 }
 
 const PAGE_GLOSSARY: GlossaryItem[] = [
@@ -121,46 +107,25 @@ async function fetchVersions(tenant: string, namespace: string, name: string): P
   return [...live, ...all.filter((s) => s.name === name)].map((s) => s.version);
 }
 
-function countNodes(blocks: BlockLike[]): number {
-  let n = 0;
-  for (const b of blocks) {
-    n++;
-    if (b.branches) for (const br of b.branches) n += countNodes(br);
-    if (b.body) n += countNodes(b.body);
-    if (b.try_block) n += countNodes(b.try_block);
-    if (b.catch_block) n += countNodes(b.catch_block);
-    if (b.finally_block) n += countNodes(b.finally_block);
-    if (b.routes) for (const r of b.routes) n += countNodes(r.blocks);
-    if (b.default) n += countNodes(b.default);
-    if (b.variants) for (const v of b.variants) n += countNodes(v.blocks);
-    if (b.blocks) n += countNodes(b.blocks);
-  }
-  return n;
-}
-
-function BlockList({ blocks, depth = 0 }: { blocks: BlockLike[]; depth?: number }) {
+function BlockList({ blocks, depth = 0 }: { blocks: unknown[]; depth?: number }) {
   return (
     <div className={depth > 0 ? "ml-4 border-l border-rule pl-3" : ""}>
-      {blocks.map((b, i) => (
-        <BlockView key={`${b.id ?? i}`} block={b} />
+      {blocks.filter(isObject).map((block, index) => (
+        <BlockView key={String(block.id ?? index)} block={block} />
       ))}
     </div>
   );
 }
 
-function BlockView({ block }: { block: BlockLike }) {
+function BlockView({ block }: { block: Record<string, unknown> }) {
   const [open, setOpen] = useState(true);
-  const hasChildren = !!(
-    block.branches ||
-    block.body ||
-    block.try_block ||
-    block.catch_block ||
-    block.finally_block ||
-    block.routes ||
-    block.default ||
-    block.variants ||
-    block.blocks
-  );
+  const slots = blockSlots(block).flatMap((slot) => {
+    const value = getAt(block, slot.path);
+    const blocks = Array.isArray(value) ? value : isObject(value) ? [value] : [];
+    return blocks.length ? [{ label: slot.label, blocks, key: JSON.stringify(slot.path) }] : [];
+  });
+  const hasChildren = slots.length > 0;
+  const blockId = typeof block.id === "string" ? block.id : "";
 
   return (
     <div className="py-1">
@@ -180,15 +145,16 @@ function BlockView({ block }: { block: BlockLike }) {
           className="font-mono text-[13px] text-ink"
           title="Block id — stable identifier used in execution trees and logs"
         >
-          {block.id ?? "(no id)"}
+          {blockId || "(no id)"}
         </span>
         <span
           className="bg-sunken border border-rule text-muted text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5"
           title="Block type — determines how the engine evaluates this node"
         >
-          {block.type}
+          {String(block.type ?? "unknown")}
         </span>
-        {block.handler && (
+        {blockId && <SequenceBlockEvidence id={blockId} />}
+        {typeof block.handler === "string" && (
           <span
             className="text-[11px] text-muted font-mono"
             title="Handler — the worker-side function this block dispatches to"
@@ -196,108 +162,35 @@ function BlockView({ block }: { block: BlockLike }) {
             → {block.handler}
           </span>
         )}
-        {typeof (block as unknown as Record<string, unknown>).sequence_name === "string" && (
+        {typeof block.sequence_name === "string" && (
           <span
             className="text-[11px] text-signal font-mono"
             title="Sub-sequence target"
           >
-            → {(block as unknown as Record<string, unknown>).sequence_name as string}
-            {typeof (block as unknown as Record<string, unknown>).version === "number"
-              ? ` v${(block as unknown as Record<string, unknown>).version as number}`
+            → {block.sequence_name}
+            {typeof block.version === "number"
+              ? ` v${block.version}`
               : ""}
           </span>
         )}
       </div>
-      {open && (
-        <>
-          {block.branches?.map((br, i) => (
-            <div key={`br-${i}`} className="ml-4">
-              <div
-                className="text-[10px] text-faint font-mono uppercase tracking-wider py-1"
-                title="Parallel branch — all branches run concurrently"
-              >
-                branch {i}
-              </div>
-              <BlockList blocks={br} depth={1} />
-            </div>
-          ))}
-          {block.body && (
-            <>
-              <div className="ml-4 text-[10px] text-faint font-mono uppercase tracking-wider pt-1">
-                body
-              </div>
-              <BlockList blocks={block.body} depth={1} />
-            </>
-          )}
-          {block.try_block && (
-            <>
-              <div className="ml-4 text-[10px] text-faint font-mono uppercase tracking-wider pt-1">
-                try
-              </div>
-              <BlockList blocks={block.try_block} depth={1} />
-            </>
-          )}
-          {block.catch_block && (
-            <>
-              <div className="ml-4 text-[10px] text-warn font-mono uppercase tracking-wider pt-1">
-                catch
-              </div>
-              <BlockList blocks={block.catch_block} depth={1} />
-            </>
-          )}
-          {block.finally_block && (
-            <>
-              <div className="ml-4 text-[10px] text-faint font-mono uppercase tracking-wider pt-1">
-                finally
-              </div>
-              <BlockList blocks={block.finally_block} depth={1} />
-            </>
-          )}
-          {block.routes?.map((r, i) => (
-            <div key={`r-${i}`} className="ml-4">
-              <div
-                className="text-[10px] text-faint font-mono uppercase tracking-wider py-1"
-                title="Switch route — first matching condition wins"
-              >
-                when <span className="text-ink-dim normal-case tracking-normal">{r.condition}</span>
-              </div>
-              <BlockList blocks={r.blocks} depth={1} />
-            </div>
-          ))}
-          {block.default && (
-            <>
-              <div
-                className="ml-4 text-[10px] text-faint font-mono uppercase tracking-wider pt-1"
-                title="Fallback route when no switch condition matches"
-              >
-                default
-              </div>
-              <BlockList blocks={block.default} depth={1} />
-            </>
-          )}
-          {block.variants?.map((v, i) => (
-            <div key={`v-${i}`} className="ml-4">
-              <div
-                className="text-[10px] text-faint font-mono uppercase tracking-wider py-1"
-                title="A/B variant — probability is weight ÷ sum of all weights in this block"
-              >
-                variant{" "}
-                <span className="text-ink-dim normal-case tracking-normal">{v.name}</span>{" "}
-                (weight {v.weight})
-              </div>
-              <BlockList blocks={v.blocks} depth={1} />
-            </div>
-          ))}
-          {block.blocks && <BlockList blocks={block.blocks} depth={1} />}
-        </>
-      )}
+      {open && slots.map((slot) => (
+        <div key={slot.key} className="ml-4">
+          <div className="text-[10px] text-muted font-mono uppercase tracking-wider py-1">{slot.label}</div>
+          <BlockList blocks={slot.blocks} depth={1} />
+        </div>
+      ))}
     </div>
   );
 }
 
 export default function SequenceDetail() {
-  usePageTitle("Sequence");
   const { id } = useParams<{ id: string }>();
+  return <SequenceRevision key={id} id={id} />;
+}
+
+function SequenceRevision({ id }: { id?: string }) {
+  usePageTitle("Sequence");
   const navigate = useNavigate();
   const [seq, setSeq] = useState<SequenceDefinition | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -387,9 +280,11 @@ export default function SequenceDetail() {
 
   useEffect(() => {
     if (!id) return;
-    getSequence(id)
-      .then(setSeq)
-      .catch((e) => setError(e instanceof Error ? e.message : String(e)));
+    const controller = new AbortController();
+    getSequence(id, controller.signal)
+      .then((result) => { if (!controller.signal.aborted) setSeq(result); })
+      .catch((e) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : String(e)); });
+    return () => controller.abort();
   }, [id]);
 
   const openRun = () => {
@@ -435,7 +330,7 @@ export default function SequenceDetail() {
   if (!id)
     return <div className="notice notice-warn">Missing sequence id</div>;
 
-  const totalNodes = seq ? countNodes(seq.blocks as BlockLike[]) : 0;
+  const totalNodes = seq ? walkBlocks(seq).length : 0;
 
   return (
     <div className="space-y-12">
@@ -791,7 +686,21 @@ export default function SequenceDetail() {
               </>
             }
           >
-            <BlockList blocks={seq.blocks as BlockLike[]} />
+            <div className="space-y-4">
+              <SequenceDependencies key={seq.id} sequence={seq} />
+              <SequenceRuntime key={seq.id} sequence={seq}>
+                {ROOT_LISTS.map((key) => {
+                  const blocks = getAt(seq, [key]);
+                  if (!Array.isArray(blocks) || (key !== "blocks" && blocks.length === 0)) return null;
+                  return (
+                    <div key={key}>
+                      {key !== "blocks" && <h3 className="eyebrow mb-2">{key}</h3>}
+                      <BlockList blocks={blocks} />
+                    </div>
+                  );
+                })}
+              </SequenceRuntime>
+            </div>
           </Section>
         </>
       )}

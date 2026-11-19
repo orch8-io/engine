@@ -1,0 +1,129 @@
+name: Published mobile starter
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Exact published SDK version or release tag
+        required: true
+        type: string
+      ios:
+        required: true
+        type: boolean
+      android:
+        required: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact published SDK version or release tag
+        default: '0.7.1'
+        required: true
+        type: string
+      ios:
+        description: Verify SwiftPM
+        default: true
+        type: boolean
+      android:
+        description: Verify Maven
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  ORCH8_VERSION: ${{ inputs.version }}
+
+jobs:
+  ios:
+    if: inputs.ios
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Prepare a clean SwiftPM consumer
+        run: |
+          command -v xcodegen >/dev/null || brew install xcodegen
+          cp -R examples/mobile-inspection "$RUNNER_TEMP/inspection"
+          cd "$RUNNER_TEMP/inspection"
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          version = os.environ["ORCH8_VERSION"].removeprefix("v")
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", version):
+              raise SystemExit("SDK version must be an exact release version")
+          spec = Path("project.yml")
+          contents, matches = re.subn(r"(?m)^    exactVersion: '[^']+'$", f"    exactVersion: '{version}'", spec.read_text())
+          if matches != 1:
+              raise SystemExit("expected one SwiftPM version pin")
+          spec.write_text(contents)
+          PY
+          xcodegen generate
+      - name: Resolve the release and test a fresh app on the iOS simulator
+        run: |
+          cd "$RUNNER_TEMP/inspection"
+          UDID="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          for runtime, devices in sorted(json.load(sys.stdin)["devices"].items(), reverse=True):
+              if ".iOS-" in runtime:
+                  for device in devices:
+                      if device["name"].startswith("iPhone"):
+                          print(device["udid"])
+                          sys.exit(0)
+          sys.exit("no iPhone simulator available")
+          ')"
+          xcodebuild test -scheme FieldInspection -project FieldInspection.xcodeproj \
+            -destination "platform=iOS Simulator,id=$UDID" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/inspection-swiftpm" \
+            -derivedDataPath "$RUNNER_TEMP/inspection-build" CODE_SIGNING_ALLOWED=NO
+
+  android:
+    if: inputs.android
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@3f5f9adaf7d9fecd50b5935e54106014257a94e6 # v6.4.0
+        with:
+          gradle-version: '8.9'
+          cache-disabled: true
+      - name: Resolve the release in a clean Gradle consumer
+        run: |
+          cp -R examples/mobile-inspection "$RUNNER_TEMP/inspection"
+          cd "$RUNNER_TEMP/inspection/android"
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0' emulator 'system-images;android-35;google_apis;x86_64'
+          gradle --no-daemon -Porch8Version="${ORCH8_VERSION#v}" :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest
+      - name: Test a fresh install with device networking disabled
+        run: |
+          cd "$RUNNER_TEMP/inspection/android"
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-orch8-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          echo no | avdmanager create avd --name inspection --package 'system-images;android-35;google_apis;x86_64' --force
+          "$ANDROID_HOME/emulator/emulator" -avd inspection -no-window -no-audio -no-snapshot -no-boot-anim -gpu swiftshader_indirect > "$RUNNER_TEMP/emulator.log" 2>&1 &
+          trap 'adb emu kill >/dev/null 2>&1 || true' EXIT
+          timeout 180 adb wait-for-device
+          deadline=$((SECONDS + 180))
+          until [[ "$(adb shell getprop sys.boot_completed | tr -d '\r')" == 1 ]]; do
+            if (( SECONDS >= deadline )); then
+              echo '::error::Android emulator never completed boot.'
+              exit 1
+            fi
+            sleep 2
+          done
+          adb shell svc wifi disable
+          adb shell svc data disable
+          gradle --no-daemon -Porch8Version="${ORCH8_VERSION#v}" :app:connectedDebugAndroidTest
+      - name: Upload Android test logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-inspection-test-logs
+          path: |
+            ${{ runner.temp }}/emulator.log
+            ${{ runner.temp }}/inspection/android/app/build/reports/androidTests/

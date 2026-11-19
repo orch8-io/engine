@@ -944,6 +944,46 @@
         }
       }
     },
+    "/continuity/effects/review": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "operationId": "list_review",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant whose unknown effects need review",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Continuation cursor returned by the preceding page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Oldest unknown effects first",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EffectReviewQueue"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/continuity/effects/{id}/resolve": {
       "post": {
         "tags": [
@@ -4731,6 +4771,38 @@
         }
       }
     },
+    "/instances/{id}/runtime-timeline": {
+      "get": {
+        "tags": [
+          "instances"
+        ],
+        "operationId": "get_timeline",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Physical instance UUID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Allowlisted worker and runtime events suitable for export",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeTimeline"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/instances/{id}/share": {
       "post": {
         "tags": [
@@ -5430,6 +5502,74 @@
         }
       }
     },
+    "/placement/plan/{id}": {
+      "get": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "get_plan",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Immutable sequence id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tags",
+            "in": "query",
+            "description": "Comma-separated instance tags",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "recipe",
+            "in": "query",
+            "description": "Preview a named recipe as an additional policy",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "worker_version",
+            "in": "query",
+            "description": "Only include workers advertising this exact version",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "staged_pins",
+            "in": "query",
+            "description": "Preview staged minimum worker versions where present",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read-only placement and fleet readiness preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlacementPlan"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/placement/policies": {
       "get": {
         "tags": [
@@ -5499,6 +5639,29 @@
           },
           "400": {
             "description": "Invalid policies"
+          }
+        }
+      }
+    },
+    "/placement/recipes": {
+      "get": {
+        "tags": [
+          "placement"
+        ],
+        "operationId": "recipes",
+        "responses": {
+          "200": {
+            "description": "Placement recipes for preview",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PlacementRecipe"
+                  }
+                }
+              }
+            }
           }
         }
       }
@@ -6680,6 +6843,70 @@
         }
       }
     },
+    "/releases/{id}/divergences/{instance_id}/fixture": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "export_replay_fixture",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "instance_id",
+            "in": "path",
+            "description": "Recorded divergent execution",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayFixtureRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Redacted offline regression fixture",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayFixture"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Selection or fixture exceeds export limits"
+          },
+          "403": {
+            "description": "Operator capability required"
+          },
+          "404": {
+            "description": "Divergence not found within the caller's scope"
+          },
+          "409": {
+            "description": "Recorded evidence changed during export"
+          }
+        }
+      }
+    },
     "/releases/{id}/evaluate": {
       "post": {
         "tags": [
@@ -7491,6 +7718,39 @@
           },
           "404": {
             "description": "Sequence not found"
+          }
+        }
+      }
+    },
+    "/sequences/test-draft": {
+      "post": {
+        "tags": [
+          "sequences"
+        ],
+        "operationId": "run",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DraftContract"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Effect-free contract report from an isolated draft",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuiteReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid draft or contract"
           }
         }
       }
@@ -8815,6 +9075,39 @@
         }
       }
     },
+    "/workers/identity": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "read",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkerIdentityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Fresh authenticated mobile runtime identity; not an execution grant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerIdentityResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A live device session is required"
+          }
+        }
+      }
+    },
     "/workers/tasks": {
       "get": {
         "tags": [
@@ -9177,6 +9470,61 @@
         }
       }
     },
+    "/workers/tasks/{id}/definition": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "worker_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "claim_epoch",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact-byte frozen definition bundle bound to the current claim",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DefinitionWireEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Different or unattributed reporter"
+          },
+          "409": {
+            "description": "Stale claim, owner, or unavailable historical snapshot"
+          }
+        }
+      }
+    },
     "/workers/tasks/{id}/fail": {
       "post": {
         "tags": [
@@ -9252,6 +9600,61 @@
           },
           "409": {
             "description": "Worker lost ownership or checkpoint sequence is stale"
+          }
+        }
+      }
+    },
+    "/workers/tasks/{id}/input": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "worker_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "claim_epoch",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact-byte input bound to the current claim and publication request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DelegationInputEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Different or unattributed reporter"
+          },
+          "409": {
+            "description": "Stale claim, owner, or unavailable historical snapshot"
           }
         }
       }
@@ -9440,6 +9843,121 @@
         "responses": {
           "204": {
             "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/workers/version-rollouts": {
+      "get": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "list_version_rollouts",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Filter by tenant",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Worker version rollouts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WorkerVersionRollout"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "stage_version_pin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StageVersionPinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Minimum worker version staged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerVersionRollout"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/workers/version-rollouts/{tenant_id}/{handler_name}": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "change_version_rollout",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "handler_name",
+            "in": "path",
+            "description": "Handler name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeVersionRolloutRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Worker version rollout updated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkerVersionRollout"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Stale rollout revision or action unavailable"
           }
         }
       }
@@ -9996,6 +10514,198 @@
             "description": "Logical URI: `artifact://<key>`."
           }
         }
+      },
+      "Assertion": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AssertionSubject",
+            "description": "Where to read the actual value."
+          },
+          {
+            "$ref": "#/components/schemas/AssertionOp",
+            "description": "The check to apply."
+          }
+        ],
+        "description": "A single value assertion."
+      },
+      "AssertionOp": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Deep equality.",
+            "required": [
+              "value",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "equals"
+                ]
+              },
+              "value": {}
+            }
+          },
+          {
+            "type": "object",
+            "description": "The path resolves to a non-null value.",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "exists"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The path is absent or null.",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "not_exists"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Strings: substring. Arrays: contains the element. Objects: contains\nthe given subset of key/value pairs.",
+            "required": [
+              "value",
+              "op"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "contains"
+                ]
+              },
+              "value": {}
+            }
+          },
+          {
+            "type": "object",
+            "description": "Numeric range check, inclusive on both ends.",
+            "required": [
+              "op"
+            ],
+            "properties": {
+              "max": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "min": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "in_range"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "JSON type check: `\"string\" | \"number\" | \"boolean\" | \"array\" |\n\"object\" | \"null\"`.",
+            "required": [
+              "expected",
+              "op"
+            ],
+            "properties": {
+              "expected": {
+                "type": "string"
+              },
+              "op": {
+                "type": "string",
+                "enum": [
+                  "has_type"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Assertion operators."
+      },
+      "AssertionSubject": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A recorded block output; `path` walks into it (dotted, empty = whole\noutput).",
+            "required": [
+              "output"
+            ],
+            "properties": {
+              "output": {
+                "type": "object",
+                "description": "A recorded block output; `path` walks into it (dotted, empty = whole\noutput).",
+                "required": [
+                  "block",
+                  "path"
+                ],
+                "properties": {
+                  "block": {
+                    "type": "string"
+                  },
+                  "definition": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ContractDefinition",
+                        "description": "Explicitly selects a reachable definition. For a child revision\ninvoked multiple times, the assertion applies to each invocation."
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The final `context.data`; `path` walks into it.",
+            "required": [
+              "context"
+            ],
+            "properties": {
+              "context": {
+                "type": "object",
+                "description": "The final `context.data`; `path` walks into it.",
+                "required": [
+                  "path"
+                ],
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "The value an assertion reads."
       },
       "AuditEntry": {
         "type": "object",
@@ -10935,6 +11645,33 @@
           }
         }
       },
+      "CallCountExpectation": {
+        "type": "object",
+        "description": "Handler call-count invariant.",
+        "required": [
+          "handler"
+        ],
+        "properties": {
+          "handler": {
+            "type": "string"
+          },
+          "max": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Maximum allowed calls (inclusive). Absent = unbounded.",
+            "minimum": 0
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Minimum required calls (inclusive). Default 0.",
+            "minimum": 0
+          }
+        }
+      },
       "CanaryRequest": {
         "type": "object",
         "required": [
@@ -11089,6 +11826,81 @@
           }
         }
       },
+      "CaseReport": {
+        "type": "object",
+        "description": "Machine-readable result of running one contract case.",
+        "required": [
+          "name",
+          "passed",
+          "final_state",
+          "ticks",
+          "logical_duration_ms"
+        ],
+        "properties": {
+          "attempted_blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Blocks whose mock handlers were reached, including failed attempts."
+          },
+          "child_executions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChildExecutionReport"
+            },
+            "description": "Child results grouped by individual invocation of a pinned revision."
+          },
+          "executed_blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Blocks that executed, in first-execution order."
+          },
+          "failures": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every divergence found (empty when passed). The first entry is the\nfirst divergence in evaluation order."
+          },
+          "final_state": {
+            "type": "string",
+            "description": "Terminal state the instance reached (engine state name), or the\nnon-terminal state it was stuck in when the runner gave up."
+          },
+          "handler_calls": {
+            "type": "object",
+            "description": "Observed handler call counts.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "logical_duration_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total virtual time advanced, in milliseconds.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "ticks": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Scheduler ticks consumed.",
+            "minimum": 0
+          }
+        }
+      },
       "CertificationRequest": {
         "type": "object",
         "required": [
@@ -11159,6 +11971,22 @@
           }
         }
       },
+      "ChangeVersionRolloutRequest": {
+        "type": "object",
+        "required": [
+          "revision",
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/WorkerVersionRolloutAction"
+          },
+          "revision": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "Checkpoint": {
         "type": "object",
         "description": "A checkpoint captures execution state at a point in time for efficient recovery.",
@@ -11184,6 +12012,40 @@
             "$ref": "#/components/schemas/InstanceId"
           }
         }
+      },
+      "ChildExecutionReport": {
+        "type": "object",
+        "description": "Block execution observed in one child instance.",
+        "required": [
+          "definition",
+          "executed_blocks",
+          "attempted_blocks"
+        ],
+        "properties": {
+          "attempted_blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "definition": {
+            "$ref": "#/components/schemas/ContractDefinition"
+          },
+          "executed_blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ChildResultMode": {
+        "type": "string",
+        "description": "Output recorded on the parent when a sub-sequence completes.",
+        "enum": [
+          "legacy_outputs",
+          "reference"
+        ]
       },
       "CircuitBreakerState": {
         "type": "object",
@@ -11244,6 +12106,16 @@
           {
             "type": "object",
             "properties": {
+              "delegation": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/DelegationClaimContext"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "runtime_kinds": {
                 "type": "array",
                 "items": {
@@ -11793,6 +12665,134 @@
           "total": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "ContractCase": {
+        "type": "object",
+        "description": "One scenario: fixture in, expectations out.",
+        "required": [
+          "name",
+          "expect"
+        ],
+        "properties": {
+          "config": {
+            "description": "Initial `context.config`."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expect": {
+            "$ref": "#/components/schemas/Expectations",
+            "description": "Expected outcomes."
+          },
+          "initial_outputs": {
+            "type": "object",
+            "description": "Outputs already durable at the selected replay boundary. The offline\nrunner seeds these into its sandbox instance, making the fixture a\ntrue continuation from that boundary rather than a replay from block\none. Real handlers are still never invoked.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "input": {
+            "description": "Initial `context.data`."
+          },
+          "max_logical_duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Cap on total virtual time the runner may advance for this case\n(logical duration). Exceeding it fails the case.",
+            "minimum": 0
+          },
+          "max_ticks": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Cap on scheduler ticks (default: runner's choice, currently 5000).",
+            "minimum": 0
+          },
+          "mocks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MockDef"
+            },
+            "description": "Handler / block mocks for this case."
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique case name within the suite."
+          },
+          "signals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignalFixture"
+            },
+            "description": "Signals delivered while the instance is waiting, in order. Each\nfixture is sent the next time the instance enters a waiting state."
+          }
+        }
+      },
+      "ContractDefinition": {
+        "type": "object",
+        "description": "Definition identity within the root's tenant and namespace.",
+        "required": [
+          "name",
+          "version"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ContractSuite": {
+        "type": "object",
+        "description": "A suite of contract cases for one sequence.",
+        "required": [
+          "cases"
+        ],
+        "properties": {
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContractCase"
+            }
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Contract format version; readers must reject versions they do not\nunderstand rather than misinterpret them.",
+            "minimum": 0
+          },
+          "sequence_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sequence this suite tests, by name. Informational when the\nrunner is handed a definition directly."
+          },
+          "sequence_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The sequence version this suite was written against."
+          },
+          "unmocked_handlers": {
+            "$ref": "#/components/schemas/UnmockedHandlerPolicy",
+            "description": "What happens when a step's handler has no mock:\nfail the case (default, safest) or return an empty success."
           }
         }
       },
@@ -12664,6 +13664,113 @@
           }
         }
       },
+      "DefinitionBundleReference": {
+        "type": "object",
+        "required": [
+          "version",
+          "sequence_sha256",
+          "bundle_sha256",
+          "payload_sha256",
+          "payload_bytes",
+          "definition_count",
+          "selector_count"
+        ],
+        "properties": {
+          "bundle_sha256": {
+            "type": "string"
+          },
+          "definition_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "payload_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "selector_count": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "sequence_sha256": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DefinitionPayloadEncoding": {
+        "type": "string",
+        "enum": [
+          "json_utf8_base64"
+        ]
+      },
+      "DefinitionReadScope": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "task_id",
+          "worker_id",
+          "claim_epoch"
+        ],
+        "properties": {
+          "claim_epoch": {
+            "type": "string",
+            "description": "Decimal text on the wire: JSON numbers cannot preserve every u64 in JS.",
+            "example": "1"
+          },
+          "task_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "worker_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "DefinitionWireEnvelope": {
+        "type": "object",
+        "required": [
+          "version",
+          "scope",
+          "reference",
+          "payload_encoding",
+          "payload_base64"
+        ],
+        "properties": {
+          "payload_base64": {
+            "type": "string"
+          },
+          "payload_encoding": {
+            "$ref": "#/components/schemas/DefinitionPayloadEncoding"
+          },
+          "reference": {
+            "$ref": "#/components/schemas/DefinitionBundleReference"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DefinitionReadScope"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "DelaySpec": {
         "type": "object",
         "required": [
@@ -12708,6 +13815,205 @@
             "description": "Timezone for `fire_at_local` (IANA, e.g. `\"America/New_York\"`).\nFalls back to the instance's timezone if omitted."
           }
         }
+      },
+      "DelegationClaimContext": {
+        "type": "object",
+        "required": [
+          "version",
+          "scope",
+          "request_sha256",
+          "expires_at",
+          "definition",
+          "input",
+          "usage"
+        ],
+        "properties": {
+          "definition": {
+            "$ref": "#/components/schemas/DefinitionBundleReference"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "input": {
+            "$ref": "#/components/schemas/DelegationInputReference"
+          },
+          "request_sha256": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DefinitionReadScope"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/DelegationResourceUsage"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DelegationInputEnvelope": {
+        "type": "object",
+        "required": [
+          "version",
+          "scope",
+          "request_sha256",
+          "reference",
+          "payload_encoding",
+          "payload_base64"
+        ],
+        "properties": {
+          "payload_base64": {
+            "type": "string"
+          },
+          "payload_encoding": {
+            "$ref": "#/components/schemas/DefinitionPayloadEncoding"
+          },
+          "reference": {
+            "$ref": "#/components/schemas/DelegationInputReference"
+          },
+          "request_sha256": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/DefinitionReadScope"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DelegationInputReference": {
+        "type": "object",
+        "required": [
+          "version",
+          "payload_sha256",
+          "payload_bytes",
+          "expanded_bytes"
+        ],
+        "properties": {
+          "expanded_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "payload_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DelegationProtocolCapabilities": {
+        "type": "object",
+        "description": "Opt-in support for the complete delegated definition/input protocol.\nMissing support must never be inferred from handlers, platform or build version.\nExisting clients must not advertise this until their execution bridge is ready.",
+        "required": [
+          "version",
+          "definition_wire_version",
+          "max_definition_payload_bytes",
+          "max_definitions",
+          "max_selectors",
+          "max_definition_expanded_bytes",
+          "input_wire_version",
+          "max_input_payload_bytes",
+          "max_input_expanded_bytes"
+        ],
+        "properties": {
+          "definition_wire_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "input_wire_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_definition_expanded_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_definition_payload_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_definitions": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_input_expanded_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_input_payload_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_selectors": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "DelegationResourceUsage": {
+        "type": "object",
+        "description": "Immutable publication metadata must supply usage; it is not a claimant assertion.",
+        "required": [
+          "definition_expanded_bytes",
+          "input_wire_version",
+          "input_payload_bytes",
+          "input_expanded_bytes"
+        ],
+        "properties": {
+          "definition_expanded_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "input_expanded_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "input_payload_bytes": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "input_wire_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
       },
       "DeliveryErrorClass": {
         "type": "string",
@@ -12988,6 +14294,19 @@
           "bulk"
         ]
       },
+      "DraftContract": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "contract"
+        ],
+        "properties": {
+          "contract": {
+            "type": "object"
+          },
+          "sequence": {}
+        }
+      },
       "EffectId": {
         "type": "string",
         "format": "uuid"
@@ -13078,6 +14397,62 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "EffectReviewItem": {
+        "type": "object",
+        "required": [
+          "id",
+          "instance_id",
+          "continuity_id",
+          "block_id",
+          "kind",
+          "updated_at"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string"
+          },
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "id": {
+            "$ref": "#/components/schemas/EffectId"
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/EffectKind"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "EffectReviewQueue": {
+        "type": "object",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EffectReviewItem"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -14058,6 +15433,64 @@
             "type": "string"
           }
         }
+      },
+      "Expectations": {
+        "type": "object",
+        "description": "Everything a case may assert.",
+        "properties": {
+          "assertions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Assertion"
+            },
+            "description": "Value assertions over outputs and final context."
+          },
+          "call_counts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CallCountExpectation"
+            },
+            "description": "Handler call-count invariants (\"charge is called at most once\")."
+          },
+          "path": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PathExpectation",
+                "description": "Blocks that must have executed. With `ordered: true` they must have\nexecuted in this relative order."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skipped_blocks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Blocks that must NOT have executed."
+          },
+          "terminal_state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExpectedTerminalState",
+                "description": "Expected terminal state."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ExpectedTerminalState": {
+        "type": "string",
+        "description": "Terminal states a contract can expect.",
+        "enum": [
+          "completed",
+          "failed",
+          "cancelled"
+        ]
       },
       "ExplanationMode": {
         "type": "string",
@@ -15315,6 +16748,13 @@
           }
         }
       },
+      "InventoryCompleteness": {
+        "type": "string",
+        "enum": [
+          "complete",
+          "observation_limit_reached"
+        ]
+      },
       "IssueTokenRequest": {
         "type": "object",
         "required": [
@@ -15811,6 +17251,168 @@
           }
         }
       },
+      "MockDef": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MockPolicy"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "block": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Block id this mock applies to (overrides handler-level mocks)."
+              },
+              "definition": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/ContractDefinition",
+                    "description": "Qualifies a block mock with the exact reachable sequence revision."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "handler": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Handler name this mock applies to."
+              }
+            }
+          }
+        ],
+        "description": "A mock target: a handler name (all steps using it) or a single block.\nBlock mocks take precedence over handler mocks."
+      },
+      "MockOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "output",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              },
+              "output": {}
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "message",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "failure"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean"
+              }
+            }
+          }
+        ],
+        "description": "One scripted attempt outcome for [`MockPolicy::Attempts`]."
+      },
+      "MockPolicy": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Always return this output.",
+            "required": [
+              "output",
+              "type"
+            ],
+            "properties": {
+              "output": {},
+              "type": {
+                "type": "string",
+                "enum": [
+                  "success"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Always fail with this message.",
+            "required": [
+              "message",
+              "type"
+            ],
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "retryable": {
+                "type": "boolean",
+                "description": "Whether the failure is retryable (drives retry policies)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "failure"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Return the recorded output for the executing block, supplied to the\nrunner out-of-band (e.g. from `orch8 test record`). Missing\nrecordings follow the suite's unmocked-handler policy.",
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "recorded"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A sequence of per-attempt outcomes; the last entry repeats once\nexhausted. Use to script \"fail, fail, then succeed\" retry tests.",
+            "required": [
+              "attempts",
+              "type"
+            ],
+            "properties": {
+              "attempts": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MockOutcome"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "attempts"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "What a mocked handler does when called."
+      },
       "Namespace": {
         "type": "string"
       },
@@ -15889,6 +17491,25 @@
           }
         },
         "additionalProperties": false
+      },
+      "PathExpectation": {
+        "type": "object",
+        "description": "Path expectation: blocks that must have run.",
+        "required": [
+          "traversed"
+        ],
+        "properties": {
+          "ordered": {
+            "type": "boolean",
+            "description": "When true, `traversed` must appear in this relative order in the\nexecution history (other blocks may interleave)."
+          },
+          "traversed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       },
       "PeerInboundPolicy": {
         "type": "object",
@@ -16070,6 +17691,33 @@
           }
         }
       },
+      "PlacementPlan": {
+        "type": "object",
+        "required": [
+          "sequence_id",
+          "ready",
+          "inventory_complete",
+          "steps"
+        ],
+        "properties": {
+          "inventory_complete": {
+            "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "sequence_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StepPlan"
+            }
+          }
+        }
+      },
       "PlacementPolicies": {
         "type": "object",
         "description": "`GET|PUT /api/v1/placement/policies` body.",
@@ -16140,6 +17788,25 @@
               "null"
             ],
             "description": "Sticky affinity: the worker id (== runtime id for capability polls)\nthat ran the instance's previous worker step."
+          }
+        }
+      },
+      "PlacementRecipe": {
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "placement"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/Placement"
           }
         }
       },
@@ -17736,6 +19403,53 @@
           }
         }
       },
+      "ReplayFixture": {
+        "type": "object",
+        "required": [
+          "sequence",
+          "contract",
+          "reproduces_divergence"
+        ],
+        "properties": {
+          "contract": {
+            "$ref": "#/components/schemas/ContractSuite"
+          },
+          "reproduces_divergence": {
+            "type": "boolean",
+            "description": "The exported files produced the saved candidate outcome and executed-block set."
+          },
+          "sequence": {
+            "$ref": "#/components/schemas/SequenceDefinition"
+          }
+        }
+      },
+      "ReplayFixtureRequest": {
+        "type": "object",
+        "properties": {
+          "input_keys": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Exact top-level context input keys to preserve. Defaults to none.",
+            "uniqueItems": true
+          },
+          "output_keys": {
+            "type": "object",
+            "description": "Exact top-level output keys to preserve for each named mock block.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "uniqueItems": true
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "ResolutionEntry": {
         "type": "object",
         "description": "One template expression's resolution provenance.",
@@ -18012,6 +19726,39 @@
           }
         }
       },
+      "RouteInventory": {
+        "type": "object",
+        "required": [
+          "completeness",
+          "eligible_count",
+          "preferred_count",
+          "excluded_count",
+          "observed_rows"
+        ],
+        "properties": {
+          "completeness": {
+            "$ref": "#/components/schemas/InventoryCompleteness"
+          },
+          "eligible_count": {
+            "type": "integer",
+            "description": "Distinct eligible worker IDs observed. This is a lower bound when the limit is reached.",
+            "minimum": 0
+          },
+          "excluded_count": {
+            "type": "integer",
+            "description": "Workers excluded by every evaluated observation. Additional observations may change this count.",
+            "minimum": 0
+          },
+          "observed_rows": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "preferred_count": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "RouterDef": {
         "type": "object",
         "required": [
@@ -18138,6 +19885,17 @@
               "type": "string"
             },
             "description": "Tenant-local credential references available to this runtime. Values\nidentify configured bindings, never secret material."
+          },
+          "delegation_protocol": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DelegationProtocolCapabilities",
+                "description": "Explicit opt-in to the frozen definition/input protocol, separate from\nhandler support and from permission to execute provider effects."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "draining": {
             "type": "boolean",
@@ -18318,6 +20076,38 @@
           "desktop",
           "browser"
         ]
+      },
+      "RuntimeTimeline": {
+        "type": "object",
+        "required": [
+          "instance_id",
+          "truncated",
+          "events"
+        ],
+        "properties": {
+          "continuity_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContinuityId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineEvent"
+            }
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        }
       },
       "RuntimeTrustLevel": {
         "type": "string",
@@ -18815,6 +20605,20 @@
           }
         }
       },
+      "SignalFixture": {
+        "type": "object",
+        "description": "A signal delivered while the case's instance is waiting.",
+        "required": [
+          "signal_type"
+        ],
+        "properties": {
+          "payload": {},
+          "signal_type": {
+            "type": "string",
+            "description": "Signal type: `custom`, `resume`, `cancel`, ... (matches the engine's\nsignal-type names)."
+          }
+        }
+      },
       "SignalType": {
         "oneOf": [
           {
@@ -18913,6 +20717,25 @@
             "format": "int64",
             "description": "Maximum wall-clock time the current step may stay running/waiting,\nmeasured from when it started. One alert per breaching step.",
             "minimum": 0
+          }
+        }
+      },
+      "StageVersionPinRequest": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "handler_name",
+          "min_version"
+        ],
+        "properties": {
+          "handler_name": {
+            "type": "string"
+          },
+          "min_version": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
           }
         }
       },
@@ -19183,6 +21006,129 @@
           }
         }
       },
+      "StepPlan": {
+        "type": "object",
+        "required": [
+          "block_id",
+          "handler",
+          "tree",
+          "route",
+          "matched_policies",
+          "eligible_workers",
+          "preferred_workers",
+          "excluded_workers"
+        ],
+        "properties": {
+          "available_poll_slots": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Sum of unused demand from the last successful HTTP polls, when known\nfor all eligible workers on this route.",
+            "minimum": 0
+          },
+          "block_id": {
+            "type": "string"
+          },
+          "canary_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "eligible_workers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "estimated_params_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Bytes of the compact JSON handler params in the saved definition.",
+            "minimum": 0
+          },
+          "excluded_workers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkerExclusion"
+            }
+          },
+          "handler": {
+            "type": "string"
+          },
+          "matched_policies": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "minimum_worker_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_action": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "oldest_pending_age_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "pending_tasks": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "preferred_workers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "queue_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "route": {
+            "type": "string"
+          },
+          "staged_worker_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tree": {
+            "type": "string"
+          },
+          "worker_inventory": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RouteInventory"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "SubSequenceDef": {
         "type": "object",
         "description": "Invoke another sequence as a child workflow.\nThe child instance is created and linked; the parent waits for completion.",
@@ -19191,6 +21137,10 @@
           "sequence_name"
         ],
         "properties": {
+          "child_result": {
+            "$ref": "#/components/schemas/ChildResultMode",
+            "description": "How to record the result of a successful child on the parent block."
+          },
           "id": {
             "$ref": "#/components/schemas/BlockId"
           },
@@ -19331,6 +21281,35 @@
           "to": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "SuiteReport": {
+        "type": "object",
+        "description": "Machine-readable result of running a whole suite.",
+        "required": [
+          "sequence_name",
+          "sequence_version",
+          "passed",
+          "cases"
+        ],
+        "properties": {
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CaseReport"
+            }
+          },
+          "passed": {
+            "type": "boolean"
+          },
+          "sequence_name": {
+            "type": "string",
+            "description": "Sequence the suite ran against."
+          },
+          "sequence_version": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -19579,6 +21558,157 @@
             "description": "Externalized-payload reference, or a sentinel tag\n(`__in_progress__` / `__retry__` / `__error__`)."
           }
         }
+      },
+      "TimelineEvent": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "at",
+              "instance_id",
+              "runtime_id",
+              "epoch",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "epoch": {
+                "$ref": "#/components/schemas/ExecutionEpoch"
+              },
+              "instance_id": {
+                "$ref": "#/components/schemas/InstanceId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "runtime_owner"
+                ]
+              },
+              "runtime_id": {
+                "$ref": "#/components/schemas/RuntimeId"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "at",
+              "task_id",
+              "instance_id",
+              "block_id",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "block_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "$ref": "#/components/schemas/InstanceId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "task_queued"
+                ]
+              },
+              "task_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "at",
+              "task_id",
+              "instance_id",
+              "block_id",
+              "claim_epoch",
+              "event",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "block_id": {
+                "type": "string"
+              },
+              "claim_epoch": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "event": {
+                "$ref": "#/components/schemas/WorkerAttemptEventKind"
+              },
+              "instance_id": {
+                "$ref": "#/components/schemas/InstanceId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "worker_attempt"
+                ]
+              },
+              "task_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "worker_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "at",
+              "task_id",
+              "instance_id",
+              "block_id",
+              "state",
+              "kind"
+            ],
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "block_id": {
+                "type": "string"
+              },
+              "instance_id": {
+                "$ref": "#/components/schemas/InstanceId"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "task_terminal"
+                ]
+              },
+              "state": {
+                "$ref": "#/components/schemas/WorkerTaskState"
+              },
+              "task_id": {
+                "type": "string",
+                "format": "uuid"
+              }
+            }
+          }
+        ]
       },
       "TimelineInstance": {
         "type": "object",
@@ -19858,6 +21988,14 @@
             }
           }
         }
+      },
+      "UnmockedHandlerPolicy": {
+        "type": "string",
+        "description": "Behavior for handlers that a case does not mock. Real handlers are\nnever invoked either way.",
+        "enum": [
+          "fail",
+          "empty_success"
+        ]
       },
       "UpdateContextRequest": {
         "type": "object",
@@ -20518,6 +22656,80 @@
           "place"
         ]
       },
+      "WorkerExclusion": {
+        "type": "object",
+        "required": [
+          "worker_id",
+          "reasons"
+        ],
+        "properties": {
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "worker_id": {
+            "type": "string"
+          }
+        }
+      },
+      "WorkerIdentityRequest": {
+        "type": "object",
+        "required": [
+          "nonce"
+        ],
+        "properties": {
+          "nonce": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkerIdentityResponse": {
+        "type": "object",
+        "required": [
+          "version",
+          "nonce",
+          "tenant_id",
+          "runtime_id",
+          "kind",
+          "device_id",
+          "issued_at",
+          "expires_at"
+        ],
+        "properties": {
+          "device_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "issued_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/RuntimeKind"
+          },
+          "nonce": {
+            "type": "string"
+          },
+          "runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "WorkerInfo": {
         "type": "object",
         "description": "Aggregated view of one worker on the fleet, grouped from its\nper-handler registrations.",
@@ -20578,6 +22790,15 @@
           "last_seen_at"
         ],
         "properties": {
+          "available_poll_slots": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Unused demand reported by the last successful HTTP poll.",
+            "minimum": 0
+          },
           "handler_name": {
             "type": "string"
           },
@@ -20902,6 +23123,65 @@
             "format": "date-time"
           }
         }
+      },
+      "WorkerVersionRollout": {
+        "type": "object",
+        "description": "A staged change and the immediately preceding enforced minimum.",
+        "required": [
+          "tenant_id",
+          "handler_name",
+          "can_rollback",
+          "updated_at"
+        ],
+        "properties": {
+          "active_min_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "can_rollback": {
+            "type": "boolean"
+          },
+          "handler_name": {
+            "type": "string"
+          },
+          "previous_min_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Changes on each mutation. Operators present this when changing a rollout."
+          },
+          "staged_min_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "WorkerVersionRolloutAction": {
+        "type": "string",
+        "enum": [
+          "promote",
+          "rollback",
+          "discard"
+        ]
       },
       "WorkflowRelease": {
         "type": "object",

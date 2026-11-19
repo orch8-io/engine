@@ -7,12 +7,17 @@ use orch8_engine::remote_worker::{
     HttpLeaseClient, LeaseResponse,
     lease::{ConfirmedLease, LeaseAuthority, LeaseEnd},
 };
-use std::{future::Future, sync::Mutex, task::Poll};
+use std::{
+    future::Future,
+    sync::{Mutex, Weak},
+    task::Poll,
+};
 
 /// Only acquisition against the expected peer can construct this value.
 pub(crate) struct ScopedClaimLease {
     lease: ConfirmedLease,
     client: HttpLeaseClient,
+    token: Arc<str>,
     authority: ScopedClaimAuthority,
     cadence: Duration,
 }
@@ -24,6 +29,7 @@ pub(crate) struct ScopedClaimAuthority {
     reader: Arc<ScopedPayloadReader>,
     task: Arc<RemoteTask>,
     context: DelegationClaimContext,
+    token: Weak<str>,
     lease: LeaseAuthority,
     revoke: CancellationToken,
     until: Instant,
@@ -45,6 +51,25 @@ impl std::fmt::Debug for ScopedClaimAuthority {
 impl ScopedClaimAuthority {
     pub(crate) fn task(&self) -> &RemoteTask {
         &self.task
+    }
+
+    pub(crate) async fn initialize_paused(
+        &self,
+        limits: crate::storage::scopes::runs::materialize::InstanceLimits,
+    ) -> Result<super::preparation::InitializedClaim, MobileError> {
+        self.verify_current().await.map_err(|_| refused())?;
+        self.reader
+            .initialize_owned(
+                Operation {
+                    context: self.context.clone(),
+                    token: self.token.upgrade().ok_or_else(refused)?,
+                    stop: self.revoke.child_token(),
+                    deadline: self.until.min(Instant::now() + Duration::from_secs(90)),
+                    claim: Some(self.clone()),
+                },
+                limits,
+            )
+            .await
     }
 
     fn window(&self) -> Result<(), LeaseEnd> {
@@ -122,6 +147,7 @@ impl ScopedClaimLease {
         let Self {
             lease,
             client,
+            token,
             authority,
             cadence,
         } = self;
@@ -134,6 +160,8 @@ impl ScopedClaimLease {
             let final_authority = authority.clone();
             let result = work(authority).await;
             final_authority.verify_current().await?;
+            // Retain the frozen credential until supervision finishes.
+            drop(token);
             Ok(result)
         };
         let renewing = || {
@@ -202,7 +230,7 @@ impl Acquisition {
         let client = HttpLeaseClient::new(
             self.reader.http.clone(),
             &self.reader.base,
-            vec![("x-api-key", self.operation.token.clone())],
+            vec![("x-api-key", self.operation.token.to_string())],
             self.operation.context.scope.worker_id.clone(),
         );
         let scope = &self.operation.context.scope;
@@ -220,6 +248,7 @@ impl Acquisition {
             reader: self.reader,
             task: self.task,
             context: self.operation.context,
+            token: Arc::downgrade(&self.operation.token),
             lease: lease
                 .authority()
                 .with_revocation(self.operation.stop.clone(), LeaseEnd::Unconfirmed),
@@ -230,6 +259,7 @@ impl Acquisition {
         Ok(ScopedClaimLease {
             lease,
             client,
+            token: self.operation.token,
             authority,
             cadence: self.cadence,
         })
@@ -269,9 +299,10 @@ impl ScopedPayloadReader {
             task,
             operation: Operation {
                 context,
-                token: token.to_owned(),
+                token: token.into(),
                 stop: stop.clone(),
                 deadline,
+                claim: None,
             },
             cadence,
             until,

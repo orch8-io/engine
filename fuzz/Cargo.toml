@@ -27,6 +27,20 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "sequence"
+path = "fuzz_targets/sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "definition_bundle"
+path = "fuzz_targets/definition_bundle.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 
 # Keep native/fuzz SQLite aligned with the root security patch.

@@ -66,3 +66,66 @@ allows the static check.
 
 Open or intentionally dynamic values are valid escape hatches, but their
 `TYPE_UNKNOWN` findings should be reviewed at release and migration boundaries.
+
+## Scaffold a typed worker handler
+
+```sh
+orch8 sequence scaffold-handler checkout.json --block charge \
+  --example-output sample-charge.json --out-dir charge-handler
+orch8 test run charge-handler/handler.contracts.json --sequence checkout.json
+```
+
+The scaffold uses the selected step's `output_schema` for the return type.
+TypeScript is the default. Pass `--language python`, `--language swift`, or
+`--language kotlin` for the other stubs. Pass `--input` with a representative
+sequence input when the definition requires one. For sequences with multiple
+steps, add mocks for the other handlers traversed by the fixture.
+
+For contracts that exercise a pinned sub-sequence, pass each child definition
+with `--child-sequence`. When the same block ID appears in reachable revisions,
+qualify both block mocks and output assertions with the definition's exact
+name and version.
+
+```json
+{
+  "name": "child validates the request",
+  "mocks": [
+    {
+      "block": "validate",
+      "definition": {"name": "risk-review", "version": 2},
+      "type": "success",
+      "output": {"approved": true}
+    }
+  ],
+  "expect": {
+    "assertions": [
+      {
+        "output": {
+          "block": "validate",
+          "definition": {"name": "risk-review", "version": 2},
+          "path": "approved"
+        },
+        "op": "equals",
+        "value": true
+      }
+    ]
+  }
+}
+```
+
+An explicit child assertion applies to every invocation of that revision.
+Handler-name mocks still apply across definitions. Embedded Rust callers can
+supply child recordings through `RunOptions::definition_recorded_outputs`.
+
+## Preflight an offline mobile sequence
+
+```sh
+orch8 sequence preflight-mobile checkout.json --sdk published-0-7-1 --handler charge
+orch8 sequence preflight-mobile checkout.json --sdk development --handler charge
+```
+
+The offline check shows app-registered handlers, built-ins and steps that
+need another runtime or a separately installed child sequence. It also runs
+typed-dataflow checks. For the online portion, run
+`orch8 placement fleet-readiness` against the stored sequence version and
+the intended worker build.

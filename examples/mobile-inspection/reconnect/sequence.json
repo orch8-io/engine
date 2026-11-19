@@ -1,0 +1,36 @@
+{
+  "name": "review-field-inspection",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "instance_id": {"type": "string"},
+      "site_id": {"type": "string"},
+      "inspection_result": {"enum": ["passed", "repair_needed"]},
+      "site_tag_verified": {"type": "boolean"}
+    },
+    "required": ["instance_id", "site_id", "inspection_result"],
+    "additionalProperties": false
+  },
+  "blocks": [
+    {
+      "type": "step",
+      "id": "accept_inspection",
+      "handler": "private_compute",
+      "params": {"site_id": "{{ data.site_id }}", "result": "{{ data.inspection_result }}", "chunks": 1},
+      "timeout": 30000
+    },
+    {
+      "type": "step",
+      "id": "approve_inspection",
+      "handler": "log",
+      "params": {"message": "Inspection reviewed"},
+      "wait_for_input": {
+        "prompt": "Approve the inspection?",
+        "store_as": "supervisor_decision",
+        "choices": [{"label": "Approve", "value": "approved"}, {"label": "Return", "value": "returned"}]
+      }
+    }
+  ]
+}

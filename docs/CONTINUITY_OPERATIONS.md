@@ -490,3 +490,12 @@ Results are deduplicated by invariant and evidence, so repeated observation of
 the same duplicate produces one violation. Keep provider idempotency keys as a
 second layer of protection; an invariant guard cannot make a non-idempotent
 provider transaction exactly once after network or process failure.
+
+
+## Page through unknown effects
+
+The effect review queue lists unresolved effects in ascending update time,
+using effect ID to break ties. Pass the last page's `next_cursor` as the
+`after` query parameter. Each request reads the current queue. An effect
+updated after a page was read may reappear on a later page under its new
+timestamp. Return to the first page to refresh the oldest unresolved effects.

@@ -94,6 +94,7 @@ async fn unavailable_nested_handler_keeps_grant(b: TestBackend) {
         .build();
     root.blocks
         .push(BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: orch8_types::ids::BlockId::new("child"),
             sequence_name: child.name.clone(),
             version: None,
@@ -197,6 +198,7 @@ async fn dependency_closure_survives_catalog_changes(b: TestBackend) {
         .build();
     let reference = |id: &str, name: &str, version| {
         BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: orch8_types::ids::BlockId::new(id),
             sequence_name: name.into(),
             version,
@@ -337,6 +339,7 @@ async fn unpinned_child_identity(b: TestBackend) {
         .build();
     root.blocks
         .push(BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: orch8_types::ids::BlockId::new("child"),
             sequence_name: child.name.clone(),
             version: None,
@@ -411,6 +414,7 @@ async fn missing_dependency_keeps_grant(b: TestBackend) {
         }
         root.blocks
             .push(BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                 id: orch8_types::ids::BlockId::new("child"),
                 sequence_name: child.name.clone(),
                 version: None,
@@ -494,6 +498,7 @@ async fn postgres_dependency_selection_uses_one_cut_across_concurrent_catalog_ch
                 .build();
             root.blocks
                 .push(BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                    child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                     id: orch8_types::ids::BlockId::new("child"),
                     sequence_name: child.name.clone(),
                     version: None,

@@ -929,3 +929,75 @@ orch8_storage::backend_test!(async fn named_queue_tenant_claim_skips_quarantined
 
 #[path = "worker_issued_claims/reconnect_guards.rs"]
 mod reconnect_guards;
+
+orch8_storage::backend_test!(async fn version_fence_checks_prepared_claims_after_promotion(b) {
+    use orch8_types::worker::WorkerVersionRolloutAction;
+
+    let storage = b.storage.as_ref();
+    let tenant = TenantId::unchecked("issued-claims");
+    for (queue, with_capabilities) in [(None, false), (Some("queue"), false), (None, true), (Some("queue"), true)] {
+        let task = fixture_in_queue(storage, false, queue).await;
+        let scoped_claim = |version: Option<&str>| {
+            WorkerClaimRequest::new(
+                Principal::ApiKey { tenant_id: tenant.clone(), key_id: "rollout-worker".into() },
+                task.handler_name.clone(),
+                "versioned-worker".into(),
+                None,
+                queue.map(str::to_owned),
+                with_capabilities.then(capabilities),
+                1,
+            ).unwrap().with_version(version.map(str::to_owned)).unwrap()
+        };
+        let old = scoped_claim(Some("2026-11-17"));
+        let missing_version = scoped_claim(None);
+        let current = scoped_claim(Some("2026-11-18"));
+        let staged = storage.stage_worker_version_pin(
+            tenant.as_str(), &task.handler_name, "2026-11-18",
+        ).await.unwrap();
+        assert!(staged.active_min_version.is_none(), "staged minimum must be inactive");
+        let staged_claim = storage.claim_worker_tasks_with_authority(&missing_version).await.unwrap();
+        assert_eq!(staged_claim[0].id, task.id, "a staged pin does not block claims");
+        let task = fixture_in_queue(storage, false, queue).await;
+        let (resume_claim, resume_signal) = tokio::sync::oneshot::channel();
+        let (claim_prepared, prepared_signal) = tokio::sync::oneshot::channel();
+        let claim = async {
+            claim_prepared.send(()).unwrap();
+            resume_signal.await.unwrap();
+            storage.claim_worker_tasks_with_transport(&old).await.unwrap()
+        };
+        let promotion = async {
+            prepared_signal.await.unwrap();
+            let active = storage.change_worker_version_rollout(
+                tenant.as_str(), &task.handler_name, staged.revision.unwrap(), WorkerVersionRolloutAction::Promote,
+            ).await.unwrap().unwrap();
+            resume_claim.send(()).unwrap();
+            active
+        };
+        let (denied, active) = tokio::join!(claim, promotion);
+        assert!(denied.tasks().is_empty());
+        assert_eq!(denied.available_poll_slots(1), None);
+        assert!(storage.claim_worker_tasks_with_authority(&missing_version).await.unwrap().is_empty());
+        let pending = storage.get_worker_task(task.id).await.unwrap().unwrap();
+        assert_eq!(pending.state, WorkerTaskState::Pending);
+        assert_eq!(pending.claim_epoch, task.claim_epoch);
+        let modern = storage.claim_worker_tasks_with_transport(&current).await.unwrap();
+        assert_eq!(modern.tasks()[0].id, task.id);
+        assert_eq!(modern.available_poll_slots(1), Some(0));
+
+        let shared_task = fixture_in_queue(storage, false, queue).await;
+        let shared = WorkerClaimRequest::new(
+            Principal::Root {}, task.handler_name.clone(), "unscoped-worker".into(), None,
+            queue.map(str::to_owned), None, 1,
+        ).unwrap();
+        let claimed = storage.claim_worker_tasks_with_authority(&shared).await.unwrap();
+        assert_eq!(claimed[0].id, shared_task.id);
+
+        let rollback = storage.change_worker_version_rollout(
+            tenant.as_str(), &task.handler_name, active.revision.unwrap(), WorkerVersionRolloutAction::Rollback,
+        ).await.unwrap().unwrap();
+        assert!(rollback.active_min_version.is_none());
+        let next = fixture_in_queue(storage, false, queue).await;
+        let claimed = storage.claim_worker_tasks_with_authority(&old).await.unwrap();
+        assert_eq!(claimed[0].id, next.id);
+    }
+});

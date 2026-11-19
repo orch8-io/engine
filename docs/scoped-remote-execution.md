@@ -3,6 +3,39 @@
 Status: implementation target. Scoped native roots currently initialize paused;
 negotiated mobile delegation delivery remains disabled.
 
+The internal mobile path can confirm the claim, fetch the issued frozen
+definition and input, and retain the paused root under one supervised device
+session. Both payload endpoints require the exact issued references and refuse
+expired publications. The phone-local delegation integration fixture exercises
+the effect-free desktop receiver below through the control plane.
+
+## Phone-to-desktop echo preview
+
+The workspace provides a desktop receiver for one explicit delegation shape.
+Save a sequence owned by the backend tenant with this single block and retain its
+sequence ID.
+
+```json
+{"type":"step","id":"echo","handler":"orch8.delegation.echo","params":{}}
+```
+
+Start the receiver with an enrolled tenant worker key in `ORCH8_WORKER_KEY`, the
+versioned API URL, your tenant, a dedicated receiver UUID and the sequence ID.
+
+```sh
+cargo run -p orch8-engine --example phone_delegation_receiver -- \
+  https://engine.example/api/v1 TENANT RUNTIME_UUID SEQUENCE_UUID
+```
+
+Use the phone's existing `MobileEngine.delegate` method with the receiver UUID,
+sequence ID, the local parent instance ID and the explicit JSON input. The phone
+reads the accepted outcome with `delegation_status`. The receiver returns the
+verified input at `outputs.echo`. It confirms the exact claim before fetching
+either payload and reports success only after the backend acknowledges the
+outcome for that generation. The example allows up to 64 KiB of serialized input,
+one frozen definition, and zero selectors. The echo operation has no external
+effects, so a replacement claim can recompute its outcome after a restart.
+
 The implementation must support multiple accounts and catalogs in one database,
 survive device suspension and process restarts, and archive only after app and
 backend acknowledgement while retaining compact deduplication/outcome receipts.

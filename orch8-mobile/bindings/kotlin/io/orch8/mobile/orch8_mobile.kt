@@ -847,6 +847,10 @@ internal object IntegrityCheckingUniffiLib {
     ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule(
     ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_install_bundled_catalog(
+    ): Int
+    external fun uniffi_orch8_mobile_checksum_method_mobileengine_install_bundled_catalog_with_result(
+    ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations(
     ): Int
     external fun uniffi_orch8_mobile_checksum_method_mobileengine_load_sequence_from_json(
@@ -1037,6 +1041,10 @@ internal object UniffiLib {
     external fun uniffi_orch8_mobile_fn_method_mobileengine_get_instance(`ptr`: Long,`instanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_orch8_mobile_fn_method_mobileengine_import_continuity_capsule(`ptr`: Long,`capsuleJson`: RustBuffer.ByValue,`payloadBase64`: RustBuffer.ByValue,`payloadKeyBase64`: RustBuffer.ByValue,`destinationRuntimeId`: RustBuffer.ByValue,`destinationInstanceId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): RustBuffer.ByValue
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_install_bundled_catalog(`ptr`: Long,`packageJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+    ): Int
+    external fun uniffi_orch8_mobile_fn_method_mobileengine_install_bundled_catalog_with_result(`ptr`: Long,`packageJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
     external fun uniffi_orch8_mobile_fn_method_mobileengine_list_delegations(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
     ): RustBuffer.ByValue
@@ -1379,6 +1387,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule() and 0xFFFF) != 19841) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_install_bundled_catalog() and 0xFFFF) != 16051) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_install_bundled_catalog_with_result() and 0xFFFF) != 12659) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if ((lib.uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations() and 0xFFFF) != 23937) {
@@ -4727,6 +4741,18 @@ public interface MobileEngineInterface {
     fun `importContinuityCapsule`(`capsuleJson`: kotlin.String, `payloadBase64`: kotlin.String, `payloadKeyBase64`: kotlin.String, `destinationRuntimeId`: kotlin.String, `destinationInstanceId`: kotlin.String): ContinuityImportResult
 
     /**
+     * Install packaged first-launch definitions signed by the app's configured
+     * root. Existing definitions and remote manifest acceptance take precedence.
+     */
+    fun `installBundledCatalog`(`packageJson`: kotlin.String): kotlin.UInt
+
+    /**
+     * Install a signed seed and report whether a synced manifest owns the
+     * catalog or all bundled names were already present.
+     */
+    fun `installBundledCatalogWithResult`(`packageJson`: kotlin.String): BundledCatalogInstall
+
+    /**
      * Every journaled delegation, oldest first.
      */
     fun `listDelegations`(): List<DelegationStatus>
@@ -5347,6 +5373,44 @@ open class MobileEngine: Disposable, AutoCloseable, MobileEngineInterface
         FfiConverterString.lower(`payloadKeyBase64`),
         FfiConverterString.lower(`destinationRuntimeId`),
         FfiConverterString.lower(`destinationInstanceId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Install packaged first-launch definitions signed by the app's configured
+     * root. Existing definitions and remote manifest acceptance take precedence.
+     */
+    @Throws(MobileException::class)override fun `installBundledCatalog`(`packageJson`: kotlin.String): kotlin.UInt {
+            return FfiConverterUInt.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_install_bundled_catalog(
+        it,
+
+        FfiConverterString.lower(`packageJson`),_status)
+}
+    }
+    )
+    }
+
+
+
+    /**
+     * Install a signed seed and report whether a synced manifest owns the
+     * catalog or all bundled names were already present.
+     */
+    @Throws(MobileException::class)override fun `installBundledCatalogWithResult`(`packageJson`: kotlin.String): BundledCatalogInstall {
+            return FfiConverterTypeBundledCatalogInstall.lift(
+    callWithHandle {
+    uniffiRustCallWithError(MobileException) { _status ->
+    UniffiLib.uniffi_orch8_mobile_fn_method_mobileengine_install_bundled_catalog_with_result(
+        it,
+
+        FfiConverterString.lower(`packageJson`),_status)
 }
     }
     )
@@ -6699,6 +6763,52 @@ public object FfiConverterTypeBackgroundRunResult: FfiConverterRustBuffer<Backgr
             FfiConverterUInt.write(value.`stepsExecuted`, buf)
             FfiConverterBoolean.write(value.`hasPendingWork`, buf)
             FfiConverterBoolean.write(value.`budgetExhausted`, buf)
+    }
+}
+
+
+
+/**
+ * Result of a first-launch catalog installation.
+ */
+data class BundledCatalogInstall (
+    var `disposition`: BundledCatalogDisposition
+    ,
+    var `installed`: kotlin.UInt
+    ,
+    var `skipped`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBundledCatalogInstall: FfiConverterRustBuffer<BundledCatalogInstall> {
+    override fun read(buf: ByteBuffer): BundledCatalogInstall {
+        return BundledCatalogInstall(
+            FfiConverterTypeBundledCatalogDisposition.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: BundledCatalogInstall) = (
+            FfiConverterTypeBundledCatalogDisposition.allocationSize(value.`disposition`) +
+            FfiConverterUInt.allocationSize(value.`installed`) +
+            FfiConverterUInt.allocationSize(value.`skipped`)
+    )
+
+    override fun write(value: BundledCatalogInstall, buf: ByteBuffer) {
+            FfiConverterTypeBundledCatalogDisposition.write(value.`disposition`, buf)
+            FfiConverterUInt.write(value.`installed`, buf)
+            FfiConverterUInt.write(value.`skipped`, buf)
     }
 }
 
@@ -8589,6 +8699,44 @@ public object FfiConverterTypeWorkerWindowResult: FfiConverterRustBuffer<WorkerW
             FfiConverterBoolean.write(value.`budgetExhausted`, buf)
     }
 }
+
+
+
+/**
+ * Whether first-launch installation could seed the local catalog.
+ */
+
+enum class BundledCatalogDisposition {
+
+    SEEDED,
+    ALREADY_PRESENT,
+    MANIFEST_OWNED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeBundledCatalogDisposition: FfiConverterRustBuffer<BundledCatalogDisposition> {
+    override fun read(buf: ByteBuffer) = try {
+        BundledCatalogDisposition.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: BundledCatalogDisposition) = 4UL
+
+    override fun write(value: BundledCatalogDisposition, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 

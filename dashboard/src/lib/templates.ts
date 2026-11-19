@@ -10,10 +10,15 @@
  * template is added or changed, update BOTH `docs/agent-patterns/` /
  * `orch8-cli/src/templates.rs` AND this module.
  *
- * This module is imported by node:test unit tests, so it must stay free of
- * imports from other dashboard modules (tests resolve bare specifiers via
- * Node, not Vite).
+ * Verified recipes import the same definition and contract files as the CLI.
  */
+
+import inspection from "../../../examples/verified-sequences/field-inspection.json" with { type: "json" };
+import inspectionContract from "../../../examples/verified-sequences/field-inspection.contracts.json" with { type: "json" };
+import delivery from "../../../examples/verified-sequences/delivery-evidence.json" with { type: "json" };
+import deliveryContract from "../../../examples/verified-sequences/delivery-evidence.contracts.json" with { type: "json" };
+import maintenance from "../../../examples/verified-sequences/maintenance-approval.json" with { type: "json" };
+import maintenanceContract from "../../../examples/verified-sequences/maintenance-approval.contracts.json" with { type: "json" };
 
 export interface SequenceTemplate {
   /** Kebab-case slug — matches `orch8 templates list`. */
@@ -22,6 +27,7 @@ export interface SequenceTemplate {
   description: string;
   /** The template's sequence JSON, verbatim from its source file. */
   sequence: Record<string, unknown>;
+  contract?: { cases: readonly unknown[] };
 }
 
 /**
@@ -37,7 +43,7 @@ const DEFAULT_SEQUENCE: Record<string, unknown> = {
     {
       type: "step",
       id: "greet",
-      handler: "greet_user",
+      handler: "noop",
       params: { message: "Hello from Orch8!" },
     },
     {
@@ -414,6 +420,24 @@ const MULTI_AGENT_DELEGATION_SEQUENCE: Record<string, unknown> = {
 /** Registry of all built-in templates, in display order (mirrors the CLI's). */
 export const TEMPLATES: SequenceTemplate[] = [
   {
+    name: "field-inspection",
+    description: "Capture an inspection and retry submission after a disconnect.",
+    sequence: inspection,
+    contract: inspectionContract,
+  },
+  {
+    name: "delivery-evidence",
+    description: "Capture delivery evidence and route exceptions to review.",
+    sequence: delivery,
+    contract: deliveryContract,
+  },
+  {
+    name: "maintenance-approval",
+    description: "Await a supervisor decision before authorizing maintenance.",
+    sequence: maintenance,
+    contract: maintenanceContract,
+  },
+  {
     name: "default",
     description: "Minimal hello-world sequence: greet, delayed wait, complete.",
     sequence: DEFAULT_SEQUENCE,
@@ -459,6 +483,10 @@ export function templatePickerOptions(): TemplatePickerOption[] {
   ];
 }
 
+export function templateContract(name: string): SequenceTemplate["contract"] {
+  return TEMPLATES.find((template) => template.name === name)?.contract;
+}
+
 export interface TemplateContext {
   tenantId: string;
   namespace: string;
@@ -494,11 +522,11 @@ export function templateEditorContent(
 
   const src = template.sequence;
   const out: Record<string, unknown> = {
+    ...src,
     tenant_id: tenantId,
     namespace,
     name: template.name === "default" ? (src["name"] as string) : template.name,
     version: 1,
   };
-  out["blocks"] = src["blocks"];
   return JSON.stringify(out, null, 2);
 }

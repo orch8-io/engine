@@ -15,6 +15,7 @@ use uuid::Uuid;
 use orch8_types::filter::Pagination;
 use orch8_types::worker::{
     WorkerAttemptEventKind, WorkerClaim, WorkerTaskAttemptEvent, WorkerTaskState,
+    WorkerVersionRollout, WorkerVersionRolloutAction,
 };
 use orch8_types::worker_filter::WorkerTaskFilter;
 
@@ -148,6 +149,14 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/workers/version-pins/{tenant_id}/{handler_name}",
             axum::routing::delete(delete_version_pin),
+        )
+        .route(
+            "/workers/version-rollouts",
+            get(list_version_rollouts).post(stage_version_pin),
+        )
+        .route(
+            "/workers/version-rollouts/{tenant_id}/{handler_name}",
+            post(change_version_rollout),
         )
 }
 
@@ -285,6 +294,104 @@ pub(crate) struct SetVersionPinRequest {
 #[derive(Deserialize)]
 pub(crate) struct ListPinsQuery {
     tenant_id: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct StageVersionPinRequest {
+    tenant_id: String,
+    handler_name: String,
+    min_version: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub(crate) struct ChangeVersionRolloutRequest {
+    revision: Uuid,
+    action: WorkerVersionRolloutAction,
+}
+
+#[utoipa::path(get, path = "/workers/version-rollouts", tag = "workers",
+    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
+    responses((status = 200, description = "Worker version rollouts", body = Vec<WorkerVersionRollout>))
+)]
+pub(crate) async fn list_version_rollouts(
+    State(state): State<AppState>,
+    admin: OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Query(q): Query<ListPinsQuery>,
+) -> Result<Json<Vec<WorkerVersionRollout>>, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
+    let tenant_id = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
+    let rollouts = state
+        .storage
+        .list_worker_version_rollouts(tenant_id.as_ref().map(orch8_types::ids::TenantId::as_str))
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_version_rollout"))?;
+    Ok(Json(rollouts))
+}
+
+#[utoipa::path(post, path = "/workers/version-rollouts", tag = "workers",
+    request_body = StageVersionPinRequest,
+    responses((status = 200, description = "Minimum worker version staged", body = WorkerVersionRollout))
+)]
+pub(crate) async fn stage_version_pin(
+    State(state): State<AppState>,
+    admin: OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(request): Json<StageVersionPinRequest>,
+) -> Result<Json<WorkerVersionRollout>, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
+    let tenant = crate::auth::enforce_tenant_create(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(request.tenant_id),
+    )?;
+    let handler = request.handler_name.trim();
+    let version = request.min_version.trim();
+    if handler.is_empty() || version.is_empty() || version.len() > 128 {
+        return Err(ApiError::InvalidArgument(
+            "handler_name is required and min_version must be 1 to 128 bytes".into(),
+        ));
+    }
+    let rollout = state
+        .storage
+        .stage_worker_version_pin(tenant.as_str(), handler, version)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_version_rollout"))?;
+    Ok(Json(rollout))
+}
+
+#[utoipa::path(post, path = "/workers/version-rollouts/{tenant_id}/{handler_name}", tag = "workers",
+    params(
+        ("tenant_id" = String, Path, description = "Tenant id"),
+        ("handler_name" = String, Path, description = "Handler name"),
+    ),
+    request_body = ChangeVersionRolloutRequest,
+    responses(
+        (status = 200, description = "Worker version rollout updated", body = WorkerVersionRollout),
+        (status = 409, description = "Stale rollout revision or action unavailable"),
+    )
+)]
+pub(crate) async fn change_version_rollout(
+    State(state): State<AppState>,
+    admin: OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path((tenant_id, handler_name)): Path<(String, String)>,
+    Json(request): Json<ChangeVersionRolloutRequest>,
+) -> Result<Json<WorkerVersionRollout>, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
+    crate::auth::enforce_tenant_access(
+        &tenant_ctx,
+        &orch8_types::ids::TenantId::unchecked(&tenant_id),
+        "worker_version_rollout",
+    )?;
+    let rollout = state
+        .storage
+        .change_worker_version_rollout(&tenant_id, &handler_name, request.revision, request.action)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "worker_version_rollout"))?
+        .ok_or_else(|| ApiError::Conflict(
+            "Worker version rollout changed or this action is unavailable. Refresh the rollout.".into(),
+        ))?;
+    Ok(Json(rollout))
 }
 
 /// Create-or-update a minimum-worker-version pin for a `(tenant, handler)`.
@@ -483,59 +590,17 @@ const fn default_poll_limit() -> u32 {
 
 const SHA256_HEX: &[u8; 16] = b"0123456789abcdef";
 
-/// Record a worker registration from a poll. Best-effort: a registry write
-/// failure must never fail the poll itself, so errors are logged and dropped.
+/// Observe a completed HTTP poll without affecting its durable claim result.
 async fn record_registration(
     state: &AppState,
-    worker_id: &str,
-    handler_name: &str,
-    queue_name: Option<&str>,
-    version: Option<&str>,
-    tenant_id: Option<&orch8_types::ids::TenantId>,
+    observation: &orch8_storage::worker_inventory::WorkerObservation<'_>,
 ) {
-    let registration = orch8_types::worker::WorkerRegistration {
-        worker_id: worker_id.to_string(),
-        handler_name: handler_name.to_string(),
-        queue_name: queue_name.map(ToString::to_string),
-        version: version.map(ToString::to_string),
-        tenant_id: tenant_id.map(|t| t.as_str().to_string()),
-        last_seen_at: chrono::Utc::now(),
-    };
-    if let Err(e) = state
-        .storage
-        .upsert_worker_registration(&registration)
-        .await
-    {
+    if let Err(error) = state.storage.record_worker_observation(observation).await {
         tracing::warn!(
-            error = %e,
-            worker_id,
-            handler_name,
-            "failed to record worker registration"
+            %error,
+            worker_id = observation.worker_id,
+            "failed to record HTTP worker observation"
         );
-    }
-}
-
-/// Is this worker blocked by a `(tenant, handler)` version pin? Returns `true`
-/// only when a pin exists and the worker's reported version doesn't satisfy it.
-/// Best-effort: a lookup error never blocks the poll (returns `false`).
-async fn version_pin_blocks(
-    state: &AppState,
-    tenant_id: Option<&orch8_types::ids::TenantId>,
-    handler_name: &str,
-    worker_version: Option<&str>,
-) -> bool {
-    let tenant = tenant_id.map_or("", orch8_types::ids::TenantId::as_str);
-    match state
-        .storage
-        .get_worker_version_pin(tenant, handler_name)
-        .await
-    {
-        Ok(Some(pin)) => !orch8_types::worker::version_satisfies(worker_version, &pin.min_version),
-        Ok(None) => false,
-        Err(e) => {
-            tracing::warn!(error = %e, handler_name, "version pin lookup failed; allowing poll");
-            false
-        }
     }
 }
 
@@ -711,48 +776,33 @@ pub(crate) async fn poll_tasks(
     )
     .await?;
 
-    // Version pin: a worker below the (tenant, handler) min version is given no
-    // tasks for that handler. Still record the registration so the operator can
-    // see the stale-version worker is polling.
-    if version_pin_blocks(
-        &state,
-        scoped.as_ref(),
-        &req.handler_name,
-        req.version.as_deref(),
-    )
-    .await
-    {
-        record_registration(
-            &state,
-            &req.worker_id,
-            &req.handler_name,
-            None,
-            req.version.as_deref(),
-            scoped.as_ref(),
-        )
-        .await;
-        return Ok(poll_response(
-            &state,
-            orch8_storage::worker_claim::WorkerClaimBatch::empty(),
-        ));
-    }
-
     // When a tenant is scoped, route through the tenant-aware claim so
     // the predicate is enforced INSIDE the lock window. The previous
     // "claim then filter" path would mark a foreign tenant's row claimed
     // with this worker_id, drop it from the response, and leave a ghost
     // `claimed` row invisible to its owning tenant until the stale-task
     // reaper reset it.
+    let all_queues = !matches!(
+        caller.0,
+        orch8_storage::worker_claim::WorkerClaimPrincipal::Runtime { .. }
+    );
     let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
         caller.0,
         req.handler_name.clone(),
         req.worker_id.clone(),
         scoped.clone(),
         None,
-        req.capabilities.take(),
+        req.capabilities.clone(),
         limit,
     )
-    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?
+    .with_version(req.version.clone())
+    .map_err(|_| {
+        ApiError::InvalidArgument(format!(
+            "version must be non-blank, contain no NUL characters, and be at most {} bytes",
+            orch8_types::worker::MAX_WORKER_VERSION_BYTES
+        ))
+    })?;
     let tasks = state
         .storage
         .claim_worker_tasks_with_transport(&request)
@@ -761,11 +811,30 @@ pub(crate) async fn poll_tasks(
 
     record_registration(
         &state,
-        &req.worker_id,
-        &req.handler_name,
-        None,
-        req.version.as_deref(),
-        scoped.as_ref(),
+        &orch8_storage::worker_inventory::WorkerObservation {
+            tenant: scoped.as_ref(),
+            worker_id: &req.worker_id,
+            handlers: std::slice::from_ref(&req.handler_name),
+            queue_name: None,
+            all_queues,
+            version: req.version.as_deref(),
+            transport: orch8_storage::worker_inventory::WorkerTransport::Http,
+            runtime_id: req
+                .capabilities
+                .as_ref()
+                .map(|capabilities| capabilities.runtime_id),
+            shared_runtime: scoped
+                .is_none()
+                .then_some(req.capabilities.as_ref())
+                .flatten(),
+            available_poll_slots: scoped
+                .as_ref()
+                .and_then(|_| tasks.available_poll_slots(limit)),
+            draining: req
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.draining),
+        },
     )
     .await;
     note_placed_claims(&state, tasks.tasks()).await;
@@ -817,40 +886,24 @@ pub(crate) async fn poll_tasks_from_queue(
     )
     .await?;
 
-    // Version pin (same as the default poll path).
-    if version_pin_blocks(
-        &state,
-        scoped.as_ref(),
-        &req.handler_name,
-        req.version.as_deref(),
-    )
-    .await
-    {
-        record_registration(
-            &state,
-            &req.worker_id,
-            &req.handler_name,
-            Some(&req.queue_name),
-            req.version.as_deref(),
-            scoped.as_ref(),
-        )
-        .await;
-        return Ok(poll_response(
-            &state,
-            orch8_storage::worker_claim::WorkerClaimBatch::empty(),
-        ));
-    }
-
+    let all_queues = false;
     let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
         caller.0,
         req.handler_name.clone(),
         req.worker_id.clone(),
         scoped.clone(),
         Some(req.queue_name.clone()),
-        req.capabilities.take(),
+        req.capabilities.clone(),
         limit,
     )
-    .map_err(|error| ApiError::from_storage(error, "worker_task"))?;
+    .map_err(|error| ApiError::from_storage(error, "worker_task"))?
+    .with_version(req.version.clone())
+    .map_err(|_| {
+        ApiError::InvalidArgument(format!(
+            "version must be non-blank, contain no NUL characters, and be at most {} bytes",
+            orch8_types::worker::MAX_WORKER_VERSION_BYTES
+        ))
+    })?;
     let tasks = state
         .storage
         .claim_worker_tasks_with_transport(&request)
@@ -859,11 +912,30 @@ pub(crate) async fn poll_tasks_from_queue(
 
     record_registration(
         &state,
-        &req.worker_id,
-        &req.handler_name,
-        Some(&req.queue_name),
-        req.version.as_deref(),
-        scoped.as_ref(),
+        &orch8_storage::worker_inventory::WorkerObservation {
+            tenant: scoped.as_ref(),
+            worker_id: &req.worker_id,
+            handlers: std::slice::from_ref(&req.handler_name),
+            queue_name: Some(&req.queue_name),
+            all_queues,
+            version: req.version.as_deref(),
+            transport: orch8_storage::worker_inventory::WorkerTransport::Http,
+            runtime_id: req
+                .capabilities
+                .as_ref()
+                .map(|capabilities| capabilities.runtime_id),
+            shared_runtime: scoped
+                .is_none()
+                .then_some(req.capabilities.as_ref())
+                .flatten(),
+            available_poll_slots: scoped
+                .as_ref()
+                .and_then(|_| tasks.available_poll_slots(limit)),
+            draining: req
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.draining),
+        },
     )
     .await;
     note_placed_claims(&state, tasks.tasks()).await;

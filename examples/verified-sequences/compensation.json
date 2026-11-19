@@ -1,0 +1,14 @@
+{
+  "name": "compensation",
+  "blocks": [{
+    "type": "saga", "id": "reserve-and-confirm",
+    "steps": [
+      {
+        "id": "reserve-stage",
+        "action": {"type": "step", "id": "reserve", "handler": "reserve_slot"},
+        "compensation": {"type": "step", "id": "release", "handler": "release_slot"}
+      },
+      {"id": "confirm-stage", "action": {"type": "step", "id": "confirm", "handler": "confirm_slot"}}
+    ]
+  }]
+}

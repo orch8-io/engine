@@ -99,6 +99,12 @@ async fn select_transport(
     drain: CancellationToken,
 ) -> anyhow::Result<Arc<dyn LeaseTransport>> {
     let grpc = || {
+        let mut headers = config.node.managed_control_headers.clone();
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("x-orch8-worker-version"));
+        headers.insert(
+            "x-orch8-worker-version".into(),
+            env!("CARGO_PKG_VERSION").into(),
+        );
         GrpcLeaseTransport::new(GrpcWorkerConfig {
             endpoint: config.node.managed_control_endpoint.trim().to_owned(),
             api_key: config.node.managed_control_api_key.clone(),
@@ -106,7 +112,7 @@ async fn select_transport(
             worker_id: identity.worker_id(),
             ca_pem: ca_pem.map(<[u8]>::to_vec),
             drain: drain.clone(),
-            headers: config.node.managed_control_headers.clone(),
+            headers,
         })
         .map_err(anyhow::Error::msg)
     };

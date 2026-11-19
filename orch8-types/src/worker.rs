@@ -317,6 +317,24 @@ pub fn claim_allowed(
     requirements.is_satisfied_by(capabilities, now)
 }
 
+/// Claim rules for a transport that supplies no runtime capabilities.
+#[must_use]
+pub fn legacy_claim_allowed(
+    requirements: &crate::continuity::CapsuleRequirements,
+    worker_id: &str,
+    now: DateTime<Utc>,
+) -> bool {
+    // Keep this predicate aligned with the legacy SQL route: only an optional
+    // worker-affinity window is admitted without capability evidence.
+    let mut hard = requirements.clone();
+    let preference = hard.prefer.take();
+    hard == crate::continuity::CapsuleRequirements::default()
+        && preference.as_ref().is_none_or(|preference| {
+            preference.worker_id.as_deref() == Some(worker_id)
+                || preference.until_ms <= now.timestamp_millis()
+        })
+}
+
 /// Whether any string in `value` is a `credentials://` reference.
 #[must_use]
 pub fn contains_credential_reference(value: &serde_json::Value) -> bool {
@@ -596,6 +614,9 @@ pub struct WorkerRegistration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
     pub last_seen_at: DateTime<Utc>,
+    /// Unused demand reported by the last successful HTTP poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_poll_slots: Option<u32>,
 }
 
 /// A control command queued for a specific worker, delivered via the worker
@@ -669,30 +690,73 @@ pub struct WorkerVersionPin {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Does a worker's reported `version` satisfy a `min_version` pin?
-///
-/// Both are parsed as dot-separated numeric components (`"1.10.2"`) and
-/// compared numerically (so `1.10.0 >= 1.9.0`, unlike a string compare).
-/// Missing components default to 0 (`"2" == "2.0.0"`). If either side has a
-/// non-numeric component the comparison falls back to a plain string `>=`.
-/// A worker that reports no version never satisfies a pin (it's treated as too
-/// old to trust).
+/// A staged change and the immediately preceding enforced minimum.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorkerVersionRollout {
+    pub tenant_id: String,
+    pub handler_name: String,
+    pub active_min_version: Option<String>,
+    pub staged_min_version: Option<String>,
+    pub previous_min_version: Option<String>,
+    pub can_rollback: bool,
+    /// Changes on each mutation. Operators present this when changing a rollout.
+    pub revision: Option<uuid::Uuid>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerVersionRolloutAction {
+    Promote,
+    Rollback,
+    Discard,
+}
+
+/// Maximum size of a build version reported in a worker poll.
+pub const MAX_WORKER_VERSION_BYTES: usize = 256;
+
+/// The persisted build string determines its scheme. Numeric releases accept an
+/// optional `v` prefix. Named builds (including ISO date stamps) compare lexically.
+enum WorkerVersion<'a> {
+    Numeric(Vec<u64>),
+    Named(&'a str),
+}
+
+impl<'a> WorkerVersion<'a> {
+    fn parse(raw: &'a str) -> Self {
+        match parse_version(raw) {
+            Some(mut components) => {
+                while components.last() == Some(&0) {
+                    components.pop();
+                }
+                Self::Numeric(components)
+            }
+            None => Self::Named(raw),
+        }
+    }
+}
+
+/// A reported version satisfies a minimum only within the same scheme.
+/// Missing versions cannot satisfy a pin.
 #[must_use]
 pub fn version_satisfies(worker: Option<&str>, min_version: &str) -> bool {
     let Some(worker) = worker else {
         return false;
     };
-    match (parse_version(worker), parse_version(min_version)) {
-        (Some(mut w), Some(mut m)) => {
-            // Pad to equal length so "2" compares equal to "2.0.0".
-            let len = w.len().max(m.len());
-            w.resize(len, 0);
-            m.resize(len, 0);
-            w >= m
-        }
-        // Non-numeric versions: lexical fallback.
-        _ => worker >= min_version,
+    match (
+        WorkerVersion::parse(worker),
+        WorkerVersion::parse(min_version),
+    ) {
+        (WorkerVersion::Numeric(worker), WorkerVersion::Numeric(minimum)) => worker >= minimum,
+        (WorkerVersion::Named(worker), WorkerVersion::Named(minimum)) => worker >= minimum,
+        _ => false,
     }
+}
+
+/// An unpinned route accepts workers that omit their version.
+#[must_use]
+pub fn version_admits(worker: Option<&str>, minimum: Option<&str>) -> bool {
+    minimum.is_none_or(|minimum| version_satisfies(worker, minimum))
 }
 
 #[cfg(test)]
@@ -728,10 +792,11 @@ mod version_tests {
     }
 
     #[test]
-    fn mixed_numeric_and_non_numeric_uses_lexical() {
-        // One side parses, the other does not → lexical `>=` over the raw strings
-        // (so the numeric ordering is NOT honored — "9.0" beats "10.x" lexically).
-        assert!(version_satisfies(Some("9.0"), "10.x"));
+    fn numeric_and_named_schemes_are_incompatible() {
+        assert!(!version_satisfies(Some("9.0"), "10.x"));
+        assert!(!version_satisfies(Some("10.x"), "9.0"));
+        assert!(!version_satisfies(Some("1z"), "2"));
+        assert!(!version_satisfies(Some("10"), "1z"));
         assert!(!version_satisfies(Some("abc"), "abd"));
         assert!(version_satisfies(Some("abd"), "abc"));
     }

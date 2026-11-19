@@ -1,0 +1,19 @@
+{
+  "cases": [{
+    "name": "releases reservation after a permanent confirmation failure",
+    "mocks": [
+      {"block": "reserve", "type": "success", "output": {"reserved": true}},
+      {"block": "confirm", "type": "failure", "message": "confirmation rejected"},
+      {"block": "release", "type": "success", "output": {"released": true}}
+    ],
+    "expect": {
+      "terminal_state": "failed",
+      "call_counts": [
+        {"handler": "reserve_slot", "min": 1, "max": 1},
+        {"handler": "confirm_slot", "min": 1, "max": 1},
+        {"handler": "release_slot", "min": 1, "max": 1}
+      ],
+      "assertions": [{"output": {"block": "release", "path": "released"}, "op": "equals", "value": true}]
+    }
+  }]
+}

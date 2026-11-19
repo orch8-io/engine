@@ -17,6 +17,9 @@ pub struct DoctorCmd {
     /// Include ranked diagnosis for one execution instance.
     #[arg(long)]
     pub instance: Option<Uuid>,
+    /// Explain placement blockers for this sequence version UUID.
+    #[arg(long)]
+    pub placement: Option<Uuid>,
     /// Exit non-zero for warnings as well as errors.
     #[arg(long)]
     pub strict: bool,
@@ -115,6 +118,22 @@ pub async fn run(
                 format!("{base}/instances/{instance}/diagnosis"),
                 "inspect the ranked remediation commands and authorize one explicitly",
                 diagnosis_warning,
+            )
+            .await,
+        );
+    }
+
+    if let Some(sequence) = command.placement {
+        checks.push(
+            fetch_json(
+                client,
+                "placement",
+                format!("{base}/placement/plan/{sequence}"),
+                "follow the next action for each blocked placement step",
+                |value| {
+                    (value["ready"].as_bool() != Some(true))
+                        .then(|| "one or more steps have no confirmed worker route".into())
+                },
             )
             .await,
         );
@@ -306,6 +325,11 @@ fn print_report(report: &DoctorReport, format: OutputFormat) -> Result<()> {
         OutputFormat::Table => {
             for check in &report.checks {
                 println!("{:?}\t{}\t{}", check.status, check.name, check.summary);
+                if check.name == "placement"
+                    && let Some(evidence) = &check.evidence
+                {
+                    super::placement::print_plan(evidence);
+                }
                 if let Some(remediation) = &check.remediation {
                     println!("  remediation: {remediation}");
                 }

@@ -455,6 +455,7 @@ mod tests {
                 }],
             })),
             BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                 id: BlockId::new("child"),
                 sequence_name: "other".into(),
                 version: None,

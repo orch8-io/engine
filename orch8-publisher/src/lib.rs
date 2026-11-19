@@ -7,6 +7,7 @@
 //! that always returned an error.
 
 pub mod capsule;
+pub mod catalog_rollout;
 pub mod cdn;
 pub mod distribution;
 pub mod grant;

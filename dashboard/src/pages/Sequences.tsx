@@ -6,6 +6,7 @@ import {
   deprecateSequence,
   deleteSequence,
   type SequenceDefinition,
+  type PreflightReport,
 } from "../api";
 import { usePolling } from "../hooks/usePolling";
 import { usePageTitle } from "../hooks/usePageTitle";
@@ -21,11 +22,14 @@ import { Id } from "../components/ui/Mono";
 import { Relative } from "../components/ui/Relative";
 import { SkeletonTable } from "../components/ui/Skeleton";
 import { IconPlus } from "../components/ui/Icons";
+import { SequenceDraftTest, SequenceHandlerCheck } from "../components/SequenceSetupChecks";
+import { parseSequenceText } from "../lib/sequenceModel";
 import { SequenceEditor } from "../components/SequenceEditor";
 import { CopyAsMenu } from "../components/CopyAsMenu";
 import { createSequenceRequest } from "../lib/requests";
 import {
   BLANK_TEMPLATE,
+  templateContract,
   templateEditorContent,
   templatePickerOptions,
 } from "../lib/templates";
@@ -384,6 +388,8 @@ export default function Sequences() {
   );
 }
 
+const SETUP_STEPS = ["Template", "Definition & input", "Handlers", "Test", "Publish"] as const;
+
 function CreateSequenceForm({
   onCreated,
   onError,
@@ -394,6 +400,8 @@ function CreateSequenceForm({
   const [tenantId, setTenantId] = useState("tenant-a");
   const [namespace, setNamespace] = useState("prod");
   const [template, setTemplate] = useState(BLANK_TEMPLATE);
+  const [step, setStep] = useState(0);
+  const [tested, setTested] = useState<{ text: string; report: PreflightReport } | null>(null);
   const [json, setJson] = useState(() =>
     templateEditorContent(BLANK_TEMPLATE, { tenantId: "tenant-a", namespace: "prod" }),
   );
@@ -401,6 +409,8 @@ function CreateSequenceForm({
   // tenant/namespace changes — picking a template always overwrites.
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const parsed = useMemo(() => parseSequenceText(json), [json]);
+  const testReport = tested?.text === json ? tested.report : null;
 
   const pickTemplate = (name: string) => {
     setTemplate(name);
@@ -457,93 +467,83 @@ function CreateSequenceForm({
   };
 
   return (
-    <Section
-      eyebrow="New sequence"
-      title="Create from a template"
-      description={
-        <>
-          Pick a starting point — the agent patterns ship with the CLI
-          (<code className="font-mono text-ink">orch8 init --template …</code>)
-          and pre-fill the editor below. <strong className="text-ink">Blank</strong>{" "}
-          starts from an empty skeleton. You can edit the JSON freely before
-          deploying; the engine validates structure on submit.
-        </>
-      }
-    >
+    <Section eyebrow="New sequence" title="Set up a sequence">
       <div className="space-y-6">
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          {templatePickerOptions().map((opt) => (
-            <button
-              key={opt.name}
-              type="button"
-              onClick={() => pickTemplate(opt.name)}
-              aria-pressed={template === opt.name}
-              className={`text-left border rounded-sm p-4 transition-colors ${
-                template === opt.name
-                  ? "border-signal bg-signal-weak"
-                  : "border-hairline bg-surface hover:border-hairline-strong"
-              }`}
-            >
-              <div className="font-mono text-[13px] text-ink mb-1">{opt.name}</div>
-              <div className="text-[12px] leading-snug text-muted">
-                {opt.description}
-              </div>
-            </button>
+        <nav aria-label="Sequence setup" className="flex flex-wrap gap-2 border-b border-rule pb-3">
+          {SETUP_STEPS.map((label, index) => (
+            <Button key={label} size="sm" variant={index === step ? "primary" : "ghost"} aria-current={index === step ? "step" : undefined} onClick={() => setStep(index)}>{label}</Button>
           ))}
-        </div>
+        </nav>
 
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
-          <div>
-            <FieldLabel>Tenant</FieldLabel>
-            <Input
-              value={tenantId}
-              onChange={(e) => changeTenant(e.target.value)}
-              className="w-full"
-            />
-            <p className="annotation mt-1">
-              Isolation group. Executions never cross tenants.
-            </p>
-          </div>
-          <div>
-            <FieldLabel>Namespace</FieldLabel>
-            <Input
-              value={namespace}
-              onChange={(e) => changeNamespace(e.target.value)}
-              className="w-full"
-            />
-            <p className="annotation mt-1">
-              Environment label — e.g. prod, staging, dev.
-            </p>
-          </div>
-        </div>
+        {step === 0 && (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {templatePickerOptions().map((opt) => (
+                <button
+                  key={opt.name}
+                  type="button"
+                  onClick={() => pickTemplate(opt.name)}
+                  aria-pressed={template === opt.name}
+                  className={`text-left border rounded-sm p-4 transition-colors ${template === opt.name ? "border-signal bg-signal-weak" : "border-hairline bg-surface hover:border-hairline-strong"}`}
+                >
+                  <div className="font-mono text-[13px] text-ink mb-1">{opt.name}</div>
+                  <div className="text-[12px] leading-snug text-muted">{opt.description}</div>
+                </button>
+              ))}
+            </div>
+            {dirty && <p className="annotation">Selecting a template replaces the edited draft.</p>}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+              <div>
+                <FieldLabel htmlFor="setup-tenant">Tenant</FieldLabel>
+                <Input id="setup-tenant" value={tenantId} onChange={(event) => changeTenant(event.target.value)} className="w-full" />
+              </div>
+              <div>
+                <FieldLabel htmlFor="setup-namespace">Namespace</FieldLabel>
+                <Input id="setup-namespace" value={namespace} onChange={(event) => changeNamespace(event.target.value)} className="w-full" />
+              </div>
+              {dirty && <p className="annotation self-end">Update the current draft’s tenant and namespace in the definition.</p>}
+            </div>
+          </>
+        )}
 
-        <div>
-          <FieldLabel>Sequence definition (JSON)</FieldLabel>
-          <p className="annotation mb-1">
-            Build it visually or edit the JSON — the JSON is exactly what gets
-            POSTed to /sequences; id and created_at are filled in automatically
-            if you leave them out.
-          </p>
+        <div hidden={step !== 1}>
           <SequenceEditor
             text={json}
-            onTextChange={(t) => {
-              setJson(t);
-              setDirty(true);
-            }}
+            onTextChange={(text) => { setJson(text); setDirty(true); }}
+            preflight={false}
             rows={18}
           />
         </div>
 
-        <div className="flex justify-end gap-2">
-          <CopyAsMenu
-            spec={() => {
-              const built = buildBody();
-              return "body" in built ? createSequenceRequest(built.body) : null;
-            }}
-          />
-          <Button variant="primary" size="sm" disabled={busy} onClick={submit}>
-            Deploy sequence
-          </Button>
+        {step === 2 && <SequenceHandlerCheck doc={parsed.ok ? parsed.value : null} />}
+
+        <div hidden={step !== 3}>
+          <SequenceDraftTest key={template} draftText={json} initialFixture={templateContract(template)}
+            buildBody={buildBody} report={testReport} onReport={(report) => setTested(report && { text: json, report })} />
+        </div>
+
+        {step === 4 && (
+          <div className="space-y-3">
+            {parsed.ok ? (
+              <>
+                <p className="text-sm text-ink"><code>{String(parsed.value.name ?? "Unnamed sequence")}</code> · v{String(parsed.value.version ?? "?")}</p>
+                <p className="text-sm text-muted">{String(parsed.value.tenant_id ?? "Unspecified tenant")} / {String(parsed.value.namespace ?? "Unspecified namespace")}</p>
+                <p className="text-sm text-muted">{testReport ? `Latest preflight result: ${testReport.overall}` : "This draft has no preflight result."}</p>
+              </>
+            ) : <p role="alert" className="notice notice-warn">{parsed.error}</p>}
+            <div className="flex gap-2 flex-wrap">
+              <CopyAsMenu spec={() => {
+                const built = buildBody();
+                return "body" in built ? createSequenceRequest(built.body) : null;
+              }} />
+              <Button variant="primary" size="sm" disabled={busy || !parsed.ok} onClick={submit}>{busy ? "Publishing…" : "Publish sequence"}</Button>
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-between gap-2">
+          <Button size="sm" variant="ghost" disabled={step === 0} onClick={() => setStep(step - 1)}>Back</Button>
+          {step < SETUP_STEPS.length - 1 && <Button size="sm" onClick={() => setStep(step + 1)}>Continue to {SETUP_STEPS[step + 1]}</Button>}
         </div>
       </div>
     </Section>

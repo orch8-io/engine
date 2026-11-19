@@ -309,6 +309,159 @@ async fn grpc_poll(client: &mut GrpcClient, handler: &str) -> Vec<WorkerTask> {
         .collect()
 }
 
+fn reported_version<T>(body: T, version: Option<&'static str>) -> tonic::Request<T> {
+    let mut request = tonic::Request::new(body);
+    if let Some(version) = version {
+        request.metadata_mut().insert(
+            "x-orch8-worker-version",
+            tonic::metadata::MetadataValue::from_static(version),
+        );
+    }
+    request
+}
+
+async fn stream_poll(
+    cloud: &Cloud,
+    key: &str,
+    handler: &str,
+    version: Option<&'static str>,
+    eligible: bool,
+) -> Option<WorkerTask> {
+    use proto::worker_stream_client::Payload as ClientPayload;
+    use proto::worker_stream_server::Payload as ServerPayload;
+
+    let open = ClientPayload::Open(proto::WorkerStreamOpen {
+        worker_id: "versioned-stream".into(),
+        handler_names: vec![handler.into()],
+        supported_features: vec!["task_delivery".into()],
+        max_in_flight: 1,
+        protocol_version: orch8_grpc::WORKER_STREAM_PROTOCOL_VERSION,
+        runtime_capabilities_json: String::new(),
+        tenant_id: cloud.tenant.clone(),
+    });
+    let mut frames = vec![
+        open.clone(),
+        ClientPayload::Demand(proto::WorkerStreamDemand { capacity: 1 }),
+    ];
+    if !eligible {
+        // A second Open is rejected after the demand is processed. Its error
+        // gives a deterministic barrier for asserting zero task frames.
+        frames.push(open);
+    }
+    let outbound =
+        tokio_stream::iter(frames.into_iter().map(|payload| proto::WorkerStreamClient {
+            payload: Some(payload),
+        }));
+    let mut inbound = grpc_with_key(cloud, key)
+        .await
+        .worker_stream(reported_version(outbound, version))
+        .await
+        .expect("stream")
+        .into_inner();
+    assert!(matches!(
+        inbound.message().await.unwrap().unwrap().payload,
+        Some(ServerPayload::Hello(_))
+    ));
+    let next = tokio::time::timeout(LONG, inbound.message()).await.unwrap();
+    if !eligible {
+        assert_eq!(
+            next.expect_err("ineligible demand must deliver no task")
+                .code(),
+            tonic::Code::FailedPrecondition
+        );
+        return None;
+    }
+    let Some(ServerPayload::Task(task)) = next.unwrap().unwrap().payload else {
+        panic!("eligible demand should deliver its task");
+    };
+    Some(serde_json::from_str(&task.task_json).unwrap())
+}
+
+#[test]
+fn staged_worker_rollout_has_transport_and_database_parity() {
+    for backend in backends() {
+        let cloud = Cloud::start_with(
+            &backend,
+            |_| {},
+            CloudOptions {
+                grpc_auth: true,
+                ..CloudOptions::default()
+            },
+        );
+        let key = cloud.mint_key(&["worker"]);
+        let handler = "rollout-parity";
+        let (_, first) = dispatched(&cloud, handler, None);
+        let (_, second) = dispatched(&cloud, handler, None);
+        let (_, third) = dispatched(&cloud, handler, None);
+        let http_poll = |version: Option<&str>| {
+            let (status, response) = cloud.call(
+                &key,
+                "POST",
+                "/workers/tasks/poll",
+                Some(&json!({"handler_name":handler,"worker_id":"versioned-http",
+                    "limit":1,"version":version})),
+            );
+            assert_eq!(status, 200, "{response}");
+            response["tasks"].as_array().unwrap().clone()
+        };
+        let unary_poll = |version| {
+            cloud.block_on(async {
+                grpc_with_key(&cloud, &key)
+                    .await
+                    .poll_tasks(reported_version(
+                        proto::PollTasksRequest {
+                            handler_name: handler.into(),
+                            worker_id: "versioned-unary".into(),
+                            limit: 1,
+                        },
+                        version,
+                    ))
+                    .await
+                    .unwrap()
+                    .into_inner()
+                    .tasks_json
+            })
+        };
+        let (status, staged) = cloud.root(
+            "POST",
+            "/workers/version-rollouts",
+            Some(&json!({"tenant_id":cloud.tenant,"handler_name":handler,"min_version":"1.10.0"})),
+        );
+        assert_eq!(status, 200, "{staged}");
+        let path = format!("/workers/version-rollouts/{}/{handler}", cloud.tenant);
+        let (status, promoted) = cloud.root(
+            "POST",
+            &path,
+            Some(&json!({"revision":staged["revision"],"action":"promote"})),
+        );
+        assert_eq!(status, 200, "{promoted}");
+        for version in [None, Some("1.9.0")] {
+            assert!(http_poll(version).is_empty());
+            assert!(unary_poll(version).is_empty());
+            assert!(
+                cloud
+                    .block_on(stream_poll(&cloud, &key, handler, version, false))
+                    .is_none()
+            );
+        }
+        let modern = cloud
+            .block_on(stream_poll(&cloud, &key, handler, Some("1.10.0"), true))
+            .unwrap();
+        assert_eq!(modern.id, first.id);
+        let (status, rollback) = cloud.root(
+            "POST",
+            &path,
+            Some(&json!({"revision":promoted["revision"],"action":"rollback"})),
+        );
+        assert_eq!(status, 200, "{rollback}");
+        assert_eq!(http_poll(Some("1.9.0"))[0]["id"], second.id.to_string());
+        let rows = unary_poll(None);
+        assert_eq!(rows.len(), 1);
+        let task: WorkerTask = serde_json::from_str(&rows[0]).unwrap();
+        assert_eq!(task.id, third.id);
+    }
+}
+
 #[test]
 fn grpc_complete_fail_release_settle_effects_like_http() {
     for backend in backends() {
@@ -1223,4 +1376,128 @@ fn run_device_session_scope(cloud: &Cloud, backend: &Backend) {
         Some(json!({"device_id": device_a})),
         &[401],
     );
+}
+
+#[test]
+fn placement_readiness_observes_http_and_live_grpc_routes() {
+    use proto::worker_stream_client::Payload as Frame;
+    use proto::worker_stream_server::Payload as Reply;
+
+    for backend in backends() {
+        let cloud = Cloud::start_with(
+            &backend,
+            |_| {},
+            CloudOptions {
+                grpc_auth: true,
+                ..CloudOptions::default()
+            },
+        );
+        let worker_key = cloud.mint_key(&["worker"]);
+        let sequence = cloud.create_sequence("transport-readiness", &json!([
+            {"type":"step", "id":"grpc", "handler":"preview.grpc", "queue_name":"named"},
+            {"type":"step", "id":"http", "handler":"preview.http", "queue_name":"http-workers"},
+            {"type":"step", "id":"wrong_queue", "handler":"preview.http", "queue_name":"different"},
+        ]));
+        let plan_path = format!("/placement/plan/{sequence}");
+        let grpc_sequence = cloud.create_sequence(
+            "grpc-only",
+            &json!([
+                {"type":"step", "id":"grpc", "handler":"preview.grpc", "queue_name":"named"},
+            ]),
+        );
+        let grpc_plan_path = format!("/placement/plan/{grpc_sequence}");
+        let (status, report) = cloud.root("GET", &plan_path, None);
+        assert_eq!(status, 200, "{report}");
+        assert_eq!(report["steps"][0]["worker_inventory"]["eligible_count"], 0);
+
+        let (status, response) = cloud.call(
+            &worker_key,
+            "POST",
+            "/workers/tasks/poll/queue",
+            Some(
+                &json!({"handler_name":"preview.http", "queue_name":"http-workers",
+                         "worker_id":"http-only", "limit":3, "version":"2026-11-18"}),
+            ),
+        );
+        assert_eq!(status, 200, "{response}");
+        let (sender, mut stream) = cloud.block_on(async {
+            let (sender, receiver) = tokio::sync::mpsc::channel(2);
+            sender
+                .send(proto::WorkerStreamClient {
+                    payload: Some(Frame::Open(proto::WorkerStreamOpen {
+                        worker_id: "grpc-stream-only".into(),
+                        handler_names: vec!["preview.grpc".into()],
+                        supported_features: vec!["task_delivery".into()],
+                        max_in_flight: 1,
+                        protocol_version: orch8_grpc::WORKER_STREAM_PROTOCOL_VERSION,
+                        runtime_capabilities_json: String::new(),
+                        tenant_id: cloud.tenant.clone(),
+                    })),
+                })
+                .await
+                .unwrap();
+            let mut stream = grpc_with_key(&cloud, &worker_key)
+                .await
+                .worker_stream(reported_version(
+                    tokio_stream::wrappers::ReceiverStream::new(receiver),
+                    Some("2026-11-18"),
+                ))
+                .await
+                .unwrap()
+                .into_inner();
+            assert!(matches!(
+                stream.message().await.unwrap().unwrap().payload,
+                Some(Reply::Hello(_))
+            ));
+            (sender, stream)
+        });
+        let (status, report) = cloud.root("GET", &plan_path, None);
+        assert_eq!(status, 200, "{report}");
+        let steps = report["steps"].as_array().unwrap();
+        assert_eq!(steps[0]["eligible_workers"], json!(["grpc-stream-only"]));
+        assert!(steps[0]["available_poll_slots"].is_null());
+        assert_eq!(steps[1]["eligible_workers"], json!(["http-only"]));
+        assert_eq!(steps[1]["available_poll_slots"], 3);
+        assert_eq!(steps[2]["eligible_workers"], json!([]));
+
+        let (status, grpc_report) = cloud.root("GET", &grpc_plan_path, None);
+        assert_eq!(status, 200, "{grpc_report}");
+        assert_eq!(grpc_report["ready"], true);
+
+        let instance = cloud.create_instance(grpc_sequence, &json!({}));
+        let pending = wait_for("dispatch on named queue", LONG, || {
+            cloud.tasks(instance).into_iter().find(|task| {
+                task.state == WorkerTaskState::Pending
+                    && task.queue_name.as_deref() == Some("named")
+            })
+        });
+        cloud.block_on(async {
+            sender
+                .send(proto::WorkerStreamClient {
+                    payload: Some(Frame::Demand(proto::WorkerStreamDemand { capacity: 1 })),
+                })
+                .await
+                .unwrap();
+            let reply = tokio::time::timeout(LONG, stream.message())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Some(Reply::Task(task)) = reply.payload else {
+                panic!("expected a claim on the previewed named route");
+            };
+            let task: WorkerTask = serde_json::from_str(&task.task_json).unwrap();
+            assert_eq!(task.id, pending.id);
+        });
+
+        drop(sender);
+        cloud.block_on(async {
+            assert!(stream.message().await.unwrap().is_none());
+        });
+        wait_for("disconnected stream observation removed", LONG, || {
+            let (status, report) = cloud.root("GET", &plan_path, None);
+            assert_eq!(status, 200, "{report}");
+            (report["steps"][0]["worker_inventory"]["eligible_count"] == 0).then_some(())
+        });
+    }
 }

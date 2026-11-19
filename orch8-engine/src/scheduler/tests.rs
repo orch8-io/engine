@@ -2613,6 +2613,7 @@ async fn seed_sub_sequence_parent(
 ) -> (TaskInstance, SequenceDefinition, InstanceId) {
     let seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         orch8_types::sequence::SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child".into(),
             version: None,

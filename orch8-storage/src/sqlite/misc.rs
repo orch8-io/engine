@@ -250,8 +250,8 @@ pub(super) async fn claim_worker_tasks_from_queue(
     handler_name: &str,
     worker_id: &str,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     // `BEGIN IMMEDIATE` (not sqlx's default DEFERRED) — the SELECT and UPDATE
     // form a read-then-write claim; under DEFERRED two concurrent pollers can
     // both SELECT the same pending rows before either UPDATE runs and claim
@@ -264,7 +264,7 @@ pub(super) async fn claim_worker_tasks_from_queue(
         worker_id,
         None,
         limit,
-        principal,
+        request,
     )
     .await;
     super::finish_transaction(conn, result).await
@@ -280,8 +280,13 @@ async fn claim_from_queue_inner(
     worker_id: &str,
     tenant_id: Option<&TenantId>,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
+    if let Some(request) = request
+        && !super::worker_version_pins::admits_claim(conn, request).await?
+    {
+        return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+    }
     let rows = if let Some(tenant) = tenant_id {
         sqlx::query(
             "SELECT wt.* FROM worker_tasks wt
@@ -352,10 +357,11 @@ async fn claim_from_queue_inner(
                 )
             })
             .collect();
-        super::worker_claim::record_on(conn, &tasks, principal).await?;
+        super::worker_claim::record_on(conn, &tasks, crate::worker_claim::claim_principal(request))
+            .await?;
         super::workers::insert_attempt_events(conn, &events).await?;
     }
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
 }
 
 /// Tenant-scoped variant — SELECT and UPDATE share a single transaction so
@@ -369,8 +375,8 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
     worker_id: &str,
     tenant_id: &TenantId,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     // BEGIN IMMEDIATE for the same double-claim reason as
     // `claim_worker_tasks_from_queue` above.
     let mut conn = super::helpers::begin_immediate(&storage.pool).await?;
@@ -381,7 +387,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
         worker_id,
         Some(tenant_id),
         limit,
-        principal,
+        request,
     )
     .await;
     super::finish_transaction(conn, result).await
@@ -650,7 +656,7 @@ pub(super) async fn delete_expired_auxiliary(
     // (table, predicate on ?1 = cutoff). Constants only — never input.
     // SQLite has no `telemetry_mobile_errors` table (server-only telemetry),
     // so `mobile_errors_before` is a no-op here.
-    let sweeps: [(Option<DateTime<Utc>>, &str, &str); 7] = [
+    let sweeps: [(Option<DateTime<Utc>>, &str, &str); 8] = [
         (
             retention.worker_attempt_events_before,
             "worker_task_attempt_events",
@@ -684,6 +690,11 @@ pub(super) async fn delete_expired_auxiliary(
         (
             retention.worker_registrations_before,
             "worker_registrations",
+            "last_seen_at < ?1",
+        ),
+        (
+            retention.worker_registrations_before,
+            "worker_route_observations",
             "last_seen_at < ?1",
         ),
     ];

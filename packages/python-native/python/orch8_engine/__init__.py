@@ -142,7 +142,10 @@ class Engine:
         return self._inner.start(name, _to_json(input), idempotency_key, version)
 
     def run(self, id: str, *, timeout: Optional[float] = None) -> dict:
-        """Drive the engine until the instance settles or ``timeout`` seconds pass."""
+        """Drive the engine until settlement or the scheduling budget elapses.
+
+        Storage reads can continue past the budget given by ``timeout`` seconds.
+        """
         return json.loads(self._inner.run(id, timeout))
 
     def get(self, id: str) -> dict:

@@ -10,6 +10,8 @@
 //! The tenant is the `X-Tenant-Id` principal, or `?tenant_id=` for the root
 //! key (default `default`).
 
+pub(crate) mod plan;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, put};
@@ -27,6 +29,8 @@ use crate::error::ApiError;
 
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
+        .route("/placement/plan/{id}", get(plan::get_plan))
+        .route("/placement/recipes", get(plan::recipes))
         .route("/placement/policies", get(get_policies).put(put_policies))
         .route("/rate-budgets", get(list_budgets))
         .route("/rate-budgets/{key}", put(put_budget).delete(delete_budget))

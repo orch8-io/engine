@@ -322,6 +322,8 @@ fn run_dispatches_code_importers() {
             name: Some("orders".into()),
             namespace: "default".into(),
             report: Some(report.clone()),
+            parity_from: None,
+            parity_out: None,
             zap: None,
             workflow: None,
         }),

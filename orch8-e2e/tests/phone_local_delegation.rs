@@ -21,8 +21,15 @@ use std::time::Duration;
 use orch8_e2e::{
     Backend, Cloud, Delivery, Desktop, Link, Phone, PhoneAuth, PhoneDb, backends, wait_for,
 };
+use orch8_engine::remote_worker::delegation_receiver::{
+    ECHO_HANDLER, EchoDelegationReceiver, EchoReceiverError,
+};
 use orch8_mobile::{DelegationStatus, InstanceStateKind};
-use orch8_types::continuity::EffectState;
+use orch8_types::{
+    continuity::{EffectState, RuntimeId},
+    ids::{SequenceId, TenantId},
+    worker::WorkerTaskState,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -735,35 +742,68 @@ fn run_isolated_step(backend: &Backend) {
     );
     assert_eq!(desktop.runs(), 1, "{backend}");
 
-    // Explicit API: delegate a sub-sequence on behalf of the local instance.
-    let sub_sequence = classify_sequence(&cloud);
+    // Explicit API: use the reusable desktop receiver on behalf of the local instance.
+    let sub_sequence = cloud.create_sequence(
+        "delegation-echo",
+        &json!([{"type": "step", "id": "echo", "handler": ECHO_HANDLER, "params": {}}]),
+    );
+    let echo_runtime = RuntimeId::new();
+    let echo_runtime_id = echo_runtime.to_string();
+    let mut receiver = EchoDelegationReceiver::new(
+        &desktop.base(),
+        TenantId::new(&cloud.tenant).unwrap(),
+        echo_runtime,
+        SequenceId::from_uuid(sub_sequence),
+        cloud.mint_key(&["worker"]),
+    )
+    .unwrap();
+    desktop.rt.block_on(receiver.register()).unwrap();
+    let input = json!({"photo": {"id": "photo-9"}, "wide": u64::MAX});
     let id = node
         .phone
         .engine
         .delegate(orch8_mobile::DelegateRequest {
             instance_id: local.clone(),
-            destination_runtime_id: destination.clone(),
+            destination_runtime_id: echo_runtime_id.clone(),
             sub_sequence_id: sub_sequence.to_string(),
-            input_json: json!({"photo": {"id": "photo-9"}}).to_string(),
+            input_json: input.to_string(),
         })
         .unwrap();
     wait_for("the explicit delegation to be placed", LONG, || {
         let status = node.phone.engine.delegation_status(id.clone()).unwrap();
         (status.state == "delegated").then_some(())
     });
-    desktop.serve_one();
+    // The issued payload must keep the published version even if a newer
+    // version becomes available before the receiver claims it.
+    desktop.rt.block_on(async {
+        let id = SequenceId::from_uuid(sub_sequence);
+        let mut live = cloud.storage.get_sequence(id).await.unwrap().unwrap();
+        let orch8_types::sequence::BlockDefinition::Step(step) = &mut live.blocks[0] else {
+            unreachable!("test sequence has one step")
+        };
+        step.handler = "noop".into();
+        live.id = SequenceId::new();
+        live.version += 1;
+        cloud.storage.create_sequence(&live).await.unwrap();
+    });
+    let acknowledged = desktop
+        .rt
+        .block_on(receiver.receive_once())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cloud.task(acknowledged).unwrap().state,
+        WorkerTaskState::Completed
+    );
     let status = wait_for("the explicit outcome", LONG, || {
         let status = node.phone.engine.delegation_status(id.clone()).unwrap();
         (status.state == "completed").then_some(status)
     });
     let output: Value = serde_json::from_str(status.output_json.as_deref().unwrap()).unwrap();
-    assert_eq!(
-        output["outputs"]["classify"]["photo"], "photo-9",
-        "{backend}: {output}"
-    );
+    assert_eq!(output["outputs"]["echo"], input, "{backend}: {output}");
     assert_eq!(
         status.destination_runtime_id.as_deref(),
-        Some(destination.as_str())
+        Some(echo_runtime_id.as_str())
     );
     assert!(
         node.phone
@@ -772,6 +812,47 @@ fn run_isolated_step(backend: &Backend) {
             .is_err(),
         "{backend}: unknown delegations are NotFound"
     );
+
+    // The mailbox can deliver a valid claim for a definition other than the
+    // receiver's pin. It must refuse completion and leave the phone waiting.
+    let mismatched_runtime = RuntimeId::new();
+    let mut mismatched_receiver = EchoDelegationReceiver::new(
+        &desktop.base(),
+        TenantId::new(&cloud.tenant).unwrap(),
+        mismatched_runtime,
+        SequenceId::new(),
+        cloud.mint_key(&["worker"]),
+    )
+    .unwrap();
+    desktop.rt.block_on(mismatched_receiver.register()).unwrap();
+    let mismatched_id = node
+        .phone
+        .engine
+        .delegate(orch8_mobile::DelegateRequest {
+            instance_id: local.clone(),
+            destination_runtime_id: mismatched_runtime.to_string(),
+            sub_sequence_id: sub_sequence.to_string(),
+            input_json: input.to_string(),
+        })
+        .unwrap();
+    wait_for("the mismatched delegation to be placed", LONG, || {
+        let status = node
+            .phone
+            .engine
+            .delegation_status(mismatched_id.clone())
+            .unwrap();
+        (status.state == "delegated").then_some(())
+    });
+    assert!(
+        matches!(
+            desktop.rt.block_on(mismatched_receiver.receive_once()),
+            Err(EchoReceiverError::Payload)
+        ),
+        "{backend}: a valid mailbox claim must still respect the sequence pin"
+    );
+    let refused = node.phone.engine.delegation_status(mismatched_id).unwrap();
+    assert_eq!(refused.state, "delegated");
+    assert!(refused.output_json.is_none());
 
     // Tenant isolation: another tenant's credential cannot read the
     // delegation, even naming this tenant.

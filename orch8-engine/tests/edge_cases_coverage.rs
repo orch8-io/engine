@@ -562,6 +562,7 @@ async fn sub_sequence_inside_for_each_iteration() {
             collection: "items".into(),
             item_var: "item".into(),
             body: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                 id: BlockId::new("sub"),
                 sequence_name: "child-flow".into(),
                 version: None,
@@ -1270,6 +1271,7 @@ async fn sub_sequence_output_propagates_to_parent() {
         deprecated: false,
         status: SequenceStatus::Production,
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -2267,6 +2269,7 @@ async fn waiting_instance_not_terminal() {
         deprecated: false,
         status: SequenceStatus::Production,
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,

@@ -43,6 +43,10 @@ Server-assigned fields (`id`, `tenant_id`, `namespace`, `name`, `version`,
 `defaults_applied`. Everything else goes through the server's strict decoder,
 so unknown fields and invalid blocks are rejected exactly as the API would.
 
+A run result identifies its `verification_scope` as `simulated_preview`.
+Status describes the outcome of that simulation, including any mocked steps
+or child sequences.
+
 A run result contains `status` (`completed` | `failed` | `tick_limit` | `operation_limit`),
 `error`, `virtual_duration_ms`, `ticks`, `operations`, `timeline`, `outputs` (by block id),
 `context`, `state` (instance KV), `would_call`, and `notes`. Each timeline
@@ -50,7 +54,9 @@ entry is `{step_id, path, kind, handler, started_at_virtual_ms,
 finished_at_virtual_ms, status, attempt, output, error}`, where `status` is
 `completed`, `mocked`, `failed`, `skipped`, `cancelled` (race losers) or
 `decision` (router / loop / for_each / ab_split / race / try_catch / saga
-bookkeeping).
+bookkeeping). Repeated outputs, errors, and resolved call parameters share a
+256 KiB detail budget. `trace_truncated` and per-entry `detail_omitted` flag
+omitted details. The compact timeline and final outputs remain available.
 
 ### Mocks
 

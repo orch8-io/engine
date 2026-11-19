@@ -1,0 +1,30 @@
+{
+  "cases": [
+    {
+      "name": "delivery with no exception",
+      "input": {"requires_review": false},
+      "mocks": [
+        {"block": "capture", "type": "success", "output": {"evidence_id": "photo-1"}},
+        {"block": "confirm", "type": "success", "output": {"confirmed": true}}
+      ],
+      "expect": {
+        "terminal_state": "completed",
+        "path": {"traversed": ["capture", "confirm"], "ordered": true},
+        "skipped_blocks": ["review"]
+      }
+    },
+    {
+      "name": "delivery with a damaged item",
+      "input": {"requires_review": true},
+      "mocks": [
+        {"block": "capture", "type": "success", "output": {"evidence_id": "photo-2"}},
+        {"block": "review", "type": "success", "output": {"ticket": "case-1"}}
+      ],
+      "expect": {
+        "terminal_state": "completed",
+        "path": {"traversed": ["capture", "review"], "ordered": true},
+        "skipped_blocks": ["confirm"]
+      }
+    }
+  ]
+}

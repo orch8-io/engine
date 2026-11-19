@@ -9,6 +9,23 @@ use crate::ids::{BlockId, Namespace, SequenceId, TenantId};
 /// field decode as v1; future incompatible formats must be upgraded explicitly.
 pub const SEQUENCE_SCHEMA_VERSION: u32 = 1;
 
+/// Pure handlers registered automatically by the development mobile runtime.
+pub const MOBILE_DEFAULT_BUILTINS: &[&str] = &[
+    "noop",
+    "log",
+    "sleep",
+    "fail",
+    "transform",
+    "assert",
+    "set_state",
+    "get_state",
+    "delete_state",
+    "merge_state",
+];
+
+/// Network-capable handlers the mobile app must enable explicitly.
+pub const MOBILE_OPT_IN_BUILTINS: &[&str] = &["http_request"];
+
 const fn default_sequence_schema_version() -> u32 {
     SEQUENCE_SCHEMA_VERSION
 }
@@ -1333,6 +1350,28 @@ pub struct SubSequenceDef {
     /// Input data to pass as the child instance's initial context data.
     #[serde(default)]
     pub input: serde_json::Value,
+    /// How to record the result of a successful child on the parent block.
+    #[serde(default, skip_serializing_if = "ChildResultMode::is_legacy")]
+    pub child_result: ChildResultMode,
+}
+
+/// Output recorded on the parent when a sub-sequence completes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChildResultMode {
+    /// Embed the child's full block output records as an array.
+    #[default]
+    LegacyOutputs,
+    /// Store only `{"child_instance_id": "<uuid>"}`. Output records stay on the
+    /// child instance and follow its normal access and retention rules.
+    Reference,
+}
+
+impl ChildResultMode {
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde requires a borrowed predicate.
+    fn is_legacy(&self) -> bool {
+        *self == Self::LegacyOutputs
+    }
 }
 
 /// A/B split: deterministically route each instance to one of several
@@ -3901,6 +3940,7 @@ mod tests {
     fn validate_rejects_sub_sequence_empty_name() {
         let seq = sample_seq(vec![BlockDefinition::SubSequence(Box::new(
             SubSequenceDef {
+                child_result: ChildResultMode::LegacyOutputs,
                 id: BlockId::new("ss"),
                 sequence_name: "  ".into(),
                 version: None,

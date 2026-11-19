@@ -72,6 +72,14 @@ async fn create_instance(client: &reqwest::Client, base_url: &str, seq_id: Uuid)
 /// Create a worker task directly via storage so we can test the API surface
 /// without spinning up the full engine scheduler.
 async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id: Uuid) -> Uuid {
+    seed_worker_task_at(srv, instance_id, chrono::Utc::now()).await
+}
+
+async fn seed_worker_task_at(
+    srv: &orch8_api::test_harness::TestServer,
+    instance_id: Uuid,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> Uuid {
     use orch8_types::worker::{WorkerTask, WorkerTaskState};
     let native_id = orch8_types::ids::InstanceId::from_uuid(instance_id);
     let mut parent = srv.storage.get_instance(native_id).await.unwrap().unwrap();
@@ -113,7 +121,7 @@ async fn seed_worker_task(srv: &orch8_api::test_harness::TestServer, instance_id
         output: None,
         error_message: None,
         error_retryable: None,
-        created_at: chrono::Utc::now(),
+        created_at,
         effect_id: None,
         continuity_epoch: None,
         lease_secs: None,
@@ -967,4 +975,284 @@ async fn complete_rejects_output_exceeding_max_context_bytes() {
     assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     let task = srv.storage.get_worker_task(task_id).await.unwrap().unwrap();
     assert_eq!(task.state.to_string(), "claimed", "nothing committed");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Exercise the rollout against the same worker, task, and queue throughout.
+async fn staged_version_pin_previews_promotes_and_rolls_back() {
+    let srv = spawn_test_server().await;
+    let tenant = "t1";
+    let handler = "external_handler";
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let instance = create_instance(&client, &srv.base_url, seq_id).await;
+    let rollouts = format!("{}/workers/version-rollouts", srv.v1_url());
+    let route = format!("{rollouts}/{tenant}/{handler}");
+    let placement = format!("{}/placement/plan/{seq_id}", srv.v1_url());
+    client
+        .post(format!("{}/workers/version-pins", srv.base_url))
+        .header("X-Tenant-Id", tenant)
+        .json(&json!({ "tenant_id": tenant, "handler_name": handler, "min_version": "1.0.0" }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let poll = || {
+        client
+            .post(format!("{}/workers/tasks/poll/queue", srv.base_url))
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({
+                "handler_name": handler, "queue_name": "q1",
+                "worker_id": "rollout-old", "limit": 3, "version": "1.9.0"
+            }))
+    };
+    assert!(poll_tasks(poll().send().await.unwrap()).await.is_empty());
+    let task = seed_worker_task_at(
+        &srv,
+        instance,
+        chrono::Utc::now() - chrono::Duration::seconds(30),
+    )
+    .await;
+
+    let stage = |min_version: &str| {
+        client.post(&rollouts).header("X-Tenant-Id", tenant).json(
+            &json!({ "tenant_id": tenant, "handler_name": handler, "min_version": min_version }),
+        )
+    };
+    let first: serde_json::Value = stage("1.10.0")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let staged: serde_json::Value = stage("2.0.0")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(staged["active_min_version"], "1.0.0");
+    assert_eq!(staged["staged_min_version"], "2.0.0");
+
+    let preview = || client.get(&placement).header("X-Tenant-Id", tenant);
+    let current: serde_json::Value = preview()
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(current["ready"], true);
+    let step = &current["steps"][0];
+    assert_eq!(step["minimum_worker_version"], "1.0.0");
+    assert_eq!(step["staged_worker_version"], "2.0.0");
+    assert_eq!(step["queue_name"], "q1");
+    assert_eq!(step["pending_tasks"], 1);
+    assert!(step["oldest_pending_age_secs"].as_i64().unwrap() >= 30);
+    assert_eq!(step["available_poll_slots"], 3);
+    assert_eq!(step["estimated_params_bytes"], 2);
+
+    let candidate: serde_json::Value = preview()
+        .query(&[("staged_pins", "true")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(candidate["ready"], false);
+    assert_eq!(candidate["steps"][0]["minimum_worker_version"], "2.0.0");
+    assert_eq!(candidate["steps"][0]["available_poll_slots"], 0);
+
+    let change = |action: &str, revision: &serde_json::Value| {
+        client
+            .post(&route)
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({ "action": action, "revision": revision }))
+    };
+    assert_eq!(
+        change("promote", &first["revision"])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    let promoted: serde_json::Value = change("promote", &staged["revision"])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(promoted["active_min_version"], "2.0.0");
+    assert_eq!(promoted["previous_min_version"], "1.0.0");
+    assert_eq!(promoted["can_rollback"], true);
+    assert!(poll_tasks(poll().send().await.unwrap()).await.is_empty());
+
+    let rolled_back: serde_json::Value = change("rollback", &promoted["revision"])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(rolled_back["active_min_version"], "1.0.0");
+    assert_eq!(rolled_back["can_rollback"], false);
+    assert_eq!(
+        poll_tasks(poll().send().await.unwrap()).await[0]["id"],
+        task.to_string()
+    );
+}
+
+#[tokio::test]
+async fn first_version_rollout_can_restore_unpinned_state() {
+    use orch8_types::worker::WorkerVersionRolloutAction;
+
+    let storage = orch8_storage::sqlite::SqliteStorage::in_memory()
+        .await
+        .unwrap();
+    let staged = storage
+        .stage_worker_version_pin("t1", "worker", "2")
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .get_worker_version_pin("t1", "worker")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let promoted = storage
+        .change_worker_version_rollout(
+            "t1",
+            "worker",
+            staged.revision.unwrap(),
+            WorkerVersionRolloutAction::Promote,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(promoted.can_rollback);
+    assert_eq!(promoted.previous_min_version, None);
+    let rolled_back = storage
+        .change_worker_version_rollout(
+            "t1",
+            "worker",
+            promoted.revision.unwrap(),
+            WorkerVersionRolloutAction::Rollback,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rolled_back.active_min_version, None);
+    assert!(
+        storage
+            .get_worker_version_pin("t1", "worker")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .list_worker_version_rollouts(Some("t1"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_rollout_actions_consume_the_revision_once() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let rollouts = format!("{}/workers/version-rollouts", server.v1_url());
+    let staged: serde_json::Value = client
+        .post(&rollouts)
+        .header("X-Tenant-Id", "tenant-a")
+        .json(&json!({"tenant_id":"tenant-a", "handler_name":"echo", "min_version":"2.0.0"}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let route = format!("{rollouts}/tenant-a/echo");
+    let action = |tenant: &str, action: &str| {
+        client
+            .post(&route)
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({"revision":staged["revision"], "action":action}))
+            .send()
+    };
+    assert_eq!(
+        action("tenant-b", "promote").await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let (promotion, discard) =
+        tokio::join!(action("tenant-a", "promote"), action("tenant-a", "discard"));
+    let statuses = [promotion.unwrap().status(), discard.unwrap().status()];
+    assert!(statuses.contains(&StatusCode::OK));
+    assert!(statuses.contains(&StatusCode::CONFLICT));
+    let active = server
+        .storage
+        .get_worker_version_pin("tenant-a", "echo")
+        .await
+        .unwrap();
+    assert_eq!(active.is_some(), statuses[0] == StatusCode::OK);
+    assert_eq!(
+        action("tenant-a", "promote").await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn worker_polls_leave_tasks_pending_when_version_pin_lookup_fails() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let sequence = create_sequence(&client, &server.base_url).await;
+    let instance = create_instance(&client, &server.base_url, sequence).await;
+    let task = seed_worker_task(&server, instance).await;
+    sqlx::query("DROP TABLE worker_version_pins")
+        .execute(server.storage.pool())
+        .await
+        .unwrap();
+    for (path, queue) in [
+        ("/workers/tasks/poll", None),
+        ("/workers/tasks/poll/queue", Some("q1")),
+    ] {
+        let mut body = json!({"worker_id":"worker-without-a-version","handler_name":"external_handler", "limit":1});
+        if let Some(queue) = queue {
+            body["queue_name"] = json!(queue);
+        }
+        let response = client
+            .post(format!("{}{path}", server.v1_url()))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let pending = server.storage.get_worker_task(task).await.unwrap().unwrap();
+        assert_eq!(pending.state, orch8_types::worker::WorkerTaskState::Pending);
+        assert!(pending.worker_id.is_none());
+    }
 }

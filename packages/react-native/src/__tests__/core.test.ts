@@ -161,8 +161,15 @@ describe("runtime node / worker API", () => {
     await client.startWorker();
     expect(native.startWorker).toHaveBeenLastCalledWith({});
 
-    await client.runWorkerWindow(20_000);
+    const window = { claimed: 1, completed: 1, failed: 0, stillRunning: 0, budgetExhausted: false };
+    native.runWorkerWindow.mockResolvedValue(window);
+    expect(await client.runWorkerWindow(20_000)).toEqual(window);
     expect(native.runWorkerWindow).toHaveBeenCalledWith(20_000);
+    expect(client.getBackgroundDiagnostics()).toMatchObject({
+      lastProgressAtMs: expect.any(Number),
+      lastWindow: { kind: "worker", outcome: "progress" },
+      nextAction: "none_observed",
+    });
 
     await client.updateNodeStatus("metered");
     expect(native.updateNodeStatus).toHaveBeenCalledWith("metered", null);

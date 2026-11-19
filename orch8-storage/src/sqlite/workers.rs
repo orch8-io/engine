@@ -149,14 +149,14 @@ pub(super) async fn get(
     row.as_ref().map(row_to_worker_task).transpose()
 }
 
-#[instrument(skip(storage), fields(handler_name, worker_id, limit))]
+#[instrument(skip(storage, request), fields(handler_name, worker_id, limit))]
 pub(super) async fn claim(
     storage: &SqliteStorage,
     handler_name: &str,
     worker_id: &str,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     // Use `BEGIN IMMEDIATE` rather than sqlx's default `BEGIN` (DEFERRED) so
     // SQLite acquires a RESERVED write lock up-front — the closest equivalent
     // to Postgres's `SELECT ... FOR UPDATE SKIP LOCKED`. Without this, two
@@ -168,7 +168,14 @@ pub(super) async fn claim(
     // Keep transaction ownership in SQLx so errors and cancelled futures
     // roll back before the connection is reused.
     let mut conn = begin_immediate(&storage.pool).await?;
+    let principal = crate::worker_claim::claim_principal(request);
     let result=async {
+    if let Some(request) = request
+        && !super::worker_version_pins::admits_claim(&mut conn, request).await?
+    {
+        return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+    }
+
 
     let select_res = sqlx::query(
         "SELECT * FROM worker_tasks WHERE handler_name=?1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state='pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND awaiting_dispatch=0 AND (requirements='{}' OR (json_remove(requirements,'$.prefer')='{}' AND (json_extract(requirements,'$.prefer.worker_id')=?3 OR json_extract(requirements,'$.prefer.until_ms') <= CAST((julianday('now') - 2440587.5) * 86400000.0 AS INTEGER)))) \
@@ -233,7 +240,7 @@ pub(super) async fn claim(
     insert_attempt_events(&mut conn, &events).await?;
     }
 
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
     }.await;
     super::finish_transaction(conn, result).await
 }
@@ -242,17 +249,24 @@ pub(super) async fn claim(
 /// inside the same BEGIN IMMEDIATE window as the UPDATE so a claim can
 /// never mark a foreign tenant's row claimed (then be invisible to that
 /// tenant until reap). Matches `postgres::workers::claim_for_tenant`.
-#[instrument(skip(storage), fields(handler_name, worker_id, tenant_id = %tenant_id, limit))]
+#[instrument(skip(storage, request), fields(handler_name, worker_id, tenant_id = %tenant_id, limit))]
 pub(super) async fn claim_for_tenant(
     storage: &SqliteStorage,
     handler_name: &str,
     worker_id: &str,
     tenant_id: &orch8_types::TenantId,
     limit: u32,
-    principal: Option<&crate::worker_claim::WorkerClaimPrincipal>,
-) -> Result<Vec<WorkerTask>, StorageError> {
+    request: Option<&crate::worker_claim::WorkerClaimRequest>,
+) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     let mut conn = begin_immediate(&storage.pool).await?;
+    let principal = crate::worker_claim::claim_principal(request);
     let result=async {
+    if let Some(request) = request
+        && !super::worker_version_pins::admits_claim(&mut conn, request).await?
+    {
+        return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+    }
+
 
     let select_res = sqlx::query(
         "SELECT wt.* FROM worker_tasks wt
@@ -319,7 +333,7 @@ pub(super) async fn claim_for_tenant(
     insert_attempt_events(&mut conn, &events).await?;
     }
 
-    Ok(tasks)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
     }.await;
     super::finish_transaction(conn, result).await
 }
@@ -327,6 +341,7 @@ pub(super) async fn claim_for_tenant(
 /// Upper bound on pending rows one `claim_matching` poll inspects.
 const CLAIM_MATCHING_MAX_SCAN: usize = 4096;
 
+#[allow(clippy::too_many_lines)] // Keep the bounded scan, requirements, and lease transaction together.
 pub(super) async fn claim_matching(
     storage: &SqliteStorage,
     handler_name: &str,
@@ -338,8 +353,9 @@ pub(super) async fn claim_matching(
 ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
     let crate::worker_claim::ClaimRuntime {
         capabilities,
-        principal,
+        request,
     } = runtime;
+    let principal = crate::worker_claim::claim_principal(request);
     // An unqualified session poll grants the default queue only. Named queues
     // require the transport's explicit allowlist check and named-queue selector.
     let default_queue_only = queue_name.is_none()
@@ -352,6 +368,12 @@ pub(super) async fn claim_matching(
     }
     let mut conn = begin_immediate(&storage.pool).await?;
     let result=async {
+    if let Some(request) = request
+        && !super::worker_version_pins::admits_claim(&mut conn, request).await?
+    {
+        return Ok(crate::worker_claim::WorkerClaimBatch::version_blocked());
+    }
+
 
     let now = Utc::now();
     let mut tasks = Vec::with_capacity(limit as usize);
@@ -1212,13 +1234,14 @@ pub(super) async fn upsert_registration(
     reg: &orch8_types::worker::WorkerRegistration,
 ) -> Result<(), StorageError> {
     sqlx::query(
-        "INSERT INTO worker_registrations (worker_id, handler_name, queue_name, version, tenant_id, last_seen_at)
-         VALUES (?1,?2,?3,?4,?5,?6)
+        "INSERT INTO worker_registrations (worker_id, handler_name, queue_name, version, tenant_id, last_seen_at, available_poll_slots)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)
          ON CONFLICT(worker_id, handler_name) DO UPDATE
          SET queue_name = excluded.queue_name,
              version = excluded.version,
              tenant_id = excluded.tenant_id,
-             last_seen_at = excluded.last_seen_at
+             last_seen_at = excluded.last_seen_at,
+             available_poll_slots = excluded.available_poll_slots
          WHERE COALESCE(worker_registrations.tenant_id, '') =
                COALESCE(excluded.tenant_id, '')",
     )
@@ -1228,6 +1251,7 @@ pub(super) async fn upsert_registration(
     .bind(&reg.version)
     .bind(&reg.tenant_id)
     .bind(ts(reg.last_seen_at))
+    .bind(reg.available_poll_slots.and_then(|slots| i32::try_from(slots).ok()))
     .execute(&storage.pool)
     .await?;
     Ok(())
@@ -1244,12 +1268,19 @@ pub(super) async fn list_registrations(
         Option<String>,
         Option<String>,
         String,
+        Option<i32>,
     );
     let rows: Vec<Row> = if let Some(secs) = seen_within_secs {
         let cutoff = ts(Utc::now() - chrono::Duration::seconds(secs));
         sqlx::query_as(
-            "SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at
-             FROM worker_registrations
+            "SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at, available_poll_slots
+             FROM (
+                SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at, available_poll_slots
+                FROM worker_registrations
+                UNION ALL
+                SELECT worker_id, handler_name, NULLIF(queue_name, ''), version, NULLIF(tenant_id, ''), last_seen_at, available_poll_slots
+                FROM worker_route_observations
+             ) AS registrations
              WHERE last_seen_at >= ?1
              ORDER BY last_seen_at DESC",
         )
@@ -1258,8 +1289,14 @@ pub(super) async fn list_registrations(
         .await?
     } else {
         sqlx::query_as(
-            "SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at
-             FROM worker_registrations
+            "SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at, available_poll_slots
+             FROM (
+                SELECT worker_id, handler_name, queue_name, version, tenant_id, last_seen_at, available_poll_slots
+                FROM worker_registrations
+                UNION ALL
+                SELECT worker_id, handler_name, NULLIF(queue_name, ''), version, NULLIF(tenant_id, ''), last_seen_at, available_poll_slots
+                FROM worker_route_observations
+             ) AS registrations
              ORDER BY last_seen_at DESC",
         )
         .fetch_all(&storage.pool)
@@ -1267,7 +1304,15 @@ pub(super) async fn list_registrations(
     };
     rows.into_iter()
         .map(
-            |(worker_id, handler_name, queue_name, version, tenant_id, last_seen_at)| {
+            |(
+                worker_id,
+                handler_name,
+                queue_name,
+                version,
+                tenant_id,
+                last_seen_at,
+                available_poll_slots,
+            )| {
                 Ok(orch8_types::worker::WorkerRegistration {
                     worker_id,
                     handler_name,
@@ -1275,6 +1320,8 @@ pub(super) async fn list_registrations(
                     version,
                     tenant_id,
                     last_seen_at: super::helpers::parse_ts(&last_seen_at)?,
+                    available_poll_slots: available_poll_slots
+                        .and_then(|slots| u32::try_from(slots).ok()),
                 })
             },
         )

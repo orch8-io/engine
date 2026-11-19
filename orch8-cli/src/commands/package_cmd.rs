@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use orch8_publisher::cdn::S3CdnBackend;
 use orch8_publisher::package::{
     PackageManifest, PackageRequirements, SignedPackage, TrustLevel, TrustPolicy, build_package,
-    check_trust, check_upgrade, contract_files, install_namespace, sequence_files, verify_package,
+    check_trust, install_namespace, verify_package,
 };
 use orch8_publisher::registry::PackageRegistryPublisher;
 use orch8_publisher::registry::{RegistryIndex, RegistryVersion, TransparencyLedger};
@@ -29,7 +29,8 @@ use orch8_publisher::registry::{RegistryIndex, RegistryVersion, TransparencyLedg
 use crate::OutputFormat;
 use crate::atomic_write;
 
-const LOCKFILE: &str = "orch8-packages.lock";
+#[path = "package_cmd_install.rs"]
+mod installation;
 
 #[derive(Subcommand)]
 pub enum PackageCmd {
@@ -87,7 +88,8 @@ pub enum PackageCmd {
         secret_key: String,
     },
     /// Verify, test, and install a package's sequences under its own
-    /// namespace. Never overwrites existing sequences.
+    /// namespace without overwriting existing sequences.
+    /// Rerun from the same directory to resume an interrupted install.
     Install {
         /// Local .orch8pkg file. Omit when using --name.
         file: Option<PathBuf>,
@@ -192,7 +194,7 @@ pub async fn run(client: &Client, base: &str, cmd: PackageCmd, format: OutputFor
                 download_registry_package(url, downloaded.path()).await?;
                 downloaded.path().to_path_buf()
             };
-            install(
+            installation::install(
                 client,
                 base,
                 &file,
@@ -557,195 +559,6 @@ fn inspect(path: &Path, format: OutputFormat) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_lines)]
-async fn install(
-    client: &Client,
-    base: &str,
-    path: &Path,
-    tenant_id: &str,
-    trusted_keys: &[String],
-    allow_untrusted: bool,
-    skip_contracts: bool,
-) -> Result<()> {
-    let pkg = read_package(path)?;
-
-    // 1. Integrity + signature.
-    verify_package(&pkg)?;
-    // 2. Trust.
-    let trust = check_trust(
-        &pkg,
-        &TrustPolicy {
-            trusted_keys: trusted_keys.to_vec(),
-            allow_untrusted,
-        },
-    )?;
-    if trust == TrustLevel::UntrustedAllowed {
-        eprintln!("WARNING: installing from an UNTRUSTED publisher (explicitly allowed)");
-    }
-
-    let manifest = &pkg.archive.manifest;
-    // 3. Lockfile downgrade check. A missing lockfile is fine; a corrupt one
-    // must not silently disable the check (step 7 would then overwrite it).
-    let mut lock: BTreeMap<String, Value> = match std::fs::read_to_string(LOCKFILE) {
-        Ok(raw) => serde_json::from_str(&raw).with_context(|| {
-            format!("{LOCKFILE} is corrupt — fix or remove it before installing")
-        })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(e) => bail!("read {LOCKFILE}: {e}"),
-    };
-    if let Some(entry) = lock.get(&manifest.name)
-        && let Some(installed) = entry["version"].as_str()
-    {
-        check_upgrade(installed, &manifest.version)?;
-    }
-
-    // 4. Run packaged contracts locally (offline, mocked, virtual time).
-    if !skip_contracts {
-        for (contract_path, contract_raw) in contract_files(&pkg.archive) {
-            let stem = contract_path
-                .trim_start_matches("contracts/")
-                .trim_end_matches(".contracts.json");
-            let seq_path = format!("sequences/{stem}.json");
-            let Some(seq_raw) = pkg.archive.files.get(&seq_path) else {
-                eprintln!("skipping {contract_path}: no matching {seq_path}");
-                continue;
-            };
-            let seq: orch8::SequenceDefinition = serde_json::from_str(seq_raw)?;
-            let suite: orch8_types::contract::ContractSuite = serde_json::from_str(contract_raw)?;
-            let report =
-                orch8::contract::run_suite(&seq, &suite, &orch8::contract::RunOptions::default())
-                    .await?;
-            if report.passed {
-                println!(
-                    "contracts: {} — {} case(s) passed",
-                    stem,
-                    report.cases.len()
-                );
-            } else {
-                for case in report.failed_cases() {
-                    eprintln!("contract FAILED [{stem} / {}]:", case.name);
-                    for failure in &case.failures {
-                        eprintln!("    {failure}");
-                    }
-                }
-                bail!("packaged contracts failed — refusing to install");
-            }
-        }
-    }
-
-    // 5. Conflict check + upload, all under the package's own namespace.
-    let namespace = install_namespace(&manifest.name);
-    let mut installed = Vec::new();
-    for (seq_path, seq_raw) in sequence_files(&pkg.archive) {
-        let mut seq: Value = serde_json::from_str(seq_raw)?;
-        let name = seq["name"]
-            .as_str()
-            .context("sequence missing name")?
-            .to_string();
-        let version = seq["version"].as_i64().unwrap_or(1);
-
-        // Never overwrite: abort when this (name, version) already exists.
-        let existing = client
-            .get(format!("{base}/sequences/by-name"))
-            .query(&[
-                ("tenant_id", tenant_id),
-                ("namespace", namespace.as_str()),
-                ("name", name.as_str()),
-                ("version", &version.to_string()),
-            ])
-            .send()
-            .await?;
-        // Only a genuine 404 means "does not exist"; any other non-success
-        // status (500, 401/403, …) must not silently degrade the
-        // never-overwrite guarantee.
-        let status = existing.status();
-        if status.is_success() {
-            bail!(
-                "sequence {namespace}/{name} v{version} already exists — refusing to \
-                 overwrite (uninstall or bump the package version)"
-            );
-        } else if status.as_u16() != 404 {
-            bail!(
-                "conflict check for {namespace}/{name} v{version} failed: server returned \
-                 {status} — refusing to install"
-            );
-        }
-
-        seq["id"] = json!(uuid::Uuid::now_v7());
-        seq["tenant_id"] = json!(tenant_id);
-        seq["namespace"] = json!(namespace);
-        seq["created_at"] = json!(chrono::Utc::now().to_rfc3339());
-        let resp = client
-            .post(format!("{base}/sequences"))
-            .json(&seq)
-            .send()
-            .await?;
-        if !resp.status().is_success() {
-            bail!(
-                "failed to install {seq_path}: {} {}",
-                resp.status(),
-                resp.text().await.unwrap_or_default()
-            );
-        }
-        let created: Value = resp.json().await?;
-        installed.push((
-            name,
-            version,
-            created["id"].as_str().unwrap_or("").to_string(),
-        ));
-    }
-
-    // 6. Preflight every installed sequence and show what still needs
-    //    configuring (workers, credentials, plugins).
-    println!(
-        "installed {} v{} → namespace {namespace} ({} sequence(s))",
-        manifest.name,
-        manifest.version,
-        installed.len()
-    );
-    for (name, version, id) in &installed {
-        let resp = client
-            .get(format!("{base}/sequences/{id}/preflight"))
-            .send()
-            .await?;
-        if let Ok(report) = resp.json::<Value>().await {
-            println!(
-                "  preflight {name} v{version}: {}",
-                report["overall"].as_str().unwrap_or("?")
-            );
-            for check in report["checks"].as_array().into_iter().flatten() {
-                let status = check["status"].as_str().unwrap_or("?");
-                if status != "pass" {
-                    println!(
-                        "    [{}] {}: {}",
-                        status.to_uppercase(),
-                        check["id"].as_str().unwrap_or("?"),
-                        check["summary"].as_str().unwrap_or("")
-                    );
-                }
-            }
-        }
-    }
-
-    // 7. Record provenance in the lockfile.
-    lock.insert(
-        manifest.name.clone(),
-        json!({
-            "version": manifest.version,
-            "content_hash": pkg.content_hash,
-            "public_key": pkg.public_key,
-            "namespace": namespace,
-            "installed_at": chrono::Utc::now().to_rfc3339(),
-        }),
-    );
-    atomic_write(
-        Path::new(LOCKFILE),
-        serde_json::to_string_pretty(&lock)?.as_bytes(),
-    )?;
-    println!("provenance recorded in {LOCKFILE}");
     Ok(())
 }
 

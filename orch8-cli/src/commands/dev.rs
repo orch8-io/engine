@@ -424,6 +424,7 @@ pub struct DevSession {
     last_progress: Instant,
     stall_hinted: bool,
     unknown: Vec<String>,
+    external_workers: bool,
 }
 
 impl DevSession {
@@ -443,6 +444,7 @@ impl DevSession {
             last_progress: Instant::now(),
             stall_hinted: false,
             unknown: Vec::new(),
+            external_workers: false,
         }
     }
 
@@ -454,7 +456,7 @@ impl DevSession {
         opts: CreateInstanceOptions,
     ) -> Result<InstanceId> {
         self.unknown = unknown_handlers(loaded, &self.mock_names);
-        for handler in &self.unknown {
+        for handler in self.unknown.iter().filter(|_| !self.external_workers) {
             eprintln!(
                 "{} handler {} is not registered — steps using it wait for an \
                  external worker and will stall; add --mock {handler}='{{...}}' \
@@ -549,7 +551,13 @@ impl DevSession {
     }
 
     fn print_stall_hint(&self) {
-        if self.unknown.is_empty() {
+        if self.external_workers && !self.unknown.is_empty() {
+            eprintln!(
+                "{} waiting for external workers serving {}",
+                "hint:".yellow().bold(),
+                self.unknown.join(", ").bold(),
+            );
+        } else if self.unknown.is_empty() {
             eprintln!(
                 "{} no progress — the instance is waiting (signal/input/timer); \
                  try --skip-timers for delays, or `orch8 signal` against a real server",
@@ -862,6 +870,7 @@ pub async fn run(cmd: DevCmd, api_key: Option<String>, tenant_id: Option<String>
     };
     let engine = build_engine_with_storage(&mocks, shared_clock, storage).await?;
     let mut session = DevSession::new(engine.clone(), manual_clock, mock_names);
+    session.external_workers = workers.is_some();
 
     let mut dir_watch = cmd
         .workflows
@@ -1069,7 +1078,11 @@ async fn dev_loop(
             }
             StepOutcome::Idle => {
                 consecutive_idle_ticks = consecutive_idle_ticks.saturating_add(1);
-                if once && consecutive_idle_ticks >= 3 && !session.unknown.is_empty() {
+                if once
+                    && consecutive_idle_ticks >= 3
+                    && !session.external_workers
+                    && !session.unknown.is_empty()
+                {
                     session.print_stall_hint();
                     bail!(
                         "instance cannot make progress: unregistered handler(s): {}",

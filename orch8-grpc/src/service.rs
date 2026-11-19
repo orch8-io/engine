@@ -175,6 +175,32 @@ impl Orch8GrpcService {
 const WORKER_STREAM_MAX_IN_FLIGHT: u32 = 256;
 const WORKER_STREAM_MAX_MESSAGE_BYTES: u32 = 1024 * 1024;
 const WORKER_STREAM_HEARTBEAT_SECS: u32 = 15;
+
+#[derive(Default)]
+struct WorkerStreamDemandState {
+    next_handler: usize,
+    version: Option<String>,
+}
+
+#[allow(clippy::result_large_err)]
+fn reported_worker_version<T>(request: &Request<T>) -> Result<Option<&str>, Status> {
+    let mut versions = request.metadata().get_all("x-orch8-worker-version").iter();
+    let Some(version) = versions.next() else {
+        return Ok(None);
+    };
+    let version = version
+        .to_str()
+        .map_err(|_| Status::invalid_argument("worker version must be ASCII"))?;
+    if version.trim() != version
+        || version.is_empty()
+        || version.len() > orch8_types::worker::MAX_WORKER_VERSION_BYTES
+        || version.contains(',')
+        || versions.next().is_some()
+    {
+        return Err(Status::invalid_argument("invalid worker version metadata"));
+    }
+    Ok(Some(version))
+}
 const MIN_TRANSFER_CHUNK_BYTES: u32 = 4 * 1024;
 const MAX_TRANSFER_CHUNK_BYTES: u32 = 1024 * 1024;
 use orch8_storage::telemetry_validation::MAX_TELEMETRY_EVENTS;
@@ -379,6 +405,19 @@ struct PreparedArtifactTransfer {
 }
 
 impl Orch8GrpcService {
+    async fn record_worker_observation(
+        &self,
+        observation: &orch8_storage::worker_inventory::WorkerObservation<'_>,
+    ) {
+        if let Err(error) = self.storage.record_worker_observation(observation).await {
+            tracing::warn!(
+                %error,
+                worker_id = observation.worker_id,
+                "failed to record gRPC worker observation"
+            );
+        }
+    }
+
     async fn persist_runtime_capabilities(
         &self,
         json: &str,
@@ -624,6 +663,7 @@ impl Orch8GrpcService {
         outstanding: &mut std::collections::HashSet<Uuid>,
         runtime_id: &mut Option<RuntimeId>,
         draining: &mut bool,
+        demand_state: &mut WorkerStreamDemandState,
         sender: &tokio::sync::mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
     ) -> Result<(), Status> {
         if prost::Message::encoded_len(&frame)
@@ -664,10 +704,14 @@ impl Orch8GrpcService {
                         .map_err(storage_err)?,
                     _ => None,
                 };
-                for handler in &open.handler_names {
+                let (earlier, later) = open.handler_names.split_at(demand_state.next_handler);
+                for handler in later.iter().chain(earlier) {
                     if remaining == 0 {
                         break;
                     }
+                    // Resume after the last handler visited when a demand is filled.
+                    demand_state.next_handler =
+                        (demand_state.next_handler + 1) % open.handler_names.len();
                     let limit = u32::try_from(remaining).unwrap_or(u32::MAX);
                     let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
                         claim_principal.clone(),
@@ -678,6 +722,7 @@ impl Orch8GrpcService {
                         advertised.clone(),
                         limit,
                     )
+                    .and_then(|claim| claim.with_version(demand_state.version.clone()))
                     .map_err(storage_err)?;
                     let batch = self
                         .storage
@@ -1816,6 +1861,7 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<tonic::Streaming<proto::WorkerStreamClient>>,
     ) -> Result<Response<Self::WorkerStreamStream>, Status> {
         let caller_tenant = caller_tenant(&req).cloned();
+        let version = reported_worker_version(&req)?.map(str::to_owned);
         let claim_principal = crate::auth::worker_claim_principal(&req);
         let principal = req
             .extensions()
@@ -1875,6 +1921,10 @@ impl Orch8Service for Orch8GrpcService {
                 "worker id, handlers, or feature list exceeds protocol bounds",
             ));
         }
+        let mut open = open;
+        let mut unique_handlers = std::collections::HashSet::new();
+        open.handler_names
+            .retain(|handler| unique_handlers.insert(handler.clone()));
         let max_in_flight = open.max_in_flight.clamp(1, WORKER_STREAM_MAX_IN_FLIGHT);
         let features = negotiated_worker_features(&open.supported_features);
         if !features.iter().any(|feature| feature == "task_delivery") {
@@ -1923,6 +1973,27 @@ impl Orch8Service for Orch8GrpcService {
         let mut draining = initial_capabilities
             .as_ref()
             .is_some_and(|capabilities| capabilities.draining);
+        let stream_id = Uuid::new_v4();
+        let observation = orch8_storage::worker_inventory::WorkerObservation {
+            tenant: tenant.as_ref(),
+            worker_id: &open.worker_id,
+            handlers: &open.handler_names,
+            queue_name: None,
+            all_queues: !matches!(
+                claim_principal,
+                orch8_storage::worker_claim::WorkerClaimPrincipal::Runtime { .. }
+            ),
+            version: version.as_deref(),
+            transport: orch8_storage::worker_inventory::WorkerTransport::GrpcStream(stream_id),
+            runtime_id: initial_capabilities
+                .as_ref()
+                .map(|capabilities| capabilities.runtime_id),
+            shared_runtime: None,
+            available_poll_slots: None,
+            draining,
+        };
+        self.record_worker_observation(&observation).await;
+        let all_queues = observation.all_queues;
         let service = self.clone();
         let auth_storage = Arc::clone(&self.storage);
         let (terminal_sender, terminal_receiver) = tokio::sync::oneshot::channel();
@@ -1964,6 +2035,11 @@ impl Orch8Service for Orch8GrpcService {
                 }
                 let mut runtime_id =
                     initial_capabilities.map(|capabilities| capabilities.runtime_id);
+                let mut observations = tokio::time::interval(std::time::Duration::from_secs(20));
+                let mut demand_state = WorkerStreamDemandState {
+                    next_handler: 0,
+                    version,
+                };
                 loop {
                     // Stop accepting frames (Demand included) on shutdown and end
                     // the response stream so graceful shutdown can complete; the
@@ -1973,6 +2049,22 @@ impl Orch8Service for Orch8GrpcService {
                         () = service.shutdown.cancelled() => {
                             let _ = sender.try_send(Err(Status::unavailable("server shutting down")));
                             break;
+                        }
+                        _ = observations.tick() => {
+                            service.record_worker_observation(&orch8_storage::worker_inventory::WorkerObservation {
+                                tenant: tenant.as_ref(),
+                                worker_id: &open.worker_id,
+                                handlers: &open.handler_names,
+                                queue_name: None,
+                                all_queues,
+                                version: demand_state.version.as_deref(),
+                                transport: orch8_storage::worker_inventory::WorkerTransport::GrpcStream(stream_id),
+                                runtime_id,
+                                shared_runtime: None,
+                                available_poll_slots: None,
+                                draining,
+                            }).await;
+                            continue;
                         }
                         frame = inbound.message() => frame,
                     };
@@ -1985,6 +2077,10 @@ impl Orch8Service for Orch8GrpcService {
                         let _ = sender.send(Err(status)).await;
                         break;
                     }
+                    let capability_refresh = matches!(
+                        frame.payload,
+                        Some(proto::worker_stream_client::Payload::RuntimeHeartbeat(_))
+                    );
                     let result = service
                         .handle_worker_stream_frame(
                             frame,
@@ -1995,12 +2091,16 @@ impl Orch8Service for Orch8GrpcService {
                             &mut outstanding,
                             &mut runtime_id,
                             &mut draining,
+                            &mut demand_state,
                             &sender,
                         )
                         .await;
                     if let Err(status) = result {
                         let _ = sender.send(Err(status)).await;
                         break;
+                    }
+                    if capability_refresh {
+                        observations.reset_immediately();
                     }
                 }
             };
@@ -2014,6 +2114,9 @@ impl Orch8Service for Orch8GrpcService {
                 Box::pin(operation),
             )
             .await;
+            if let Err(error) = service.storage.close_worker_observation(stream_id).await {
+                tracing::warn!(%error, %stream_id, "failed to close gRPC worker observation");
+            }
         });
 
         Ok(Response::new(Box::pin(
@@ -2027,23 +2130,39 @@ impl Orch8Service for Orch8GrpcService {
     ) -> Result<Response<proto::PollTasksResponse>, Status> {
         let scoped = crate::auth::caller_tenant(&req).cloned();
         let principal = crate::auth::worker_claim_principal(&req);
+        let version = reported_worker_version(&req)?.map(str::to_owned);
         let inner = req.into_inner();
         let limit = inner.limit.min(1000);
         let request = orch8_storage::worker_claim::WorkerClaimRequest::new(
             principal,
-            inner.handler_name,
-            inner.worker_id,
-            scoped,
+            inner.handler_name.clone(),
+            inner.worker_id.clone(),
+            scoped.clone(),
             None,
             None,
             limit,
         )
+        .and_then(|claim| claim.with_version(version.clone()))
         .map_err(storage_err)?;
         let tasks = self
             .storage
             .claim_worker_tasks_with_authority(&request)
             .await
             .map_err(storage_err)?;
+        self.record_worker_observation(&orch8_storage::worker_inventory::WorkerObservation {
+            tenant: scoped.as_ref(),
+            worker_id: &inner.worker_id,
+            handlers: std::slice::from_ref(&inner.handler_name),
+            queue_name: None,
+            all_queues: true,
+            version: version.as_deref(),
+            transport: orch8_storage::worker_inventory::WorkerTransport::GrpcUnary,
+            runtime_id: None,
+            shared_runtime: None,
+            available_poll_slots: None,
+            draining: false,
+        })
+        .await;
         let json: Result<Vec<_>, _> = tasks.iter().map(|t| to_json_string(t)).collect();
         Ok(Response::new(proto::PollTasksResponse {
             tasks_json: json?,

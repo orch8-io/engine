@@ -2323,6 +2323,18 @@ public protocol MobileEngineProtocol: AnyObject, Sendable {
     func importContinuityCapsule(capsuleJson: String, payloadBase64: String, payloadKeyBase64: String, destinationRuntimeId: String, destinationInstanceId: String) throws  -> ContinuityImportResult
 
     /**
+     * Install packaged first-launch definitions signed by the app's configured
+     * root. Existing definitions and remote manifest acceptance take precedence.
+     */
+    func installBundledCatalog(packageJson: String) throws  -> UInt32
+
+    /**
+     * Install a signed seed and report whether a synced manifest owns the
+     * catalog or all bundled names were already present.
+     */
+    func installBundledCatalogWithResult(packageJson: String) throws  -> BundledCatalogInstall
+
+    /**
      * Every journaled delegation, oldest first.
      */
     func listDelegations() throws  -> [DelegationStatus]
@@ -2822,6 +2834,34 @@ open func importContinuityCapsule(capsuleJson: String, payloadBase64: String, pa
         FfiConverterString.lower(payloadKeyBase64),
         FfiConverterString.lower(destinationRuntimeId),
         FfiConverterString.lower(destinationInstanceId),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Install packaged first-launch definitions signed by the app's configured
+     * root. Existing definitions and remote manifest acceptance take precedence.
+     */
+open func installBundledCatalog(packageJson: String)throws  -> UInt32  {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_install_bundled_catalog(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(packageJson),uniffiCallStatus
+    )
+})
+}
+
+    /**
+     * Install a signed seed and report whether a synced manifest owns the
+     * catalog or all bundled names were already present.
+     */
+open func installBundledCatalogWithResult(packageJson: String)throws  -> BundledCatalogInstall  {
+    return try  FfiConverterTypeBundledCatalogInstall_lift(try rustCallWithError(FfiConverterTypeMobileError_lift) {
+        uniffiCallStatus in
+    uniffi_orch8_mobile_fn_method_mobileengine_install_bundled_catalog_with_result(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(packageJson),uniffiCallStatus
     )
 })
 }
@@ -3838,6 +3878,67 @@ public func FfiConverterTypeBackgroundRunResult_lift(_ buf: RustBuffer) throws -
 #endif
 public func FfiConverterTypeBackgroundRunResult_lower(_ value: BackgroundRunResult) -> RustBuffer {
     return FfiConverterTypeBackgroundRunResult.lower(value)
+}
+
+
+/**
+ * Result of a first-launch catalog installation.
+ */
+public struct BundledCatalogInstall: Equatable, Hashable {
+    public let disposition: BundledCatalogDisposition
+    public let installed: UInt32
+    public let skipped: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(disposition: BundledCatalogDisposition, installed: UInt32, skipped: UInt32) {
+        self.disposition = disposition
+        self.installed = installed
+        self.skipped = skipped
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension BundledCatalogInstall: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBundledCatalogInstall: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BundledCatalogInstall {
+        return
+            try BundledCatalogInstall(
+                disposition: FfiConverterTypeBundledCatalogDisposition.read(from: &buf),
+                installed: FfiConverterUInt32.read(from: &buf),
+                skipped: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: BundledCatalogInstall, into buf: inout [UInt8]) {
+        FfiConverterTypeBundledCatalogDisposition.write(value.disposition, into: &buf)
+        FfiConverterUInt32.write(value.installed, into: &buf)
+        FfiConverterUInt32.write(value.skipped, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBundledCatalogInstall_lift(_ buf: RustBuffer) throws -> BundledCatalogInstall {
+    return try FfiConverterTypeBundledCatalogInstall.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBundledCatalogInstall_lower(_ value: BundledCatalogInstall) -> RustBuffer {
+    return FfiConverterTypeBundledCatalogInstall.lower(value)
 }
 
 
@@ -6255,6 +6356,82 @@ public func FfiConverterTypeWorkerWindowResult_lower(_ value: WorkerWindowResult
 }
 
 
+/**
+ * Whether first-launch installation could seed the local catalog.
+ */
+
+public enum BundledCatalogDisposition: Equatable, Hashable {
+
+    case seeded
+    case alreadyPresent
+    case manifestOwned
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension BundledCatalogDisposition: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeBundledCatalogDisposition: FfiConverterRustBuffer {
+    typealias SwiftType = BundledCatalogDisposition
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> BundledCatalogDisposition {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .seeded
+
+        case 2: return .alreadyPresent
+
+        case 3: return .manifestOwned
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: BundledCatalogDisposition, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .seeded:
+            writeInt(&buf, Int32(1))
+
+
+        case .alreadyPresent:
+            writeInt(&buf, Int32(2))
+
+
+        case .manifestOwned:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBundledCatalogDisposition_lift(_ buf: RustBuffer) throws -> BundledCatalogDisposition {
+    return try FfiConverterTypeBundledCatalogDisposition.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBundledCatalogDisposition_lower(_ value: BundledCatalogDisposition) -> RustBuffer {
+    return FfiConverterTypeBundledCatalogDisposition.lower(value)
+}
+
+
+
 
 public enum DeviceCapability: Equatable, Hashable {
 
@@ -7510,6 +7687,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_import_continuity_capsule() != 19841) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_install_bundled_catalog() != 16051) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_orch8_mobile_checksum_method_mobileengine_install_bundled_catalog_with_result() != 12659) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_orch8_mobile_checksum_method_mobileengine_list_delegations() != 23937) {

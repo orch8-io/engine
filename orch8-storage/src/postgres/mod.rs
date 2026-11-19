@@ -69,6 +69,7 @@ mod worker_claim;
 mod worker_claim_candidates;
 mod worker_commands;
 mod worker_dispatch;
+mod worker_inventory;
 mod worker_invocations;
 mod worker_outcome;
 mod worker_reconciliation;
@@ -1479,6 +1480,22 @@ impl crate::OutputStore for PostgresStorage {
         outputs::delete_by_id(self, id).await
     }
 
+    async fn get_replay_output_keys(
+        &self,
+        instance_id: InstanceId,
+        max_history_rows: u32,
+    ) -> Result<Option<Vec<crate::ReplayOutputKey>>, StorageError> {
+        outputs::replay_keys(self, instance_id, max_history_rows).await
+    }
+
+    async fn get_inline_output_by_id(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        outputs::inline_by_id(self, instance_id, id).await
+    }
+
     async fn get_outputs_page(
         &self,
         instance_id: InstanceId,
@@ -1716,7 +1733,7 @@ impl crate::WorkerStore for PostgresStorage {
         request: &crate::worker_claim::WorkerClaimRequest,
     ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
         request.validate()?;
-        let principal = Some(&request.principal);
+        let authority = Some(request);
         if let Some(capabilities) = &request.capabilities {
             return workers::claim_matching(
                 self,
@@ -1726,7 +1743,7 @@ impl crate::WorkerStore for PostgresStorage {
                 request.queue_name.as_deref(),
                 crate::worker_claim::ClaimRuntime {
                     capabilities,
-                    principal,
+                    request: authority,
                 },
                 request.limit,
             )
@@ -1741,7 +1758,7 @@ impl crate::WorkerStore for PostgresStorage {
                     &request.worker_id,
                     tenant,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
@@ -1752,7 +1769,7 @@ impl crate::WorkerStore for PostgresStorage {
                     &request.handler_name,
                     &request.worker_id,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
@@ -1763,7 +1780,7 @@ impl crate::WorkerStore for PostgresStorage {
                     &request.worker_id,
                     tenant,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
@@ -1773,12 +1790,11 @@ impl crate::WorkerStore for PostgresStorage {
                     &request.handler_name,
                     &request.worker_id,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
         }
-        .and_then(|tasks| crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new()))
     }
     async fn get_worker_delegation_context(
         &self,
@@ -1852,7 +1868,9 @@ impl crate::WorkerStore for PostgresStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim(self, handler_name, worker_id, limit, None).await
+        workers::claim(self, handler_name, worker_id, limit, None)
+            .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn claim_worker_tasks_for_tenant(
@@ -1862,7 +1880,9 @@ impl crate::WorkerStore for PostgresStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None).await
+        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None)
+            .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn claim_worker_tasks_matching(
@@ -1882,7 +1902,7 @@ impl crate::WorkerStore for PostgresStorage {
             queue_name,
             crate::worker_claim::ClaimRuntime {
                 capabilities,
-                principal: None,
+                request: None,
             },
             limit,
         )
@@ -2134,6 +2154,7 @@ impl crate::WorkerStore for PostgresStorage {
     ) -> Result<Vec<WorkerTask>, StorageError> {
         misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit, None)
             .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn claim_worker_tasks_from_queue_for_tenant(
@@ -2154,6 +2175,25 @@ impl crate::WorkerStore for PostgresStorage {
             None,
         )
         .await
+        .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
+    }
+
+    async fn record_worker_observation(
+        &self,
+        observation: &crate::worker_inventory::WorkerObservation<'_>,
+    ) -> Result<(), StorageError> {
+        worker_inventory::record(&self.pool, observation).await
+    }
+
+    async fn close_worker_observation(&self, session_id: Uuid) -> Result<(), StorageError> {
+        worker_inventory::close(&self.pool, session_id).await
+    }
+
+    async fn worker_route_observations(
+        &self,
+        route: &crate::worker_inventory::WorkerRoute<'_>,
+    ) -> Result<Vec<crate::worker_inventory::RouteObservation>, StorageError> {
+        worker_inventory::route(&self.pool, route).await
     }
 
     async fn upsert_worker_registration(
@@ -2330,6 +2370,39 @@ impl crate::WorkerStore for PostgresStorage {
 
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError> {
         worker_commands::delete(self, id).await
+    }
+
+    async fn list_worker_version_rollouts(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::worker::WorkerVersionRollout>, StorageError> {
+        worker_version_pins::list_rollouts(self, tenant_id).await
+    }
+
+    async fn stage_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+        min_version: &str,
+    ) -> Result<orch8_types::worker::WorkerVersionRollout, StorageError> {
+        worker_version_pins::stage(self, tenant_id, handler_name, min_version).await
+    }
+
+    async fn change_worker_version_rollout(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+        revision: uuid::Uuid,
+        action: orch8_types::worker::WorkerVersionRolloutAction,
+    ) -> Result<Option<orch8_types::worker::WorkerVersionRollout>, StorageError> {
+        worker_version_pins::change(self, tenant_id, handler_name, revision, action).await
+    }
+
+    async fn placement_queue_evidence(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+    ) -> Result<Vec<orch8_types::placement::PlacementQueueEvidence>, StorageError> {
+        placement::queue_evidence(self, tenant_id).await
     }
 
     async fn upsert_worker_version_pin(

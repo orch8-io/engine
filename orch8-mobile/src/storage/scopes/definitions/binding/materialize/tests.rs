@@ -13,6 +13,7 @@ use orch8_types::{
     worker::WorkerTask,
 };
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 const SERVER: &str = "https://engine.example/";
 const REQUEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 async fn initialize(
@@ -32,7 +33,9 @@ async fn initialize(
         )
         .await?;
     storage
-        .initialize_remote_instance_for_run(peer, context, &expected, limits, stop)
+        .initialize_remote_instance_for_run(peer, context, &expected, limits, &|| {
+            !stop.is_cancelled()
+        })
         .await
 }
 fn limits() -> InstanceLimits {
@@ -650,13 +653,7 @@ async fn changed_prepared_identity_cannot_allocate_or_pin_a_different_root() {
         }
         assert!(
             storage
-                .initialize_remote_instance_for_run(
-                    &peer,
-                    &context,
-                    &expected,
-                    limits(),
-                    &CancellationToken::new()
-                )
+                .initialize_remote_instance_for_run(&peer, &context, &expected, limits(), &|| true)
                 .await
                 .is_err(),
             "{mismatch}"

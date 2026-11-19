@@ -527,6 +527,7 @@ async fn evaluate_waiting_node_returns_more_work_with_waiting() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -807,6 +808,7 @@ async fn ensure_tree_sub_sequence_node() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -1336,6 +1338,7 @@ async fn sla_deadline_only_checks_waiting_nodes() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -1934,6 +1937,7 @@ async fn dispatch_sub_sequence_creates_child() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -1998,6 +2002,7 @@ async fn dispatch_sub_sequence_waits_for_child() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -2062,6 +2067,7 @@ async fn dispatch_sub_sequence_child_completed_completes_node() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -2138,6 +2144,7 @@ async fn dispatch_sub_sequence_child_failed_fails_node() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -2296,6 +2303,7 @@ async fn eval_outcome_more_work_has_waiting_true() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -2435,6 +2443,7 @@ async fn instance_stays_running_on_more_work() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,
@@ -2501,6 +2510,7 @@ async fn instance_transitions_to_waiting_when_all_nodes_waiting() {
         deprecated: false,
         status: SequenceStatus::default(),
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-flow".into(),
             version: None,

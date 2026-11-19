@@ -1415,6 +1415,37 @@ impl crate::ContinuityStore for PostgresStorage {
             .collect()
     }
 
+    async fn list_unknown_effect_receipts(
+        &self,
+        tenant_id: &TenantId,
+        limit: u32,
+        after: Option<(DateTime<Utc>, EffectId)>,
+    ) -> Result<Vec<EffectReceipt>, StorageError> {
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "SELECT record FROM effect_receipts WHERE state = 'unknown' AND tenant_id = ",
+        );
+        query.push_bind(tenant_id.as_str());
+        if let Some((timestamp, id)) = after {
+            query
+                .push(" AND (updated_at, id) > (")
+                .push_bind(timestamp)
+                .push(", ")
+                .push_bind(*id.as_uuid())
+                .push(")");
+        }
+        query
+            .push(" ORDER BY updated_at, id LIMIT ")
+            .push_bind(i64::from(limit.min(101)));
+        let rows = query
+            .build()
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| StorageError::Query(error.to_string()))?;
+        rows.into_iter()
+            .map(|row| decode(row.get("record")))
+            .collect()
+    }
+
     async fn collect_compensation_effects(
         &self,
         tenant_id: &TenantId,

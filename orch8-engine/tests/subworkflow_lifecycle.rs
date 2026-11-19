@@ -7,10 +7,11 @@ use serde_json::json;
 
 use orch8_engine::testing::TestEngine;
 use orch8_storage::testing::backends::{BackendKind, TestBackend};
+use orch8_storage::testing::faulty::FaultStorage;
 use orch8_storage::testing::fixtures::{SequenceBuilder, step};
-use orch8_types::ids::InstanceId;
+use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::{InstanceState, TaskInstance};
-use orch8_types::sequence::{BlockDefinition, SequenceDefinition, SubSequenceDef};
+use orch8_types::sequence::{BlockDefinition, ChildResultMode, SequenceDefinition, SubSequenceDef};
 
 const KINDS: [BackendKind; 2] = [BackendKind::Sqlite, BackendKind::Postgres];
 
@@ -23,11 +24,108 @@ fn gate(id: &str) -> BlockDefinition {
 
 fn sub_sequence(id: &str, target: &SequenceDefinition) -> BlockDefinition {
     BlockDefinition::SubSequence(Box::new(SubSequenceDef {
-        id: orch8_types::ids::BlockId::new(id),
+        child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
+        id: BlockId::new(id),
         sequence_name: target.name.clone(),
         version: None,
         input: json!({}),
     }))
+}
+
+#[tokio::test]
+async fn child_result_references_bound_nested_output_materialization() {
+    const DEPTH: usize = 4;
+    let payload = json!({"body": "field inspection evidence\n".repeat(512)});
+    let mut measurements = Vec::new();
+    for mode in [ChildResultMode::LegacyOutputs, ChildResultMode::Reference] {
+        let backend = TestBackend::open(BackendKind::Sqlite).await.unwrap();
+        let (storage, calls) = FaultStorage::wrap(backend.storage.clone());
+        let output = payload.clone();
+        let engine = TestEngine::builder()
+            .storage(storage)
+            .register("produce_evidence", move |_| {
+                let output = output.clone();
+                async move { Ok(output) }
+            })
+            .build()
+            .await;
+        let mut sequence = SequenceBuilder::new("t")
+            .block(BlockDefinition::Step(Box::new(step(
+                "evidence",
+                "produce_evidence",
+            ))))
+            .build();
+        for _ in 0..DEPTH {
+            engine.storage.create_sequence(&sequence).await.unwrap();
+            let mut block = sub_sequence("child", &sequence);
+            if let BlockDefinition::SubSequence(child) = &mut block {
+                child.child_result = mode;
+            }
+            sequence = SequenceBuilder::new("t").block(block).build();
+        }
+        let root = engine.start(&sequence).await;
+        assert_eq!(
+            run_to_terminal(&engine, root).await.state,
+            InstanceState::Completed
+        );
+        let full_reads = calls.calls("get_all_outputs");
+
+        let mut parent = root;
+        let mut child_payload_read_bytes = 0;
+        let mut child_rows_materialized_bytes = 0;
+        let mut ancestor_payload_bytes = 0;
+        for _ in 0..DEPTH {
+            let child = only_child(&engine, parent).await.id;
+            let output = engine
+                .storage
+                .get_block_output(parent, &BlockId::new("child"))
+                .await
+                .unwrap()
+                .unwrap()
+                .output;
+            if mode == ChildResultMode::Reference {
+                assert_eq!(output, json!({"child_instance_id": child}));
+            } else {
+                let records = engine.storage.get_all_outputs(child).await.unwrap();
+                child_payload_read_bytes += records
+                    .iter()
+                    .map(|record| serde_json::to_vec(&record.output).unwrap().len())
+                    .sum::<usize>();
+                child_rows_materialized_bytes += serde_json::to_vec(&records).unwrap().len();
+                assert_eq!(output, serde_json::to_value(records).unwrap());
+            }
+            ancestor_payload_bytes += serde_json::to_vec(&output).unwrap().len();
+            parent = child;
+        }
+        let leaf = engine
+            .storage
+            .get_block_output(parent, &BlockId::new("evidence"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(leaf.output, payload);
+        measurements.push((
+            full_reads,
+            child_payload_read_bytes,
+            child_rows_materialized_bytes,
+            ancestor_payload_bytes,
+        ));
+    }
+    let [legacy, reference] = measurements.as_slice() else {
+        unreachable!()
+    };
+    assert_eq!(
+        usize::try_from(legacy.0).unwrap(),
+        usize::try_from(reference.0).unwrap() + DEPTH
+    );
+    assert!(legacy.1 >= serde_json::to_vec(&payload).unwrap().len() * DEPTH);
+    assert_eq!(legacy.2, legacy.3);
+    assert_eq!(reference.1, 0);
+    assert_eq!(reference.2, 0);
+    assert_eq!(reference.3, 60 * DEPTH);
+    eprintln!(
+        "Legacy {legacy:?} and reference {reference:?} (full reads, child payload bytes read, child records serialized, ancestor payload bytes stored)"
+    );
 }
 
 async fn engine_on(kind: BackendKind) -> Option<(TestBackend, TestEngine)> {

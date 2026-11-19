@@ -41,6 +41,25 @@ pub const LOCAL_HANDLERS: &[&str] = &[
 // guards, empty routes, composite blocks) and retries with large tick budgets.
 // This limits interpreter dispatches, not bytes or expression complexity.
 const MAX_OPERATIONS: u32 = 10_000;
+const MAX_TRACE_DETAIL_BYTES: usize = 256 * 1024;
+
+/// Count serialized bytes and stop at the remaining budget without
+/// allocating a second serialized copy of the payload.
+struct DetailBudget(usize);
+
+impl std::io::Write for DetailBudget {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_sub(bytes.len())
+            .ok_or(std::io::ErrorKind::WriteZero)?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// Default instance id used for `ab_split` selection when none is given.
 const DEFAULT_INSTANCE_ID: &str = "00000000-0000-7000-8000-000000000001";
@@ -130,6 +149,8 @@ struct Interp<'a> {
     timeline: Vec<Value>,
     would_call: Vec<Value>,
     notes: Vec<String>,
+    trace_detail_bytes: usize,
+    trace_truncated: bool,
 }
 
 /// Run `sequence` to completion (or failure / tick limit) in virtual time.
@@ -155,6 +176,8 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
         timeline: Vec::new(),
         would_call: Vec::new(),
         notes: Vec::new(),
+        trace_detail_bytes: MAX_TRACE_DETAIL_BYTES,
+        trace_truncated: false,
     };
     if sequence.interceptors.is_some() {
         interp
@@ -184,12 +207,14 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
         }
     };
     json!({
+        "verification_scope": "simulated_preview",
         "status": status,
         "error": error,
         "virtual_duration_ms": interp.now,
         "ticks": interp.ticks,
         "operations": interp.operations,
         "timeline": interp.timeline,
+        "trace_truncated": interp.trace_truncated,
         "outputs": interp.outputs,
         "context": { "data": interp.context.data, "config": interp.context.config },
         "state": interp.state,
@@ -299,12 +324,33 @@ impl Interp<'_> {
         expression::is_truthy(&self.expr_value(expr))
     }
 
-    fn push(&mut self, entry: Value) -> usize {
+    fn push(&mut self, entry: Value) {
         self.timeline.push(entry);
-        self.timeline.len() - 1
     }
 
-    fn decision(&mut self, id: &str, path: &str, kind: &str, detail: Value) {
+    fn trace_detail(&mut self, entry: &mut Value, field: &str, detail: &Value) {
+        // Reserve room for the field key, separators, and escaping.
+        let mut remaining = DetailBudget(self.trace_detail_bytes.saturating_sub(field.len() + 6));
+        if serde_json::to_writer(&mut remaining, detail).is_ok() {
+            self.trace_detail_bytes = remaining.0;
+            entry[field] = detail.clone();
+        } else {
+            self.trace_truncated = true;
+            entry["detail_omitted"] = Value::Bool(true);
+        }
+    }
+
+    fn record_call(&mut self, id: &str, handler: &str, params: &Value) {
+        let mut entry = json!({
+            "step_id": id,
+            "handler": handler,
+            "at_virtual_ms": self.now,
+        });
+        self.trace_detail(&mut entry, "params", params);
+        self.would_call.push(entry);
+    }
+
+    fn decision(&mut self, id: &str, path: &str, kind: &str, detail: &Value) {
         let mut entry = json!({
             "step_id": id,
             "path": path,
@@ -314,7 +360,7 @@ impl Interp<'_> {
             "finished_at_virtual_ms": self.now,
             "status": "decision",
         });
-        entry["output"] = detail;
+        self.trace_detail(&mut entry, "output", detail);
         self.push(entry);
     }
 
@@ -342,10 +388,10 @@ impl Interp<'_> {
                     .iter()
                     .position(|route| self.truthy(&route.condition));
                 if let Some(index) = chosen {
-                    self.decision(&id, &path, "router", json!({ "route": index }));
+                    self.decision(&id, &path, "router", &json!({ "route": index }));
                     self.run_blocks(&def.routes[index].blocks, &path)
                 } else {
-                    self.decision(&id, &path, "router", json!({ "route": "default" }));
+                    self.decision(&id, &path, "router", &json!({ "route": "default" }));
                     match &def.default {
                         Some(blocks) => self.run_blocks(blocks, &path),
                         None => Ok(()),
@@ -360,7 +406,7 @@ impl Interp<'_> {
                             &id,
                             &path,
                             "try_catch",
-                            json!({ "caught": { "block_id": block_id, "message": message } }),
+                            &json!({ "caught": { "block_id": block_id, "message": message } }),
                         );
                         self.run_blocks(&def.catch_block, &format!("{path}/catch"))
                     }
@@ -374,17 +420,14 @@ impl Interp<'_> {
             BlockDefinition::SubSequence(def) => {
                 self.tick()?;
                 let output = json!({ "dry_run": true, "sequence_name": def.sequence_name });
-                self.would_call.push(json!({
-                    "step_id": id,
-                    "handler": "sub_sequence",
-                    "at_virtual_ms": self.now,
-                    "params": { "sequence_name": def.sequence_name, "version": def.version, "input": def.input },
+                self.record_call(&id, "sub_sequence", &json!({
+                    "sequence_name": def.sequence_name, "version": def.version, "input": def.input,
                 }));
                 self.outputs.insert(id.clone(), output.clone());
                 let mut entry = step_entry(&id, &path, "sub_sequence", self.now, "mocked");
                 entry["kind"] = json!("sub_sequence");
                 entry["attempt"] = json!(1);
-                entry["output"] = output;
+                self.trace_detail(&mut entry, "output", &output);
                 self.push(entry);
                 Ok(())
             }
@@ -398,7 +441,7 @@ impl Interp<'_> {
                 let name = def.variants[index].name.clone();
                 self.outputs
                     .insert(id.clone(), json!({ "variant": name, "index": index }));
-                self.decision(&id, &path, "ab_split", json!({ "variant": name }));
+                self.decision(&id, &path, "ab_split", &json!({ "variant": name }));
                 self.run_blocks(&def.variants[index].blocks, &path)
             }
             BlockDefinition::CancellationScope(def) => self.run_blocks(&def.blocks, &path),
@@ -413,7 +456,7 @@ impl Interp<'_> {
                                 &id,
                                 &path,
                                 "saga",
-                                json!({ "compensating": completed.len(), "failed": block_id }),
+                                &json!({ "compensating": completed.len(), "failed": block_id }),
                             );
                             for done in completed.iter().rev() {
                                 if let Some(compensation) = &done.compensation
@@ -499,7 +542,7 @@ impl Interp<'_> {
             });
         };
         self.now = finished;
-        self.decision(id, path, "race", json!({ "winner_branch": index }));
+        self.decision(id, path, "race", &json!({ "winner_branch": index }));
         if ok {
             Ok(())
         } else {
@@ -518,7 +561,7 @@ impl Interp<'_> {
             if iterations > 0 {
                 self.now = self.now.saturating_add(poll_ms);
             }
-            self.decision(id, path, "loop", json!({ "iteration": iterations }));
+            self.decision(id, path, "loop", &json!({ "iteration": iterations }));
             match self.run_blocks(&def.body, &format!("{path}#{iterations}")) {
                 Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
                 Err(failure) if !def.continue_on_error => return Err(failure),
@@ -563,7 +606,7 @@ impl Interp<'_> {
                 id,
                 path,
                 "for_each",
-                json!({ "index": index, "item": item }),
+                &json!({ "index": index, "item": item }),
             );
             self.run_blocks(&def.body, &format!("{path}#{index}"))?;
         }
@@ -701,14 +744,14 @@ impl Interp<'_> {
             entry["attempt"] = json!(attempt);
             match result {
                 Ok(output) => {
-                    entry["output"] = output.clone();
+                    self.trace_detail(&mut entry, "output", &output);
                     self.push(entry);
                     self.outputs.insert(id, output);
                     return Ok(());
                 }
                 Err((message, retryable)) => {
                     entry["status"] = json!("failed");
-                    entry["error"] = json!(message);
+                    self.trace_detail(&mut entry, "error", &Value::String(message.clone()));
                     self.push(entry);
                     if retryable
                         && attempt < max_attempts
@@ -751,12 +794,7 @@ impl Interp<'_> {
         if LOCAL_HANDLERS.contains(&step.handler.as_str()) {
             return ("completed", self.run_local(&step.handler, params));
         }
-        self.would_call.push(json!({
-            "step_id": id,
-            "handler": step.handler,
-            "at_virtual_ms": self.now,
-            "params": params,
-        }));
+        self.record_call(id, &step.handler, params);
         (
             "mocked",
             Ok(json!({ "dry_run": true, "handler": step.handler })),
@@ -897,6 +935,18 @@ mod tests {
     }
 
     #[test]
+    fn completed_preview_identifies_simulated_child_execution() {
+        let r = run_json(
+            r#"{"blocks":[{"type":"sub_sequence","id":"child","sequence_name":"other-seq"}]}"#,
+            &RunOptions::default(),
+        );
+        assert_eq!(r["verification_scope"], "simulated_preview");
+        assert_eq!(r["status"], "completed");
+        assert_eq!(r["timeline"][0]["kind"], "sub_sequence");
+        assert_eq!(r["timeline"][0]["status"], "mocked");
+    }
+
+    #[test]
     fn router_uses_engine_expressions_and_outputs() {
         let seq = r#"{"blocks":[
           {"type":"step","id":"score","handler":"transform","params":{"value":"{{ data.n }}"}},
@@ -999,6 +1049,39 @@ mod tests {
         assert_eq!(r["outputs"]["fe"]["iterations"], 2);
         assert_eq!(r["outputs"]["greet"]["message"], "hi b");
         assert!(r["context"]["data"].get("item").is_none());
+    }
+
+    #[test]
+    fn repeated_large_outputs_keep_compact_trace_and_final_output() {
+        let options = super::RunOptions {
+            input: json!({"items": vec![0; 512]}),
+            mocks: std::collections::BTreeMap::from([(
+                "work".into(),
+                super::Mock {
+                    output: Some(json!("x".repeat(16 * 1024))),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let decoded = crate::decode::decode(
+            r#"{"blocks":[{"type":"for_each","id":"items","collection":"{{ context.data.items }}","body":[{"type":"step","id":"work","handler":"worker"}]}]}"#,
+        ).unwrap();
+        let result = super::run(&decoded.sequence, &options);
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["ticks"], 512);
+        assert_eq!(result["trace_truncated"], true);
+        assert_eq!(result["outputs"]["work"].as_str().unwrap().len(), 16 * 1024);
+        let timeline = result["timeline"].as_array().unwrap();
+        assert_eq!(
+            timeline
+                .iter()
+                .filter(|entry| entry["step_id"] == "work")
+                .count(),
+            512
+        );
+        assert!(timeline.iter().any(|entry| entry["detail_omitted"] == true));
+        assert!(serde_json::to_vec(&result).unwrap().len() < 512 * 1024);
     }
 
     #[test]

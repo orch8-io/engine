@@ -677,6 +677,92 @@ async fn native_instances(f: &Fixture) -> i64 {
         .await
         .unwrap()
 }
+
+#[tokio::test]
+async fn confirmed_claim_initializes_only_its_paused_root_with_frozen_authentication() {
+    let f = fixture().await;
+    let lease = f
+        .reader
+        .acquire_claim_lease(
+            Arc::new(f.task.clone()),
+            "dst_frozen",
+            CancellationToken::new(),
+            Duration::from_secs(15),
+        )
+        .await
+        .unwrap();
+    let initialized = lease
+        .run(|claim| async move {
+            let initialized = claim.initialize_paused(initialization_limits()).await?;
+            Ok::<_, MobileError>((claim, initialized))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        initialized.1.instance.state,
+        orch8_types::instance::InstanceState::Paused
+    );
+    assert_eq!(initialized.1.instance.id, initialized.1.run.local_run_id);
+    assert_eq!(
+        initialized.1.instance.context.data["wide"].as_u64(),
+        Some(u64::MAX)
+    );
+    assert!(
+        initialized
+            .0
+            .initialize_paused(initialization_limits())
+            .await
+            .is_err()
+    );
+    assert_eq!(native_instances(&f).await, 1);
+
+    let state = f.state.lock().unwrap();
+    assert!(state.seen[0].0.ends_with("/workers/identity"));
+    assert!(state.seen[1].0.ends_with("/heartbeat"));
+    assert!(
+        state
+            .seen
+            .iter()
+            .any(|(path, _)| path.contains("/definition?"))
+    );
+    assert!(state.seen.iter().any(|(path, _)| path.contains("/input?")));
+    assert!(state.seen.iter().all(|(_, token)| token == "dst_frozen"));
+}
+
+#[tokio::test]
+async fn superseded_claim_cannot_initialize_after_physical_preparation_unblocks() {
+    let mut f = fixture().await;
+    let preparation = PreparationGate::initialization(&mut f.reader);
+    let lease = f
+        .reader
+        .acquire_claim_lease(
+            Arc::new(f.task.clone()),
+            "dst_frozen",
+            CancellationToken::new(),
+            Duration::from_millis(20),
+        )
+        .await
+        .unwrap();
+    let waiting = tokio::spawn(
+        lease.run(|claim| async move { claim.initialize_paused(initialization_limits()).await }),
+    );
+    preparation.wait().await;
+    f.state.lock().unwrap().bad = "heartbeat-lost";
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err(),
+        orch8_engine::remote_worker::lease::LeaseEnd::LostOwnership,
+    );
+    assert_eq!(f.reader.budget.available_permits(), 0);
+    preparation.release();
+    wait_for_preparation_capacity(&f).await;
+    assert_eq!(native_instances(&f).await, 0);
+}
+
 #[tokio::test]
 async fn owned_initialization_is_paused_and_reuses_its_root_after_a_fresh_probe() {
     let f = fixture().await;

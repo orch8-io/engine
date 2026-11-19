@@ -209,6 +209,7 @@ async fn add_dependency(b: &TestBackend, f: &Fixture) {
         .unwrap();
     root.blocks
         .push(BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: orch8_types::ids::BlockId::new("child"),
             sequence_name: child.name,
             version: None,

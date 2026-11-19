@@ -78,7 +78,14 @@ pub(super) async fn update_node_state(
     state: NodeState,
 ) -> Result<(), StorageError> {
     let mut conn = storage.pool.acquire().await?;
-    update_node_state_on(&mut conn, node_id, state, None).await?;
+    update_node_state_on(
+        &mut conn,
+        node_id,
+        state,
+        None,
+        storage.execution_tree_clock.now(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -87,8 +94,9 @@ pub(super) async fn update_node_state_on(
     node_id: ExecutionNodeId,
     state: NodeState,
     instance_id: Option<InstanceId>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, StorageError> {
-    let now = super::helpers::ts(chrono::Utc::now());
+    let now = ts(now);
     let started = (state == NodeState::Running).then_some(&now);
     let completed = matches!(
         state,
@@ -120,18 +128,25 @@ pub(super) async fn update_nodes_state(
         return Ok(());
     }
     let mut conn = storage.pool.acquire().await?;
-    update_nodes_state_on(&mut conn, node_ids, state).await
+    update_nodes_state_on(
+        &mut conn,
+        node_ids,
+        state,
+        storage.execution_tree_clock.now(),
+    )
+    .await
 }
 
 pub(super) async fn update_nodes_state_on(
     conn: &mut sqlx::SqliteConnection,
     node_ids: &[ExecutionNodeId],
     state: NodeState,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), StorageError> {
     if node_ids.is_empty() {
         return Ok(());
     }
-    let now = ts(chrono::Utc::now());
+    let now = ts(now);
     let state_str = state.to_string();
 
     let mut qb = sqlx::QueryBuilder::new("UPDATE execution_tree SET state=");
@@ -167,17 +182,18 @@ pub(super) async fn batch_activate_nodes(
         return Ok(());
     }
     let mut conn = storage.pool.acquire().await?;
-    batch_activate_nodes_on(&mut conn, node_ids).await
+    batch_activate_nodes_on(&mut conn, node_ids, storage.execution_tree_clock.now()).await
 }
 
 pub(super) async fn batch_activate_nodes_on(
     conn: &mut sqlx::SqliteConnection,
     node_ids: &[ExecutionNodeId],
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), StorageError> {
     if node_ids.is_empty() {
         return Ok(());
     }
-    let now = ts(chrono::Utc::now());
+    let now = ts(now);
     let mut qb = sqlx::QueryBuilder::new(
         "UPDATE execution_tree SET state='running', started_at=COALESCE(started_at, ",
     );

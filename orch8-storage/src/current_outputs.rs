@@ -4,6 +4,27 @@ use std::collections::HashMap;
 
 use orch8_types::output::BlockOutput;
 
+// Read a bounded history window using only metadata and choose the last
+// eligible row for each block. LEFT JOIN retains the count for empty runs
+// and over-limit histories without returning payload IDs for either.
+pub(crate) const REPLAY_KEYS_QUERY: &str = "
+WITH history AS (
+    SELECT id, block_id, output_ref, created_at
+    FROM block_outputs WHERE instance_id = $1
+    ORDER BY created_at DESC, id DESC LIMIT $2
+),
+ranked AS (
+    SELECT id, block_id, output_ref,
+           ROW_NUMBER() OVER (PARTITION BY block_id ORDER BY created_at DESC, id DESC) AS replay_rank
+    FROM history
+    WHERE substr(block_id, 1, 1) <> '_'
+      AND (output_ref IS NULL OR output_ref NOT IN ('__error__', '__retry__', '__in_progress__'))
+),
+totals AS (SELECT COUNT(*) AS row_count FROM history)
+SELECT ranked.id, ranked.block_id, ranked.output_ref, totals.row_count
+FROM totals LEFT JOIN ranked ON replay_rank = 1 AND totals.row_count < $2
+";
+
 // The same key stream and eligibility predicate serve both dialects. Keep
 // current business values separate from current diagnostic/retry values.
 macro_rules! key_stream {

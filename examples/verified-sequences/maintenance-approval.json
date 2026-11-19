@@ -1,0 +1,15 @@
+{
+  "name": "maintenance-approval",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "version": 1,
+  "blocks": [
+    {"type": "step", "id": "open", "handler": "open_maintenance_request"},
+    {
+      "type": "step", "id": "approve", "handler": "log",
+      "params": {"message": "Maintenance review recorded"},
+      "wait_for_input": {"prompt": "Authorize maintenance?", "timeout": 60000}
+    },
+    {"type": "step", "id": "authorize", "handler": "record_maintenance_approval"}
+  ]
+}

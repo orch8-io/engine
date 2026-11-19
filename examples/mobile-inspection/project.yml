@@ -1,0 +1,46 @@
+name: FieldInspection
+options:
+  deploymentTarget:
+    iOS: '16.0'
+packages:
+  Orch8Mobile:
+    url: https://github.com/orch8-io/orch8-mobile-swift
+    exactVersion: '0.7.1'
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  Inspection:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/Inspection
+        excludes: [Resources]
+      - path: Sources/Inspection/Resources
+        buildPhase: resources
+    dependencies:
+      - package: Orch8Mobile
+        product: Orch8Mobile
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.orch8.inspection
+        INFOPLIST_KEY_CFBundleDisplayName: Field Inspection
+        INFOPLIST_KEY_NSCameraUsageDescription: Scan the QR tag for the site you are inspecting.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+  InspectionTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [Tests/InspectionTests]
+    dependencies:
+      - target: Inspection
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.orch8.inspection.tests
+schemes:
+  FieldInspection:
+    build:
+      targets:
+        Inspection: all
+    test:
+      targets: [InspectionTests]

@@ -10,6 +10,8 @@
 )]
 
 mod builtins;
+mod bundled_catalog;
+pub use bundled_catalog::{BundledCatalogDisposition, BundledCatalogInstall};
 mod capabilities;
 mod config;
 mod continuity;
@@ -1048,6 +1050,23 @@ impl MobileEngine {
             info!(name = %seq.name, version = seq.version, "loaded sequence from JSON");
             Ok(())
         })
+    }
+
+    /// Install packaged first-launch definitions signed by the app's configured
+    /// root. Existing definitions and remote manifest acceptance take precedence.
+    pub fn install_bundled_catalog(&self, package_json: String) -> Result<u32, MobileError> {
+        Ok(self
+            .install_bundled_catalog_with_result(package_json)?
+            .installed)
+    }
+
+    /// Install a signed seed and report whether a synced manifest owns the
+    /// catalog or all bundled names were already present.
+    pub fn install_bundled_catalog_with_result(
+        &self,
+        package_json: String,
+    ) -> Result<BundledCatalogInstall, MobileError> {
+        self.run_with_timeout(bundled_catalog::install(self, package_json))
     }
 
     /// Fetch and load sequences from a remote URL. The endpoint must return a

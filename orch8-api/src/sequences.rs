@@ -15,6 +15,8 @@ use orch8_types::sequence::{SequenceDefinition, SequenceStatus};
 use crate::AppState;
 use crate::error::ApiError;
 
+pub(crate) mod draft_contract;
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct DraftDecodeOptions {
     #[serde(default)]
@@ -90,6 +92,10 @@ pub(crate) fn decode_draft_sequence(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/sequences", post(create_sequence).get(list_sequences))
+        .route(
+            "/sequences/test-draft",
+            post(draft_contract::run).layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
+        )
         .route("/sequences.json", get(list_sequences_array))
         .route("/sequences/{id}", get(get_sequence).delete(delete_sequence))
         .route("/sequences/{id}/deprecate", post(deprecate_sequence))
@@ -136,6 +142,40 @@ pub(crate) async fn validate_and_persist_sequence(
     seq: &SequenceDefinition,
     decode_warnings: Vec<String>,
 ) -> Result<serde_json::Value, ApiError> {
+    validate_sequence_definition(seq)?;
+
+    let mut warnings = decode_warnings;
+    warnings.extend(seq.unknown_handler_warnings());
+
+    let template_warnings = orch8_engine::template::validate_sequence_templates(seq);
+    for tw in &template_warnings {
+        warnings.push(tw.to_string());
+    }
+
+    let lint_warnings = orch8_engine::lint::lint_sequence(seq);
+    for lw in &lint_warnings {
+        warnings.push(lw.to_string());
+    }
+
+    state
+        .storage
+        .create_sequence(seq)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
+
+    let mut body = serde_json::json!({ "id": seq.id });
+    if !warnings.is_empty() {
+        body["warnings"] = serde_json::json!(warnings);
+    }
+
+    Ok(body)
+}
+
+/// Validate the contents of a sequence before publishing it.
+///
+/// # Errors
+/// Returns a validation error for invalid sequence structure, schemas, or embed options.
+pub fn validate_sequence_definition(seq: &SequenceDefinition) -> Result<(), ApiError> {
     if let Some(embed) = &seq.embed
         && embed.visible_outputs.len() > 256
     {
@@ -165,31 +205,7 @@ pub(crate) async fn validate_and_persist_sequence(
         validate_output_schemas_in_blocks(on_cancel)?;
     }
 
-    let mut warnings = decode_warnings;
-    warnings.extend(seq.unknown_handler_warnings());
-
-    let template_warnings = orch8_engine::template::validate_sequence_templates(seq);
-    for tw in &template_warnings {
-        warnings.push(tw.to_string());
-    }
-
-    let lint_warnings = orch8_engine::lint::lint_sequence(seq);
-    for lw in &lint_warnings {
-        warnings.push(lw.to_string());
-    }
-
-    state
-        .storage
-        .create_sequence(seq)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "sequence"))?;
-
-    let mut body = serde_json::json!({ "id": seq.id });
-    if !warnings.is_empty() {
-        body["warnings"] = serde_json::json!(warnings);
-    }
-
-    Ok(body)
+    Ok(())
 }
 
 #[utoipa::path(get, path = "/sequences/{id}", tag = "sequences",

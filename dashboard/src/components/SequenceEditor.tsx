@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { getSequenceByName, preflightDraft, type PreflightReport, type PreflightStatus } from "../api";
 import {
   BLOCK_TYPES,
@@ -28,6 +28,10 @@ import {
   type Path,
 } from "../lib/sequenceModel";
 import { BLOCK_SCHEMAS, schemaFields } from "../lib/schemaForm";
+import { referencePaths } from "../lib/sequenceAuthoring";
+import { HumanInputBuilder } from "./HumanInputBuilder";
+import { PathSuggestions } from "./PathSuggestions";
+import { SequenceInputDraft } from "./SequenceInputDraft";
 import { SchemaForm } from "./SchemaForm";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
@@ -451,6 +455,7 @@ function BlockNode({ ctx, path }: { ctx: EditorCtx; path: Path }) {
 // ─── Inspectors ─────────────────────────────────────────────────────────────
 
 function SequenceInspector({ ctx }: { ctx: EditorCtx }) {
+  const [schemaRevision, setSchemaRevision] = useState(0);
   const known = new Set(["blocks", "on_failure", "on_cancel", ...Object.keys(SEQUENCE_SCHEMA.properties)]);
   const preserved = Object.keys(ctx.doc).filter((k) => !known.has(k));
   return (
@@ -460,10 +465,15 @@ function SequenceInspector({ ctx }: { ctx: EditorCtx }) {
         <p className="annotation text-[11px] mt-1">Select a block in the graph to edit it.</p>
       </div>
       <SchemaForm
+        key={schemaRevision}
         schema={SEQUENCE_SCHEMA}
         value={ctx.doc}
         onChange={(k, v) => ctx.update((d) => (v === undefined ? removeAt(d, [k]) : setAt(d, [k], v)))}
       />
+      <SequenceInputDraft onApply={(schema) => {
+        ctx.update((doc) => setAt(doc, ["input_schema"], schema));
+        setSchemaRevision((current) => current + 1);
+      }} />
       <PreservedFields keys={preserved} />
     </div>
   );
@@ -494,6 +504,8 @@ function BlockInspector({ ctx, path, onDeselect }: { ctx: EditorCtx; path: Path;
   const schemaKeys = new Set(schemaFields(schema).map((f) => f.key));
   const preserved = Object.keys(block).filter((k) => !schemaKeys.has(k) && !STRUCTURAL.has(k));
   const problems = ctx.issues.get(pathKey(path));
+  const expressionPaths = referencePaths(ctx.doc, path, "expression");
+  const templatePaths = referencePaths(ctx.doc, path);
 
   const setField = (key: string, value: unknown) =>
     ctx.update((d) => (value === undefined ? removeAt(d, [...path, key]) : setAt(d, [...path, key], value)));
@@ -552,11 +564,19 @@ function BlockInspector({ ctx, path, onDeselect }: { ctx: EditorCtx; path: Path;
         </ul>
       )}
       {schema ? (
-        <SchemaForm schema={schema} value={block} onChange={setField} />
+        <SchemaForm
+          schema={schema}
+          value={block}
+          onChange={setField}
+          exclude={type === "step" ? ["wait_for_input"] : []}
+          templateFields={["collection"]}
+          references={{ when: expressionPaths, condition: expressionPaths, break_on: expressionPaths, params: templatePaths, collection: templatePaths }}
+        />
       ) : (
         <p className="text-warn text-[12px]">Unknown block type — edit it in the JSON tab.</p>
       )}
-      {type === "router" && <RouterRoutes ctx={ctx} path={path} block={block} />}
+      {type === "step" && <HumanInputBuilder value={block.wait_for_input} blockId={blockId(block)} onChange={(value) => setField("wait_for_input", value)} />}
+      {type === "router" && <RouterRoutes ctx={ctx} path={path} block={block} suggestions={expressionPaths} />}
       {type === "ab_split" && <AbVariants ctx={ctx} path={path} block={block} />}
       {type === "saga" && <SagaSteps ctx={ctx} path={path} block={block} />}
       {type === "sub_sequence" && <SubSequenceInput ctx={ctx} path={path} block={block} />}
@@ -569,22 +589,38 @@ function SubHeading({ children }: { children: ReactNode }) {
   return <div className="eyebrow pt-2 border-t border-rule">{children}</div>;
 }
 
-function RouterRoutes({ ctx, path, block }: { ctx: EditorCtx; path: Path; block: JsonObject }) {
+function RouterRoutes({ ctx, path, block, suggestions }: { ctx: EditorCtx; path: Path; block: JsonObject; suggestions: string[] }) {
   const routes = Array.isArray(block.routes) ? block.routes : [];
   return (
     <div className="space-y-2">
       <SubHeading>Routes (first match wins)</SubHeading>
-      {routes.map((r, i) => (
-        <div key={i}>
-          <FieldLabel htmlFor={`route-${pathKey(path)}-${i}`}>route {i + 1} condition</FieldLabel>
-          <Input
-            id={`route-${pathKey(path)}-${i}`}
-            value={isObject(r) && typeof r.condition === "string" ? r.condition : ""}
-            onChange={(e) => ctx.update((d) => setAt(d, [...path, "routes", i, "condition"], e.target.value))}
-            className="w-full font-mono"
-          />
-        </div>
+      {routes.map((route, index) => (
+        <RouteCondition
+          key={index}
+          id={`route-${pathKey(path)}-${index}`}
+          label={`Route ${index + 1} condition`}
+          value={isObject(route) && typeof route.condition === "string" ? route.condition : ""}
+          onChange={(value) => ctx.update((doc) => setAt(doc, [...path, "routes", index, "condition"], value))}
+          suggestions={suggestions}
+        />
       ))}
+    </div>
+  );
+}
+
+function RouteCondition({ id, label, value, onChange, suggestions }: {
+  id: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  suggestions: string[];
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <div>
+      <FieldLabel htmlFor={id}>{label}</FieldLabel>
+      <Input ref={input} id={id} value={value} className="w-full font-mono" onChange={(event) => onChange(event.target.value)} />
+      <PathSuggestions control={input} paths={suggestions} onInsert={onChange} />
     </div>
   );
 }

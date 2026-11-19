@@ -61,7 +61,7 @@ export class Engine {
     input?: object,
     options?: { idempotencyKey?: string; version?: number },
   ): Promise<string>
-  /** Drive the engine until the instance is completed/failed/cancelled/paused/waiting, or `timeoutMs` elapses. */
+  /** Drive the engine until the instance settles or the scheduling budget elapses. Storage reads can continue past `timeoutMs`. */
   run(id: string, options?: { timeoutMs?: number }): Promise<InstanceSnapshot>
   get(id: string): Promise<InstanceSnapshot>
   /** `pause` | `resume` | `cancel` | `update_context`, or a custom signal name. */

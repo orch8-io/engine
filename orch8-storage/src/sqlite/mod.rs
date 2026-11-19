@@ -100,6 +100,7 @@ mod worker_admission;
 mod worker_claim;
 mod worker_commands;
 mod worker_dispatch;
+mod worker_inventory;
 mod worker_invocations;
 mod worker_outcome;
 mod worker_reconciliation;
@@ -169,6 +170,7 @@ pub struct SqliteStorage {
     closing: std::sync::Mutex<Option<tokio::sync::watch::Receiver<bool>>>,
     memory_database: Option<std::sync::Arc<memory::MemoryDatabase>>,
     pub(crate) pool: SqlitePool,
+    execution_tree_clock: orch8_types::clock::SharedClock,
     /// Optional durable artifact backend (local FS / S3). `None` → artifact
     /// methods return `Unsupported`.
     artifact_store: Option<std::sync::Arc<crate::artifacts::ObjectArtifactStore>>,
@@ -289,6 +291,14 @@ impl SqliteStorage {
         self
     }
 
+    /// Set the clock for execution node transitions. An in-memory contract
+    /// sandbox shares this clock with its scheduler so timeouts can replay.
+    #[must_use]
+    pub fn with_execution_tree_clock(mut self, clock: orch8_types::clock::SharedClock) -> Self {
+        self.execution_tree_clock = clock;
+        self
+    }
+
     /// Create a new in-memory SQLite storage with all tables.
     pub async fn in_memory() -> Result<Self, StorageError> {
         let opts = SqliteConnectOptions::from_str("sqlite::memory:")
@@ -308,6 +318,7 @@ impl SqliteStorage {
             memory_database,
             pool,
             artifact_store: None,
+            execution_tree_clock: orch8_types::clock::SharedClock::default(),
         };
         storage.create_tables().await?;
         Ok(storage)
@@ -352,6 +363,7 @@ impl SqliteStorage {
             memory_database,
             pool,
             artifact_store: None,
+            execution_tree_clock: orch8_types::clock::SharedClock::default(),
         };
         storage.create_tables().await?;
         Ok(storage)
@@ -396,6 +408,7 @@ impl SqliteStorage {
             memory_database,
             pool,
             artifact_store: None,
+            execution_tree_clock: orch8_types::clock::SharedClock::default(),
         };
         storage.create_tables().await?;
         Ok(storage)
@@ -448,6 +461,7 @@ impl SqliteStorage {
         let storage = Self {
             pool,
             artifact_store: None,
+            execution_tree_clock: orch8_types::clock::SharedClock::default(),
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(Some(owner))),
             closing: std::sync::Mutex::new(None),
             memory_database: None,
@@ -710,6 +724,30 @@ impl SqliteStorage {
         if !activations {
             sqlx::query("UPDATE execution_tree SET activation_id=lower(hex(randomblob(16))) WHERE activation_id IS NULL").execute(&mut *retirement).await?;
             sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(63)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let rollout_controls: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=75)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !rollout_controls {
+            sqlx::raw_sql(include_str!("worker_rollout_controls.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(75)")
+                .execute(&mut *retirement)
+                .await?;
+        }
+        let route_observations: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM schema_versions WHERE version=76)")
+                .fetch_one(&mut *retirement)
+                .await?;
+        if !route_observations {
+            sqlx::raw_sql(include_str!("worker_route_observations.sql"))
+                .execute(&mut *retirement)
+                .await?;
+            sqlx::query("INSERT OR IGNORE INTO schema_versions(version) VALUES(76)")
                 .execute(&mut *retirement)
                 .await?;
         }
@@ -1968,6 +2006,22 @@ impl crate::OutputStore for SqliteStorage {
         outputs::delete_by_id(self, id).await
     }
 
+    async fn get_replay_output_keys(
+        &self,
+        instance_id: InstanceId,
+        max_history_rows: u32,
+    ) -> Result<Option<Vec<crate::ReplayOutputKey>>, StorageError> {
+        outputs::replay_keys(self, instance_id, max_history_rows).await
+    }
+
+    async fn get_inline_output_by_id(
+        &self,
+        instance_id: InstanceId,
+        id: Uuid,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        outputs::inline_by_id(self, instance_id, id).await
+    }
+
     async fn get_outputs_page(
         &self,
         instance_id: InstanceId,
@@ -2205,7 +2259,7 @@ impl crate::WorkerStore for SqliteStorage {
         request: &crate::worker_claim::WorkerClaimRequest,
     ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
         request.validate()?;
-        let principal = Some(&request.principal);
+        let authority = Some(request);
         if let Some(capabilities) = &request.capabilities {
             return workers::claim_matching(
                 self,
@@ -2215,7 +2269,7 @@ impl crate::WorkerStore for SqliteStorage {
                 request.queue_name.as_deref(),
                 crate::worker_claim::ClaimRuntime {
                     capabilities,
-                    principal,
+                    request: authority,
                 },
                 request.limit,
             )
@@ -2230,7 +2284,7 @@ impl crate::WorkerStore for SqliteStorage {
                     &request.worker_id,
                     tenant,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
@@ -2241,7 +2295,7 @@ impl crate::WorkerStore for SqliteStorage {
                     &request.handler_name,
                     &request.worker_id,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
@@ -2252,7 +2306,7 @@ impl crate::WorkerStore for SqliteStorage {
                     &request.worker_id,
                     tenant,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
@@ -2262,12 +2316,11 @@ impl crate::WorkerStore for SqliteStorage {
                     &request.handler_name,
                     &request.worker_id,
                     request.limit,
-                    principal,
+                    authority,
                 )
                 .await
             }
         }
-        .and_then(|tasks| crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new()))
     }
     async fn get_worker_delegation_context(
         &self,
@@ -2341,7 +2394,9 @@ impl crate::WorkerStore for SqliteStorage {
         worker_id: &str,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim(self, handler_name, worker_id, limit, None).await
+        workers::claim(self, handler_name, worker_id, limit, None)
+            .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn claim_worker_tasks_for_tenant(
@@ -2351,7 +2406,9 @@ impl crate::WorkerStore for SqliteStorage {
         tenant_id: &orch8_types::TenantId,
         limit: u32,
     ) -> Result<Vec<WorkerTask>, StorageError> {
-        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None).await
+        workers::claim_for_tenant(self, handler_name, worker_id, tenant_id, limit, None)
+            .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn claim_worker_tasks_matching(
@@ -2371,7 +2428,7 @@ impl crate::WorkerStore for SqliteStorage {
             queue_name,
             crate::worker_claim::ClaimRuntime {
                 capabilities,
-                principal: None,
+                request: None,
             },
             limit,
         )
@@ -2679,6 +2736,7 @@ impl crate::WorkerStore for SqliteStorage {
     ) -> Result<Vec<WorkerTask>, StorageError> {
         misc::claim_worker_tasks_from_queue(self, queue_name, handler_name, worker_id, limit, None)
             .await
+            .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
     }
 
     async fn claim_worker_tasks_from_queue_for_tenant(
@@ -2699,6 +2757,25 @@ impl crate::WorkerStore for SqliteStorage {
             None,
         )
         .await
+        .map(crate::worker_claim::WorkerClaimBatch::into_tasks)
+    }
+
+    async fn record_worker_observation(
+        &self,
+        observation: &crate::worker_inventory::WorkerObservation<'_>,
+    ) -> Result<(), StorageError> {
+        worker_inventory::record(&self.pool, observation).await
+    }
+
+    async fn close_worker_observation(&self, session_id: Uuid) -> Result<(), StorageError> {
+        worker_inventory::close(&self.pool, session_id).await
+    }
+
+    async fn worker_route_observations(
+        &self,
+        route: &crate::worker_inventory::WorkerRoute<'_>,
+    ) -> Result<Vec<crate::worker_inventory::RouteObservation>, StorageError> {
+        worker_inventory::route(&self.pool, route).await
     }
 
     async fn upsert_worker_registration(
@@ -2875,6 +2952,39 @@ impl crate::WorkerStore for SqliteStorage {
 
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError> {
         worker_commands::delete(self, id).await
+    }
+
+    async fn list_worker_version_rollouts(
+        &self,
+        tenant_id: Option<&str>,
+    ) -> Result<Vec<orch8_types::worker::WorkerVersionRollout>, StorageError> {
+        worker_version_pins::list_rollouts(self, tenant_id).await
+    }
+
+    async fn stage_worker_version_pin(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+        min_version: &str,
+    ) -> Result<orch8_types::worker::WorkerVersionRollout, StorageError> {
+        worker_version_pins::stage(self, tenant_id, handler_name, min_version).await
+    }
+
+    async fn change_worker_version_rollout(
+        &self,
+        tenant_id: &str,
+        handler_name: &str,
+        revision: uuid::Uuid,
+        action: orch8_types::worker::WorkerVersionRolloutAction,
+    ) -> Result<Option<orch8_types::worker::WorkerVersionRollout>, StorageError> {
+        worker_version_pins::change(self, tenant_id, handler_name, revision, action).await
+    }
+
+    async fn placement_queue_evidence(
+        &self,
+        tenant_id: &orch8_types::ids::TenantId,
+    ) -> Result<Vec<orch8_types::placement::PlacementQueueEvidence>, StorageError> {
+        placement::queue_evidence(self, tenant_id).await
     }
 
     async fn upsert_worker_version_pin(
@@ -4491,6 +4601,7 @@ mod tests {
             memory_database: None,
             pool,
             artifact_store: None,
+            execution_tree_clock: orch8_types::clock::SharedClock::default(),
         };
 
         // create_tables: CREATE IF NOT EXISTS is a no-op on the existing table,
@@ -6547,6 +6658,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn route_observation_migration_preserves_existing_worker_pins() {
+        use orch8_types::worker::{WorkerVersionPin, version_satisfies};
+
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let now = Utc::now();
+        for (handler, version) in [("numeric", "v2.2.0"), ("dated", "2026-11-18")] {
+            storage
+                .upsert_worker_version_pin(&WorkerVersionPin {
+                    tenant_id: "migration-tenant".to_owned(),
+                    handler_name: handler.to_owned(),
+                    min_version: version.to_owned(),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+        }
+        sqlx::raw_sql(
+            "DROP TABLE worker_route_observations;
+             DROP INDEX idx_worker_registrations_route;
+             DELETE FROM schema_versions WHERE version=76;",
+        )
+        .execute(storage.pool())
+        .await
+        .unwrap();
+        storage.create_tables().await.unwrap();
+
+        for (handler, compatible, incompatible) in [
+            ("numeric", "2.2", "2.1.99"),
+            ("dated", "2026-11-19", "2026-11-17"),
+        ] {
+            let pin = storage
+                .get_worker_version_pin("migration-tenant", handler)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(version_satisfies(Some(compatible), &pin.min_version));
+            assert!(!version_satisfies(Some(incompatible), &pin.min_version));
+        }
+    }
+
+    #[tokio::test]
     async fn worker_registration_cannot_be_reassigned_across_tenants() {
         let storage = SqliteStorage::in_memory().await.unwrap();
         let first = orch8_types::worker::WorkerRegistration {
@@ -6556,6 +6709,7 @@ mod tests {
             version: Some("tenant-a-version".into()),
             tenant_id: Some("tenant-a".into()),
             last_seen_at: Utc::now(),
+            available_poll_slots: None,
         };
         storage.upsert_worker_registration(&first).await.unwrap();
 

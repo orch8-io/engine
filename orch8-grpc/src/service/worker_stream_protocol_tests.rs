@@ -89,6 +89,7 @@ struct Session {
     outstanding: std::collections::HashSet<Uuid>,
     runtime_id: Option<RuntimeId>,
     draining: bool,
+    demand_state: WorkerStreamDemandState,
     sender: mpsc::Sender<Result<proto::WorkerStreamServer, Status>>,
     receiver: mpsc::Receiver<Result<proto::WorkerStreamServer, Status>>,
 }
@@ -117,6 +118,7 @@ fn session_with_storage(
         outstanding: std::collections::HashSet::new(),
         runtime_id: None,
         draining: false,
+        demand_state: WorkerStreamDemandState::default(),
         sender,
         receiver,
     }
@@ -139,6 +141,7 @@ impl Session {
                 &mut self.outstanding,
                 &mut self.runtime_id,
                 &mut self.draining,
+                &mut self.demand_state,
                 &self.sender,
             )
             .await
@@ -270,6 +273,7 @@ async fn payloadless_frame_is_invalid_argument() {
             &mut session.outstanding,
             &mut session.runtime_id,
             &mut session.draining,
+            &mut session.demand_state,
             &session.sender,
         )
         .await

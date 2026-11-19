@@ -104,8 +104,19 @@ pub struct MockDef {
     /// Block id this mock applies to (overrides handler-level mocks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block: Option<String>,
+    /// Qualifies a block mock with the exact reachable sequence revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<ContractDefinition>,
     #[serde(flatten)]
     pub policy: MockPolicy,
+}
+
+/// Definition identity within the root's tenant and namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContractDefinition {
+    pub name: String,
+    pub version: i32,
 }
 
 /// What a mocked handler does when called.
@@ -236,7 +247,14 @@ pub struct Assertion {
 pub enum AssertionSubject {
     /// A recorded block output; `path` walks into it (dotted, empty = whole
     /// output).
-    Output { block: String, path: String },
+    Output {
+        block: String,
+        path: String,
+        /// Explicitly selects a reachable definition. For a child revision
+        /// invoked multiple times, the assertion applies to each invocation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        definition: Option<ContractDefinition>,
+    },
     /// The final `context.data`; `path` walks into it.
     Context { path: String },
 }
@@ -307,6 +325,9 @@ impl ContractCase {
     /// Returns the first problem found as a human-readable message.
     pub fn validate(&self) -> Result<(), String> {
         for mock in &self.mocks {
+            if mock.definition.is_some() && mock.block.is_none() {
+                return Err("mock 'definition' requires a block selector".to_string());
+            }
             match (&mock.handler, &mock.block) {
                 (None, None) => {
                     return Err("mock must set either 'handler' or 'block'".to_string());
@@ -489,16 +510,24 @@ pub fn evaluate_assertion(
     context_data: &serde_json::Value,
 ) -> Result<(), String> {
     match &assertion.subject {
-        AssertionSubject::Output { block, path } => {
+        AssertionSubject::Output {
+            block,
+            path,
+            definition,
+        } => {
+            let subject = definition.as_ref().map_or_else(
+                || format!("output.{block}"),
+                |definition| format!("output.{}@{}.{block}", definition.name, definition.version),
+            );
             let Some(output) = outputs.get(block) else {
                 // NotExists on a block that never ran is satisfied.
                 if matches!(assertion.op, AssertionOp::NotExists) {
                     return Ok(());
                 }
-                return Err(format!("output.{block}: block produced no output"));
+                return Err(format!("{subject}: block produced no output"));
             };
             check_op(&assertion.op, resolve_path(output, path))
-                .map_err(|e| format!("output.{block}.{path}: {e}"))
+                .map_err(|e| format!("{subject}.{path}: {e}"))
         }
         AssertionSubject::Context { path } => {
             check_op(&assertion.op, resolve_path(context_data, path))
@@ -589,6 +618,12 @@ pub struct CaseReport {
     /// Blocks that executed, in first-execution order.
     #[serde(default)]
     pub executed_blocks: Vec<String>,
+    /// Blocks whose mock handlers were reached, including failed attempts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attempted_blocks: Vec<String>,
+    /// Child results grouped by individual invocation of a pinned revision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_executions: Vec<ChildExecutionReport>,
     /// Observed handler call counts.
     #[serde(default)]
     pub handler_calls: BTreeMap<String, u32>,
@@ -596,6 +631,14 @@ pub struct CaseReport {
     pub ticks: u32,
     /// Total virtual time advanced, in milliseconds.
     pub logical_duration_ms: u64,
+}
+
+/// Block execution observed in one child instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ChildExecutionReport {
+    pub definition: ContractDefinition,
+    pub executed_blocks: Vec<String>,
+    pub attempted_blocks: Vec<String>,
 }
 
 /// Machine-readable result of running a whole suite.
@@ -753,6 +796,7 @@ mod tests {
     fn validate_rejects_mock_without_target() {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
         suite.cases[0].mocks.push(MockDef {
+            definition: None,
             handler: None,
             block: None,
             policy: MockPolicy::Recorded,
@@ -769,6 +813,7 @@ mod tests {
     fn validate_rejects_mock_with_both_targets() {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
         suite.cases[0].mocks.push(MockDef {
+            definition: None,
             handler: Some("h".into()),
             block: Some("b".into()),
             policy: MockPolicy::Recorded,
@@ -780,6 +825,7 @@ mod tests {
     fn validate_rejects_empty_attempts() {
         let mut suite: ContractSuite = serde_json::from_value(suite_json()).unwrap();
         suite.cases[0].mocks.push(MockDef {
+            definition: None,
             handler: Some("h".into()),
             block: None,
             policy: MockPolicy::Attempts { attempts: vec![] },
@@ -1001,6 +1047,7 @@ mod tests {
         );
         let a = Assertion {
             subject: AssertionSubject::Output {
+                definition: None,
                 block: "charge".into(),
                 path: "charged".into(),
             },
@@ -1013,6 +1060,7 @@ mod tests {
     fn assertion_on_missing_block_fails_with_context() {
         let a = Assertion {
             subject: AssertionSubject::Output {
+                definition: None,
                 block: "nope".into(),
                 path: String::new(),
             },
@@ -1027,6 +1075,7 @@ mod tests {
     fn not_exists_on_missing_block_passes() {
         let a = Assertion {
             subject: AssertionSubject::Output {
+                definition: None,
                 block: "refund".into(),
                 path: "any".into(),
             },
@@ -1180,21 +1229,25 @@ mod tests {
             passed: false,
             cases: vec![
                 CaseReport {
+                    child_executions: Vec::new(),
                     name: "ok".into(),
                     passed: true,
                     failures: vec![],
                     final_state: "completed".into(),
                     executed_blocks: vec![],
+                    attempted_blocks: Vec::new(),
                     handler_calls: BTreeMap::new(),
                     ticks: 3,
                     logical_duration_ms: 0,
                 },
                 CaseReport {
+                    child_executions: Vec::new(),
                     name: "bad".into(),
                     passed: false,
                     failures: vec!["divergence".into()],
                     final_state: "failed".into(),
                     executed_blocks: vec![],
+                    attempted_blocks: Vec::new(),
                     handler_calls: BTreeMap::new(),
                     ticks: 3,
                     logical_duration_ms: 500,

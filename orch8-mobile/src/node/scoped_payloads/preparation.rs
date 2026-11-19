@@ -1,9 +1,8 @@
 //! Own complete cached/downloaded preparation on one capacity-bound dedicated thread.
 //! No provider invocation, scheduler admission or lease confirmation occurs here.
-use super::{
-    Arc, CancellationToken, Duration, Instant, MobileError, Operation, Permit, RemoteTask,
-    ScopedPayloadReader, refused,
-};
+use super::{Arc, CancellationToken, MobileError, Operation, Permit, ScopedPayloadReader, refused};
+#[cfg(test)]
+use super::{Duration, Instant, RemoteTask};
 use crate::storage::scopes::{BoundClaimRun, runs::materialize::InstanceLimits};
 use orch8_types::instance::TaskInstance;
 use orch8_types::{delegation_definition::input::VerifiedDelegationInput, error::StorageError};
@@ -40,17 +39,20 @@ impl<T> Drop for Preparing<T> {
 }
 #[allow(dead_code)] // Staged until scoped native admission is complete.
 impl ScopedPayloadReader {
+    #[cfg(test)]
     pub(crate) async fn prepare(
         self: &Arc<Self>,
         task: &RemoteTask,
         token: &str,
         stop: CancellationToken,
     ) -> Result<PreparedClaim, MobileError> {
-        self.prepare_with(task, token, stop, |owner, mut operation| async move {
+        let operation = self.probe_operation(task, token, stop)?;
+        self.prepare_with(operation, |owner, mut operation| async move {
             owner.prepare_owned(&mut operation).await
         })
         .await
     }
+    #[cfg(test)]
     pub(crate) async fn initialize(
         self: &Arc<Self>,
         task: &RemoteTask,
@@ -58,7 +60,15 @@ impl ScopedPayloadReader {
         stop: CancellationToken,
         limits: InstanceLimits,
     ) -> Result<InitializedClaim, MobileError> {
-        self.prepare_with(task, token, stop, move |owner, mut operation| async move {
+        self.initialize_owned(self.probe_operation(task, token, stop)?, limits)
+            .await
+    }
+    pub(super) async fn initialize_owned(
+        self: &Arc<Self>,
+        operation: Operation,
+        limits: InstanceLimits,
+    ) -> Result<InitializedClaim, MobileError> {
+        self.prepare_with(operation, move |owner, mut operation| async move {
             let PreparedClaim { run, input } = owner.prepare_owned(&mut operation).await?;
             // Release decoded cache data before initialization reads it in its
             // writer-fenced snapshot. The physical preparation slot stays held.
@@ -75,7 +85,7 @@ impl ScopedPayloadReader {
                         &operation.context,
                         &run,
                         limits,
-                        &operation.stop,
+                        &|| operation.live().is_ok(),
                     ),
                 )
                 .await?;
@@ -86,11 +96,25 @@ impl ScopedPayloadReader {
         })
         .await
     }
-    async fn prepare_with<T, F, Fut>(
-        self: &Arc<Self>,
+    #[cfg(test)]
+    fn probe_operation(
+        &self,
         task: &RemoteTask,
         token: &str,
         stop: CancellationToken,
+    ) -> Result<Operation, MobileError> {
+        task.validate_delegation(&self.peer.runtime_id().to_string())
+            .map_err(|_| refused())?;
+        Ok(Operation::probe(
+            task.delegation.clone().ok_or_else(refused)?,
+            token,
+            stop,
+            Instant::now() + Duration::from_secs(90),
+        ))
+    }
+    async fn prepare_with<T, F, Fut>(
+        self: &Arc<Self>,
+        operation: Operation,
         work: F,
     ) -> Result<T, MobileError>
     where
@@ -98,29 +122,24 @@ impl ScopedPayloadReader {
         F: FnOnce(Arc<Self>, Operation) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = Result<T, MobileError>> + 'static,
     {
-        task.validate_delegation(&self.peer.runtime_id().to_string())
-            .map_err(|_| refused())?;
-        let context = task.delegation.clone().ok_or_else(refused)?;
         self.peer
-            .validate_claim_identity(&context)
+            .validate_claim_identity(&operation.context)
             .map_err(|_| refused())?;
-        if !token.starts_with(crate::credential::DEVICE_SESSION_PREFIX) || token.len() > 1024 * 1024
+        if !operation
+            .token
+            .starts_with(crate::credential::DEVICE_SESSION_PREFIX)
+            || operation.token.len() > 1024 * 1024
         {
             return Err(refused());
         }
+        operation.live()?;
         let permit = Permit::acquire(&self.budget)?;
         let mut reader = (**self).clone();
         reader.reserved = Some(permit);
         let owner = Arc::new(reader);
-        let token = token.to_owned();
-        let child = stop.child_token();
-        let deadline = Instant::now() + Duration::from_secs(90);
-        let operation = Operation {
-            context,
-            token,
-            stop: child.clone(),
-            deadline,
-        };
+        let child = operation.child(operation.deadline);
+        let deadline = child.deadline;
+        let stop = child.stop.clone();
         let runtime = tokio::runtime::Handle::current();
         // All cache decoding/fingerprinting stays off runtime executor threads.
         // Detaching the waiter leaves this owner/permit with physical work.
@@ -130,7 +149,7 @@ impl ScopedPayloadReader {
         std::thread::Builder::new()
             .name("orch8-prepare".into())
             .spawn(move || {
-                let result = runtime.block_on(work(owner.clone(), operation));
+                let result = runtime.block_on(work(owner.clone(), child));
                 // An abandoned result is destroyed while physical capacity is held.
                 if let Err(result) = sender.send(result) {
                     drop(result);
@@ -138,11 +157,8 @@ impl ScopedPayloadReader {
                 drop(owner);
             })
             .map_err(|_| refused())?;
-        let mut waiting = Preparing {
-            result,
-            stop: child,
-        };
-        tokio::select! {biased; ()=stop.cancelled()=>Err(refused()), result=tokio::time::timeout_at(deadline,&mut waiting.result)=>result.map_err(|_|refused())?.map_err(|_|refused())?}
+        let mut waiting = Preparing { result, stop };
+        tokio::select! {biased; ()=operation.stop.cancelled()=>Err(refused()), result=tokio::time::timeout_at(deadline,&mut waiting.result)=>result.map_err(|_|refused())?.map_err(|_|refused())?}
     }
     async fn stored<T>(
         &self,
@@ -183,9 +199,7 @@ impl ScopedPayloadReader {
         let run = if let Some(run) = run {
             run
         } else {
-            let envelope = self
-                .definition_context(context.clone(), &operation.token, operation.stop.clone())
-                .await?;
+            let envelope = self.definition_context(operation).await?;
             self.stored(
                 operation,
                 self.storage.install_claim_definitions(
@@ -218,9 +232,7 @@ impl ScopedPayloadReader {
         let input = if let Some(input) = input {
             input
         } else {
-            let envelope = self
-                .input_context(context.clone(), &operation.token, operation.stop.clone())
-                .await?;
+            let envelope = self.input_context(operation).await?;
             self.stored(
                 operation,
                 self.storage

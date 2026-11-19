@@ -127,7 +127,12 @@ pub fn honours_sub_tenant_header(method: &Method, path: &str) -> bool {
     let path = path.strip_prefix(crate::API_V1_PREFIX).unwrap_or(path);
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (method, segments.as_slice()) {
-        (&Method::POST, ["instances" | "sequences"] | ["instances", "batch"])
+        (
+            &Method::POST,
+            ["releases", _, "divergences", _, "fixture"]
+            | ["instances" | "sequences"]
+            | ["instances", "batch"],
+        )
         | (&Method::GET, ["instances"]) => true,
         (&Method::GET, ["instances", id]) => uuid::Uuid::parse_str(id).is_ok(),
         _ => false,
@@ -142,7 +147,7 @@ pub async fn reject_unhonoured_sub_tenant_header(request: Request, next: Next) -
         && !honours_sub_tenant_header(request.method(), request.uri().path())
     {
         return axum::response::IntoResponse::into_response(ApiError::InvalidArgument(format!(
-            "{SUB_TENANT_HEADER} is not supported on this route (it scopes instance create/list/get/batch and sequence create only); remove the header"
+            "{SUB_TENANT_HEADER} is not supported on this route; remove the header"
         )));
     }
     next.run(request).await

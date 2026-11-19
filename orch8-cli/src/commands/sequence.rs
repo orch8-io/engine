@@ -8,8 +8,17 @@ use uuid::Uuid;
 use crate::atomic_write;
 use crate::{OutputFormat, print_response};
 
+#[path = "sequence_mobile_preflight.rs"]
+mod mobile_preflight;
+#[path = "sequence_scaffold.rs"]
+mod scaffold;
+
 #[derive(Subcommand)]
 pub enum SequenceCmd {
+    /// Generate a typed handler stub and a mocked workflow contract for one step.
+    ScaffoldHandler(scaffold::ScaffoldHandler),
+    /// Check a sequence against an explicit offline mobile SDK profile and handlers.
+    PreflightMobile(mobile_preflight::MobilePreflightArgs),
     /// Create a sequence from a JSON or YAML file.
     Create {
         /// Path to the definition file (`.json`, `.yaml`, or `.yml`).
@@ -252,6 +261,8 @@ pub async fn run(
     format: OutputFormat,
 ) -> Result<()> {
     match cmd {
+        SequenceCmd::ScaffoldHandler(args) => scaffold::run(&args)?,
+        SequenceCmd::PreflightMobile(args) => mobile_preflight::run(&args, format)?,
         SequenceCmd::Create { file } => {
             let body = crate::seqdoc::read_document(&file)?;
             let resp = client

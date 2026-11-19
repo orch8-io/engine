@@ -1,0 +1,19 @@
+{
+  "name": "field-inspection",
+  "tenant_id": "demo",
+  "namespace": "default",
+  "version": 1,
+  "input_schema": {
+    "type": "object",
+    "properties": {"site_id": {"type": "string"}},
+    "required": ["site_id"]
+  },
+  "blocks": [
+    {"type": "step", "id": "capture", "handler": "capture_inspection", "params": {"site": "{{ data.site_id }}"}},
+    {
+      "type": "step", "id": "submit", "handler": "submit_inspection",
+      "params": {"inspection": "{{ outputs.capture }}"},
+      "retry": {"max_attempts": 3, "initial_backoff": 1000, "max_backoff": 30000}
+    }
+  ]
+}

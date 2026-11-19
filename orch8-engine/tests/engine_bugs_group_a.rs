@@ -1703,6 +1703,7 @@ async fn a10_sub_sequence_links_parent_and_propagates_outputs() {
     // --- Parent sequence has a single SubSequence block pointing at the
     //     child sequence by name.
     let sub = BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+        child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
         id: BlockId::new("ss"),
         sequence_name: "child-seq".into(),
         version: Some(1),

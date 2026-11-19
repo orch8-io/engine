@@ -81,10 +81,11 @@ jobs:
         run: cargo check --locked --workspace
       - name: Browser WASM target
         run: cargo check --locked -p orch8-wasm --target wasm32-unknown-unknown
-      - name: Native Node and Python bindings
+      - name: Clippy for standalone bindings and fuzz harnesses
         run: |
-          cargo check --locked --manifest-path packages/node-native/Cargo.toml
-          cargo check --locked --manifest-path packages/python-native/Cargo.toml
+          for manifest in packages/node-native/Cargo.toml packages/python-native/Cargo.toml fuzz/Cargo.toml; do
+            cargo clippy --locked --all-targets --manifest-path "$manifest"
+          done
       - name: Generated client contract
         run: ./scripts/check-generated-clients.sh
       - name: Clippy (all targets)
@@ -129,12 +130,17 @@ jobs:
           python-version: "3.10"
       - name: Build current Node native addon
         run: cargo build --locked --manifest-path packages/node-native/Cargo.toml
-      - name: Build current Python native extension
-        run: cargo build --locked --manifest-path packages/python-native/Cargo.toml
+      - name: Build and install locked Python wheel
+        run: |
+          python -m pip install 'maturin>=1.8,<2'
+          maturin build --locked --profile dev --compatibility linux \
+            --interpreter "$(command -v python)" \
+            --manifest-path packages/python-native/Cargo.toml --out "$RUNNER_TEMP/orch8-wheels"
+          python -m pip install --no-deps "$RUNNER_TEMP"/orch8-wheels/*.whl
       - name: Test packed addon with real host callbacks and process restarts
         run: bash scripts/check-node-native.sh "$CARGO_TARGET_DIR/debug/liborch8_node.so"
-      - name: Test Python physical callbacks, retirement and process restarts
-        run: bash scripts/check-python-native.sh "$CARGO_TARGET_DIR/debug/lib_native.so"
+      - name: Test wheel callbacks, retirement and process restarts
+        run: python -m unittest discover -s packages/python-native/tests -p 'test_*.py' -v
 
   test:
     name: Unit Tests
@@ -202,7 +208,26 @@ jobs:
       - name: Build orch8-server
         run: cargo build --locked -p orch8-server --bin orch8-server
       - name: Test
+        env:
+          ORCH8_SERVER_BIN: ${{ github.workspace }}/target/debug/orch8-server
         run: cargo test --locked --workspace
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Exercise hybrid worker sandbox and private fallback
+        env:
+          ORCH8_BIN: ${{ github.workspace }}/target/debug/orch8
+        run: |
+          cargo build --locked -p orch8-cli --bin orch8
+          timeout 60s sh examples/private-workers/sandbox.sh
+          ORCH8_RESIDENCY=eu timeout 60s sh examples/private-workers/sandbox.sh fallback.json
+      - name: Verify inspection reconnect through worker and approval
+        env:
+          ORCH8_BIN: ${{ github.workspace }}/target/debug/orch8
+          ORCH8_SERVER_BIN: ${{ github.workspace }}/target/debug/orch8-server
+        run: |
+          python3 -B -m unittest discover -s examples/mobile-inspection -p 'test_doctor_runtime.py'
+          python3 -B -m unittest discover -s examples/mobile-inspection/reconnect
       - name: Verify partitioned output-index prebuild
         run: python3 scripts/check-output-index-prebuild.py
       # Criterion's test mode exercises each workload without collecting
@@ -246,9 +271,9 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
-      - name: Build and typecheck
+      - name: Test and build
         working-directory: dashboard
-        run: npm ci --no-audit --no-fund && npm run build
+        run: npm ci --no-audit --no-fund && npm test && npm run build
 
   e2e:
     name: E2E Tests
@@ -457,7 +482,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [expression, template]
+        target: [expression, template, sequence, definition_bundle]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # nightly

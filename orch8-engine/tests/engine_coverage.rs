@@ -2659,6 +2659,7 @@ async fn sub_sequence_calls_child_sequence() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-seq".into(),
             version: None,
@@ -2702,6 +2703,7 @@ async fn sub_sequence_inherits_parent_context() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-inherit".into(),
             version: None,
@@ -2745,6 +2747,7 @@ async fn sub_sequence_failure_propagates_to_parent() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-fail".into(),
             version: None,
@@ -2789,6 +2792,7 @@ async fn sub_sequence_output_available_to_parent() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-output".into(),
             version: None,
@@ -2832,6 +2836,7 @@ async fn sub_sequence_with_custom_input() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-input".into(),
             version: None,
@@ -2888,6 +2893,7 @@ async fn sub_sequence_nested_two_levels() {
         deprecated: false,
         status: SequenceStatus::Production,
         blocks: vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub_inner"),
             sequence_name: "grandchild".into(),
             version: None,
@@ -2905,6 +2911,7 @@ async fn sub_sequence_nested_two_levels() {
     // parent
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub_outer"),
             sequence_name: "child-nested".into(),
             version: None,
@@ -2950,6 +2957,7 @@ async fn sub_sequence_in_parallel_branch() {
         id: BlockId::new("par"),
         branches: vec![
             vec![BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                 id: BlockId::new("sub_par"),
                 sequence_name: "child-par".into(),
                 version: None,
@@ -2998,6 +3006,7 @@ async fn sub_sequence_with_retry() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-retry".into(),
             version: None,
@@ -3041,6 +3050,7 @@ async fn sub_sequence_timeout() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-timeout".into(),
             version: None,
@@ -3084,6 +3094,7 @@ async fn sub_sequence_cancel_propagates() {
     storage.create_sequence(&child_seq).await.unwrap();
     let parent_seq = mk_sequence(vec![BlockDefinition::SubSequence(Box::new(
         SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child-cancel".into(),
             version: None,

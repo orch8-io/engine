@@ -1050,6 +1050,7 @@ mod tests {
             version: version.map(ToString::to_string),
             tenant_id: None,
             last_seen_at: t0(),
+            available_poll_slots: None,
         }
     }
 

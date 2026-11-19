@@ -78,6 +78,7 @@ fn cc(handler: &str, min: u32, max: Option<u32>) -> CallCountExpectation {
 
 fn case_report(name: &str, passed: bool) -> CaseReport {
     CaseReport {
+        child_executions: Vec::new(),
         name: name.to_string(),
         passed,
         failures: if passed {
@@ -87,6 +88,7 @@ fn case_report(name: &str, passed: bool) -> CaseReport {
         },
         final_state: if passed { "completed" } else { "failed" }.to_string(),
         executed_blocks: vec![],
+        attempted_blocks: Vec::new(),
         handler_calls: BTreeMap::new(),
         ticks: 1,
         logical_duration_ms: 0,
@@ -433,6 +435,7 @@ fn assertion_output_subject_shape_parses() {
     assert_eq!(
         a.subject,
         AssertionSubject::Output {
+            definition: None,
             block: "charge".into(),
             path: "amount".into()
         }
@@ -1391,6 +1394,7 @@ fn assertion_output_empty_path_reads_whole_output() {
     let outputs = outputs_with("charge", json!({"ok": true}));
     let a = Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "charge".into(),
             path: String::new(),
         },
@@ -1404,6 +1408,7 @@ fn assertion_output_deep_path_resolves() {
     let outputs = outputs_with("fetch", json!({"body": {"items": [{"id": 9}]}}));
     let a = Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "fetch".into(),
             path: "body.items.0.id".into(),
         },
@@ -1416,6 +1421,7 @@ fn assertion_output_deep_path_resolves() {
 fn assertion_equals_on_missing_block_fails() {
     let a = Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "ghost".into(),
             path: "x".into(),
         },
@@ -1430,6 +1436,7 @@ fn assertion_equals_on_missing_block_fails() {
 fn assertion_exists_on_missing_block_fails_but_not_exists_passes() {
     let mk = |op: AssertionOp| Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "never_ran".into(),
             path: String::new(),
         },
@@ -1444,6 +1451,7 @@ fn assertion_not_exists_passes_for_missing_path_in_present_block() {
     let outputs = outputs_with("step", json!({"present": 1}));
     let a = Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "step".into(),
             path: "missing".into(),
         },
@@ -1457,6 +1465,7 @@ fn assertion_output_error_is_prefixed_with_block_and_path() {
     let outputs = outputs_with("charge", json!({"amount": 5}));
     let a = Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "charge".into(),
             path: "amount".into(),
         },
@@ -1493,6 +1502,7 @@ fn assertion_contains_applies_to_output_subject() {
     let outputs = outputs_with("list", json!({"tags": ["red", "green"]}));
     let a = Assertion {
         subject: AssertionSubject::Output {
+            definition: None,
             block: "list".into(),
             path: "tags".into(),
         },

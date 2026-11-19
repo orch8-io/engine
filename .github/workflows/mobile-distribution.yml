@@ -48,9 +48,16 @@ jobs:
     name: Swift package (orch8-mobile-swift)
     runs-on: macos-latest
     timeout-minutes: 30
+    outputs:
+      enabled: ${{ steps.channel.outputs.enabled }}
     env:
       SWIFT_REPO_TOKEN: ${{ secrets.ORCH8_MOBILE_SWIFT_TOKEN }}
     steps:
+      - name: Enable published consumer check
+        if: env.SWIFT_REPO_TOKEN != ''
+        id: channel
+        run: echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Skip without ORCH8_MOBILE_SWIFT_TOKEN
         if: env.SWIFT_REPO_TOKEN == ''
         run: echo "::notice::ORCH8_MOBILE_SWIFT_TOKEN is not set; skipping the orch8-mobile-swift release."
@@ -193,9 +200,16 @@ jobs:
     name: Maven (io.orch8:orch8-mobile)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    outputs:
+      enabled: ${{ steps.channel.outputs.enabled }}
     env:
       MAVEN_REPO_TOKEN: ${{ secrets.ORCH8_MAVEN_TOKEN }}
     steps:
+      - name: Enable published consumer check
+        if: env.MAVEN_REPO_TOKEN != ''
+        id: channel
+        run: echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - name: Skip without ORCH8_MAVEN_TOKEN
         if: env.MAVEN_REPO_TOKEN == ''
         run: echo "::notice::ORCH8_MAVEN_TOKEN is not set; skipping the orch8-io/maven publication."
@@ -239,6 +253,20 @@ jobs:
             git pull --rebase origin main
           done
           exit 1
+
+  published-consumer:
+    name: Verify fresh installs from public registries
+    needs: [swift-package, maven]
+    if: |
+      !cancelled() && (
+        (needs.swift-package.result == 'success' && needs.swift-package.outputs.enabled == 'true') ||
+        (needs.maven.result == 'success' && needs.maven.outputs.enabled == 'true')
+      )
+    uses: ./.github/workflows/mobile-install.yml
+    with:
+      version: ${{ inputs.tag }}
+      ios: ${{ needs.swift-package.result == 'success' && needs.swift-package.outputs.enabled == 'true' }}
+      android: ${{ needs.maven.result == 'success' && needs.maven.outputs.enabled == 'true' }}
 
   # -- Maven: io.orch8:orch8-kmp ---------------------------------------------
   kmp:

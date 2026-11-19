@@ -15,6 +15,7 @@ use axum::response::{Html, IntoResponse, Response};
 use owo_colors::OwoColorize;
 use rust_embed::Embed;
 use tokio::net::TcpListener;
+use tokio::time::{Duration, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -36,11 +37,14 @@ use orch8_storage::sqlite::SqliteStorage;
 #[include = "*.woff2"]
 struct DashboardAssets;
 
+const WORKER_LEASE_SECS: u64 = 60;
+
 /// Running dev server state — kept alive for the session's lifetime.
 pub struct DevServer {
     _storage: Arc<dyn StorageBackend>,
     pub shutdown: CancellationToken,
     _http_handle: tokio::task::JoinHandle<()>,
+    _reaper_handle: tokio::task::JoinHandle<()>,
 }
 
 impl Drop for DevServer {
@@ -68,7 +72,7 @@ impl DevServer {
             shutdown: shutdown.clone(),
             max_context_bytes: 1_048_576,
             externalization_mode: orch8_types::config::ExternalizationMode::default(),
-            worker_lease_secs: 60,
+            worker_lease_secs: WORKER_LEASE_SECS,
             worker_heartbeat_interval_secs: 15,
             circuit_breakers: Some(cb_registry.clone()),
             stream_limiter: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_STREAMS)),
@@ -143,6 +147,8 @@ impl DevServer {
             }
         });
 
+        let reaper_handle = tokio::spawn(worker_reaper(storage.clone(), shutdown.clone()));
+
         eprintln!(
             "  {} API:       http://localhost:{port}/api/v1",
             "→".cyan().bold(),
@@ -160,7 +166,27 @@ impl DevServer {
             _storage: storage,
             shutdown,
             _http_handle: http_handle,
+            _reaper_handle: reaper_handle,
         })
+    }
+}
+
+// The studio drives scheduler ticks directly. Run the same fenced lease and
+// deadline reaper as a standalone engine so expired work can advance the run.
+async fn worker_reaper(storage: Arc<dyn StorageBackend>, shutdown: CancellationToken) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => break,
+            _ = tick.tick() => {
+                if let Err(error) = orch8_engine::worker_lease::reap_worker_tasks(
+                    storage.as_ref(), Duration::from_secs(WORKER_LEASE_SECS)
+                ).await {
+                    tracing::warn!(%error, "local worker task reaper failed");
+                }
+            }
+        }
     }
 }
 
@@ -227,12 +253,20 @@ mod tests {
         let shutdown = CancellationToken::new();
         let background_shutdown = shutdown.clone();
         let (finished, completion) = tokio::sync::oneshot::channel();
+        let (reaper_finished, reaper_completion) = tokio::sync::oneshot::channel();
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let reaper_storage = storage.clone();
+        let reaper_shutdown = shutdown.clone();
         let server = DevServer {
-            _storage: Arc::new(SqliteStorage::in_memory().await.unwrap()),
+            _storage: storage,
             shutdown,
             _http_handle: tokio::spawn(async move {
                 background_shutdown.cancelled().await;
                 let _ = finished.send(());
+            }),
+            _reaper_handle: tokio::spawn(async move {
+                worker_reaper(reaper_storage, reaper_shutdown).await;
+                let _ = reaper_finished.send(());
             }),
         };
 
@@ -242,6 +276,10 @@ mod tests {
             .await
             .expect("dropping the server must signal shutdown")
             .expect("background task should finish normally");
+        tokio::time::timeout(Duration::from_secs(5), reaper_completion)
+            .await
+            .expect("dropping the server must stop the worker reaper")
+            .expect("worker reaper should finish normally");
     }
 
     #[tokio::test]

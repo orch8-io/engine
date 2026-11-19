@@ -14,7 +14,6 @@ use orch8_types::{
     instance::{InstanceState, Priority, TaskInstance},
 };
 use serde::{Deserialize, Serialize};
-use tokio_util::sync::CancellationToken;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -34,8 +33,11 @@ struct Root {
     namespace: Namespace,
     created_at: chrono::DateTime<chrono::Utc>,
 }
-fn live(context: &DelegationClaimContext, stop: &CancellationToken) -> Result<(), StorageError> {
-    if stop.is_cancelled() || chrono::Utc::now() >= context.expires_at {
+fn live(
+    context: &DelegationClaimContext,
+    claim_live: &(impl Fn() -> bool + Sync),
+) -> Result<(), StorageError> {
+    if !claim_live() || chrono::Utc::now() >= context.expires_at {
         return Err(invalid(
             "remote initialization cancelled or publication expired",
         ));
@@ -81,9 +83,9 @@ impl MobileStorage {
         context: &DelegationClaimContext,
         expected: &BoundClaimRun,
         limits: InstanceLimits,
-        stop: &CancellationToken,
+        claim_live: &(impl Fn() -> bool + Sync),
     ) -> Result<TaskInstance, StorageError> {
-        live(context, stop)?;
+        live(context, claim_live)?;
         peer.validate_claim_identity(context)?;
         let scope = peer.scope();
         let server = peer.api_base();
@@ -161,7 +163,7 @@ impl MobileStorage {
                 {
                     return Err(invalid("remote active-instance capacity exhausted"));
                 }
-                insert(&mut tx, id, &root, input, context, stop).await?
+                insert(&mut tx, id, &root, input, context, claim_live).await?
             }
             _ => {
                 return Err(invalid(
@@ -169,7 +171,7 @@ impl MobileStorage {
                 ));
             }
         };
-        live(context, stop)?;
+        live(context, claim_live)?;
         tx.commit().await?;
         Ok(instance)
     }
@@ -180,7 +182,7 @@ async fn insert(
     root: &Root,
     input: orch8_types::delegation_definition::input::VerifiedDelegationInput,
     context: &DelegationClaimContext,
-    stop: &CancellationToken,
+    claim_live: &(impl Fn() -> bool + Sync),
 ) -> Result<TaskInstance, StorageError> {
     let instance = TaskInstance {
         id,
@@ -207,7 +209,7 @@ async fn insert(
         created_at: root.created_at,
         updated_at: root.created_at,
     };
-    live(context, stop)?;
+    live(context, claim_live)?;
     SqliteStorage::create_instance_in_transaction(tx, &instance).await?;
     let record = serde_json::to_string(&root)?;
     if record.len() > 16384 {

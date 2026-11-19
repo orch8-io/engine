@@ -2,6 +2,25 @@ import { NativeModules, NativeEventEmitter } from "react-native";
 import { Orch8Client, type NativeOrch8 } from "./core";
 
 export * from "./types";
+export { previewDataVisibility, resolveOfflineConflict, workflowSyncState } from "./offlineWorkflow";
+export type {
+  BackgroundDiagnostics, DataDestination, DataVisibility, OfflineConflictDecision,
+  OfflineConflictHandler, OfflineConflictResult, OfflineEdit, VisibilityEntry, WorkflowJson,
+  WorkflowCompletion, WorkflowSyncEvidence, WorkflowSyncReceipt, WorkflowSyncState,
+} from "./offlineWorkflow";
+export { Orch8SyncStatus } from "./syncStatus";
+export { DurableMediaUploader } from "./mediaUpload";
+export type {
+  MediaUploadOptions, MediaUploadProgress, MediaUploadState, MediaUploadStore, MediaUploadTransport,
+} from "./mediaUpload";
+export { Orch8ApprovalInbox, Orch8ExecutionStatus, Orch8ExecutionTimeline } from "./executionComponents";
+export type {
+  Orch8ApprovalInboxProps, Orch8ExecutionStatusProps, Orch8ExecutionTimelineProps,
+} from "./executionComponents";
+export type {
+  Orch8Approval, Orch8ApprovalChoice, Orch8ApprovalDecision, Orch8ApprovalDecisionResult,
+  Orch8ExecutionStep, Orch8ExecutionStepState,
+} from "./executionPresentation";
 export { Orch8Account, Orch8Catalog, Orch8CatalogRun, CatalogHistoryCursor } from "./scoped";
 export type { AccountIdentity, CatalogConfiguration, CatalogRunRequest, CatalogCallbackContext,
   CatalogStepHandler, CatalogTokenSource, CatalogRunSnapshot, CatalogArchiveReceipt,

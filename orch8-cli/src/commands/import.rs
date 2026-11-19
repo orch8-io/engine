@@ -80,6 +80,12 @@ pub struct ImportArgs {
     /// Write the machine-readable conversion report (JSON) here.
     #[arg(long)]
     pub report: Option<PathBuf>,
+    /// Observed source-run cases used to build an Orch8 contract fixture.
+    #[arg(long, requires = "parity_out")]
+    pub parity_from: Option<PathBuf>,
+    /// Write the generated contract suite here.
+    #[arg(long, requires_all = ["parity_from", "out"])]
+    pub parity_out: Option<PathBuf>,
     /// Zapier only: zap id or title to convert when the file holds several.
     #[arg(long)]
     pub zap: Option<String>,
@@ -203,6 +209,20 @@ pub fn run(cmd: ImportCmd, tenant_id: Option<&str>) -> Result<()> {
         }
     };
 
+    let parity = args
+        .parity_from
+        .as_ref()
+        .map(|path| {
+            let evidence = crate::seqdoc::read_document(path)?;
+            build_parity_fixture(&conversion, evidence)
+        })
+        .transpose()?;
+    if let Some(path) = &args.parity_out {
+        anyhow::ensure!(
+            !path.exists() && Some(path) != args.out.as_ref() && Some(path) != args.report.as_ref(),
+            "parity fixture output must be a new, distinct file"
+        );
+    }
     match &args.out {
         Some(path) => {
             crate::seqdoc::write_document(path, &conversion.sequence)?;
@@ -214,14 +234,104 @@ pub fn run(cmd: ImportCmd, tenant_id: Option<&str>) -> Result<()> {
         ),
     }
     if let Some(path) = &args.report {
+        let mut report = serde_json::to_value(&conversion.report)?;
+        let (partial, manual): (Vec<_>, Vec<_>) = conversion
+            .report
+            .todos
+            .iter()
+            .partition(|node| node.handler != "log");
+        report["translation"] = json!({
+            "mapped": conversion.report.mapped,
+            "partial": partial,
+            "manual": manual,
+            "unmapped_source_constructs": conversion.report.unmapped,
+        });
         crate::atomic_write(
             path,
-            format!("{}\n", serde_json::to_string_pretty(&conversion.report)?).as_bytes(),
+            format!("{}\n", serde_json::to_string_pretty(&report)?).as_bytes(),
         )?;
         eprintln!("wrote conversion report {}", path.display());
     }
+    if let (Some(path), Some(fixture)) = (&args.parity_out, parity) {
+        use std::io::Write as _;
+        let rendered = crate::seqdoc::render_for_path(path, &fixture)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .with_context(|| format!("creating {}", path.display()))?
+            .write_all(rendered.as_bytes())?;
+        eprintln!("wrote parity fixture {}", path.display());
+    }
     eprint!("{}", summarize(&conversion.report));
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+struct SourceRunEvidence {
+    cases: Vec<SourceRunCase>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourceRunCase {
+    name: String,
+    #[serde(default)]
+    input: Value,
+    observed_nodes: Vec<String>,
+    #[serde(default)]
+    mocks: Vec<orch8_types::contract::MockDef>,
+    #[serde(default)]
+    signals: Vec<orch8_types::contract::SignalFixture>,
+    terminal_state: orch8_types::contract::ExpectedTerminalState,
+}
+
+fn build_parity_fixture(conversion: &Conversion, evidence: Value) -> Result<Value> {
+    let evidence: SourceRunEvidence =
+        serde_json::from_value(evidence).context("invalid source-run evidence")?;
+    let sequence = super::test_cmd::decode_authoring_sequence(conversion.sequence.clone())?;
+    let mut steps = HashSet::new();
+    for block in &sequence.blocks {
+        orch8_types::sequence::visit_steps(block, &mut |step| {
+            steps.insert(step.id.as_str());
+        });
+    }
+    let mappings = &conversion.report.mapped;
+    let mut cases = Vec::with_capacity(evidence.cases.len());
+    for case in evidence.cases {
+        let mut traversed = Vec::new();
+        for node in &case.observed_nodes {
+            let mut matches = mappings.iter().filter(|mapping| {
+                &mapping.node == node && steps.contains(mapping.block_id.as_str())
+            });
+            let mapping = matches.next().with_context(|| {
+                format!("cannot map observed node '{node}' to an executable translated step")
+            })?;
+            anyhow::ensure!(
+                matches.next().is_none(),
+                "observed node '{node}' maps to multiple translated steps"
+            );
+            anyhow::ensure!(
+                !traversed.contains(&mapping.block_id.as_str()),
+                "observed node '{node}' repeats; contract paths capture first execution only"
+            );
+            traversed.push(mapping.block_id.as_str());
+        }
+        cases.push(json!({
+            "name": case.name,
+            "input": case.input,
+            "mocks": case.mocks,
+            "signals": case.signals,
+            "expect": {
+                "terminal_state": case.terminal_state,
+                "path": {"traversed": traversed, "ordered": true},
+            },
+        }));
+    }
+    let fixture = json!({"sequence_name": sequence.name, "cases": cases});
+    let suite: orch8_types::contract::ContractSuite = serde_json::from_value(fixture.clone())?;
+    suite.validate().map_err(anyhow::Error::msg)?;
+    Ok(fixture)
 }
 
 /// Human summary printed to stderr.

@@ -301,3 +301,36 @@ await orch8.stopDelegation(); // pause; journaled delegations resume on the next
 
 `onPushReceived` / `onPushWake` advance pending delegations immediately. See
 the [Mobile SDK guide](https://github.com/orch8-io/engine/blob/main/docs/MOBILE_SDK.md#delegating-from-a-phone-local-workflow).
+
+## Offline execution UI and integrations
+
+Use `Orch8ExecutionStatus` and `Orch8ExecutionTimeline` with the state and
+allowlisted step labels from your workflow. `Orch8SyncStatus` accepts the
+current completion and an authenticated backend receipt. It ignores receipts
+for an earlier revision of the same submission.
+
+```tsx
+<Orch8SyncStatus evidence={{ completion, startedSync, receipt }} />
+<Orch8ApprovalInbox
+  scopeKey={catalogKey}
+  approvals={approvals}
+  onDecide={commitApproval}
+/>
+```
+
+Implement `commitApproval` as a durable conditional write using the decision's
+`expectedRevision` and `idempotencyKey`. Return `"stale"` when the revision
+has changed, then refresh the inbox.
+
+`resolveOfflineConflict` returns a write against the observed server revision
+or an explicit review outcome. Apply its expected revision in the same atomic
+write that stores the new value. `previewDataVisibility` lists field paths
+for your configured destination allowlists. Use the same policy at each
+actual disclosure boundary.
+
+`DurableMediaUploader` resumes chunks from storage callbacks supplied by the
+host. Back `compareAndSet` with a durable transaction, retain the same file
+contents throughout the upload, and use an idempotent server range endpoint.
+Call `advance` again in a later eligible window if the connection drops.
+`orch8.getBackgroundDiagnostics()` reports outcomes for windows observed in
+the current client lifecycle.

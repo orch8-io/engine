@@ -6,7 +6,7 @@ use orch8_storage::StorageBackend;
 use orch8_types::error::StorageError;
 use orch8_types::execution::{ExecutionNode, NodeState};
 use orch8_types::instance::TaskInstance;
-use orch8_types::sequence::BlockDefinition;
+use orch8_types::sequence::{BlockDefinition, ChildResultMode};
 
 use super::{complete_node, fail_node};
 use crate::error::EngineError;
@@ -325,17 +325,16 @@ pub(super) async fn dispatch_block(
             if let Some(child) = existing_child {
                 // Child exists — check if it's done.
                 if child.state == orch8_types::instance::InstanceState::Completed {
-                    // Save child outputs as this block's output.
-                    let child_outputs = storage.get_all_outputs(child.id).await?;
-                    let output_val = serde_json::to_value(&child_outputs).map_err(|e| {
-                        tracing::warn!(
-                            instance_id = %instance.id,
-                            child_id = %child.id,
-                            error = %e,
-                            "failed to serialize child outputs"
-                        );
-                        EngineError::Storage(StorageError::Serialization(e))
-                    })?;
+                    let output_val = match ss_def.child_result {
+                        ChildResultMode::Reference => {
+                            serde_json::json!({ "child_instance_id": child.id })
+                        }
+                        ChildResultMode::LegacyOutputs => {
+                            let child_outputs = storage.get_all_outputs(child.id).await?;
+                            serde_json::to_value(&child_outputs)
+                                .map_err(StorageError::Serialization)?
+                        }
+                    };
                     let block_output = orch8_types::output::BlockOutput {
                         id: uuid::Uuid::now_v7(),
                         instance_id: instance.id,

@@ -83,7 +83,7 @@ class Engine {
     )
   }
 
-  /** Drive the engine until the instance settles (or `timeoutMs` elapses). */
+  /** Drive the engine until the instance settles or the scheduling budget elapses. Storage reads can continue past `timeoutMs`. */
   async run(id, options = {}) {
     return JSON.parse(await this._inner.run(id, options.timeoutMs ?? undefined))
   }

@@ -43,6 +43,7 @@ fn write_package(dir: &std::path::Path, pkg: &orch8_publisher::package::SignedPa
 fn deploy_cmd(package: PathBuf) -> DeployCmd {
     DeployCmd {
         package,
+        package_sequence: None,
         release_id: Uuid::now_v7(),
         canary_percent: 5,
         observations: 1,
@@ -277,4 +278,60 @@ fn canary_percent_is_bounded_to_1_through_50_and_observations_to_1_through_20() 
         ]);
         assert_eq!(parsed.is_ok(), accepted, "{flag} {value}");
     }
+}
+
+#[tokio::test]
+async fn artifact_promotion_refuses_a_different_candidate_before_release_mutation() {
+    let source =
+        json!({"name":"billing", "blocks":[{"type":"step","id":"charge","handler":"noop"}]});
+    let mut candidate = source.clone();
+    candidate["blocks"][0]["handler"] = json!("different_handler");
+    candidate["tenant_id"] = json!("production");
+    let candidate_id = Uuid::now_v7();
+    candidate["id"] = json!(candidate_id);
+    let config = signed_package().archive.manifest;
+    let package = build_package(
+        config,
+        BTreeMap::from([("sequences/billing.json".into(), source.to_string())]),
+        &ed25519_dalek::SigningKey::from_bytes(&[1; 32]),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+
+    let api = mock_api_with_responses(vec![
+        ok(&json!({"candidate_sequence_id": candidate_id})),
+        ok(&candidate),
+    ])
+    .await;
+    let mut command = deploy_cmd(write_package(dir.path(), &package));
+    command.promote = true;
+    command.package_sequence = Some("sequences/billing.json".into());
+    let error = run(&Client::new(), &api.base, command, OutputFormat::Json)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("does not match the signed sequence"));
+    let requests = api.log.snapshot();
+    assert_eq!(count(&requests, "/canary"), 0);
+    assert_eq!(count(&requests, "/promote"), 0);
+}
+
+#[test]
+fn artifact_promotion_allows_environment_identity_but_checks_placement() {
+    let signed = json!({
+        "name":"billing", "blocks":[{"type":"step","id":"charge","handler":"noop",
+          "placement":{"region":"eu"}}]
+    });
+    let mut candidate = signed.clone();
+    candidate["tenant_id"] = json!("production");
+    candidate["namespace"] = json!("operations");
+    candidate["version"] = json!(24);
+    assert_eq!(
+        sequence_content(signed.clone()).unwrap(),
+        sequence_content(candidate.clone()).unwrap()
+    );
+    candidate["blocks"][0]["placement"]["region"] = json!("us");
+    assert_ne!(
+        sequence_content(signed).unwrap(),
+        sequence_content(candidate).unwrap()
+    );
 }

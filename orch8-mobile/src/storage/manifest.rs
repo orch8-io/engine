@@ -1,6 +1,7 @@
 //! Durable acceptance is distinct from successful workflow evaluation. A retry
 //! may finish an accepted document, but cannot restore an older trust set.
 use super::MobileStorage;
+use crate::{BundledCatalogDisposition, BundledCatalogInstall};
 use chrono::Utc;
 use orch8_types::error::StorageError;
 use sqlx::{Sqlite, Transaction};
@@ -119,6 +120,66 @@ pub(super) async fn legacy_trust_in(
 }
 
 impl MobileStorage {
+    pub(crate) async fn install_legacy_seed(
+        &self,
+        sequences: &[orch8_types::sequence::SequenceDefinition],
+        limit: u32,
+    ) -> Result<BundledCatalogInstall, StorageError> {
+        let sequence_count = u32::try_from(sequences.len()).map_err(|_| {
+            StorageError::Constraint("bundled catalog has too many sequences".into())
+        })?;
+        let mut tx = self.pool().begin_with("BEGIN IMMEDIATE").await?;
+        let trust = legacy_trust_in(&mut tx).await?;
+        if trust.accepted_version.is_some() || trust.applied_version.is_some() {
+            return Ok(BundledCatalogInstall {
+                disposition: BundledCatalogDisposition::ManifestOwned,
+                installed: 0,
+                skipped: sequence_count,
+            });
+        }
+
+        let mut installed = 0;
+        for sequence in sequences {
+            let existing: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM sequences WHERE tenant_id = ?1
+                 AND namespace = ?2 AND name = ?3)",
+            )
+            .bind(sequence.tenant_id.as_str())
+            .bind(sequence.namespace.as_str())
+            .bind(&sequence.name)
+            .fetch_one(&mut *tx)
+            .await?;
+            if existing {
+                continue;
+            }
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(DISTINCT name) FROM sequences WHERE tenant_id = ?1 AND namespace = ?2",
+            )
+            .bind(sequence.tenant_id.as_str())
+            .bind(sequence.namespace.as_str())
+            .fetch_one(&mut *tx)
+            .await?;
+            if count >= i64::from(limit) {
+                return Err(StorageError::Constraint(
+                    "bundled catalog exceeds the configured sequence count limit".into(),
+                ));
+            }
+            orch8_storage::sqlite::SqliteStorage::create_sequence_in_transaction(&mut tx, sequence)
+                .await?;
+            installed += 1;
+        }
+        tx.commit().await?;
+        Ok(BundledCatalogInstall {
+            disposition: if installed == 0 {
+                BundledCatalogDisposition::AlreadyPresent
+            } else {
+                BundledCatalogDisposition::Seeded
+            },
+            installed,
+            skipped: sequence_count - installed,
+        })
+    }
+
     pub(crate) async fn manifest_trust(&self) -> Result<ManifestTrust, StorageError> {
         let rows = sqlx::query_as("SELECT key, value FROM sync_metadata WHERE key IN ('accepted_manifest_version', 'accepted_manifest_digest', 'last_manifest_version')")
             .fetch_all(self.pool()).await?;

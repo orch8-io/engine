@@ -335,33 +335,43 @@ struct DeliveryJob {
 
 impl DeliveryJob {
     async fn run(self, wake: ClaimedWake) -> Result<(), String> {
+        let mut http_attempts = None;
         let send = async {
-            if let Some((key_id, key)) = &self.wake_signer {
-                match crate::SignedWakeMetadata::sign(
-                    &wake.tenant_id,
-                    &wake.device_id,
-                    &wake.command_id,
-                    key_id,
-                    key,
-                    self.attempt_at,
-                    self.attempt_at + Duration::minutes(5),
-                ) {
-                    Ok(metadata) => {
-                        self.provider
-                            .send_signed_wake(&wake.push_token, &wake.platform, &metadata)
-                            .await
-                    }
-                    Err(error) => Err(PushError::Permanent(error.to_string())),
-                }
+            let metadata = if let Some((key_id, key)) = &self.wake_signer {
+                Some(
+                    crate::SignedWakeMetadata::sign(
+                        &wake.tenant_id,
+                        &wake.device_id,
+                        &wake.command_id,
+                        key_id,
+                        key,
+                        self.attempt_at,
+                        self.attempt_at + Duration::minutes(5),
+                    )
+                    .map_err(|error| PushError::Permanent(error.to_string()))?,
+                )
             } else {
-                self.provider
-                    .send_silent_push(&wake.push_token, &wake.platform)
-                    .await
-            }
+                None
+            };
+            self.provider
+                .send_outbox_wake(
+                    &wake.push_token,
+                    &wake.platform,
+                    metadata.as_ref(),
+                    &mut http_attempts,
+                )
+                .await
         };
         let provider_result = tokio::time::timeout_at(self.send_deadline, send)
             .await
             .unwrap_or_else(|_| Err(PushError::Retryable("push provider timed out".into())));
+        tracing::debug!(
+            platform = %wake.platform,
+            outbox_attempt = wake.attempts.saturating_add(1),
+            http_attempts,
+            delivered = provider_result.is_ok(),
+            "Push wake delivery attempt finished"
+        );
         let completed_at = self.now
             + Duration::from_std(self.started.elapsed())
                 .map_err(|error| format!("push outbox clock overflow: {error}"))?;

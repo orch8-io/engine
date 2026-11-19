@@ -124,6 +124,69 @@ async fn exact_delivery(b: TestBackend) {
 }
 orch8_storage::backend_test!(async fn issued_context_binds_both_payloads_and_survives_hot_task_cleanup(b){exact_delivery(b).await;});
 
+async fn reads_require_issued_references(b: TestBackend) {
+    let server = spawn_test_server_on(b.storage.clone(), Some(ROOT)).await;
+    let f = fixture(b.storage.as_ref(), &server, Mode::Remote).await;
+    accepted(&server, &f.request).await;
+    let caps = capabilities(&b, &f).await;
+    let wire: Value = poll_raw(&server, &f, &caps).await.json().await.unwrap();
+    let context: DelegationClaimContext =
+        serde_json::from_value(wire["tasks"][0]["delegation"].clone()).unwrap();
+    verify_payloads(&server, &context, &f.request["input"]).await;
+
+    sql(&b, match &b.raw {
+        RawPool::Sqlite(_) => "DROP TRIGGER worker_issued_delegation_context_update;",
+        RawPool::Postgres(_) => "DROP TRIGGER worker_issued_delegation_context_immutable ON worker_issued_delegation_contexts;",
+    }).await;
+    for field in ["definition", "input", "expiry"] {
+        let mut changed = context.clone();
+        let mut denied = &["definition", "input"][..];
+        match field {
+            "definition" => {
+                changed.definition.payload_sha256 = "a".repeat(64);
+                denied = &["definition"];
+            }
+            "input" => {
+                changed.input.payload_sha256 = "b".repeat(64);
+                denied = &["input"];
+            }
+            "expiry" => changed.expires_at = Utc::now() - chrono::Duration::seconds(1),
+            _ => unreachable!(),
+        }
+        changed.validate().unwrap();
+        match &b.raw {
+            RawPool::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE worker_issued_delegation_contexts SET record=?1 WHERE task_id=?2",
+                )
+                .bind(serde_json::to_string(&changed).unwrap())
+                .bind(context.scope.task_id.to_string())
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+            RawPool::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE worker_issued_delegation_contexts SET record=$1 WHERE task_id=$2",
+                )
+                .bind(serde_json::to_value(&changed).unwrap())
+                .bind(context.scope.task_id)
+                .execute(pool)
+                .await
+                .unwrap();
+            }
+        }
+        for resource in denied {
+            assert_eq!(
+                read(&server, &context, resource).await.status(),
+                reqwest::StatusCode::CONFLICT,
+                "{field} {resource}"
+            );
+        }
+    }
+}
+orch8_storage::backend_test!(async fn delegated_payload_reads_reject_mismatched_or_expired_issued_receipts(b){reads_require_issued_references(b).await;});
+
 async fn atomic_capture(b: TestBackend) {
     let server = spawn_test_server_on(b.storage.clone(), Some(ROOT)).await;
     for suppress in [false, true] {

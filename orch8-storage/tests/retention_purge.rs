@@ -671,6 +671,7 @@ async fn auxiliary_retention_deletes_only_expired_rows() {
                     version: None,
                     tenant_id: None,
                     last_seen_at: Utc::now(),
+                    available_poll_slots: None,
                 })
                 .await
                 .unwrap();

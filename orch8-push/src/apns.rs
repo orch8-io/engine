@@ -139,7 +139,7 @@ pub struct ApnsProvider {
     key_id: String,
     team_id: String,
     topic: String,
-    base_url: &'static str,
+    base_url: String,
     cached_token: Mutex<Option<CachedToken>>,
 }
 
@@ -155,6 +155,9 @@ impl ApnsProvider {
         };
 
         let client = reqwest::Client::builder()
+            // Keep request retries inside the provider or its durable outbox.
+            .retry(reqwest::retry::never())
+            .redirect(reqwest::redirect::Policy::none())
             .http2_prior_knowledge()
             .timeout(Duration::from_secs(10))
             .build()
@@ -166,7 +169,7 @@ impl ApnsProvider {
             key_id: config.key_id,
             team_id: config.team_id,
             topic: config.topic,
-            base_url,
+            base_url: base_url.into(),
             cached_token: Mutex::new(None),
         })
     }
@@ -204,13 +207,15 @@ impl ApnsProvider {
         &self,
         token: &str,
         metadata: Option<&SignedWakeMetadata>,
+        max_attempts: u32,
+        http_attempts: &mut u32,
     ) -> Result<(), PushError> {
         if token.len() > MAX_TOKEN_LEN {
             return Err(PushError::InvalidToken);
         }
 
         let mut last_err = String::from("no attempts made");
-        for attempt in 0..MAX_DELIVERY_ATTEMPTS {
+        for attempt in 0..max_attempts {
             let jwt = self.get_or_refresh_token().await?;
             let encoded = urlencoding::encode(token);
             let url = format!("{}/3/device/{}", self.base_url, encoded);
@@ -226,6 +231,7 @@ impl ApnsProvider {
                 })?;
             }
 
+            *http_attempts += 1;
             let resp = match self
                 .client
                 .post(&url)
@@ -248,7 +254,7 @@ impl ApnsProvider {
                 Err(e) => {
                     last_err = format!("APNs request failed: {e}");
                     warn!(attempt, error = %last_err, "APNs request failed, will retry");
-                    if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         tokio::time::sleep(retry_backoff(attempt)).await;
                     }
                     continue;
@@ -303,12 +309,12 @@ impl ApnsProvider {
                     );
                     *self.cached_token.lock().await = None;
                     last_err = "APNs returned 403 (JWT rejected)".to_string();
-                    if attempt + 1 < MAX_DELIVERY_ATTEMPTS {
+                    if attempt + 1 < max_attempts {
                         continue;
                     }
                     break;
                 }
-                ApnsOutcome::Retryable if attempt + 1 < MAX_DELIVERY_ATTEMPTS => {
+                ApnsOutcome::Retryable if attempt + 1 < max_attempts => {
                     last_err = format!("APNs returned {status}");
                     warn!(attempt, status = %status, "APNs server error, will retry");
                     tokio::time::sleep(retry_backoff(attempt)).await;
@@ -346,7 +352,7 @@ impl ApnsProvider {
         }
 
         Err(PushError::Retryable(format!(
-            "APNs delivery failed after {MAX_DELIVERY_ATTEMPTS} attempts: {last_err}"
+            "APNs delivery failed after {max_attempts} attempts: {last_err}"
         )))
     }
 }
@@ -354,7 +360,7 @@ impl ApnsProvider {
 #[async_trait]
 impl PushProvider for ApnsProvider {
     async fn send_silent_push(&self, token: &str, _platform: &str) -> Result<(), PushError> {
-        self.send(token, None).await
+        self.send(token, None, MAX_DELIVERY_ATTEMPTS, &mut 0).await
     }
 
     async fn send_signed_wake(
@@ -363,7 +369,18 @@ impl PushProvider for ApnsProvider {
         _platform: &str,
         metadata: &SignedWakeMetadata,
     ) -> Result<(), PushError> {
-        self.send(token, Some(metadata)).await
+        self.send(token, Some(metadata), MAX_DELIVERY_ATTEMPTS, &mut 0)
+            .await
+    }
+
+    async fn send_outbox_wake(
+        &self,
+        token: &str,
+        _platform: &str,
+        metadata: Option<&SignedWakeMetadata>,
+        http_attempts: &mut Option<u32>,
+    ) -> Result<(), PushError> {
+        self.send(token, metadata, 1, http_attempts.insert(0)).await
     }
 }
 
@@ -522,6 +539,62 @@ kHmPRiazukxPLb6ilpRAewjW8nihRANCAATDskChT+Altkm9X7MI69T3IUmrQU0L
         assert_eq!(production.base_url, "https://api.push.apple.com");
         assert_eq!(sandbox.base_url, "https://api.sandbox.push.apple.com");
         assert_eq!(production.topic, "io.orch8.test");
+    }
+
+    #[tokio::test]
+    async fn outbox_attempts_send_once_and_preserve_auth_and_token_classification() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut provider = ApnsProvider::new(config(false)).unwrap();
+        provider.base_url = format!("http://{}", listener.local_addr().unwrap());
+        provider.client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let responses =
+            std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::from([
+                (reqwest::StatusCode::SERVICE_UNAVAILABLE, "{}"),
+                (
+                    reqwest::StatusCode::FORBIDDEN,
+                    r#"{"reason":"ExpiredProviderToken"}"#,
+                ),
+                (reqwest::StatusCode::GONE, "{}"),
+            ])));
+        let router = axum::Router::new().route(
+            "/3/device/{token}",
+            axum::routing::post({
+                let responses = responses.clone();
+                move |_: axum::Json<serde_json::Value>| async move {
+                    responses.lock().await.pop_front().unwrap()
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut count = None;
+        assert!(matches!(
+            provider
+                .send_outbox_wake("token", "ios", None, &mut count)
+                .await,
+            Err(PushError::Retryable(_))
+        ));
+        assert_eq!(count, Some(1));
+        assert!(provider.cached_token.lock().await.is_some());
+
+        assert!(matches!(
+            provider
+                .send_outbox_wake("token", "ios", None, &mut count)
+                .await,
+            Err(PushError::Retryable(_))
+        ));
+        assert_eq!(count, Some(1));
+        assert!(provider.cached_token.lock().await.is_none());
+
+        assert!(matches!(
+            provider
+                .send_outbox_wake("token", "ios", None, &mut count)
+                .await,
+            Err(PushError::InvalidToken)
+        ));
+        assert_eq!(count, Some(1));
+        assert!(responses.lock().await.is_empty());
+        server.abort();
     }
 
     #[tokio::test]

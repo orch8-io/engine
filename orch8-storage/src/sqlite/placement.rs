@@ -190,3 +190,29 @@ pub(super) async fn pending_depth(
         })
         .collect()
 }
+
+pub(super) async fn queue_evidence(
+    storage: &SqliteStorage,
+    tenant_id: &orch8_types::ids::TenantId,
+) -> Result<Vec<orch8_types::placement::PlacementQueueEvidence>, StorageError> {
+    let rows: Vec<(String, Option<String>, i64, String)> = sqlx::query_as(
+        "SELECT wt.handler_name, wt.queue_name, COUNT(*), MIN(wt.created_at)
+         FROM worker_tasks wt JOIN task_instances ti ON ti.id = wt.instance_id
+         WHERE ti.tenant_id = ?1 AND wt.state = 'pending' AND wt.awaiting_dispatch = 0
+           AND ti.state NOT IN ('completed', 'failed', 'cancelled')
+         GROUP BY wt.handler_name, wt.queue_name",
+    )
+    .bind(tenant_id.as_str())
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.into_iter()
+        .map(|(handler_name, queue_name, count, oldest_pending_at)| {
+            Ok(orch8_types::placement::PlacementQueueEvidence {
+                handler_name,
+                queue_name,
+                pending_tasks: u64::try_from(count).unwrap_or_default(),
+                oldest_pending_at: super::helpers::parse_ts(&oldest_pending_at)?,
+            })
+        })
+        .collect()
+}

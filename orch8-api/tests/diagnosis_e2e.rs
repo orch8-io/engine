@@ -218,6 +218,7 @@ fn mk_registration(
         version: version.map(ToString::to_string),
         tenant_id: tenant.map(ToString::to_string),
         last_seen_at: Utc::now(),
+        available_poll_slots: None,
     }
 }
 

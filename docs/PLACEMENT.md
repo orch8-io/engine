@@ -21,6 +21,66 @@ queue polls, and the negotiated gRPC stream, on PostgreSQL and SQLite alike.
 | Autoscaling metrics | `orch8_queue_depth{capability,region,priority_lane}` | Pending worker backlog for KEDA/HPA.                                                                        |
 | Trace propagation   | `task.context.runtime.traceparent`                   | One trace spans control plane → executor → completion.                                                      |
 
+## Preview a sequence against the fleet
+
+Use **Workers → Preview placement** or run `orch8 placement plan <sequence-uuid>`.
+The preview evaluates each saved step against live workers, version pins, and
+hard placement requirements. Run a new preview after changing its inputs or
+a version rollout. Pass `--tags pilot` to include tag-selective
+policies, `--recipe private_network` to preview a recipe, or
+`--worker-version 2.1.0` to scope the preview to an exact advertised version.
+`orch8 placement fleet-readiness <sequence-uuid>` returns a failing exit code
+when a step has a blocked route or the worker inventory is incomplete.
+
+For each worker step, the preview shows the tenant's pending task count and the
+age of the oldest pending task on the effective handler and queue. It includes
+dispatch-bound tasks whose instances are still active. Available capacity is
+the unused demand from the last admitted tenant-scoped HTTP polls by
+eligible workers on that route, within the 60-second liveness window. The
+inventory also includes recent unary gRPC polls and live worker streams. Capacity
+is unknown when an eligible observation has no capacity measurement or the
+route inventory exceeds 1,000 observations. The response reports counts of
+distinct workers and samples up to 50 worker IDs for each eligibility outcome.
+The same worker may serve more than
+one step, so avoid summing the per-step capacity. The transfer estimate counts
+the compact JSON bytes of the saved handler params. Runtime-resolved inputs,
+context, artifacts, and transport overhead can change the actual transfer size.
+
+## Stage and roll back worker version pins
+
+In **Workers → Worker version rollouts**, stage a minimum version for a tenant
+and handler. Use **Preview staged version pins** in the placement preview, or run
+`orch8 placement fleet-readiness <sequence-uuid> --staged-pins` before promoting.
+
+- `POST /api/v1/workers/version-rollouts` stages a `tenant_id`, `handler_name`, and
+  `min_version`. It returns the rollout revision.
+- `GET /api/v1/workers/version-rollouts` lists active and staged versions.
+- `POST /api/v1/workers/version-rollouts/{tenant_id}/{handler_name}` accepts the
+  current `revision` and an `action` of `promote`, `rollback`, or `discard`.
+  A stale revision returns HTTP 409. Refresh the rollout before retrying.
+- Promotion enforces the staged minimum for new claims scoped to that tenant.
+  If the pin lookup fails, the worker receives an error before claiming from
+  the affected handler.
+  Rollback restores the preceding minimum, including an unpinned
+  state, and clears any outstanding stage. Discard clears only the stage.
+- Use tenant-scoped worker credentials for rollouts. The rollout applies to
+  default and named HTTP queues, unary gRPC polls, and new claims on gRPC
+  streams. gRPC workers send `x-orch8-worker-version` metadata when opening
+  a stream or polling. The managed executor sends its build version.
+  Workers without a reported version can claim from unpinned handlers.
+  Existing claims keep their normal completion and reconnect behavior. Shared
+  credentials use the unscoped pin, if configured. A tenant's own minimum only
+  applies to claims scoped to that tenant.
+- Dotted numeric versions compare by component, treating trailing zero
+  components as equal and accepting a leading `v`. Named builds such as
+  `2026-11-18` compare lexically against other named builds. A worker must
+  report a version in the same scheme as its pin. Coordinate a change of
+  scheme with the worker deployment.
+
+The [private-worker sandbox](../examples/private-workers/README.md) includes
+a versioned canary and an explicit EU fallback between two private worker
+types.
+
 ## Step and sequence `placement`
 
 ```json

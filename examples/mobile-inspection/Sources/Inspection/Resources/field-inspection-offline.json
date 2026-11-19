@@ -1,0 +1,26 @@
+{
+  "id": "ee2b0d13-dc51-4606-bdf1-4954fa382da1",
+  "tenant_id": "mobile",
+  "namespace": "default",
+  "name": "field-inspection-offline",
+  "version": 1,
+  "deprecated": false,
+  "created_at": "2026-01-01T00:00:00Z",
+  "blocks": [
+    {
+      "type": "step",
+      "id": "record_inspection",
+      "handler": "save_inspection",
+      "params": {},
+      "wait_for_input": {
+        "prompt": "Did site A-12 pass inspection?",
+        "timeout": 43200000,
+        "choices": [
+          { "label": "Passed", "value": "passed" },
+          { "label": "Repair needed", "value": "repair_needed" }
+        ],
+        "store_as": "inspection_result"
+      }
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "regional-compute-fallback",
+  "placement": { "residency": "eu" },
+  "blocks": [
+    {
+      "type": "try_catch",
+      "id": "regional_fallback",
+      "try_block": [
+        {
+          "type": "step",
+          "id": "primary",
+          "handler": "private_compute",
+          "placement": { "labels": { "site": "private", "accelerator": "gpu" } },
+          "params": { "chunks": 8 },
+          "timeout": 5000
+        }
+      ],
+      "catch_block": [
+        {
+          "type": "step",
+          "id": "fallback",
+          "handler": "private_compute",
+          "placement": { "labels": { "site": "private", "accelerator": "cpu" } },
+          "params": { "chunks": 8 },
+          "timeout": 30000
+        }
+      ]
+    }
+  ]
+}

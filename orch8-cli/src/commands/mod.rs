@@ -29,6 +29,7 @@ pub mod job;
 pub mod learn;
 pub mod package_cmd;
 pub mod pieces;
+pub mod placement;
 pub mod portable;
 pub mod prompt;
 pub mod receipts;

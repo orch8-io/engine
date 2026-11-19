@@ -400,6 +400,7 @@ async fn api_cancel_of_a_child_wakes_its_waiting_parent() {
         let child_seq = SequenceBuilder::new("t").block(gate("g")).build();
         let parent_seq = SequenceBuilder::new("t")
             .block(BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+                child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
                 id: BlockId::new("to_child"),
                 sequence_name: child_seq.name.clone(),
                 version: None,

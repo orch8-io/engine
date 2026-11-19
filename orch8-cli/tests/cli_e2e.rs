@@ -765,3 +765,277 @@ async fn portable_worker_once_polls_the_real_api_and_exits_cleanly() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn contract_coverage_reports_unexecuted_nested_steps() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.join("choice.json"),
+        r#"{"name":"choice","blocks":[{"type":"router","id":"choice","routes":[
+        {"condition":"kind == 'a'","blocks":[{"type":"step","id":"a","handler":"work",
+        "params":{"example":{"id":"not_a_block","handler":"arbitrary_data"}}}]},
+        {"condition":"kind == 'b'","blocks":[{"type":"step","id":"b","handler":"work"}]}
+        ]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.root.join("choice.contracts.json"),
+        r#"{"cases":[{"name":"takes a","input":{"kind":"a"},
+        "mocks":[{"handler":"work","type":"success","output":{}}],
+        "expect":{"terminal_state":"completed","path":{"traversed":["a"]}}}]}"#,
+    )
+    .unwrap();
+
+    let report = sandbox.run_ok(&[
+        "test",
+        "run",
+        "choice.contracts.json",
+        "--report",
+        "coverage",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["coverage"]["covered"], serde_json::json!(["a"]));
+    assert_eq!(report["coverage"]["uncovered"], serde_json::json!(["b"]));
+    assert_eq!(report["coverage"]["total"], 2);
+
+    let error = sandbox.run_err(&["test", "run", "choice.contracts.json", "--require-coverage"]);
+    assert!(
+        error.contains("1 sequence step(s) were not covered"),
+        "{error}"
+    );
+}
+
+#[test]
+fn verified_recipes_run_their_bundled_contracts_offline() {
+    let sandbox = Sandbox::new();
+    for recipe in [
+        "field-inspection",
+        "delivery-evidence",
+        "maintenance-approval",
+    ] {
+        let output = sandbox.run_ok(&["templates", "verify", recipe]);
+        let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(report["suite"]["sequence_name"], recipe);
+        assert_eq!(report["suite"]["passed"], true);
+        assert_eq!(report["coverage"]["uncovered"], serde_json::json!([]));
+        assert!(report["required_handlers"].as_array().unwrap().len() >= 2);
+    }
+    let error = sandbox.run_err(&["templates", "verify", "default"]);
+    assert!(error.contains("has no bundled contract"), "{error}");
+}
+
+#[test]
+fn importer_generates_runnable_parity_fixture_from_source_evidence() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.join("original.json"),
+        r#"{"StartAt":"Wait","States":{"Wait":{"Type":"Wait","Seconds":1,"End":true}}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        sandbox.root.join("source-run.json"),
+        r#"{"cases":[{"name":"original completed","input":{"order":"A"},
+        "observed_nodes":["Wait"],"mocks":[{"handler":"noop","type":"success","output":{}}],
+        "terminal_state":"completed"}]}"#,
+    )
+    .unwrap();
+    sandbox.run_ok(&[
+        "import",
+        "sfn",
+        "original.json",
+        "--out",
+        "converted.json",
+        "--report",
+        "report.json",
+        "--parity-from",
+        "source-run.json",
+        "--parity-out",
+        "converted.contracts.json",
+    ]);
+    let output = sandbox.run_ok(&[
+        "test",
+        "run",
+        "converted.contracts.json",
+        "--report",
+        "json",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        report["cases"][0]["executed_blocks"],
+        serde_json::json!(["wait"])
+    );
+    let conversion: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(sandbox.root.join("report.json")).unwrap()).unwrap();
+    assert_eq!(conversion["translation"]["mapped"][0]["node"], "Wait");
+
+    std::fs::write(
+        sandbox.root.join("unmapped.json"),
+        r#"{"cases":[{"name":"missing step","observed_nodes":["Unknown"],"terminal_state":"completed"}]}"#,
+    )
+    .unwrap();
+    let error = sandbox.run_err(&[
+        "import",
+        "sfn",
+        "original.json",
+        "--out",
+        "other.json",
+        "--parity-from",
+        "unmapped.json",
+        "--parity-out",
+        "other.contracts.json",
+    ]);
+    assert!(
+        error.contains("cannot map observed node 'Unknown'"),
+        "{error}"
+    );
+    assert!(!sandbox.root.join("other.json").exists());
+    assert!(!sandbox.root.join("other.contracts.json").exists());
+}
+
+#[test]
+fn sequence_scaffolds_a_typed_worker_handler_and_contract() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.join("receipt.json"),
+        r#"{"name":"receipt","blocks":[{"type":"step","id":"capture","handler":"scan",
+        "output_schema":{"type":"object","properties":{"receipt":{"type":"string"}},"required":["receipt"]}}]}"#,
+    )
+    .unwrap();
+    std::fs::write(sandbox.root.join("output.json"), r#"{"receipt":"r-42"}"#).unwrap();
+    let command = [
+        "sequence",
+        "scaffold-handler",
+        "receipt.json",
+        "--block",
+        "capture",
+        "--example-output",
+        "output.json",
+        "--out-dir",
+        "generated",
+    ];
+    sandbox.run_ok(&command);
+    let stub = std::fs::read_to_string(sandbox.root.join("generated/handler.ts")).unwrap();
+    assert!(stub.contains(r#"StepOutputs["capture"]"#));
+    assert!(stub.contains("Promise<HandlerOutput>"));
+    let types = std::fs::read_to_string(sandbox.root.join("generated/types.ts")).unwrap();
+    assert!(types.contains(r#""receipt": string"#));
+    sandbox.run_ok(&[
+        "test",
+        "run",
+        "generated/handler.contracts.json",
+        "--sequence",
+        "receipt.json",
+        "--require-coverage",
+    ]);
+    let error = sandbox.run_err(&command);
+    assert!(error.contains("generated"), "{error}");
+}
+
+#[test]
+fn mobile_sequence_preflight_distinguishes_published_and_development_handlers() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.join("offline.json"),
+        r#"{"name":"offline","blocks":[
+        {"type":"step","id":"save","handler":"save_inspection"},
+        {"type":"step","id":"shape","handler":"transform"}
+        ]}"#,
+    )
+    .unwrap();
+    let blocked = sandbox.run_err(&[
+        "--output",
+        "json",
+        "sequence",
+        "preflight-mobile",
+        "offline.json",
+        "--sdk",
+        "published-0-7-1",
+        "--handler",
+        "save_inspection",
+    ]);
+    assert!(
+        blocked.contains("mobile compatibility checks failed"),
+        "{blocked}"
+    );
+    let report = sandbox.run_ok(&[
+        "--output",
+        "json",
+        "sequence",
+        "preflight-mobile",
+        "offline.json",
+        "--sdk",
+        "development",
+        "--handler",
+        "save_inspection",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(report["ready"], true);
+    assert_eq!(report["checks"][0]["source"], "host");
+    assert_eq!(report["checks"][1]["source"], "builtin");
+}
+
+#[test]
+fn failure_pack_contract_counts_failed_attempt_and_compensation_as_covered() {
+    let sandbox = Sandbox::new();
+    let fixture = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../examples/verified-sequences/compensation.contracts.json"
+    );
+    let output = sandbox.run_ok(&[
+        "test",
+        "run",
+        fixture,
+        "--report",
+        "coverage",
+        "--require-coverage",
+    ]);
+    let report: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(
+        report["coverage"]["covered"],
+        serde_json::json!(["confirm", "release", "reserve"])
+    );
+}
+
+#[test]
+fn handler_scaffold_supports_native_and_python_output_types() {
+    let sandbox = Sandbox::new();
+    std::fs::write(
+        sandbox.root.join("formation.json"),
+        r#"{"name":"formation","blocks":[
+        {"type":"step","id":"leaf","handler":"scan","output_schema":{"type":"string"}}
+    ]}"#,
+    )
+    .unwrap();
+    std::fs::write(sandbox.root.join("result.json"), r#""completed""#).unwrap();
+    for (language, stub, types) in [
+        ("python", "handler.py", "handler_types.py"),
+        ("swift", "Handler.swift", "HandlerTypes.swift"),
+        ("kotlin", "Handler.kt", "HandlerTypes.kt"),
+    ] {
+        sandbox.run_ok(&[
+            "sequence",
+            "scaffold-handler",
+            "formation.json",
+            "--block",
+            "leaf",
+            "--example-output",
+            "result.json",
+            "--out-dir",
+            language,
+            "--language",
+            language,
+        ]);
+        let directory = sandbox.root.join(language);
+        assert!(
+            std::fs::read_to_string(directory.join(stub))
+                .unwrap()
+                .contains("HandlerOutput")
+        );
+        assert!(
+            std::fs::read_to_string(directory.join(types))
+                .unwrap()
+                .contains("SequenceInput")
+        );
+        assert!(directory.join("handler.contracts.json").is_file());
+    }
+}

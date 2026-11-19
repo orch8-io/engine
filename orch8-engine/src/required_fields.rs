@@ -571,6 +571,7 @@ mod tests {
         use orch8_types::sequence::SubSequenceDef;
         // Sub-sequence steps belong to the CHILD's RFT, not the parent.
         let sub = SubSequenceDef {
+            child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
             id: BlockId::new("sub"),
             sequence_name: "child".into(),
             version: None,

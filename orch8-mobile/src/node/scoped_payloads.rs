@@ -50,9 +50,10 @@ impl<T> Drop for Waiting<T> {
 }
 struct Operation {
     context: DelegationClaimContext,
-    token: String,
+    token: Arc<str>,
     stop: CancellationToken,
     deadline: Instant,
+    claim: Option<claim_lease::ScopedClaimAuthority>,
 }
 impl Operation {
     fn live(&self) -> Result<(), MobileError> {
@@ -62,11 +63,40 @@ impl Operation {
         {
             return Err(refused());
         }
+        if let Some(claim) = &self.claim {
+            claim.check().map_err(|_| refused())?;
+        }
         Ok(())
     }
     async fn io<T>(&self, future: impl std::future::Future<Output = T>) -> Result<T, MobileError> {
         self.live()?;
         tokio::select! {biased; ()=self.stop.cancelled()=>Err(refused()), result=tokio::time::timeout_at(self.deadline,future)=>result.map_err(|_|refused())}
+    }
+
+    fn child(&self, deadline: Instant) -> Self {
+        Self {
+            context: self.context.clone(),
+            token: self.token.clone(),
+            stop: self.stop.child_token(),
+            deadline: self.deadline.min(deadline),
+            claim: self.claim.clone(),
+        }
+    }
+
+    #[cfg(test)]
+    fn probe(
+        context: DelegationClaimContext,
+        token: &str,
+        stop: CancellationToken,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            context,
+            token: token.into(),
+            stop,
+            deadline,
+            claim: None,
+        }
     }
 }
 #[allow(dead_code)]
@@ -96,6 +126,7 @@ impl ScopedPayloadReader {
             initialize_hook: None,
         }))
     }
+    #[cfg(test)]
     pub(crate) async fn input(
         self: &Arc<Self>,
         task: &RemoteTask,
@@ -104,16 +135,19 @@ impl ScopedPayloadReader {
     ) -> Result<DelegationInputEnvelope, MobileError> {
         task.validate_delegation(&self.peer.runtime_id().to_string())
             .map_err(|_| refused())?;
-        self.input_context(task.delegation.clone().ok_or_else(refused)?, token, stop)
-            .await
+        self.input_context(&Operation::probe(
+            task.delegation.clone().ok_or_else(refused)?,
+            token,
+            stop,
+            Instant::now() + Duration::from_secs(30),
+        ))
+        .await
     }
     async fn input_context(
         self: &Arc<Self>,
-        context: DelegationClaimContext,
-        token: &str,
-        stop: CancellationToken,
+        operation: &Operation,
     ) -> Result<DelegationInputEnvelope, MobileError> {
-        self.read(context, token, stop, "input", |context, bytes| {
+        self.read(operation, "input", |context, bytes| {
             let envelope: DelegationInputEnvelope =
                 serde_json::from_slice(&bytes).map_err(|_| refused())?;
             envelope
@@ -129,6 +163,7 @@ impl ScopedPayloadReader {
         })
         .await
     }
+    #[cfg(test)]
     pub(crate) async fn definition(
         self: &Arc<Self>,
         task: &RemoteTask,
@@ -137,25 +172,31 @@ impl ScopedPayloadReader {
     ) -> Result<DefinitionWireEnvelope, MobileError> {
         task.validate_delegation(&self.peer.runtime_id().to_string())
             .map_err(|_| refused())?;
-        self.definition_context(task.delegation.clone().ok_or_else(refused)?, token, stop)
-            .await
+        self.definition_context(&Operation::probe(
+            task.delegation.clone().ok_or_else(refused)?,
+            token,
+            stop,
+            Instant::now() + Duration::from_secs(30),
+        ))
+        .await
     }
     async fn definition_context(
         self: &Arc<Self>,
-        context: DelegationClaimContext,
-        token: &str,
-        stop: CancellationToken,
+        operation: &Operation,
     ) -> Result<DefinitionWireEnvelope, MobileError> {
-        self.read(context, token, stop, "definition", |context, bytes| {
+        self.read(operation, "definition", |context, bytes| {
             let envelope: DefinitionWireEnvelope =
                 serde_json::from_slice(&bytes).map_err(|_| refused())?;
-            envelope
+            let graph = envelope
                 .verify(
                     &context.scope,
                     &context.definition,
                     DefinitionGraphLimits::default(),
                 )
                 .map_err(|_| refused())?;
+            if graph.expanded_bytes() != context.usage.definition_expanded_bytes {
+                return Err(refused());
+            }
             Ok(envelope)
         })
         .await
@@ -176,7 +217,7 @@ impl ScopedPayloadReader {
             .io(self
                 .http
                 .post(format!("{}workers/identity", self.base))
-                .header("x-api-key", &operation.token)
+                .header("x-api-key", operation.token.as_ref())
                 .header("cache-control", "no-store")
                 .json(&challenge)
                 .send())
@@ -215,37 +256,34 @@ impl ScopedPayloadReader {
     }
     async fn read<T: Send + 'static>(
         self: &Arc<Self>,
-        context: DelegationClaimContext,
-        token: &str,
-        stop: CancellationToken,
+        operation: &Operation,
         resource: &'static str,
         verify: impl FnOnce(DelegationClaimContext, Vec<u8>) -> Result<T, MobileError> + Send + 'static,
     ) -> Result<T, MobileError> {
         self.peer
-            .validate_claim_identity(&context)
+            .validate_claim_identity(&operation.context)
             .map_err(|_| refused())?;
-        if !token.starts_with(crate::credential::DEVICE_SESSION_PREFIX) || token.len() > 1024 * 1024
+        if !operation
+            .token
+            .starts_with(crate::credential::DEVICE_SESSION_PREFIX)
+            || operation.token.len() > 1024 * 1024
         {
             return Err(refused());
         }
+        operation.live()?;
         let permit = match &self.reserved {
             Some(permit) if permit.belongs_to(&self.budget) => permit.clone(),
             Some(_) => return Err(refused()),
             None => Permit::acquire(&self.budget)?,
         };
-        let deadline = Instant::now() + Duration::from_secs(30);
         let owner = self.clone();
-        let child = stop.child_token();
-        let operation = Operation {
-            context,
-            token: token.to_owned(),
-            stop: child.clone(),
-            deadline,
-        };
+        let request = operation.child(Instant::now() + Duration::from_secs(30));
+        let deadline = request.deadline;
+        let child = request.stop.clone();
         let task =
-            tokio::spawn(async move { owner.owned(operation, resource, verify, permit).await });
+            tokio::spawn(async move { owner.owned(request, resource, verify, permit).await });
         let mut wait = Waiting { task, stop: child };
-        tokio::select! {biased; ()=stop.cancelled()=>Err(refused()), result=tokio::time::timeout_at(deadline,&mut wait.task)=>result.map_err(|_|refused())?.map_err(|_|refused())?}
+        tokio::select! {biased; ()=operation.stop.cancelled()=>Err(refused()), result=tokio::time::timeout_at(deadline,&mut wait.task)=>result.map_err(|_|refused())?.map_err(|_|refused())?}
     }
     async fn owned<T: Send + 'static>(
         &self,
@@ -265,7 +303,7 @@ impl ScopedPayloadReader {
             .io(self
                 .http
                 .get(url)
-                .header("x-api-key", &operation.token)
+                .header("x-api-key", operation.token.as_ref())
                 .header("x-device-id", &self.device)
                 .header("cache-control", "no-store")
                 .send())
@@ -276,21 +314,17 @@ impl ScopedPayloadReader {
         }
         let bytes = operation.io(read_capped(response)).await??;
         self.active(&operation).await?;
-        let context = operation.context.clone();
-        let cancelled = operation.stop.clone();
         #[cfg(test)]
         let hook = self.verify_hook.clone();
-        let (permit, result) = tokio::task::spawn_blocking(move || {
+        let (permit, operation, result) = tokio::task::spawn_blocking(move || {
             #[cfg(test)]
             if let Some(hook) = hook {
                 hook();
             }
-            let result = if cancelled.is_cancelled() {
-                Err(refused())
-            } else {
-                verify(context, bytes)
-            };
-            (permit, result)
+            let result = operation
+                .live()
+                .and_then(|()| verify(operation.context.clone(), bytes));
+            (permit, operation, result)
         })
         .await
         .map_err(|_| refused())?;

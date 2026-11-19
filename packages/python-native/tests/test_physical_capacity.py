@@ -114,3 +114,24 @@ class PhysicalCapacityTest(unittest.TestCase):
                 while counts["active"] and time.monotonic() < deadline:
                     time.sleep(0.01)
             self.assertEqual(counts["active"], 0)
+
+    def test_run_budget_validation_and_zero_budget_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="orch8-budget-") as directory:
+            engine = Engine(str(Path(directory, "app.db")))
+            calls = []
+            engine.handler("host", lambda request: calls.append(request) or True)
+            try:
+                engine.deploy({"name": "budget", "blocks": [
+                    {"type": "step", "id": "work", "handler": "host"},
+                ]})
+                instance = engine.start("budget")
+                for timeout in (-1, float("nan"), float("inf"), 1e100):
+                    with self.subTest(timeout=timeout):
+                        with self.assertRaisesRegex(ValueError, "timeout"):
+                            engine.run(instance, timeout=timeout)
+                self.assertEqual(engine.run(instance, timeout=0)["state"], "scheduled")
+                self.assertEqual(calls, [])
+                self.assertEqual(engine.run(instance, timeout=1)["state"], "completed")
+                self.assertEqual(len(calls), 1)
+            finally:
+                engine.close()

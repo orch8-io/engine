@@ -1,5 +1,6 @@
-import { useId, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { coerceField, fieldText, schemaFields, type FormField } from "../lib/schemaForm";
+import { PathSuggestions } from "./PathSuggestions";
 import { FieldLabel, Input, Select } from "./ui/Input";
 
 const TEXTAREA =
@@ -19,18 +20,22 @@ export function SchemaForm({
   value,
   onChange,
   exclude = [],
+  references,
+  templateFields = [],
 }: {
   schema: unknown;
   value: Record<string, unknown>;
   onChange: (key: string, next: unknown) => void;
   exclude?: string[];
+  references?: Record<string, string[]>;
+  templateFields?: string[];
 }) {
   const fields = schemaFields(schema).filter((f) => !exclude.includes(f.key));
   if (fields.length === 0) return null;
   return (
     <div className="space-y-3">
       {fields.map((f) => (
-        <FieldInput key={f.key} field={f} value={value[f.key]} onChange={(v) => onChange(f.key, v)} />
+        <FieldInput key={f.key} field={f} references={references?.[f.key]} template={templateFields.includes(f.key)} value={value[f.key]} onChange={(v) => onChange(f.key, v)} />
       ))}
     </div>
   );
@@ -38,14 +43,20 @@ export function SchemaForm({
 
 function FieldInput({
   field,
+  references,
+  template,
   value,
   onChange,
 }: {
   field: FormField;
+  references?: string[];
+  template: boolean;
   value: unknown;
   onChange: (next: unknown) => void;
 }) {
   const id = useId();
+  const input = useRef<HTMLInputElement>(null);
+  const textarea = useRef<HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState(() => fieldText(field, value));
   const [error, setError] = useState<string | null>(null);
 
@@ -122,6 +133,7 @@ function FieldInput({
         {label}
         <textarea
           id={id}
+          ref={textarea}
           value={draft}
           rows={Math.min(10, Math.max(3, draft.split("\n").length))}
           spellCheck={false}
@@ -132,6 +144,12 @@ function FieldInput({
           onBlur={() => apply(draft)}
           className={TEXTAREA}
         />
+        {references && (
+          <>
+            <p className="annotation text-[11px]">Place the cursor inside a JSON string to insert a template reference.</p>
+            <PathSuggestions control={textarea} paths={references} template onInsert={(next) => { setDraft(next); apply(next); }} />
+          </>
+        )}
         {help}
         {err}
       </div>
@@ -143,6 +161,8 @@ function FieldInput({
       {label}
       <Input
         id={id}
+        ref={input}
+        list={references ? `${id}-references` : undefined}
         type={field.kind === "string" ? "text" : "number"}
         step={field.kind === "integer" ? 1 : "any"}
         value={draft}
@@ -155,6 +175,12 @@ function FieldInput({
         }}
         className="w-full font-mono"
       />
+      {references && (
+        <>
+          <datalist id={`${id}-references`}>{references.map((path) => <option key={path} value={template ? `{{${path}}}` : path} />)}</datalist>
+          <PathSuggestions control={input} paths={references} template={template} replaceField={template} onInsert={(next) => { setDraft(next); apply(next); }} />
+        </>
+      )}
       {help}
       {err}
     </div>

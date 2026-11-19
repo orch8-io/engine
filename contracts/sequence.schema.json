@@ -501,6 +501,14 @@
         }
       }
     },
+    "ChildResultMode": {
+      "type": "string",
+      "description": "Output recorded on the parent when a sub-sequence completes.",
+      "enum": [
+        "legacy_outputs",
+        "reference"
+      ]
+    },
     "CompensationVerificationPolicy": {
       "type": "string",
       "enum": [
@@ -1392,6 +1400,10 @@
         "sequence_name"
       ],
       "properties": {
+        "child_result": {
+          "$ref": "#/$defs/ChildResultMode",
+          "description": "How to record the result of a successful child on the parent block."
+        },
         "id": {
           "$ref": "#/$defs/BlockId"
         },

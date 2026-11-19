@@ -472,11 +472,116 @@ fn export_scoped_sdk_fixture_for_wrappers() {
         assert!(catalog.history(None, 1).unwrap().items.is_empty());
     }
     checkpoint_and_close(&reopened);
+    let bundled_catalog = export_bundled_catalog_fixture(&destination);
     std::fs::write(
         metadata,
-        serde_json::to_vec_pretty(&serde_json::json!({"cases":cases})).unwrap(),
+        serde_json::to_vec_pretty(
+            &serde_json::json!({"cases":cases,"bundledCatalog":bundled_catalog}),
+        )
+        .unwrap(),
     )
     .unwrap();
+}
+
+fn export_bundled_catalog_fixture(destination: &std::path::Path) -> serde_json::Value {
+    use orch8_publisher::manifest::{ManifestGenerator, ManifestRemoved};
+    use orch8_publisher::package::{PackageManifest, PackageRequirements, build_package};
+    use orch8_storage::SequenceStore as _;
+    use sha2::{Digest as _, Sha256};
+
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&[41; 32]);
+    let root_public_key = BASE64.encode(signing_key.verifying_key().to_bytes());
+    let sequence_name = "bundled-field-inspection";
+    let sequence_id = orch8_types::ids::SequenceId::new();
+    let now = chrono::Utc::now();
+    let sequence = serde_json::json!({
+        "id":sequence_id, "tenant_id":"mobile", "namespace":"default",
+        "version":1, "name":sequence_name, "created_at":now,
+        "blocks":[{"type":"step","id":"start","handler":"noop"}]
+    });
+    let package = build_package(
+        PackageManifest {
+            name: "fixture/mobile-seed".into(),
+            version: "1.0.0".into(),
+            description: "Packaged Swift host fixture".into(),
+            publisher: "fixture".into(),
+            requirements: PackageRequirements::default(),
+            created_at: now,
+        },
+        std::collections::BTreeMap::from([(
+            "sequences/inspection.json".into(),
+            sequence.to_string(),
+        )]),
+        &signing_key,
+    )
+    .unwrap();
+    let package_json = serde_json::to_string(&package).unwrap();
+
+    let database = destination.join("manifest-owned.db");
+    assert!(!database.exists(), "fixture output must be fresh");
+    let engine = MobileEngine::new(
+        database.to_string_lossy().into_owned(),
+        MobileEngineConfig {
+            telemetry_enabled: false,
+            root_public_key: root_public_key.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        engine
+            .install_bundled_catalog(package_json.clone())
+            .unwrap(),
+        1
+    );
+    let manifest = ManifestGenerator::new(signing_key, "fixture".into())
+        .generate(
+            Vec::new(),
+            vec![ManifestRemoved {
+                name: sequence_name.into(),
+                removed_at: now,
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+    let body = manifest.canonical_json.as_bytes();
+    crate::sync::RootKey::from_base64(&root_public_key)
+        .unwrap()
+        .verify(body, &BASE64.decode(&manifest.signature_b64).unwrap())
+        .unwrap();
+    let digest = hex::encode(Sha256::digest(body));
+    let keys: Vec<_> = manifest
+        .body
+        .signing_keys
+        .iter()
+        .map(|key| (key.key_id.as_str(), key.public_key.as_str()))
+        .collect();
+    // Set up an accepted and reconciled catalog without depending on a public
+    // HTTPS endpoint for the hosted wrapper test.
+    engine.runtime.block_on(async {
+        let storage = engine.lifecycle.mobile_storage();
+        let version = manifest.body.manifest_version;
+        storage
+            .accept_manifest_trust(&keys, version, &digest)
+            .await
+            .unwrap();
+        engine.sqlite.delete_sequence(sequence_id).await.unwrap();
+        let version_metadata = version.to_string();
+        storage
+            .commit_manifest_evaluation(
+                &[("last_manifest_version", Some(&version_metadata))],
+                version,
+                &digest,
+            )
+            .await
+            .unwrap();
+    });
+    checkpoint_and_close(&engine);
+
+    serde_json::json!({
+        "rootPublicKey":root_public_key, "packageJson":package_json,
+        "sequenceName":sequence_name
+    })
 }
 
 fn checkpoint_and_close(engine: &MobileEngine) {

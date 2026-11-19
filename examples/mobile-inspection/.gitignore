@@ -1,0 +1,7 @@
+*.xcodeproj/
+android/.gradle/
+android/local.properties
+android/app/build/
+Sources/Inspection/Resources/reconnect-config.json
+
+__pycache__/

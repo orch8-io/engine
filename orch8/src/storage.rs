@@ -31,7 +31,7 @@ impl std::fmt::Debug for Storage {
 #[derive(Clone)]
 pub(crate) enum StorageKind {
     SqliteFile(PathBuf),
-    SqliteInMemory,
+    SqliteInMemory(Option<crate::SharedClock>),
     Postgres(String),
 }
 
@@ -45,7 +45,7 @@ impl std::fmt::Debug for StorageKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StorageKind::SqliteFile(path) => f.debug_tuple("SqliteFile").field(path).finish(),
-            StorageKind::SqliteInMemory => f.write_str("SqliteInMemory"),
+            StorageKind::SqliteInMemory(_) => f.write_str("SqliteInMemory"),
             StorageKind::Postgres(url) => {
                 f.write_str("Postgres(")?;
                 f.write_str(&redacted_connection_url(url))?;
@@ -124,7 +124,14 @@ impl Storage {
     #[must_use]
     pub fn sqlite_in_memory() -> Self {
         Self {
-            kind: StorageKind::SqliteInMemory,
+            kind: StorageKind::SqliteInMemory(None),
+            artifacts: None,
+        }
+    }
+
+    pub(crate) fn contract_sandbox(clock: crate::SharedClock) -> Self {
+        Self {
+            kind: StorageKind::SqliteInMemory(Some(clock)),
             artifacts: None,
         }
     }
@@ -179,8 +186,11 @@ impl Storage {
                 }
                 Ok(ConnectedStorage::Sqlite(Arc::new(storage)))
             }
-            StorageKind::SqliteInMemory => {
+            StorageKind::SqliteInMemory(node_clock) => {
                 let mut storage = SqliteStorage::in_memory().await?;
+                if let Some(clock) = node_clock {
+                    storage = storage.with_execution_tree_clock(clock);
+                }
                 if let Some(store) = artifact_store {
                     storage = storage.with_artifact_store(store);
                 }

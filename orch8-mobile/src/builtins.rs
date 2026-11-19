@@ -21,22 +21,9 @@
 use orch8_engine::handlers::HandlerRegistry;
 use orch8_engine::handlers::builtin::register_builtins;
 
-/// Registered on every mobile engine.
-pub const DEFAULT_BUILTINS: &[&str] = &[
-    "noop",
-    "log",
-    "sleep",
-    "fail",
-    "transform",
-    "assert",
-    "set_state",
-    "get_state",
-    "delete_state",
-    "merge_state",
-];
-
-/// Available on request via `MobileEngine::enable_builtin`.
-pub const OPT_IN_BUILTINS: &[&str] = &["http_request"];
+pub use orch8_types::sequence::{
+    MOBILE_DEFAULT_BUILTINS as DEFAULT_BUILTINS, MOBILE_OPT_IN_BUILTINS as OPT_IN_BUILTINS,
+};
 
 /// A registry pre-populated with the given builtin names (unknown names are
 /// ignored; callers validate against the allow-lists first).

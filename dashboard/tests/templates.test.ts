@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   BLANK_TEMPLATE,
   TEMPLATES,
+  templateContract,
   templateEditorContent,
   templatePickerOptions,
 } from "../src/lib/templates.ts";
@@ -14,6 +15,9 @@ import {
 // ---------------------------------------------------------------------------
 
 const EXPECTED_NAMES = [
+  "field-inspection",
+  "delivery-evidence",
+  "maintenance-approval",
   "default",
   "react-loop",
   "tool-calling-pipeline",
@@ -21,7 +25,7 @@ const EXPECTED_NAMES = [
   "multi-agent-delegation",
 ];
 
-test("TEMPLATES contains exactly the 5 CLI templates, in display order", () => {
+test("TEMPLATES contains the CLI templates in display order", () => {
   assert.deepEqual(
     TEMPLATES.map((t) => t.name),
     EXPECTED_NAMES,
@@ -57,9 +61,9 @@ test("template names are unique kebab-case", () => {
 // Picker options — the list the UI renders
 // ---------------------------------------------------------------------------
 
-test("templatePickerOptions lists blank first, then all 5 templates", () => {
+test("templatePickerOptions lists blank first, then the templates", () => {
   const opts = templatePickerOptions();
-  assert.equal(opts.length, 6);
+  assert.equal(opts.length, EXPECTED_NAMES.length + 1);
   assert.equal(opts[0]!.name, BLANK_TEMPLATE);
   assert.deepEqual(opts.slice(1).map((o) => o.name), EXPECTED_NAMES);
   for (const o of opts) {
@@ -124,7 +128,20 @@ test("an unknown template name behaves like blank", () => {
 
 const PATTERNS_DIR = join(import.meta.dirname, "..", "..", "docs", "agent-patterns");
 
-for (const name of EXPECTED_NAMES.filter((n) => n !== "default")) {
+const VERIFIED_DIR = join(import.meta.dirname, "..", "..", "examples", "verified-sequences");
+
+for (const name of EXPECTED_NAMES.slice(0, 3)) {
+  test(`verified recipe "${name}" loads the shared schema and fixture`, () => {
+    const definition = JSON.parse(readFileSync(join(VERIFIED_DIR, `${name}.json`), "utf8"));
+    const fixture = JSON.parse(readFileSync(join(VERIFIED_DIR, `${name}.contracts.json`), "utf8"));
+    const edited = JSON.parse(templateEditorContent(name, { tenantId: "demo", namespace: "default" }));
+    assert.deepEqual(edited.blocks, definition.blocks);
+    assert.deepEqual(edited.input_schema, definition.input_schema);
+    assert.deepEqual(templateContract(name), fixture);
+  });
+}
+
+for (const name of EXPECTED_NAMES.slice(4)) {
   test(`embedded "${name}" template matches docs/agent-patterns/${name}.json`, () => {
     const file = JSON.parse(readFileSync(join(PATTERNS_DIR, `${name}.json`), "utf8"));
     const embedded = TEMPLATES.find((t) => t.name === name)!.sequence;

@@ -41,6 +41,7 @@ fn inventory(workers: &[String]) -> RuntimeInventory {
                     version: None,
                     tenant_id: None,
                     last_seen_at: chrono::Utc::now(),
+                    available_poll_slots: None,
                 })
                 .collect(),
         ),
@@ -439,6 +440,8 @@ fn run_writes_sequence_and_report_files() {
             name: None,
             namespace: "sales".into(),
             report: Some(report.clone()),
+            parity_from: None,
+            parity_out: None,
             zap: None,
             workflow: None,
         }),

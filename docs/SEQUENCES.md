@@ -422,6 +422,8 @@ Call another published sequence and wait for it.
 
 Use for reusable workflow components. Omit `version` to call the latest non-deprecated version.
 
+On success, the parent block stores an array of the child's full output records by default. Set `"child_result": "reference"` to store only `{"child_instance_id": "<uuid>"}`. This keeps the parent result at a fixed size even in a nested chain. Use the child instance ID to read its outputs through the normal instance APIs, subject to the child's access and retention rules.
+
 Sub-sequences may nest at most 16 levels deep; a spawn beyond that fails the step rather than creating the child. The parent's execution budget (if any) is propagated to the child.
 
 ### ABSplit

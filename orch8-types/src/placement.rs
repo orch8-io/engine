@@ -832,3 +832,12 @@ mod tests {
         assert!(validate_rate_budget(10, f64::NAN).is_err());
     }
 }
+
+/// Dispatch-bound pending work on one tenant's effective worker queue.
+#[derive(Debug, Clone)]
+pub struct PlacementQueueEvidence {
+    pub handler_name: String,
+    pub queue_name: Option<String>,
+    pub pending_tasks: u64,
+    pub oldest_pending_at: chrono::DateTime<chrono::Utc>,
+}

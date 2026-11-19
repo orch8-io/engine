@@ -17,6 +17,9 @@ pub struct DeployCmd {
     /// Signed `.orch8pkg` to verify before touching the control plane.
     #[arg(long)]
     pub package: PathBuf,
+    /// Signed archive member that must match the target environment's candidate.
+    #[arg(long)]
+    pub package_sequence: Option<String>,
     /// Existing release binding baseline and candidate sequence versions.
     #[arg(long)]
     pub release_id: Uuid,
@@ -35,6 +38,8 @@ struct DeployEvidence {
     release_id: Uuid,
     package_hash: String,
     package_status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_candidate_id: Option<uuid::Uuid>,
     semantic_diff_status: &'static str,
     historical_validation_status: &'static str,
     canary_percent: u8,
@@ -49,6 +54,13 @@ pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputForm
         serde_json::from_slice(&bytes).context("decode signed package")?;
     orch8_publisher::package::verify_package(&package)
         .map_err(|error| anyhow::anyhow!("signed package verification failed: {error}"))?;
+
+    let artifact_candidate_id = match &cmd.package_sequence {
+        Some(path) => {
+            Some(verify_candidate_artifact(client, base, cmd.release_id, &package, path).await?)
+        }
+        None => None,
+    };
 
     crate::commands::release::check_gate(client, base, cmd.release_id, None, false, 0, 0).await?;
     post_success(
@@ -88,6 +100,7 @@ pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputForm
         release_id: cmd.release_id,
         package_hash: package.content_hash,
         package_status: "verified",
+        artifact_candidate_id,
         semantic_diff_status: "checked",
         historical_validation_status: "passed",
         canary_percent: cmd.canary_percent,
@@ -102,6 +115,74 @@ pub async fn run(client: &Client, base: &str, cmd: DeployCmd, format: OutputForm
         ),
     }
     Ok(())
+}
+
+fn sequence_content(value: Value) -> Result<Value> {
+    let sequence = orch8_types::sequence::deserialize_sequence_strict(
+        &super::test_cmd::authoring_defaults(value),
+    )?;
+    sequence.validate()?;
+    let mut content = serde_json::to_value(sequence)?;
+    let record = content
+        .as_object_mut()
+        .context("sequence must be an object")?;
+    for key in [
+        "$schema",
+        "id",
+        "tenant_id",
+        "namespace",
+        "version",
+        "created_at",
+        "deprecated",
+        "status",
+    ] {
+        record.remove(key);
+    }
+    Ok(content)
+}
+
+async fn verify_candidate_artifact(
+    client: &Client,
+    base: &str,
+    release_id: Uuid,
+    package: &orch8_publisher::package::SignedPackage,
+    path: &str,
+) -> Result<Uuid> {
+    let source = package
+        .archive
+        .files
+        .get(path)
+        .with_context(|| format!("signed package does not contain '{path}'"))?;
+    let signed = sequence_content(crate::seqdoc::parse_text(
+        std::path::Path::new(path),
+        source,
+    )?)
+    .context("signed archive member is not a valid sequence")?;
+    let release = response_json(
+        client
+            .get(format!("{base}/releases/{release_id}"))
+            .send()
+            .await?,
+    )
+    .await?;
+    let candidate_id: Uuid = serde_json::from_value(release["candidate_sequence_id"].clone())
+        .context("release has no valid candidate sequence ID")?;
+    let candidate = response_json(
+        client
+            .get(format!("{base}/sequences/{candidate_id}"))
+            .send()
+            .await?,
+    )
+    .await?;
+    anyhow::ensure!(
+        candidate["id"] == serde_json::json!(candidate_id),
+        "candidate response has a different sequence ID"
+    );
+    anyhow::ensure!(
+        sequence_content(candidate)? == signed,
+        "target release candidate does not match the signed sequence '{path}'"
+    );
+    Ok(candidate_id)
 }
 
 /// Required fields from the API's `EvaluationReport`. Unknown additional fields

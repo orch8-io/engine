@@ -228,6 +228,7 @@ fn find_block_sub_sequence_only_finds_root_not_internals() {
     // inside the *parent* definition must not descend into it.
     use orch8_types::sequence::SubSequenceDef;
     let sub = BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+        child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
         id: BlockId::new("sub"),
         sequence_name: "child".into(),
         version: None,
@@ -503,6 +504,7 @@ fn block_meta_recognizes_each_variant() {
         finally_block: None,
     }));
     let sub = BlockDefinition::SubSequence(Box::new(SubSequenceDef {
+        child_result: orch8_types::sequence::ChildResultMode::LegacyOutputs,
         id: BlockId::new("sub"),
         sequence_name: "s".into(),
         version: None,

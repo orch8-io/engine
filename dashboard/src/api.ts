@@ -202,6 +202,7 @@ export type WorkerCommandKind = "drain" | "reload" | "ping";
 export interface WorkerCommand {
   id: string;
   worker_id: string;
+  tenant_id: string;
   command: WorkerCommandKind;
   payload: unknown;
   created_at: string;
@@ -213,7 +214,7 @@ export function enqueueWorkerCommand(
   payload?: unknown,
   signal?: AbortSignal,
 ): Promise<WorkerCommand> {
-  return mutate("/workers/commands", "POST", { worker_id, command, payload: payload ?? {} }, undefined, signal);
+  return mutate("/workers/commands", "POST", { worker_id, command, tenant_id: getTenantId() ?? "", payload: payload ?? {} }, undefined, signal);
 }
 
 export function listWorkerCommands(worker_id: string, signal?: AbortSignal): Promise<WorkerCommand[]> {
@@ -488,6 +489,21 @@ export function preflightDraft(body: Record<string, unknown>, signal?: AbortSign
   return mutate("/sequences/preflight", "POST", body, undefined, signal);
 }
 
+export interface DraftContractReport {
+  passed: boolean;
+  cases: {
+    name: string;
+    passed: boolean;
+    final_state: string;
+    executed_blocks: string[];
+    failures?: string[];
+  }[];
+}
+
+export function runDraftContract(sequence: Record<string, unknown>, contract: unknown, signal?: AbortSignal): Promise<DraftContractReport> {
+  return mutate("/sequences/test-draft", "POST", { sequence, contract }, undefined, signal);
+}
+
 export interface ListSequencesParams {
   tenant_id?: string;
   namespace?: string;
@@ -593,6 +609,21 @@ export interface SemanticDiff {
   candidate_lint: string[];
 }
 
+export interface ReplayFixture {
+  sequence: SequenceDefinition;
+  contract: Record<string, unknown>;
+  reproduces_divergence: boolean;
+}
+
+export function exportReplayFixture(
+  releaseId: string, instanceId: string,
+  fields: { input_keys: string[]; output_keys: Record<string, string[]> },
+  signal?: AbortSignal,
+): Promise<ReplayFixture> {
+  const path = `/api/v1/releases/${encodeURIComponent(releaseId)}/divergences/${encodeURIComponent(instanceId)}/fixture`;
+  return mutate(path, "POST", fields, undefined, signal);
+}
+
 export function listReleases(params?: { tenant_id?: string; limit?: string }, signal?: AbortSignal): Promise<WorkflowRelease[]> {
   return request("/releases", params, signal);
 }
@@ -641,35 +672,47 @@ export function rollbackRelease(id: string, signal?: AbortSignal): Promise<Workf
 
 // ─── Version Pins ───────────────────────────────────────────────────────────
 
-export interface VersionPin {
+export interface WorkerVersionRollout {
   tenant_id: string;
   handler_name: string;
-  min_version: number;
-  created_at: string;
+  active_min_version: string | null;
+  staged_min_version: string | null;
+  previous_min_version: string | null;
+  can_rollback: boolean;
+  revision: string | null;
+  updated_at: string;
 }
 
-export function listVersionPins(signal?: AbortSignal): Promise<VersionPin[]> {
-  return request("/version-pins", undefined, signal);
+export type WorkerVersionRolloutAction = "promote" | "rollback" | "discard";
+
+export function listWorkerVersionRollouts(signal?: AbortSignal): Promise<WorkerVersionRollout[]> {
+  return request("/workers/version-rollouts", undefined, signal);
 }
 
-export function setVersionPin(
-  body: { tenant_id: string; handler_name: string; min_version: number },
-  signal?: AbortSignal,
-): Promise<VersionPin> {
-  return mutate("/version-pins", "PUT", body, undefined, signal);
+export function stageWorkerVersionPin(
+  body: { tenant_id: string; handler_name: string; min_version: string },
+): Promise<WorkerVersionRollout> {
+  return mutate("/workers/version-rollouts", "POST", body);
+}
+
+export function changeWorkerVersionRollout(
+  rollout: WorkerVersionRollout,
+  action: WorkerVersionRolloutAction,
+): Promise<WorkerVersionRollout> {
+  return mutate(
+    `/workers/version-rollouts/${encodeURIComponent(rollout.tenant_id)}/${encodeURIComponent(rollout.handler_name)}`,
+    "POST",
+    { revision: rollout.revision, action },
+  );
 }
 
 export function deleteVersionPin(
   tenantId: string,
   handlerName: string,
-  signal?: AbortSignal,
 ): Promise<null> {
   return mutate(
-    `/version-pins/${encodeURIComponent(tenantId)}/${encodeURIComponent(handlerName)}`,
+    `/workers/version-pins/${encodeURIComponent(tenantId)}/${encodeURIComponent(handlerName)}`,
     "DELETE",
-    undefined,
-    undefined,
-    signal,
   );
 }
 
@@ -1595,6 +1638,31 @@ export function getInstanceTimeline(
   );
 }
 
+
+export type ResolutionStatus = "ok" | "null" | "missing" | "redacted" | "error";
+
+export interface ResolvedBlockInput {
+  block_id: string;
+  resolved_params?: unknown;
+  entries: {
+    param_path: string;
+    status: ResolutionStatus;
+    fallback_used?: boolean;
+  }[];
+}
+
+export function getResolvedBlockInput(
+  instanceId: string,
+  blockId: string,
+  signal?: AbortSignal,
+): Promise<ResolvedBlockInput> {
+  return request(
+    `/instances/${encodeURIComponent(instanceId)}/blocks/${encodeURIComponent(blockId)}/resolved-input`,
+    { at_block: blockId },
+    signal,
+  );
+}
+
 /** Fetch every timeline page (bounded by `maxEntries`). */
 export async function getFullInstanceTimeline(
   id: string,
@@ -1883,4 +1951,115 @@ export function bulkReschedule(
 
 export function listSessionInstances(id: string, signal?: AbortSignal): Promise<TaskInstance[]> {
   return request(`/sessions/${encodeURIComponent(id)}/instances`, undefined, signal);
+}
+
+export type RuntimeTimelineEvent =
+  | { kind: "runtime_owner"; at: string; instance_id: string; runtime_id: string; epoch: number }
+  | { kind: "task_queued"; at: string; task_id: string; instance_id: string; block_id: string }
+  | { kind: "worker_attempt"; at: string; task_id: string; instance_id: string; block_id: string; claim_epoch: number; worker_id?: string; event: string }
+  | { kind: "task_terminal"; at: string; task_id: string; instance_id: string; block_id: string; state: string };
+
+export interface RuntimeTimeline {
+  instance_id: string;
+  continuity_id?: string;
+  truncated: boolean;
+  events: RuntimeTimelineEvent[];
+}
+
+export function getRuntimeTimeline(id: string, signal?: AbortSignal): Promise<RuntimeTimeline> {
+  return request(`/instances/${encodeURIComponent(id)}/runtime-timeline`, undefined, signal);
+}
+
+export interface InstanceDiagnosis {
+  diagnoses: {
+    code: string;
+    summary: string;
+    remediation?: { summary: string; side_effect_risk: boolean }[];
+  }[];
+}
+
+export function getInstanceDiagnosis(id: string, signal?: AbortSignal): Promise<InstanceDiagnosis> {
+  return request(`/instances/${encodeURIComponent(id)}/diagnosis`, undefined, signal);
+}
+
+export interface EffectReviewItem {
+  id: string;
+  instance_id: string;
+  continuity_id: string;
+  block_id: string;
+  kind: string;
+  updated_at: string;
+}
+
+export function getEffectReviewQueue(tenant: string, signal?: AbortSignal, after?: string): Promise<{ items: EffectReviewItem[]; has_more: boolean; next_cursor?: string | null }> {
+  const query = new URLSearchParams({ tenant_id: tenant });
+  if (after) query.set("after", after);
+  return request(`/continuity/effects/review?${query}`, undefined, signal);
+}
+
+export function settleUnknownEffect(
+  effect: string,
+  tenant: string,
+  state: "verified" | "abandoned",
+  providerReceipt?: string,
+): Promise<unknown> {
+  return mutate(`/continuity/effects/${encodeURIComponent(effect)}/resolve`, "POST", {
+    tenant_id: tenant,
+    state,
+    provider_receipt_id: providerReceipt,
+  });
+}
+
+export function createWorkerEnrollment(tenant: string, name: string, expiresAt: string): Promise<{ id: string; secret: string }> {
+  return mutate("/api-keys", "POST", { tenant_id: tenant, name, capabilities: ["worker"], expires_at: expiresAt });
+}
+
+export interface PlacementRecipe {
+  id: string;
+  label: string;
+}
+
+export interface PlacementPreview {
+  ready: boolean;
+  inventory_complete: boolean;
+  steps: {
+    block_id: string;
+    handler: string;
+    tree: string;
+    route: string;
+    matched_policies: string[];
+    eligible_workers: string[];
+    preferred_workers: string[];
+    excluded_workers: { worker_id: string; reasons: string[] }[];
+    worker_inventory?: {
+      completeness: "complete" | "observation_limit_reached";
+      eligible_count: number;
+      preferred_count: number;
+      excluded_count: number;
+      observed_rows: number;
+    } | null;
+    minimum_worker_version: string | null;
+    staged_worker_version: string | null;
+    queue_name: string | null;
+    pending_tasks: number | null;
+    oldest_pending_age_secs: number | null;
+    available_poll_slots: number | null;
+    estimated_params_bytes: number | null;
+    canary_version?: string;
+    next_action?: string;
+  }[];
+}
+
+export function listPlacementRecipes(signal?: AbortSignal): Promise<PlacementRecipe[]> {
+  return request("/placement/recipes", undefined, signal);
+}
+
+export function getPlacementPreview(
+  id: string,
+  options: { recipe?: string; tags?: string; worker_version?: string; staged_pins?: "true" },
+  signal?: AbortSignal,
+): Promise<PlacementPreview> {
+  const query = new URLSearchParams();
+  Object.entries(options).forEach(([key, value]) => { if (value) query.set(key, value); });
+  return request(`/placement/plan/${encodeURIComponent(id)}?${query}`, undefined, signal);
 }

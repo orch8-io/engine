@@ -2,17 +2,25 @@ import { useState, useCallback } from "react";
 import { usePolling } from "../hooks/usePolling";
 import { usePageTitle } from "../hooks/usePageTitle";
 import {
+  connectionInfo,
   listWorkers,
+  listWorkerCommands,
   listHandlers,
   enqueueWorkerCommand,
-  listVersionPins,
-  setVersionPin,
+  listWorkerVersionRollouts,
+  stageWorkerVersionPin,
+  changeWorkerVersionRollout,
   deleteVersionPin,
   type WorkerInfo,
+  type WorkerCommand,
   type HandlerCatalog,
   type WorkerCommandKind,
-  type VersionPin,
+  type WorkerVersionRollout,
+  type WorkerVersionRolloutAction,
 } from "../api";
+import { EffectReviewQueue } from "../components/EffectReviewQueue";
+import { WorkerPlacementPreview } from "../components/WorkerPlacementPreview";
+import { WorkerEnrollment } from "../components/WorkerEnrollment";
 import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageMeta } from "../components/ui/PageMeta";
@@ -61,15 +69,22 @@ const PAGE_GLOSSARY: GlossaryItem[] = [
 
 export default function Workers() {
   usePageTitle("Workers");
+  const tenant = connectionInfo().tenantId ?? "default";
   const [includeStale, setIncludeStale] = useState(false);
+  const [drainTarget, setDrainTarget] = useState<string | null>(null);
+  const [drainCommand, setDrainCommand] = useState<WorkerCommand | null>(null);
+  const drainFetcher = useCallback((signal?: AbortSignal) => (
+    drainCommand ? listWorkerCommands(drainCommand.worker_id, signal) : Promise.resolve([])
+  ), [drainCommand]);
+  const { data: drainCommands, error: drainError } = usePolling(drainFetcher, 3000);
 
   const workersFetcher = useCallback(
     (signal?: AbortSignal) =>
       listWorkers(
-        { include_stale: includeStale ? "true" : undefined },
+        { include_stale: includeStale || drainCommand ? "true" : undefined },
         signal,
       ),
-    [includeStale],
+    [includeStale, drainCommand],
   );
   const {
     data: workers,
@@ -86,26 +101,64 @@ export default function Workers() {
   const { data: catalog } = usePolling<HandlerCatalog>(handlersFetcher, 30000);
 
   const pinsFetcher = useCallback(
-    (signal?: AbortSignal) => listVersionPins(signal),
+    (signal?: AbortSignal) => listWorkerVersionRollouts(signal),
     [],
   );
   const {
     data: pins,
     refresh: refreshPins,
-  } = usePolling<VersionPin[]>(pinsFetcher, 10000);
+    error: pinError,
+  } = usePolling<WorkerVersionRollout[]>(pinsFetcher, 10000);
 
   const [pinTenant, setPinTenant] = useState("");
   const [pinHandler, setPinHandler] = useState("");
   const [pinVersion, setPinVersion] = useState("");
   const [pinBusy, setPinBusy] = useState(false);
+  const [rolloutChanges, setRolloutChanges] = useState(0);
+  const rolloutRevision = JSON.stringify([
+    rolloutChanges,
+    pins?.map((pin) => JSON.stringify([
+      pin.tenant_id, pin.handler_name, pin.revision, pin.active_min_version, pin.staged_min_version,
+    ])).sort(),
+  ]);
 
   const [toast, setToast] = useState<string | null>(null);
   const [busyWorker, setBusyWorker] = useState<string | null>(null);
 
+  const changeRollout = async (pin: WorkerVersionRollout, action: WorkerVersionRolloutAction | "delete") => {
+    const label = {
+      promote: "Promote staged version",
+      rollback: "Roll back active version",
+      discard: "Discard staged version",
+      delete: "Delete version pin",
+    }[action];
+    if (!window.confirm(`${label} for ${pin.handler_name} in tenant ${pin.tenant_id}?`)) return;
+    setPinBusy(true);
+    try {
+      if (action === "delete") {
+        await deleteVersionPin(pin.tenant_id, pin.handler_name);
+      } else {
+        await changeWorkerVersionRollout(pin, action);
+      }
+      setRolloutChanges((count) => count + 1);
+      setToast(`Updated version rollout for ${pin.handler_name}`);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPinBusy(false);
+      refreshPins();
+      setTimeout(() => setToast(null), 3500);
+    }
+  };
+
   const sendCommand = async (workerId: string, command: WorkerCommandKind) => {
     setBusyWorker(workerId);
     try {
-      await enqueueWorkerCommand(workerId, command);
+      const queued = await enqueueWorkerCommand(workerId, command);
+      if (command === "drain") {
+        setDrainCommand(queued);
+        setDrainTarget(null);
+      }
       setToast(`Queued ${command} for ${workerId.slice(0, 12)}…`);
       setTimeout(() => setToast(null), 2500);
     } catch (e) {
@@ -126,6 +179,38 @@ export default function Workers() {
       />
 
       <Glossary items={PAGE_GLOSSARY} />
+
+      <WorkerEnrollment />
+
+      <WorkerPlacementPreview rolloutRevision={rolloutRevision} />
+
+      <EffectReviewQueue key={tenant} tenant={tenant} />
+
+      {(drainTarget || drainCommand) && (
+        <Section title="Worker drain">
+          {drainTarget && (
+            <div className="space-y-3">
+              <p>Ask {drainTarget} to stop taking new tasks on its gRPC worker stream. The worker can finish its active tasks.</p>
+              <p className="text-muted">Command scope is {connectionInfo().tenantId ?? "the root worker scope"}. REST workers require a process-level graceful shutdown.</p>
+              <div className="flex gap-2">
+                <Button size="sm" disabled={busyWorker !== null} onClick={() => void sendCommand(drainTarget, "drain")}>Queue drain</Button>
+                <Button size="sm" disabled={busyWorker !== null} onClick={() => setDrainTarget(null)}>Cancel</Button>
+              </div>
+            </div>
+          )}
+          {drainCommand && (
+            <div className="space-y-2">
+              <p>{drainCommand.worker_id}</p>
+              {drainError && <p role="status">{drainError.message}</p>}
+              <p role="status">{!drainCommands ? "Checking delivery…" : drainCommands.some((item) => item.id === drainCommand.id)
+                ? "Drain command pending delivery."
+                : "Check intake and active work before stopping the worker."}</p>
+              <p>Active tasks: {workers?.find((worker) => worker.worker_id === drainCommand.worker_id)?.in_flight ?? "unavailable"}</p>
+              <Button size="sm" onClick={() => setDrainCommand(null)}>Close</Button>
+            </div>
+          )}
+        </Section>
+      )}
 
       {toast && <div className="notice notice-ok">{toast}</div>}
       {error && <div className="notice notice-warn">{error.message}</div>}
@@ -227,7 +312,7 @@ export default function Workers() {
                           variant="ghost"
                           size="sm"
                           disabled={busyWorker === w.worker_id}
-                          onClick={() => sendCommand(w.worker_id, c)}
+                          onClick={() => c === "drain" ? setDrainTarget(w.worker_id) : void sendCommand(w.worker_id, c)}
                           title={`Queue a ${c} command for this worker (picked up on its next command poll)`}
                         >
                           {c}
@@ -292,20 +377,15 @@ export default function Workers() {
 
       <Section
         eyebrow="Deployment"
-        title="Version Pins"
-        description={
-          <>
-            Pin a minimum worker version per tenant + handler. Workers below
-            the pinned version will not receive tasks for that handler — use
-            this to enforce a rolling deploy floor.
-          </>
-        }
+        title="Worker version rollouts"
+        description="Stage a minimum version and preview it against the fleet. Promote it to enforce it on tenant-scoped HTTP polls, or roll back to the previous minimum."
       >
         <div className="space-y-6">
           <div className="grid grid-cols-1 md:grid-cols-[1fr_1fr_1fr_auto] gap-3 items-end">
             <div>
-              <label className="field-label block mb-1.5">Tenant ID</label>
+              <label htmlFor="pin-tenant" className="field-label block mb-1.5">Tenant ID</label>
               <Input
+                id="pin-tenant"
                 type="text"
                 placeholder="tenant-a"
                 value={pinTenant}
@@ -313,8 +393,9 @@ export default function Workers() {
               />
             </div>
             <div>
-              <label className="field-label block mb-1.5">Handler name</label>
+              <label htmlFor="pin-handler" className="field-label block mb-1.5">Handler name</label>
               <Input
+                id="pin-handler"
                 type="text"
                 placeholder="my_handler"
                 value={pinHandler}
@@ -322,10 +403,11 @@ export default function Workers() {
               />
             </div>
             <div>
-              <label className="field-label block mb-1.5">Min version</label>
+              <label htmlFor="pin-version" className="field-label block mb-1.5">Minimum version</label>
               <Input
-                type="number"
-                placeholder="1"
+                id="pin-version"
+                type="text"
+                placeholder="2.0.0"
                 value={pinVersion}
                 onChange={(e) => setPinVersion(e.target.value)}
               />
@@ -337,12 +419,13 @@ export default function Workers() {
               onClick={async () => {
                 setPinBusy(true);
                 try {
-                  await setVersionPin({
+                  await stageWorkerVersionPin({
                     tenant_id: pinTenant.trim(),
                     handler_name: pinHandler.trim(),
-                    min_version: Number(pinVersion),
+                    min_version: pinVersion.trim(),
                   });
-                  setToast(`Version pin set for ${pinHandler.trim()}`);
+                  setRolloutChanges((count) => count + 1);
+                  setToast(`Staged version pin for ${pinHandler.trim()}`);
                   setTimeout(() => setToast(null), 2500);
                   setPinTenant("");
                   setPinHandler("");
@@ -356,23 +439,23 @@ export default function Workers() {
                 }
               }}
             >
-              Set Pin
+              Stage version
             </Button>
           </div>
 
+          {pinError && <p role="status" className="text-muted">{pinError.message}</p>}
           <Table>
             <THead>
               <TH>Tenant</TH>
               <TH>Handler</TH>
-              <TH>Min version</TH>
-              <TH>Created</TH>
+              <TH>Active minimum</TH>
+              <TH>Staged minimum</TH>
               <TH className="text-right">Actions</TH>
             </THead>
             <tbody>
               {(!pins || pins.length === 0) && (
                 <Empty colSpan={5}>
-                  No version pins configured. Use the form above to pin a
-                  minimum worker version for a handler.
+                  No worker version rollouts.
                 </Empty>
               )}
               {pins?.map((p) => (
@@ -383,31 +466,31 @@ export default function Workers() {
                   <TD>
                     <Badge tone="neutral">{p.handler_name}</Badge>
                   </TD>
-                  <TD>
-                    <span className="font-mono text-[12px]">{p.min_version}</span>
-                  </TD>
-                  <TD>
-                    <Relative at={p.created_at} />
-                  </TD>
+                  <TD className="font-mono">{p.active_min_version ?? "None"}</TD>
+                  <TD className="font-mono">{p.staged_min_version ?? "None"}</TD>
                   <TD className="text-right">
-                    <Button
-                      variant="danger"
-                      size="sm"
-                      onClick={async () => {
-                        if (!window.confirm(`Delete version pin for ${p.handler_name} (tenant ${p.tenant_id})?`)) return;
-                        try {
-                          await deleteVersionPin(p.tenant_id, p.handler_name);
-                          setToast(`Deleted pin for ${p.handler_name}`);
-                          setTimeout(() => setToast(null), 2500);
-                          refreshPins();
-                        } catch (e) {
-                          setToast(`Failed: ${e instanceof Error ? e.message : String(e)}`);
-                          setTimeout(() => setToast(null), 3500);
-                        }
-                      }}
-                    >
-                      Delete
-                    </Button>
+                    <div className="flex flex-wrap justify-end gap-2">
+                      {p.staged_min_version && p.revision && (
+                        <>
+                          <Button size="sm" disabled={pinBusy} onClick={() => void changeRollout(p, "promote")}>
+                            Promote
+                          </Button>
+                          <Button size="sm" disabled={pinBusy} onClick={() => void changeRollout(p, "discard")}>
+                            Discard stage
+                          </Button>
+                        </>
+                      )}
+                      {p.can_rollback && p.revision && (
+                        <Button size="sm" disabled={pinBusy} onClick={() => void changeRollout(p, "rollback")}>
+                          Roll back to {p.previous_min_version ?? "no minimum"}
+                        </Button>
+                      )}
+                      {p.active_min_version && !p.staged_min_version && (
+                        <Button variant="danger" size="sm" disabled={pinBusy} onClick={() => void changeRollout(p, "delete")}>
+                          Delete pin
+                        </Button>
+                      )}
+                    </div>
                   </TD>
                 </TR>
               ))}

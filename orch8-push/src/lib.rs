@@ -44,6 +44,22 @@ pub trait PushProvider: Send + Sync + 'static {
             "push provider does not support signed wake metadata".into(),
         ))
     }
+
+    /// Make at most one built-in delivery request for a durable outbox lease.
+    /// Providers may record the number of delivery HTTP requests in
+    /// `http_attempts`. A missing count means the provider cannot report it.
+    async fn send_outbox_wake(
+        &self,
+        token: &str,
+        platform: &str,
+        metadata: Option<&SignedWakeMetadata>,
+        _http_attempts: &mut Option<u32>,
+    ) -> Result<(), PushError> {
+        match metadata {
+            Some(metadata) => self.send_signed_wake(token, platform, metadata).await,
+            None => self.send_silent_push(token, platform).await,
+        }
+    }
 }
 
 pub struct NoopPushProvider;
@@ -195,6 +211,18 @@ impl PushProvider for DispatchingPushProvider {
     ) -> Result<(), PushError> {
         self.provider_for(platform)?
             .send_signed_wake(token, platform, metadata)
+            .await
+    }
+
+    async fn send_outbox_wake(
+        &self,
+        token: &str,
+        platform: &str,
+        metadata: Option<&SignedWakeMetadata>,
+        http_attempts: &mut Option<u32>,
+    ) -> Result<(), PushError> {
+        self.provider_for(platform)?
+            .send_outbox_wake(token, platform, metadata, http_attempts)
             .await
     }
 }
