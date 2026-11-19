@@ -703,12 +703,11 @@ fn non_numeric_pin_falls_back_to_lexical_compare() {
 }
 
 #[test]
-fn mixed_numeric_and_non_numeric_pin_uses_lexical_over_raw_strings() {
-    // "9.0" >= "10.x" lexically even though numeric ordering would say no.
+fn mixed_numeric_and_non_numeric_versions_fail_the_pin() {
     let report = pinned_report(Some("9.0"), "10.x");
     assert_eq!(
         check(&report, "handlers_have_workers").status,
-        PreflightStatus::Pass
+        PreflightStatus::Fail
     );
 }
 

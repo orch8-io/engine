@@ -1,5 +1,8 @@
 [advisories]
 ignore = [
+    { id = "RUSTSEC-2026-0543", reason = "Maintenance advisory. Public timestamps and SQLx types still use chrono. Remove after migrating the workspace and its transitive dependencies." },
+    { id = "RUSTSEC-2026-0555", reason = "Maintenance advisory. Cron and send windows still use chrono-tz for IANA time zones. Remove after migrating time zone handling." },
+    { id = "RUSTSEC-2026-0542", reason = "Maintenance advisory. The object_store dependency still requires humantime. Remove when object_store can resolve without it." },
     # basic-toml is unmaintained, with no patched release. It is required by
     # askama_derive's config feature through uniffi_bindgen, enabled only by
     # orch8-mobile/bindgen (the developer CLI that generates SDK bindings).
