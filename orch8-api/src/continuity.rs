@@ -4421,7 +4421,7 @@ fn build_extracted_contract(
     let initial_outputs = outputs
         .iter()
         .filter(|output| output.created_at <= checkpoint.created_at)
-        .filter(|output| !output.block_id.as_str().starts_with('_'))
+        .filter(|output| is_real_output_row(output))
         .map(|output| {
             (
                 output.block_id.as_str().to_owned(),
@@ -4429,16 +4429,40 @@ fn build_extracted_contract(
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mocks = outputs
+    // Keep one outcome per block. The history can contain several attempts,
+    // and a contract only accepts one mock for each block.
+    let mut outcomes = std::collections::BTreeMap::new();
+    for output in outputs
         .iter()
         .filter(|output| output.created_at > checkpoint.created_at)
         .filter(|output| !output.block_id.as_str().starts_with('_'))
-        .map(|output| orch8_types::contract::MockDef {
+        .filter(|output| {
+            !matches!(
+                output.output_ref.as_deref(),
+                Some("__in_progress__" | "__retry__")
+            )
+        })
+    {
+        let latest = outcomes.entry(output.block_id.as_str()).or_insert(output);
+        if (output.created_at, output.id) > (latest.created_at, latest.id) {
+            *latest = output;
+        }
+    }
+    let mocks = outcomes
+        .into_iter()
+        .map(|(block, output)| orch8_types::contract::MockDef {
             definition: None,
             handler: None,
-            block: Some(output.block_id.as_str().to_owned()),
-            policy: orch8_types::contract::MockPolicy::Success {
-                output: redaction.redacted(&output.output),
+            block: Some(block.to_owned()),
+            policy: match output.output_ref.as_deref() {
+                Some("__error__") => orch8_types::contract::MockPolicy::Failure {
+                    // Recorded error messages can contain request data.
+                    message: "recorded step failure".into(),
+                    retryable: false,
+                },
+                _ => orch8_types::contract::MockPolicy::Success {
+                    output: redaction.redacted(&output.output),
+                },
             },
         })
         .collect();

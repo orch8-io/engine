@@ -655,7 +655,8 @@ async fn open_file(
 }
 
 async fn restore_version_55_request_table(storage: &MobileStorage) {
-    // Model the actual v55 request table, with populated rows/materializations.
+    // Restore the archive tables to their v55 shape while keeping unrelated
+    // migration records aligned with the rest of the fixture's schema.
     sqlx::query("DROP INDEX idx_mobile_catalog_run_hot_usage")
         .execute(storage.pool())
         .await
@@ -664,7 +665,7 @@ async fn restore_version_55_request_table(storage: &MobileStorage) {
         .execute(storage.pool())
         .await
         .unwrap();
-    sqlx::query("DELETE FROM schema_versions WHERE version>55")
+    sqlx::query("DROP TABLE mobile_catalog_run_archives")
         .execute(storage.pool())
         .await
         .unwrap();

@@ -1700,6 +1700,14 @@ describe("Portable Continuity", () => {
     assert.equal((reproduction.scenario as any).faults.length, 1);
     assert.deepEqual((reproduction.scenario as any).event_order, []);
     assert.equal((reproduction.fixture as any).complete, true);
+    assert.deepEqual((reproduction.fixture as any).contract.cases[0].mocks, [
+      {
+        block: "provider",
+        type: "failure",
+        message: "recorded step failure",
+        retryable: false,
+      },
+    ]);
     assert.ok(!JSON.stringify(reproduction).includes("sk-incident-secret"));
     const attached = await client.listDlqReproductions(
       String(group.fingerprint),
