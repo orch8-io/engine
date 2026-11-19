@@ -52,7 +52,7 @@ tar = "0.4.45"
 [target.'cfg(unix)'.dependencies]
 # `orch8 dev --worker`: signal whole worker process groups (killpg) so
 # forked grandchildren never outlive the dev session.
-nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.32", default-features = false, features = ["signal", "process"] }
 
 [lints]
 workspace = true
