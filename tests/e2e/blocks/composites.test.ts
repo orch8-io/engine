@@ -1,5 +1,7 @@
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { once } from "node:events";
+import { createServer, type ServerResponse } from "node:http";
 import { Orch8Client, testSequence, step, uuid } from "../client.ts";
 import { startServer, stopServer } from "../harness.ts";
 import type { ServerHandle } from "../harness.ts";
@@ -94,46 +96,60 @@ describe("Composite Blocks", () => {
     assert.equal(completed.state, "completed");
   });
 
-  it("parallel: in-process handlers execute concurrently", async () => {
+  it("parallel: in-process handlers execute concurrently", async (t) => {
+    const waiting = new Map<string, ServerResponse>();
+    const barrier = createServer((request, response) => {
+      const path = request.url;
+      if ((path !== "/left" && path !== "/right") || waiting.has(path)) {
+        response.writeHead(400).end();
+        return;
+      }
+
+      // Neither handler can return successfully before the other arrives.
+      waiting.set(path, response);
+      if (waiting.size === 2) {
+        for (const [branch, pending] of waiting) pending.end(branch);
+      }
+    });
+    barrier.listen(0, "127.0.0.1");
+    t.after(() => new Promise<void>((resolve, reject) => {
+      barrier.close((error) => error ? reject(error) : resolve());
+      barrier.closeAllConnections();
+    }));
+    await once(barrier, "listening");
+    const address = barrier.address();
+    assert.ok(address && typeof address !== "string");
+    const url = `http://127.0.0.1:${address.port}`;
+
     const tenantId = `par-concurrent-${uuid().slice(0, 8)}`;
-    const durationMs = 1000;
     const seq = testSequence(
       "par-concurrent",
       [
         parallel("p1", [
-          [step("left", "sleep", { duration_ms: durationMs })],
-          [step("right", "sleep", { duration_ms: durationMs })],
+          [step("left", "http_request", { url: `${url}/left`, timeout_ms: 10_000 })],
+          [step("right", "http_request", { url: `${url}/right`, timeout_ms: 10_000 })],
         ]) as Block,
       ],
       { tenantId, namespace: "default" },
     );
     await client.createSequence(seq);
 
-    const started = Date.now();
     const { id } = await client.createInstance({
       sequence_id: seq.id,
       tenant_id: tenantId,
       namespace: "default",
     });
-    const completed = await client.waitForState(id, "completed", {
-      timeoutMs: 10_000,
-      intervalMs: 25,
+    const completed = await client.waitForState(id, ["completed", "failed"], {
+      timeoutMs: 15_000,
     });
-    const elapsed = Date.now() - started;
-
-    assert.equal(completed.state, "completed");
-    assert.ok(
-      elapsed < 1750,
-      `two 1000ms in-process branches should overlap; completed in ${elapsed}ms`,
-    );
+    assert.equal(completed.state, "completed", "both requests must reach the barrier");
     const outputs = await client.getOutputs(id);
-    assert.deepEqual(
-      outputs
-        .filter((output) => output.block_id === "left" || output.block_id === "right")
-        .map((output) => (output.output as { slept_ms?: unknown }).slept_ms)
-        .sort(),
-      [durationMs, durationMs],
-    );
+    for (const branch of ["left", "right"]) {
+      assert.deepEqual(outputs.find((output) => output.block_id === branch)?.output, {
+        status: 200,
+        body: `/${branch}`,
+      });
+    }
   });
 
   it("parallel: multi-step branches", async () => {
