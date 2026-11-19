@@ -96,6 +96,7 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         HttpMethod::Get,
         "list_instance_effects",
     ),
+    ("/continuity/effects/review", HttpMethod::Get, "list_review"),
     (
         "/continuity/effects/{id}/resolve",
         HttpMethod::Post,
