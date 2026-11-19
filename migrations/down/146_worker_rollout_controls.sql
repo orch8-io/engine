@@ -1,3 +1,5 @@
+-- Remove rollout controls and worker poll capacity. Discard inactive pins so
+-- the older schema cannot interpret them as active version requirements.
 DELETE FROM worker_version_pins WHERE NOT active;
 ALTER TABLE worker_version_pins
     DROP COLUMN active,
