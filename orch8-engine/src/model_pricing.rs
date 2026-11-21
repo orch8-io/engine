@@ -155,6 +155,17 @@ fn build_table(overrides_json: Option<&str>) -> HashMap<String, ModelPrice> {
         .map(|(name, p)| (name.to_lowercase(), *p))
         .collect();
 
+    // Rows the dated llm-prices catalog lists under the same id take its rates.
+    for (name, p) in &mut table {
+        if let Some(row) = llm_prices::lookup(name)
+            .filter(|r| r.model == name.as_str() || r.aliases.contains(&name.as_str()))
+        {
+            if let (Some(input_per_1m), Some(output_per_1m)) = (row.input, row.output) {
+                *p = price(input_per_1m, output_per_1m);
+            }
+        }
+    }
+
     if let Some(json) = overrides_json {
         match serde_json::from_str::<HashMap<String, ModelPrice>>(json) {
             Ok(overrides) => {
@@ -257,16 +268,30 @@ mod tests {
     #[test]
     fn prices_current_models_across_provider_families() {
         let expected = [
-            ("gpt-5.6-terra", (2.50, 15.00)),
+            ("gpt-5.6-terra", (2.00, 12.00)),
             ("claude-sonnet-5", (2.00, 10.00)),
             ("gemini-3.7-flash", (0.75, 3.75)),
-            ("deepseek-v4-pro", (0.435, 0.87)),
+            ("deepseek-v4-pro", (1.32, 3.96)),
             ("mistral-small-4", (0.15, 0.60)),
             ("llama-4-maverick", (0.24, 0.97)),
             ("grok-4.6", (2.00, 6.00)),
             ("qwen3.7-plus", (0.40, 1.60)),
             ("command-a", (2.50, 10.00)),
             ("nova-micro", (0.035, 0.14)),
+        ];
+        for (model, pair) in expected {
+            let p = price_for_model(model).unwrap();
+            assert_eq!((p.input_per_1m, p.output_per_1m), pair, "{model}");
+        }
+    }
+
+    #[test]
+    fn catalog_list_prices_replace_stale_rows() {
+        let expected = [
+            ("gpt-5.6-sol", (4.00, 20.00)),
+            ("gpt-5.6-luna", (0.20, 1.20)),
+            ("deepseek-chat", (0.30, 1.20)),
+            ("deepseek-reasoner", (0.30, 1.20)),
         ];
         for (model, pair) in expected {
             let p = price_for_model(model).unwrap();
