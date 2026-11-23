@@ -21,8 +21,9 @@ A runnable 3-step example with a simulated crash is in
 
 ## API
 
-The API is synchronous. Blocking native engine operations release the GIL while
-the Rust runtime works; Python handlers acquire it when executing Python code.
+The `Engine` API is synchronous. Blocking native engine operations release the
+GIL while the Rust runtime works. Python handlers acquire it when executing
+Python code.
 
 | Call                                                                    | Does                                                                                                                                                                                            |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -59,6 +60,20 @@ immediately.
 
 `validate_sequence_json`, `sequence_schema_version` and `run_sequence_json`
 (an isolated in-memory dry run of built-in handlers) are still exported.
+
+## Async applications
+
+Use `await AsyncEngine.open(path)` to run engine operations without blocking
+the application's event loop. Register handlers with `handler` before calling
+`deploy`, `start`, `run`, `get`, or `signal`. Await those operations and
+`close` on the loop that opened the engine. Async handlers run on that loop
+and can use application-owned async clients. Synchronous handlers run on the
+native callback thread. Cancelling an awaiting task stops observation. Use a
+workflow signal to pause or cancel durable execution. For an application
+lifespan, use `async with await AsyncEngine.open(path, shutdown_timeout=5)`.
+Shutdown stops scheduling and holds database ownership until outstanding host
+handlers return. If the deadline expires, native close continues. Await
+`close()` to join it before opening a replacement on the same database.
 
 ## Semantics
 
@@ -141,6 +156,26 @@ A snapshot retains the current retry diagnostic while its next attempt is
 scheduled. Snapshot and handler views select current rows before decoding
 payloads, so superseded or internal history does not need to be decoded. A damaged
 selected result still fails the read.
+
+`engine.get_output(id, block, attempt)` reads just the given block attempt and
+resolves its payload. It returns the latest matching row for a repeated block,
+or `None` when the attempt has no record. Await the method on `AsyncEngine`.
+
+Use `engine.iter_instances(state="scheduled", sequence_id=sequence_id, page_size=100)`
+to iterate summaries in descending instance ID order. The optional sequence ID is
+returned by `deploy`. Use `async for` with `AsyncEngine`. Each iterator reads one
+page at a time and returns only the ID, sequence ID, state, and creation time.
+
+Set `observer_timeout` in seconds on `run` to bound how long the caller waits
+for scheduling and storage reads. Expiration raises `TimeoutError`. Admitted
+work can still finish and be observed by a later `get` or `run` call.
+`timeout` is the separate scheduling budget.
+
+`start_batch([{"name": name, "input": data, "idempotency_key": key}, ...])` starts
+up to 1000 items in one transaction. Each item requires a nonempty key. The
+returned IDs follow input order, including repeated keys. Retry with the same
+keys to recover the original IDs after losing the response. Await the method
+on `AsyncEngine`.
 
 ### Handler failure diagnostics
 

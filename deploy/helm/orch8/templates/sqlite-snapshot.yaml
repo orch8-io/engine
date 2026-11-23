@@ -1,0 +1,119 @@
+{{- $snapshot := .Values.sqlite.snapshot -}}
+{{- if $snapshot.enabled }}
+{{- include "orch8.validate" . }}
+{{- $name := required "sqlite.snapshot.name is required" $snapshot.name }}
+{{- $class := required "sqlite.snapshot.volumeSnapshotClassName is required" $snapshot.volumeSnapshotClassName }}
+{{- $image := required "sqlite.snapshot.image is required" $snapshot.image }}
+{{- $job := printf "%s-sqlite-snap-%s" (include "orch8.fullname" . | trunc 36 | trimSuffix "-") (sha256sum $name | trunc 12) }}
+{{- $deployment := printf "%s-all-in-one" (include "orch8.fullname" .) }}
+{{- $claim := default (printf "%s-data" (include "orch8.fullname" .)) .Values.sqlite.persistence.existingClaim }}
+{{- if not (regexMatch "^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$" $claim) }}
+{{- fail "SQLite snapshot requires a valid PVC name." }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $job }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $job }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: [{{ $deployment | quote }}]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    resourceNames: [{{ $claim | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["get"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $job }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $job }}
+    namespace: {{ .Release.Namespace | quote }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $job }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $job }}
+data:
+  snapshot.sh: |
+    {{- .Files.Get "files/sqlite-snapshot.sh" | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $job }}
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+    app.kubernetes.io/component: sqlite-snapshot
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: {{ add (mul $snapshot.timeoutSeconds 3) 30 }}
+  template:
+    metadata:
+      labels:
+        {{- include "orch8.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: sqlite-snapshot
+    spec:
+      serviceAccountName: {{ $job }}
+      automountServiceAccountToken: true
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: snapshot
+          image: {{ $image | quote }}
+          command: ["/bin/sh", "/scripts/snapshot.sh"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          env:
+            - name: HOME
+              value: /tmp
+            - name: POD_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            - name: DEPLOYMENT
+              value: {{ $deployment | quote }}
+            - name: CLAIM
+              value: {{ $claim | quote }}
+            - name: SNAPSHOT
+              value: {{ $name | quote }}
+            - name: SNAPSHOT_CLASS
+              value: {{ $class | quote }}
+            - name: TIMEOUT_SECONDS
+              value: {{ $snapshot.timeoutSeconds | quote }}
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: scratch, mountPath: /tmp }
+      volumes:
+        - name: scripts
+          configMap: { name: {{ $job }} }
+        - name: scratch
+          emptyDir: { sizeLimit: 32Mi }
+{{- end }}

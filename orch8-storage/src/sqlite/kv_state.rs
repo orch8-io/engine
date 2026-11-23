@@ -1,3 +1,5 @@
+use crate::restore::InstanceKvEntry;
+use chrono::{DateTime, Utc};
 use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
 
@@ -117,6 +119,7 @@ impl SqliteStorage {
         let row: Option<(Option<String>,)> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
             "SELECT kv.value FROM task_instances LEFT JOIN instance_kv_state kv
              ON kv.instance_id = task_instances.id AND kv.key = ?3
+             AND (kv.expires_at IS NULL OR kv.expires_at > ?5)
              WHERE task_instances.id = ?1 AND task_instances.tenant_id = ?2
              AND task_instances.state = 'running' AND task_instances.claimed_at = ?4 AND {}",
             super::mobile_execution::ALLOWED
@@ -125,6 +128,7 @@ impl SqliteStorage {
         .bind(tenant.as_str())
         .bind(key)
         .bind(super::helpers::ts(claim_token))
+        .bind(super::helpers::ts(Utc::now()))
         .fetch_optional(&self.pool)
         .await?;
         match row {
@@ -144,10 +148,12 @@ impl SqliteStorage {
     ) -> Result<Option<serde_json::Value>, StorageError> {
         let id_str = instance_id.into_uuid().to_string();
         let row: Option<(String,)> = sqlx::query_as(
-            "SELECT value FROM instance_kv_state WHERE instance_id = ?1 AND key = ?2",
+            "SELECT value FROM instance_kv_state WHERE instance_id = ?1 AND key = ?2
+             AND (expires_at IS NULL OR expires_at > ?3)",
         )
         .bind(&id_str)
         .bind(key)
+        .bind(super::helpers::ts(Utc::now()))
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| StorageError::Query(e.to_string()))?;
@@ -166,12 +172,15 @@ impl SqliteStorage {
         instance_id: InstanceId,
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
         let id_str = instance_id.into_uuid().to_string();
-        let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT key, value FROM instance_kv_state WHERE instance_id = ?1")
-                .bind(&id_str)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| StorageError::Query(e.to_string()))?;
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM instance_kv_state WHERE instance_id = ?1
+                              AND (expires_at IS NULL OR expires_at > ?2)",
+        )
+        .bind(&id_str)
+        .bind(super::helpers::ts(Utc::now()))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
         let mut map = std::collections::HashMap::with_capacity(rows.len());
         for (k, v_str) in rows {
             let v: serde_json::Value =
@@ -270,22 +279,81 @@ impl SqliteStorage {
     }
 }
 
+pub(super) async fn list_history_page(
+    store: &SqliteStorage,
+    instance: InstanceId,
+    after: Option<&str>,
+    limit: u32,
+) -> Result<Vec<InstanceKvEntry>, StorageError> {
+    let rows = sqlx::query_as::<_, (String, String, DateTime<Utc>, Option<DateTime<Utc>>)>(
+        "SELECT key, value, updated_at, expires_at FROM instance_kv_state
+         WHERE instance_id = ?1 AND key >= COALESCE(?2, '') AND key IS NOT ?2
+         ORDER BY key LIMIT ?3",
+    )
+    .bind(instance.to_string())
+    .bind(after)
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter()
+        .map(|(key, value, updated_at, expires_at)| {
+            Ok(InstanceKvEntry {
+                instance_id: instance,
+                key,
+                value: serde_json::from_str(&value)?,
+                updated_at,
+                expires_at,
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn restore_on(
+    conn: &mut sqlx::SqliteConnection,
+    entry: &InstanceKvEntry,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(entry.instance_id.to_string())
+    .bind(&entry.key)
+    .bind(serde_json::to_string(&entry.value)?)
+    .bind(super::helpers::ts(entry.updated_at))
+    .bind(entry.expires_at.map(super::helpers::ts))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn set_instance_kv_on(
     conn: &mut sqlx::SqliteConnection,
     instance_id: InstanceId,
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    write_instance_kv_on(conn, instance_id, key, value, None).await
+}
+
+pub(super) async fn write_instance_kv_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<(), StorageError> {
     let id_str = instance_id.into_uuid().to_string();
     let val_str = serde_json::to_string(value).map_err(|e| StorageError::Query(e.to_string()))?;
     sqlx::query(
-        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
-             VALUES (?1, ?2, ?3, datetime('now'))
-             ON CONFLICT (instance_id, key) DO UPDATE SET value = ?3, updated_at = datetime('now')",
+        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at, expires_at)
+             VALUES (?1, ?2, ?3, datetime('now'), ?4)
+             ON CONFLICT (instance_id, key) DO UPDATE
+             SET value = excluded.value, updated_at = excluded.updated_at, expires_at = excluded.expires_at",
     )
     .bind(&id_str)
     .bind(key)
     .bind(&val_str)
+    .bind(expires_at.map(super::helpers::ts))
     .execute(&mut *conn)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;

@@ -133,25 +133,32 @@ pub(super) async fn retire_on(
     tenant: &TenantId,
     instance_id: orch8_types::ids::InstanceId,
     blocks: &[orch8_types::ids::BlockId],
+    preserve_all: bool,
 ) -> Result<u64, StorageError> {
     if blocks.is_empty() {
         return Ok(0);
     }
-    let retain = sqlx::query("SELECT 1 FROM workflow_invariants w JOIN task_instances i ON i.sequence_id=w.sequence_id AND i.tenant_id=w.tenant_id
+    let retain = if preserve_all {
+        true
+    } else {
+        let retain = sqlx::query("SELECT 1 FROM workflow_invariants w JOIN task_instances i ON i.sequence_id=w.sequence_id AND i.tenant_id=w.tenant_id
  LEFT JOIN sequences s ON s.id=i.sequence_id AND s.tenant_id=i.tenant_id
  WHERE i.tenant_id=?1 AND i.id=?2 AND w.enabled=1
  AND (w.sequence_version IS NULL OR s.version IS NULL OR w.sequence_version=s.version) LIMIT 1").bind(tenant.as_str()).bind(instance_id.to_string()).fetch_optional(&mut *conn).await?.is_some();
-    let frozen = sqlx::query("SELECT 1 FROM continuity_effect_guards g WHERE g.tenant_id=?1 AND (EXISTS(SELECT 1 FROM continuity_locations l WHERE l.tenant_id=g.tenant_id AND l.continuity_id=g.continuity_id AND l.instance_id=?2) OR EXISTS(SELECT 1 FROM capsule_effect_imports p WHERE p.tenant_id=g.tenant_id AND p.continuity_id=g.continuity_id AND p.instance_id=?2)) LIMIT 1")
+        let frozen = sqlx::query("SELECT 1 FROM continuity_effect_guards g WHERE g.tenant_id=?1 AND (EXISTS(SELECT 1 FROM continuity_locations l WHERE l.tenant_id=g.tenant_id AND l.continuity_id=g.continuity_id AND l.instance_id=?2) OR EXISTS(SELECT 1 FROM capsule_effect_imports p WHERE p.tenant_id=g.tenant_id AND p.continuity_id=g.continuity_id AND p.instance_id=?2)) LIMIT 1")
         .bind(tenant.as_str()).bind(instance_id.to_string()).fetch_optional(&mut *conn).await?.is_some();
-    let retain = retain || frozen;
+        retain || frozen
+    };
     let mut deleted = 0;
     for block in blocks {
         sqlx::query("INSERT INTO effect_block_resets(tenant_id,instance_id,block_id) SELECT tenant_id,id,?3 FROM task_instances WHERE tenant_id=?1 AND id=?2 ON CONFLICT DO NOTHING")
    .bind(tenant.as_str()).bind(instance_id.to_string()).bind(block.as_str()).execute(&mut *conn).await?;
         // Unstarted effects cannot have happened. Ambiguous effects survive even
         // without a guard; resolved history survives while invariants depend on it.
-        deleted+=sqlx::query("DELETE FROM effect_receipts WHERE tenant_id=?1 AND ((instance_id=?2 AND json_extract(record,'$.block_id')=?3) OR id IN (SELECT effect_id FROM effect_attempt_bindings WHERE tenant_id=?1 AND instance_id=?2 AND block_id=?3)) AND (state IN ('planned','prepared') OR (?4=FALSE AND state NOT IN ('dispatched','unknown')))")
+        if !preserve_all {
+            deleted+=sqlx::query("DELETE FROM effect_receipts WHERE tenant_id=?1 AND ((instance_id=?2 AND json_extract(record,'$.block_id')=?3) OR id IN (SELECT effect_id FROM effect_attempt_bindings WHERE tenant_id=?1 AND instance_id=?2 AND block_id=?3)) AND (state IN ('planned','prepared') OR (?4=FALSE AND state NOT IN ('dispatched','unknown')))")
    .bind(tenant.as_str()).bind(instance_id.to_string()).bind(block.as_str()).bind(retain).execute(&mut *conn).await?.rows_affected();
+        }
         sqlx::query("DELETE FROM effect_attempt_bindings WHERE tenant_id=?1 AND instance_id=?2 AND block_id=?3")
    .bind(tenant.as_str()).bind(instance_id.to_string()).bind(block.as_str()).execute(&mut *conn).await?;
     }

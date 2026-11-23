@@ -14,6 +14,12 @@ spec:
   {{- if $p.storageClass }}
   storageClassName: {{ $p.storageClass | quote }}
   {{- end }}
+  {{- with $p.restoreFromSnapshot }}
+  dataSource:
+    apiGroup: snapshot.storage.k8s.io
+    kind: VolumeSnapshot
+    name: {{ . | quote }}
+  {{- end }}
   resources:
     requests:
       storage: {{ $p.size }}

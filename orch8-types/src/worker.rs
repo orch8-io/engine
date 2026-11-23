@@ -12,6 +12,30 @@ use crate::ids::{BlockId, InstanceId};
 /// the handler and persists the parsed value on the durable task offer.
 pub const RUNTIME_REQUIREMENTS_PARAM: &str = "$runtime";
 
+/// Importer-owned envelope for a renewable deadline and the original worker input.
+pub const ASL_HEARTBEAT_PARAM: &str = "$asl_heartbeat";
+/// Importer-owned envelope for an absolute deadline resolved from state input.
+pub const ASL_TIMEOUT_PARAM: &str = "$asl_timeout";
+/// Reserved importer envelope for a task that waits for a callback.
+pub const ASL_CALLBACK_PARAM: &str = "$asl_callback";
+/// Marker emitted only for direct `$$.Task.Token` references in callback tasks.
+pub const ASL_CALLBACK_TOKEN: &str = "$asl_task_token";
+/// Server-owned parameter insertion paths retained with the durable task.
+pub const ASL_CALLBACK_PATHS: &str = "__orch8_asl_callback_paths";
+/// The maximum absolute lifetime for a callback without an explicit task timeout.
+pub const ASL_CALLBACK_DEFAULT_TIMEOUT_MS: i64 = 365 * 24 * 60 * 60 * 1000;
+
+/// A delivery-only parameter. String pointers preserve historical task context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum CallbackParameter {
+    Token(String),
+    Intrinsic {
+        pointer: String,
+        expression: crate::asl_intrinsic::Intrinsic,
+    },
+}
+
 /// Split routing requirements from handler input without widening every step
 /// definition. `params.$runtime` uses the `CapsuleRequirements` wire shape.
 pub fn take_runtime_requirements(
@@ -217,6 +241,12 @@ pub struct WorkerTask {
     pub context: serde_json::Value,
     pub attempt: u16,
     pub timeout_ms: Option<i64>,
+    /// Workflow heartbeat interval, measured from the claim or latest successful renewal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_timeout_secs: Option<u32>,
+    /// Success is accepted only through the exact issued callback token.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wait_for_callback: bool,
     pub state: WorkerTaskState,
     pub worker_id: Option<String>,
     pub claimed_at: Option<DateTime<Utc>>,
@@ -538,6 +568,8 @@ pub enum WorkerTaskResolutionAction {
     /// Mark the task failed, fail the tree node, and schedule the instance so
     /// the evaluator propagates the failure.
     FailNode {
+        /// Optional typed failure marker, written atomically with the node transition.
+        failure_output: Option<Box<crate::output::BlockOutput>>,
         node_id: Option<crate::ids::ExecutionNodeId>,
         fire_at: DateTime<Utc>,
     },
@@ -577,6 +609,7 @@ pub struct WorkerTaskResolution {
     pub event: WorkerAttemptEventKind,
     pub effect_resolution: WorkerTaskEffectResolution,
     pub reason: String,
+    pub error_code: Option<String>,
     pub retryable: bool,
     pub action: WorkerTaskResolutionAction,
 }

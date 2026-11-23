@@ -1654,6 +1654,7 @@ async fn postgres_worker_retry_and_duplicate_enqueue_keep_parent_before_worker_l
         holder_worker_id: None,
         event: WorkerAttemptEventKind::TimedOut,
         effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
+        error_code: None,
         reason: "retry pending timeout".into(),
         retryable: true,
         action: WorkerTaskResolutionAction::Retry {
@@ -2445,6 +2446,7 @@ orch8_storage::backend_test!(async fn pending_reported_worker_failure_blocks_cap
         expected_claim_epoch: held.claim_epoch, expected_worker_id: held.worker_id.clone(),
         holder_worker_id: held.worker_id.clone(), event: orch8_types::worker::WorkerAttemptEventKind::Failed,
         effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Unknown,
+        error_code: None,
         reason: "failed during pause".into(), retryable: true,
         action: orch8_types::worker::WorkerTaskResolutionAction::FailTaskOnly,
     }).await.unwrap());

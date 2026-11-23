@@ -20,6 +20,25 @@ use super::types::{
 use crate::AppState;
 use crate::error::ApiError;
 
+async fn require_mutable_history(
+    state: &AppState,
+    instance: &orch8_types::instance::TaskInstance,
+) -> Result<(), ApiError> {
+    if instance.state.is_terminal()
+        && state
+            .storage
+            .read_only_history_migration(instance.id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "instance history"))?
+            .is_some()
+    {
+        return Err(ApiError::Conflict(
+            "archived instance history is read-only".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Scope an idempotency key by execution mode. Non-empty keys for dry-runs are
 /// prefixed so a real run reusing the same key isn't deduplicated to a prior
 /// simulation (see E1). Empty / absent keys are preserved verbatim so the
@@ -223,12 +242,16 @@ pub(crate) async fn create_instance_scoped(
     // failure) before anything is persisted.
     crate::input_schema::validate_input(sequence.input_schema.as_ref(), &req.context.data)?;
 
+    orch8_engine::input_schema::validate_config(sequence.config_schema(), &req.context.config)
+        .map_err(|error| ApiError::UnprocessableEntity(error.to_string()))?;
+
     // Reject oversized contexts before they hit the DB.
     req.context.check_size(state.max_context_bytes)?;
 
     // Dry-run is requested per run; stamp it onto the instance's runtime
     // context so every handler sees it (and it survives checkpoint/replay).
     let mut context = req.context;
+    orch8_storage::externalizing::escape_literals(&mut context.data);
     context.runtime.dry_run = req.dry_run || context.runtime.dry_run;
     context.runtime.dry_run_auto_approve =
         req.dry_run_auto_approve || context.runtime.dry_run_auto_approve;
@@ -473,6 +496,7 @@ pub async fn create_instances_batch(
     // sequential database queries.
     let mut input_schemas: std::collections::HashMap<_, Option<serde_json::Value>> =
         std::collections::HashMap::new();
+    let mut config_schemas = std::collections::HashMap::new();
     let mut sequence_tenants: std::collections::HashMap<_, TenantId> =
         std::collections::HashMap::new();
     let mut sequence_lanes: std::collections::HashMap<
@@ -486,6 +510,7 @@ pub async fn create_instances_batch(
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?
     {
+        config_schemas.insert(seq.id, seq.config_schema().cloned());
         sequence_tenants.insert(seq.id, seq.tenant_id);
         input_schemas.insert(seq.id, seq.input_schema);
         sequence_lanes.insert(
@@ -517,6 +542,9 @@ pub async fn create_instances_batch(
             }
             other => other,
         })?;
+        let config_schema = config_schemas.get(&r.sequence_id).and_then(Option::as_ref);
+        orch8_engine::input_schema::validate_config(config_schema, &r.context.config)
+            .map_err(|error| ApiError::UnprocessableEntity(format!("instances[{i}]: {error}")))?;
     }
 
     let now = Utc::now();
@@ -526,6 +554,7 @@ pub async fn create_instances_batch(
         .enumerate()
         .map(|(i, r)| {
             let mut context = r.context;
+            orch8_storage::externalizing::escape_literals(&mut context.data);
             context.runtime.dry_run = r.dry_run || context.runtime.dry_run;
             context.runtime.dry_run_auto_approve =
                 r.dry_run_auto_approve || context.runtime.dry_run_auto_approve;
@@ -616,7 +645,7 @@ pub async fn get_instance(
     sub_header: crate::sub_tenants::SubTenantHeader,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let instance = state
+    let mut instance = state
         .storage
         .get_instance(InstanceId::from_uuid(id))
         .await
@@ -631,6 +660,13 @@ pub async fn get_instance(
     }
     sub_header.enforce_access(instance.sub_tenant.as_deref(), &format!("instance {id}"))?;
 
+    instance.context = orch8_engine::externalized::resolve_context_markers(
+        state.storage.as_ref(),
+        instance.id,
+        instance.context,
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "instance context"))?;
     Ok(Json(instance))
 }
 
@@ -809,6 +845,7 @@ pub async fn update_state(
             instance.state, req.state
         )));
     }
+    require_mutable_history(&state, &instance).await?;
 
     // Cancel is a request, not a column flip: a direct write to `Cancelled`
     // would skip the instance's saga compensation and `on_cancel` hooks. Hand
@@ -906,12 +943,16 @@ pub async fn update_context(
         // run identity, invocation checkpoint, execution mode or loop snapshot.
         let mut context = req.context.clone();
         context.runtime = instance.context.runtime;
-        context.check_size(state.max_context_bytes)?;
-        if state
-            .storage
-            .update_instance_context_cas(instance_id, &context, instance.updated_at)
-            .await
-            .map_err(|e| ApiError::from_storage(e, "instance"))?
+        orch8_storage::externalizing::escape_literals(&mut context.data);
+        if super::context_patch::persist_context(
+            state.storage.as_ref(),
+            state.max_context_bytes,
+            instance_id,
+            instance.sequence_id,
+            instance.updated_at,
+            &mut context,
+        )
+        .await?
         {
             return Ok(StatusCode::OK);
         }
@@ -957,6 +998,7 @@ pub async fn retry_instance(
             instance.state
         )));
     }
+    require_mutable_history(&state, &instance).await?;
 
     // CAS-claimed retry (Failed → Paused → reset → Scheduled) so a concurrent
     // retry can never wipe the execution tree of the run another retry just
@@ -1129,6 +1171,7 @@ pub async fn resume_from_block(
         &instance.tenant_id,
         &format!("instance {id}"),
     )?;
+    require_mutable_history(&state, &instance).await?;
 
     orch8_storage::delegation_publication::ensure_native_instance(
         state.storage.as_ref(),
@@ -1200,7 +1243,10 @@ pub async fn resume_from_block(
             context.data = serde_json::json!({});
         }
         if let Some(data) = context.data.as_object_mut() {
-            data.extend(patch);
+            for (key, mut value) in patch {
+                orch8_storage::externalizing::escape_literals(&mut value);
+                data.insert(key, value);
+            }
         }
         context.check_size(state.max_context_bytes)?;
         Some(context)

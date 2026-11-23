@@ -76,6 +76,16 @@ pub(crate) fn validate_effect_state(
     {
         return Err(invalid());
     }
+    source.epoch.checked_next().map_err(|_| invalid())?;
+    validate_effect_evidence(source, state, sequence, sequence_version)
+}
+
+pub(crate) fn validate_effect_evidence(
+    source: &ContinuityExecution,
+    state: &CapsuleEffectState,
+    sequence: SequenceId,
+    sequence_version: i32,
+) -> Result<(), StorageError> {
     let receipts: HashMap<_, _> = state.receipts.iter().map(|r| (r.id, r)).collect();
     if receipts.len() != state.receipts.len()
         || state.receipts.iter().any(|r| {
@@ -114,7 +124,6 @@ pub(crate) fn validate_effect_state(
     {
         return Err(invalid());
     }
-    source.epoch.checked_next().map_err(|_| invalid())?;
     Ok(())
 }
 fn invalid() -> StorageError {

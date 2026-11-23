@@ -176,6 +176,7 @@ message FailTaskRequest {
   string message = 3;
   bool retryable = 4;
   uint64 claim_epoch = 5;
+  optional string error_code = 6;
 }
 
 message HeartbeatTaskRequest {

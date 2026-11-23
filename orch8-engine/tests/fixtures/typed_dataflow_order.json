@@ -1,0 +1,58 @@
+{
+  "id": "01900000-0000-7000-8000-000000000001",
+  "name": "output-order",
+  "tenant_id": "t1",
+  "namespace": "default",
+  "version": 1,
+  "created_at": "2026-01-01T00:00:00Z",
+  "input_schema": {
+    "type": "object",
+    "properties": {"pick": {"type": "boolean"}},
+    "required": ["pick"]
+  },
+  "blocks": [
+    {
+      "type": "step",
+      "id": "premature_reader",
+      "handler": "transform",
+      "params": {"value": "{{ outputs.delayed.value }}"}
+    },
+    {
+      "type": "router",
+      "id": "choose",
+      "routes": [
+        {
+          "condition": "data.pick",
+          "blocks": [
+            {
+              "type": "step",
+              "id": "conditional",
+              "handler": "transform",
+              "output_schema": {
+                "type": "object",
+                "properties": {"value": {"type": "integer"}},
+                "required": ["value"]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "type": "step",
+      "id": "delayed",
+      "handler": "transform",
+      "output_schema": {
+        "type": "object",
+        "properties": {"value": {"type": "integer"}},
+        "required": ["value"]
+      }
+    },
+    {
+      "type": "step",
+      "id": "post_branch_reader",
+      "handler": "transform",
+      "params": {"value": "{{ outputs.conditional.value }}"}
+    }
+  ]
+}

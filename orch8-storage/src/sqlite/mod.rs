@@ -68,6 +68,8 @@ pub use file_path::resolve_sqlite_database_path;
 mod instances;
 mod kv_state;
 mod local_migration;
+mod maintenance;
+pub use maintenance::{MaintenanceReport, maintain_file};
 mod memory;
 mod misc;
 mod mobile_execution;
@@ -84,6 +86,10 @@ mod queue_dispatch;
 mod queue_routing;
 mod rate_limits;
 mod releases;
+mod schema_reconciliation;
+pub use schema_reconciliation::{
+    SchemaChange, SchemaReconciliation, copy_snapshot, reconcile_file_schema,
+};
 mod restore;
 mod rollback;
 mod schema;
@@ -94,9 +100,11 @@ mod step_logs;
 mod telemetry;
 mod tenancy;
 mod triggers;
+mod wasm_gc;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_admission;
+mod worker_callbacks;
 mod worker_claim;
 mod worker_commands;
 mod worker_dispatch;
@@ -326,10 +334,46 @@ impl SqliteStorage {
 
     /// Create a file-backed SQLite storage with WAL mode for concurrent reads.
     pub async fn file(path: &str) -> Result<Self, StorageError> {
-        let uri = format!("sqlite:{path}");
+        Self::file_tuned(path, 8, Duration::from_secs(5)).await
+    }
+
+    /// Open a SQLite file with an explicit pool size and lock wait budget.
+    pub async fn file_tuned(
+        path: &str,
+        max_connections: u32,
+        busy_timeout: Duration,
+    ) -> Result<Self, StorageError> {
+        Self::open_tuned(path, max_connections, busy_timeout, false).await
+    }
+
+    /// Open server storage and acquire exclusive recovery authority before boot.
+    pub async fn file_server_owned(
+        path: &str,
+        max_connections: u32,
+        busy_timeout: Duration,
+    ) -> Result<Self, StorageError> {
+        Self::open_tuned(path, max_connections, busy_timeout, true).await
+    }
+
+    async fn open_tuned(
+        path: &str,
+        max_connections: u32,
+        busy_timeout: Duration,
+        owned: bool,
+    ) -> Result<Self, StorageError> {
+        if max_connections == 0 || !(1..=2_147_483_647).contains(&busy_timeout.as_millis()) {
+            return Err(StorageError::Connection(
+                "invalid SQLite pool size or busy timeout".into(),
+            ));
+        }
+        let uri = if path.starts_with("sqlite:") {
+            path.to_owned()
+        } else {
+            format!("sqlite:{path}")
+        };
         let opts = SqliteConnectOptions::from_str(&uri)
             .map_err(|e| StorageError::Connection(e.to_string()))?;
-        Self::file_with_options(opts, &uri).await
+        Self::file_with_options(opts, &uri, max_connections, busy_timeout, owned).await
     }
 
     /// Open a literal filesystem path. Unlike `file`, URI parameters and
@@ -340,22 +384,37 @@ impl SqliteStorage {
         }
         let path = std::path::absolute(path)
             .map_err(|error| StorageError::Connection(error.to_string()))?;
-        Self::file_with_options(SqliteConnectOptions::new().filename(path), "").await
+        Self::file_with_options(
+            SqliteConnectOptions::new().filename(path),
+            "",
+            8,
+            Duration::from_secs(5),
+            false,
+        )
+        .await
     }
 
     async fn file_with_options(
         opts: SqliteConnectOptions,
         uri: &str,
+        max_connections: u32,
+        busy_timeout: Duration,
+        owned: bool,
     ) -> Result<Self, StorageError> {
         let opts = opts
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(busy_timeout)
             // FK enforcement is off by default in SQLite. Mirror in_memory().
             .foreign_keys(true);
         let opts = space_reclaiming(opts);
 
-        let (pool, memory_database) = memory::connect(pool_options(8), opts, uri).await?;
+        if owned && !memory::uses_memory(&opts, uri) {
+            return Self::open_owned(opts, pool_options(max_connections)).await;
+        }
+
+        let (pool, memory_database) =
+            memory::connect(pool_options(max_connections), opts, uri).await?;
 
         let storage = Self {
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -421,24 +480,42 @@ impl SqliteStorage {
         if path == ":memory:" {
             return Self::file_mobile(path).await;
         }
-        let (canonical, owner) = ownership::Owner::acquire(path)?;
-        let weak = std::sync::Arc::downgrade(&owner);
         let opts = space_reclaiming(
             SqliteConnectOptions::new()
-                .filename(canonical)
+                .filename(path)
                 .create_if_missing(true)
                 .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
                 .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
                 .busy_timeout(Duration::from_secs(5))
                 .foreign_keys(true),
         );
-        let pool = pool_options(5)
-            .idle_timeout(Duration::from_secs(30))
+        Self::open_owned(opts, pool_options(5).idle_timeout(Duration::from_secs(30))).await
+    }
+
+    async fn open_owned(
+        opts: SqliteConnectOptions,
+        pool: SqlitePoolOptions,
+    ) -> Result<Self, StorageError> {
+        let storage = Self::open_owned_unreconciled(opts, pool).await?;
+        storage.create_tables().await?;
+        Ok(storage)
+    }
+
+    async fn open_owned_unreconciled(
+        opts: SqliteConnectOptions,
+        pool: SqlitePoolOptions,
+    ) -> Result<Self, StorageError> {
+        let path = opts.get_filename().to_str().ok_or_else(|| {
+            StorageError::Unsupported("database filename must be valid UTF-8".into())
+        })?;
+        let (canonical, owner) = ownership::Owner::acquire(path)?;
+        let weak = std::sync::Arc::downgrade(&owner);
+        let pool = pool
             .after_connect(move |connection, _| {
                 let owner = weak.upgrade();
                 Box::pin(async move {
                     let owner = owner.ok_or_else(|| {
-                        sqlx::Error::Protocol("mobile database ownership is retired".into())
+                        sqlx::Error::Protocol("SQLite database ownership is retired".into())
                     })?;
                     // SQLx SQLite workers can outlive a cancelled async caller.
                     // A native connection-owned destructor is the final barrier:
@@ -456,18 +533,16 @@ impl SqliteStorage {
                     Ok(())
                 })
             })
-            .connect_with(opts)
+            .connect_with(opts.filename(canonical))
             .await?;
-        let storage = Self {
+        Ok(Self {
             pool,
             artifact_store: None,
             execution_tree_clock: orch8_types::clock::SharedClock::default(),
             recovery_owner: std::sync::Arc::new(std::sync::Mutex::new(Some(owner))),
             closing: std::sync::Mutex::new(None),
             memory_database: None,
-        };
-        storage.create_tables().await?;
-        Ok(storage)
+        })
     }
 
     /// Close every pool alias before relinquishing logical recovery ownership.
@@ -558,6 +633,7 @@ impl SqliteStorage {
         }
         migration.commit().await?;
         self.reconcile_columns().await?;
+        plugins::reconcile_tenant_key(self).await?;
         for stmt in &index_stmts {
             if let Err(e) = sqlx::query(AssertSqlSafe(*stmt)).execute(&self.pool).await {
                 // `reconcile_columns` deliberately skips a NOT NULL column
@@ -751,6 +827,18 @@ impl SqliteStorage {
                 .execute(&mut *retirement)
                 .await?;
         }
+        sqlx::raw_sql(schema::READONLY_HISTORY_TRIGGER)
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(schema::MIGRATION_SIGNAL_CUT_TRIGGER)
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(schema::CRON_MIGRATION_TRIGGERS)
+            .execute(&mut *retirement)
+            .await?;
+        sqlx::raw_sql(schema::WASM_RETIREMENT_TRIGGERS)
+            .execute(&mut *retirement)
+            .await?;
         retirement.commit().await?;
         self.backfill_legacy_api_key_capabilities().await?;
         self.record_schema_version().await?;
@@ -1140,8 +1228,33 @@ impl crate::InstanceStore for SqliteStorage {
         &self,
         snapshot: &crate::restore::InstanceSnapshot,
     ) -> Result<bool, StorageError> {
-        restore::restore(self, snapshot).await
+        restore::restore(self, snapshot, &crate::restore::InstanceHistory::default()).await
     }
+    async fn restore_instance_snapshot_with_history(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+        history: &crate::restore::InstanceHistory,
+    ) -> Result<bool, StorageError> {
+        restore::restore(self, snapshot, history).await
+    }
+
+    async fn read_only_history_migration(
+        &self,
+        instance: InstanceId,
+    ) -> Result<Option<Uuid>, StorageError> {
+        let id: Option<String> = sqlx::query_scalar(
+            "SELECT migration_id FROM readonly_instance_history WHERE instance_id=?",
+        )
+        .bind(instance.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        id.map(|id| {
+            Uuid::parse_str(&id)
+                .map_err(|_| StorageError::Constraint("invalid migration identity".into()))
+        })
+        .transpose()
+    }
+
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         instances::create(self, instance).await
     }
@@ -1195,6 +1308,41 @@ impl crate::InstanceStore for SqliteStorage {
         limits: &std::collections::HashMap<TenantId, u64>,
     ) -> Result<u64, StorageError> {
         instances::create_batch_admitted(self, instances, limits).await
+    }
+
+    async fn create_prepared_instances(
+        &self,
+        instances: &[crate::externalizing::PreparedInstance],
+    ) -> Result<u64, StorageError> {
+        instances::create_prepared(self, instances).await
+    }
+
+    async fn update_prepared_context(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        payloads: &[(String, serde_json::Value)],
+    ) -> Result<(), StorageError> {
+        instances::update_prepared(self, id, context, payloads).await
+    }
+
+    async fn update_prepared_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        payloads: &[crate::externalizing::ExternalizedRef],
+        expected_updated_at: DateTime<Utc>,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        instances::update_prepared_cas(
+            self,
+            id,
+            context,
+            payloads,
+            expected_updated_at,
+            claim_token,
+        )
+        .await
     }
 
     async fn create_instance_externalized(
@@ -1733,6 +1881,15 @@ impl crate::ExecutionTreeStore for SqliteStorage {
         execution_tree::get_tree(self, instance_id).await
     }
 
+    async fn get_execution_tree_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<ExecutionNodeId>,
+        limit: u32,
+    ) -> Result<Vec<ExecutionNode>, StorageError> {
+        execution_tree::get_page(self, instance_id, after, limit).await
+    }
+
     async fn update_node_state(
         &self,
         node_id: ExecutionNodeId,
@@ -1800,6 +1957,16 @@ impl crate::OutputStore for SqliteStorage {
         claim_token: DateTime<Utc>,
     ) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError> {
         outputs::get_claimed(self, instance_id, tenant, block_id, claim_token).await
+    }
+
+    async fn get_scoped_block_output_attempt(
+        &self,
+        tenant: &TenantId,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        attempt: u16,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        outputs::get_scoped_attempt(self, tenant, instance_id, block_id, attempt).await
     }
 
     async fn get_block_output(
@@ -2047,6 +2214,15 @@ impl crate::OutputStore for SqliteStorage {
 
 #[async_trait]
 impl crate::SignalStore for SqliteStorage {
+    async fn list_signal_history_page(
+        &self,
+        instance: InstanceId,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<Signal>, StorageError> {
+        signals::list_history_page(self, instance, after, limit).await
+    }
+
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError> {
         signals::enqueue(self, signal).await
     }
@@ -2333,6 +2509,14 @@ impl crate::WorkerStore for SqliteStorage {
     > {
         delegation_claim_contexts::get(self, tenant, task_id, claim).await
     }
+    async fn get_worker_callback(
+        &self,
+        tenant: Option<&TenantId>,
+        token: &str,
+    ) -> Result<Option<crate::worker_callback::WorkerCallbackBinding>, StorageError> {
+        worker_callbacks::lookup(self, tenant, token).await
+    }
+
     async fn get_worker_issued_claim(
         &self,
         tenant: Option<&TenantId>,
@@ -2361,6 +2545,15 @@ impl crate::WorkerStore for SqliteStorage {
     ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
         worker_admission::create(self, intent).await
     }
+    async fn list_worker_task_archive_page(
+        &self,
+        instance: &orch8_types::instance::TaskInstance,
+        after: Option<uuid::Uuid>,
+        limit: u32,
+    ) -> Result<Vec<crate::restore::WorkerTaskArchive>, StorageError> {
+        restore::worker_task_archive_page(self, instance, after, limit).await
+    }
+
     async fn get_worker_dispatch_admission(
         &self,
         tenant_id: &TenantId,
@@ -3084,6 +3277,16 @@ impl crate::SchedulingStore for SqliteStorage {
         cron::create(self, schedule).await
     }
 
+    async fn import_cron_migration(
+        &self,
+        snapshot: &orch8_types::cron::CronMigrationSnapshot,
+        schedule: &CronSchedule,
+        epoch: i64,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        cron::import_migration(self, snapshot, schedule, epoch, digest).await
+    }
+
     async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError> {
         cron::get(self, id).await
     }
@@ -3292,6 +3495,10 @@ impl crate::AdminStore for SqliteStorage {
 
     async fn delete_plugin(&self, name: &str) -> Result<(), StorageError> {
         plugins::delete(self, name).await
+    }
+
+    async fn delete_plugin_exact(&self, tenant_id: &str, name: &str) -> Result<(), StorageError> {
+        plugins::delete_exact(self, tenant_id, name).await
     }
 
     // === Triggers ===
@@ -3640,6 +3847,23 @@ impl crate::AdminStore for SqliteStorage {
         cluster::heartbeat(self, node_id).await
     }
 
+    async fn record_wasm_revision_ready(
+        &self,
+        node: Uuid,
+        revision: orch8_types::ids::SequenceId,
+        ready_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        cluster::record_wasm_revision_ready(self, node, revision, ready_until).await
+    }
+
+    async fn list_wasm_ready_nodes(
+        &self,
+        revision: orch8_types::ids::SequenceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Uuid>, StorageError> {
+        cluster::list_wasm_ready_nodes(self, revision, now).await
+    }
+
     async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError> {
         cluster::drain(self, node_id).await
     }
@@ -3984,6 +4208,36 @@ impl crate::ResourceStore for SqliteStorage {
             .await
     }
 
+    async fn put_shared_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &orch8_types::plugin::WasmArtifactDigest,
+        bytes: bytes::Bytes,
+    ) -> Result<(), StorageError> {
+        wasm_gc::put(self, tenant, digest, bytes).await
+    }
+
+    async fn collect_unused_wasm_modules(
+        &self,
+        tenant: &TenantId,
+        before: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+        apply: bool,
+    ) -> Result<Vec<String>, StorageError> {
+        wasm_gc::collect(self, tenant, before, limit, apply).await
+    }
+
+    async fn get_shared_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &orch8_types::plugin::WasmArtifactDigest,
+        limit: u64,
+    ) -> Result<Option<bytes::Bytes>, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .get_wasm_module(tenant, digest, limit)
+            .await
+    }
+
     async fn delete_artifact(&self, key: &str) -> Result<(), StorageError> {
         crate::artifacts::require_store(self.artifact_store.as_ref())?
             .delete(key)
@@ -4046,6 +4300,26 @@ impl crate::ResourceStore for SqliteStorage {
     }
 
     // === Instance KV State ===
+
+    async fn list_instance_kv_page(
+        &self,
+        instance: InstanceId,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::restore::InstanceKvEntry>, StorageError> {
+        kv_state::list_history_page(self, instance, after, limit).await
+    }
+
+    async fn set_instance_kv_expiring(
+        &self,
+        instance: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut conn = self.pool.acquire().await?;
+        kv_state::write_instance_kv_on(&mut conn, instance, key, value, Some(expires_at)).await
+    }
 
     async fn set_instance_kv(
         &self,
@@ -4312,6 +4586,28 @@ impl crate::ResourceStore for SqliteStorage {
         checkpoints::save(self, checkpoint).await
     }
 
+    async fn save_checkpoint_at_epoch(
+        &self,
+        tenant: &TenantId,
+        expected_epoch: u64,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = helpers::begin_immediate(&self.pool).await?;
+        if !checkpoints::owns_epoch_on(
+            &mut transaction,
+            tenant,
+            checkpoint.instance_id,
+            expected_epoch,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        checkpoints::save_on(&mut transaction, checkpoint).await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     async fn get_latest_checkpoint(
         &self,
         instance_id: InstanceId,
@@ -4327,12 +4623,39 @@ impl crate::ResourceStore for SqliteStorage {
         checkpoints::list(self, instance_id, limit).await
     }
 
+    async fn list_checkpoint_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
+        checkpoints::page(self, instance_id, after, limit).await
+    }
+
     async fn prune_checkpoints(
         &self,
         instance_id: InstanceId,
         keep: u32,
     ) -> Result<u64, StorageError> {
         checkpoints::prune(self, instance_id, keep).await
+    }
+
+    async fn prune_checkpoints_at_epoch(
+        &self,
+        tenant: &TenantId,
+        instance_id: InstanceId,
+        expected_epoch: u64,
+        keep: u32,
+    ) -> Result<Option<u64>, StorageError> {
+        let mut transaction = helpers::begin_immediate(&self.pool).await?;
+        if !checkpoints::owns_epoch_on(&mut transaction, tenant, instance_id, expected_epoch)
+            .await?
+        {
+            return Ok(None);
+        }
+        let count = checkpoints::prune_on(&mut transaction, instance_id, keep).await?;
+        transaction.commit().await?;
+        Ok(Some(count))
     }
 }
 
@@ -5762,6 +6085,8 @@ mod tests {
                 created_at: now,
                 effect_id: None,
                 continuity_epoch: None,
+                heartbeat_timeout_secs: None,
+                wait_for_callback: false,
                 lease_secs: None,
                 carries_credentials: false,
                 claimed_runtime_kind: None,
@@ -6604,6 +6929,36 @@ mod tests {
         assert!(beyond.is_empty());
     }
 
+    #[tokio::test]
+    async fn select_output_attempt_respects_tenant_attempt_and_completion() {
+        let storage = SqliteStorage::in_memory().await.unwrap();
+        let id = seed_instances(&storage, 1).await[0];
+        let block = BlockId::new("step");
+        let mut prior = mk_block_output(id, "step", None, 0);
+        prior.attempt = 1;
+        let completed = mk_block_output(id, "step", None, 1);
+        let ongoing = mk_block_output(id, "step", Some("__in_progress__"), 2);
+        for output in [&prior, &completed, &ongoing] {
+            storage.save_block_output(output).await.unwrap();
+        }
+        let tenant = TenantId::unchecked("t");
+        for output in [&prior, &completed] {
+            let selected = storage
+                .get_scoped_block_output_attempt(&tenant, id, &block, output.attempt)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(selected.id, output.id);
+        }
+        assert!(
+            storage
+                .get_scoped_block_output_attempt(&TenantId::unchecked("other"), id, &block, 2)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
     /// Regression test for the deep storage review's finding that
     /// `acquire_manifest_lock`/`release_manifest_lock` were a no-op on every
     /// backend: two "publishers" racing to hold the same tenant's manifest
@@ -6766,6 +7121,8 @@ mod tests {
                     created_at: now,
                     effect_id: None,
                     continuity_epoch: None,
+                    heartbeat_timeout_secs: None,
+                    wait_for_callback: false,
                     lease_secs: None,
                     carries_credentials: false,
                     claimed_runtime_kind: None,

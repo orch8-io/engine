@@ -51,11 +51,38 @@ impl std::fmt::Display for ExprError {
     }
 }
 
+/// Environment for the three expression functions with external inputs.
+pub(crate) trait ExpressionRuntime {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
+
+    fn random_u64(&self) -> u64 {
+        rand::random()
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        uuid::Uuid::new_v4()
+    }
+}
+
+struct SystemRuntime;
+impl ExpressionRuntime for SystemRuntime {}
+
 /// Evaluate an expression, returning a detailed error on parse failure.
 pub fn try_evaluate(
     expr: &str,
     context: &ExecutionContext,
     outputs: &serde_json::Value,
+) -> Result<serde_json::Value, ExprError> {
+    try_evaluate_with(expr, context, outputs, &SystemRuntime)
+}
+
+fn try_evaluate_with(
+    expr: &str,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+    runtime: &dyn ExpressionRuntime,
 ) -> Result<serde_json::Value, ExprError> {
     let trimmed = expr.trim();
     if trimmed.is_empty() {
@@ -72,7 +99,7 @@ pub fn try_evaluate(
             });
         }
     }
-    let mut parser = Parser::new(&tokens, context, outputs);
+    let mut parser = Parser::new(&tokens, context, outputs, runtime);
     let result = parser.parse_ternary();
     if let Some(message) = parser.error {
         return Err(ExprError {
@@ -111,7 +138,16 @@ pub fn evaluate(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> serde_json::Value {
-    match try_evaluate(strip_template_braces(expr.trim()), context, outputs) {
+    evaluate_with(expr, context, outputs, &SystemRuntime)
+}
+
+pub(crate) fn evaluate_with(
+    expr: &str,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+    runtime: &dyn ExpressionRuntime,
+) -> serde_json::Value {
+    match try_evaluate_with(strip_template_braces(expr), context, outputs, runtime) {
         Ok(value) => value,
         Err(error) => {
             warn!(%error, "invalid expression evaluated as null");
@@ -130,6 +166,40 @@ fn strip_template_braces(expr: &str) -> &str {
         return inner.trim();
     }
     s
+}
+
+/// Identify paths used directly by operators that require numeric operands.
+/// Shared tokenization excludes string literals and recognizes unary minus.
+pub(crate) fn direct_numeric_operand_paths(expression: &str) -> Vec<String> {
+    let tokens = tokenize_cached(strip_template_braces(expression));
+    let is_numeric_operator =
+        |token: &Token| matches!(token, Token::Minus | Token::Star | Token::Slash);
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(index, token)| {
+            let Token::Path(path) = token else {
+                return None;
+            };
+            let previous = index.checked_sub(1).and_then(|i| tokens.get(i));
+            let next = tokens.get(index + 1);
+            if next == Some(&Token::LParen) {
+                return None;
+            }
+            let before_number = next == Some(&Token::Plus)
+                && matches!(tokens.get(index + 2), Some(Token::Number(_)));
+            let after_number = previous == Some(&Token::Plus)
+                && matches!(
+                    index.checked_sub(2).and_then(|i| tokens.get(i)),
+                    Some(Token::Number(_))
+                );
+            (previous.is_some_and(is_numeric_operator)
+                || next.is_some_and(is_numeric_operator)
+                || before_number
+                || after_number)
+                .then(|| path.clone())
+        })
+        .collect()
 }
 
 /// Check if an expression evaluates to a truthy value.
@@ -167,7 +237,16 @@ pub fn evaluate_condition_strict(
     context: &ExecutionContext,
     outputs: &serde_json::Value,
 ) -> Result<bool, ExprError> {
-    let result = try_evaluate(strip_template_braces(condition), context, outputs)?;
+    evaluate_condition_strict_with(condition, context, outputs, &SystemRuntime)
+}
+
+pub(crate) fn evaluate_condition_strict_with(
+    condition: &str,
+    context: &ExecutionContext,
+    outputs: &serde_json::Value,
+    runtime: &dyn ExpressionRuntime,
+) -> Result<bool, ExprError> {
+    let result = try_evaluate_with(strip_template_braces(condition), context, outputs, runtime)?;
     Ok(is_truthy(&result))
 }
 
@@ -393,6 +472,7 @@ struct Parser<'a> {
     pos: usize,
     context: &'a ExecutionContext,
     outputs: &'a serde_json::Value,
+    runtime: &'a dyn ExpressionRuntime,
     depth: u32,
     /// First parse error encountered (missing ternary `:`, depth overflow).
     /// The lenient [`evaluate`] path ignores it and keeps the `null` result;
@@ -405,12 +485,14 @@ impl<'a> Parser<'a> {
         tokens: &'a [Token],
         context: &'a ExecutionContext,
         outputs: &'a serde_json::Value,
+        runtime: &'a dyn ExpressionRuntime,
     ) -> Self {
         Self {
             tokens,
             pos: 0,
             context,
             outputs,
+            runtime,
             depth: 0,
             error: None,
         }
@@ -687,7 +769,7 @@ impl<'a> Parser<'a> {
                     // Pass arguments by reference so a large container argument
                     // (e.g. `len(outputs.big_array)`) is inspected, not cloned.
                     let arg_refs: Vec<&serde_json::Value> = args.iter().map(Cow::as_ref).collect();
-                    return Cow::Owned(Self::apply_function(&path, &arg_refs));
+                    return Cow::Owned(self.apply_function(&path, &arg_refs));
                 }
                 self.resolve_path(&path)
             }
@@ -741,7 +823,7 @@ impl<'a> Parser<'a> {
         clippy::cast_sign_loss,
         clippy::cast_precision_loss
     )]
-    fn apply_function(name: &str, args: &[&serde_json::Value]) -> serde_json::Value {
+    fn apply_function(&self, name: &str, args: &[&serde_json::Value]) -> serde_json::Value {
         let arg: &serde_json::Value = args.first().copied().unwrap_or(&serde_json::Value::Null);
         match name {
             "abs" => match to_f64(arg) {
@@ -767,8 +849,8 @@ impl<'a> Parser<'a> {
                 }
             }
             // --- template-enhancements-v0.3.1 ---
-            "now" => serde_json::json!(chrono::Utc::now().to_rfc3339()),
-            "uuid" => serde_json::json!(uuid::Uuid::new_v4().to_string()),
+            "now" => serde_json::json!(self.runtime.now().to_rfc3339()),
+            "uuid" => serde_json::json!(self.runtime.uuid().to_string()),
             "random" => {
                 let min = args.first().copied().and_then(to_f64).unwrap_or(0.0) as i64;
                 let max = args.get(1).copied().and_then(to_f64).unwrap_or(100.0) as i64;
@@ -785,7 +867,7 @@ impl<'a> Parser<'a> {
                 // lossless here despite the general lint.
                 #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
                 let n = {
-                    let offset = (u128::from(rand::random::<u64>()) % range) as i128;
+                    let offset = (u128::from(self.runtime.random_u64()) % range) as i128;
                     (i128::from(min) + offset) as i64
                 };
                 serde_json::json!(n)
@@ -2196,6 +2278,37 @@ mod tests {
         );
         let v = result.as_f64().unwrap();
         assert!((v - 20.0).abs() < 0.001, "expected ~20.0, got {v}");
+    }
+
+    #[test]
+    fn injected_expression_runtime_supplies_time_randomness_and_uuid() {
+        struct FixedRuntime;
+        impl ExpressionRuntime for FixedRuntime {
+            fn now(&self) -> chrono::DateTime<chrono::Utc> {
+                chrono::DateTime::UNIX_EPOCH
+            }
+            fn random_u64(&self) -> u64 {
+                57
+            }
+            fn uuid(&self) -> uuid::Uuid {
+                uuid::Uuid::nil()
+            }
+        }
+
+        let result = evaluate_with(
+            "[now(), random(10,20), uuid()]",
+            &ctx(),
+            &outputs(),
+            &FixedRuntime,
+        );
+        assert_eq!(
+            result,
+            serde_json::json!([
+                "1970-01-01T00:00:00+00:00",
+                17,
+                "00000000-0000-0000-0000-000000000000"
+            ])
+        );
     }
 
     // --- now() ---

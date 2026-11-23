@@ -197,6 +197,40 @@ impl EncryptingStorage {
         }
     }
 
+    async fn prepare_externalized_instance(
+        &self,
+        instance: &TaskInstance,
+        threshold_bytes: u32,
+    ) -> Result<crate::externalizing::PreparedInstance, StorageError> {
+        let mut instance = instance.clone();
+        crate::externalizing::escape_literals(&mut instance.context.data);
+        let payloads = self
+            .prepare_externalized_context(instance.id, &mut instance.context, threshold_bytes)
+            .await?;
+        Ok(crate::externalizing::PreparedInstance { instance, payloads })
+    }
+
+    async fn prepare_externalized_context(
+        &self,
+        id: InstanceId,
+        context: &mut orch8_types::context::ExecutionContext,
+        threshold_bytes: u32,
+    ) -> Result<Vec<(String, serde_json::Value)>, StorageError> {
+        if self.is_sealed_context(id, &context.data) {
+            return Ok(Vec::new());
+        }
+        let mut payloads = crate::externalizing::externalize_fields(
+            &mut context.data,
+            &id.to_string(),
+            threshold_bytes,
+        );
+        self.encrypt_context_mut(id, context)?;
+        for (key, value) in &mut payloads {
+            *value = self.seal_externalized(id, key, value).await?;
+        }
+        Ok(payloads)
+    }
+
     /// Inverse of [`Self::seal_externalized`]. Without a vault, a vault
     /// reference is returned unchanged (reference-only operation).
     async fn open_externalized(
@@ -840,6 +874,16 @@ passthrough_impl! {
         async fn get_continuity_execution_touching_instance(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId) -> Result<Option<orch8_types::continuity::ContinuityExecution>, StorageError>;
         async fn list_continuity_locations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
         async fn cas_continuity_owner(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::ContinuityId, expected_epoch: orch8_types::continuity::ExecutionEpoch, expected_owner: orch8_types::continuity::RuntimeId, next: &orch8_types::continuity::ContinuityExecution) -> Result<bool, StorageError>;
+        async fn release_migrated_instance(&self, staged: &orch8_types::continuity::ContinuityExecution, state: &orch8_types::migration::MigratedInstanceState) -> Result<bool, StorageError> {
+            let mut state = state.clone();
+            for key in &mut state.instance_kv {
+                key.value = self.encrypt_json_value(&key.value)?;
+            }
+            for checkpoint in &mut state.checkpoints {
+                checkpoint.checkpoint_data = self.encrypt_json_value(&checkpoint.checkpoint_data)?;
+            }
+            self.inner.release_migrated_instance(staged, &state).await
+        }
         async fn create_handoff(&self, handoff: &orch8_types::continuity::ExecutionHandoff) -> Result<(), StorageError>;
         async fn get_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId) -> Result<Option<orch8_types::continuity::ExecutionHandoff>, StorageError>;
         async fn cas_handoff(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity::HandoffId, expected_state: orch8_types::continuity::HandoffState, expected_version: u64, next: &orch8_types::continuity::ExecutionHandoff) -> Result<bool, StorageError>;
@@ -926,6 +970,7 @@ passthrough_impl! {
         async fn find_unresolved_effect_receipt(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, instance_id: orch8_types::ids::InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<orch8_types::continuity::EffectReceipt>, StorageError>;
     async fn delete_effect_receipts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
     async fn retire_effect_attempts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn retire_composite_retry_effects(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<orch8_types::continuity::EffectReceipt>>, StorageError>;
 
         async fn delete_effect_receipts_for_blocks(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn retire_effect_attempts_for_blocks(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: orch8_types::ids::InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
@@ -993,6 +1038,16 @@ passthrough_impl! {
         async fn append_stream_frame(&self, frame: &orch8_types::continuity::StreamFrame) -> Result<bool, StorageError>;
         async fn list_stream_frames(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId, after_sequence: Option<u64>, now: chrono::DateTime<chrono::Utc>, limit: u32) -> Result<Vec<orch8_types::continuity::StreamFrame>, StorageError>;
         async fn retract_stream_frames(&self, tenant_id: &orch8_types::ids::TenantId, stream_id: orch8_types::continuity::StreamId, epoch: orch8_types::continuity::ExecutionEpoch, after_sequence: u64) -> Result<u64, StorageError>;
+        async fn stage_migration_chunk(&self, tenant: &TenantId, digest: &str, index: u32, payload: &[u8]) -> Result<bool, StorageError> {
+            let sealed = self.encryptor.encrypt_bytes(payload).map_err(|error| StorageError::Encryption(error.to_string()))?;
+            self.inner.stage_migration_chunk(tenant, digest, index, &sealed).await
+        }
+        async fn read_migration_chunk(&self, tenant: &TenantId, digest: &str, index: u32) -> Result<Option<Vec<u8>>, StorageError> {
+            self.inner.read_migration_chunk(tenant, digest, index).await?.map(|sealed| {
+                self.encryptor.decrypt_bytes(&sealed).map_err(|error| StorageError::Encryption(error.to_string()))
+            }).transpose()
+        }
+        async fn clear_migration_chunks(&self, tenant: &TenantId, digest: &str) -> Result<(), StorageError>;
         async fn save_live_migration(&self, record: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<(), StorageError> {
             let encrypted = self.encrypt_live_migration(record)?;
             self.inner.save_live_migration(&encrypted).await
@@ -1292,10 +1347,37 @@ passthrough_impl! {
         snapshot.checked_nodes()?;
         self.inner.restore_instance_snapshot(&self.encrypt_snapshot(snapshot).await?).await
     }
+    async fn restore_instance_snapshot_with_history(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+        history: &crate::restore::InstanceHistory,
+    ) -> Result<bool, StorageError> {
+        snapshot.checked_nodes()?;
+        history.validate(&snapshot.instance)?;
+        let mut history = history.clone();
+        for checkpoint in &mut history.checkpoints {
+            if !FieldEncryptor::is_encrypted(&checkpoint.checkpoint_data) {
+                checkpoint.checkpoint_data = self.encrypt_json_value(&checkpoint.checkpoint_data)?;
+            }
+        }
+        for signal in &mut history.signals {
+            *signal = self.encrypt_signal(signal)?.into_owned();
+        }
+        for entry in &mut history.state {
+            if !self.is_sealed_value(&entry.value) {
+                entry.value = self.encrypt_json_value(&entry.value)?;
+            }
+        }
+        self.inner
+            .restore_instance_snapshot_with_history(&self.encrypt_snapshot(snapshot).await?, &history)
+            .await
+    }
+
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         let encrypted = self.encrypt_instance(instance)?;
         self.inner.create_instance(encrypted.as_ref()).await
     }
+    async fn read_only_history_migration(&self, instance: InstanceId) -> Result<Option<Uuid>, StorageError>;
 
     async fn create_child_instance_claimed(
         &self,
@@ -1580,47 +1662,18 @@ passthrough_impl! {
         Ok(child)
     }
 
-    // `create_instance_externalized` / `create_instances_batch_externalized` /
-    // `update_instance_context_externalized` must externalize *before*
-    // encrypting: `externalize_fields` requires `context.data` to still be a
-    // JSON object, but whole-blob encryption collapses it to a single string,
-    // so encrypting first silently disables externalization (oversized
-    // contexts land inline, TOAST-bloating `task_instances` and starving the
-    // GC/size-cap machinery). Doing it in this order also means the
-    // externalized-state payloads pulled out here get encrypted individually
-    // via `batch_save_externalized_state` below, rather than left in plaintext.
-    //
-    // Trade-off: the inner backend's `create_instance_externalized` commits
-    // the instance row and its externalized-state rows in one transaction;
-    // externalizing here means the wrapper issues two separate writes, the
-    // same non-atomic shape the default trait impl in `lib.rs` already
-    // documents as the accepted fallback for backends that don't implement
-    // it natively. Unlike that default, the instance row is written *first*:
-    // `externalized_state.instance_id` has a `FOREIGN KEY ... ON DELETE
-    // CASCADE` (SQLite has `PRAGMA foreign_keys = ON`), so an externalized
-    // row referencing an instance that doesn't exist yet is rejected outright.
+    // Select externalized fields before sealing the remaining context.
+    // Publish the sealed context and payload rows in one backend transaction.
     async fn create_instance_externalized(
         &self,
         instance: &TaskInstance,
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
-        if self.is_sealed_context(instance.id, &instance.context.data) {
-            // Nothing left to externalize -- pass through untouched.
-            return self
-                .inner
-                .create_instance_externalized(instance, threshold_bytes)
-                .await;
-        }
-        let mut inst_clone = instance.clone();
-        let refs = crate::externalizing::externalize_fields(
-            &mut inst_clone.context.data,
-            &instance.id.into_uuid().to_string(),
-            threshold_bytes,
-        );
-        self.encrypt_context_mut(instance.id, &mut inst_clone.context)?;
-        self.inner.create_instance(&inst_clone).await?;
-        if !refs.is_empty() {
-            crate::InstanceStore::batch_save_externalized_state(self, instance.id, &refs).await?;
+        let prepared = self.prepare_externalized_instance(instance, threshold_bytes).await?;
+        if prepared.payloads.is_empty() {
+            self.inner.create_instance(&prepared.instance).await?;
+        } else {
+            self.inner.create_prepared_instances(&[prepared]).await?;
         }
         Ok(())
     }
@@ -1630,43 +1683,15 @@ passthrough_impl! {
         instances: &[TaskInstance],
         threshold_bytes: u32,
     ) -> Result<u64, StorageError> {
-        if instances
-            .iter()
-            .all(|i| self.is_sealed_context(i.id, &i.context.data))
-        {
-            return self
-                .inner
-                .create_instances_batch_externalized(instances, threshold_bytes)
-                .await;
+        let mut prepared = Vec::with_capacity(instances.len());
+        for instance in instances {
+            prepared.push(self.prepare_externalized_instance(instance, threshold_bytes).await?);
         }
-        let mut clones: Vec<TaskInstance> = Vec::with_capacity(instances.len());
-        let mut all_refs: Vec<(InstanceId, Vec<(String, serde_json::Value)>)> = Vec::new();
-        for inst in instances {
-            if self.is_sealed_context(inst.id, &inst.context.data) {
-                clones.push(inst.clone());
-                continue;
-            }
-            let mut c = inst.clone();
-            let refs = crate::externalizing::externalize_fields(
-                &mut c.context.data,
-                &inst.id.into_uuid().to_string(),
-                threshold_bytes,
-            );
-            self.encrypt_context_mut(inst.id, &mut c.context)?;
-            if !refs.is_empty() {
-                all_refs.push((inst.id, refs));
-            }
-            clones.push(c);
+        if prepared.iter().all(|entry| entry.payloads.is_empty()) {
+            let instances: Vec<_> = prepared.into_iter().map(|entry| entry.instance).collect();
+            return self.inner.create_instances_batch(&instances).await;
         }
-        // Instance rows must land before externalized-state rows (FK on
-        // `externalized_state.instance_id`), so persist the batch first and
-        // the refs after -- same ordering constraint as
-        // `create_instance_externalized`.
-        let count = self.inner.create_instances_batch(&clones).await?;
-        for (instance_id, refs) in &all_refs {
-            crate::InstanceStore::batch_save_externalized_state(self, *instance_id, refs).await?;
-        }
-        Ok(count)
+        self.inner.create_prepared_instances(&prepared).await
     }
 
     async fn update_instance_context_externalized(
@@ -1675,23 +1700,27 @@ passthrough_impl! {
         context: &orch8_types::context::ExecutionContext,
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
-        if self.is_sealed_context(id, &context.data) {
-            return self
-                .inner
-                .update_instance_context_externalized(id, context, threshold_bytes)
-                .await;
+        let mut context = context.clone();
+        let payloads = self.prepare_externalized_context(id, &mut context, threshold_bytes).await?;
+        self.inner.update_prepared_context(id, &context, &payloads).await
+    }
+
+    async fn update_prepared_context_cas(
+        &self,
+        id: InstanceId,
+        context: &ExecutionContext,
+        payloads: &[crate::externalizing::ExternalizedRef],
+        expected_updated_at: DateTime<Utc>,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        let context = self.encrypt_context(id, context)?;
+        let mut sealed = Vec::with_capacity(payloads.len());
+        for (key, payload) in payloads {
+            sealed.push((key.clone(), self.seal_externalized(id, key, payload).await?));
         }
-        let mut ctx_clone = context.clone();
-        let refs = crate::externalizing::externalize_fields(
-            &mut ctx_clone.data,
-            &id.into_uuid().to_string(),
-            threshold_bytes,
-        );
-        self.encrypt_context_mut(id, &mut ctx_clone)?;
-        if !refs.is_empty() {
-            crate::InstanceStore::batch_save_externalized_state(self, id, &refs).await?;
-        }
-        self.inner.update_instance_context(id, &ctx_clone).await
+        self.inner
+            .update_prepared_context_cas(id, context.as_ref(), &sealed, expected_updated_at, claim_token)
+            .await
     }
 
     async fn create_instance_with_dedupe(
@@ -1770,6 +1799,7 @@ passthrough_impl! {
     async fn batch_activate_nodes_claimed(&self, instance_id: InstanceId, node_ids: &[orch8_types::ids::ExecutionNodeId], claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
 
         async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
+        async fn get_execution_tree_page(&self, instance_id: InstanceId, after: Option<orch8_types::ids::ExecutionNodeId>, limit: u32) -> Result<Vec<orch8_types::execution::ExecutionNode>, StorageError>;
         async fn update_node_state(&self, node_id: orch8_types::ids::ExecutionNodeId, state: orch8_types::execution::NodeState) -> Result<(), StorageError>;
     async fn update_node_state_claimed(&self, instance_id: InstanceId, node_id: orch8_types::ids::ExecutionNodeId,
         state: orch8_types::execution::NodeState, claim_token: chrono::DateTime<chrono::Utc>,
@@ -1805,6 +1835,16 @@ passthrough_impl! {
         if let crate::ClaimedRead::Value(Some(ref mut output)) = read { self.decrypt_block_output(output)?; }
         Ok(read)
     }
+    async fn get_scoped_block_output_attempt(
+        &self, tenant: &TenantId, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u16,
+    ) -> Result<Option<orch8_types::output::BlockOutput>, StorageError> {
+        let mut output = self.inner.get_scoped_block_output_attempt(tenant, instance_id, block_id, attempt).await?;
+        if let Some(row) = &mut output {
+            self.decrypt_block_output(row)?;
+        }
+        Ok(output)
+    }
+
     async fn get_block_output(
         &self,
         instance_id: InstanceId,
@@ -2028,6 +2068,13 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::SignalStore for EncryptingStorage {
+    async fn list_signal_history_page(&self, instance: InstanceId, after: Option<Uuid>, limit: u32) -> Result<Vec<orch8_types::signal::Signal>, StorageError> {
+        let mut signals = self.inner.list_signal_history_page(instance, after, limit).await?;
+        for signal in &mut signals {
+            self.decrypt_signal(signal)?;
+        }
+        Ok(signals)
+    }
     async fn enqueue_signal(
         &self,
         signal: &orch8_types::signal::Signal,
@@ -2116,6 +2163,7 @@ passthrough_impl! {
         for task in &mut tasks{self.decrypt_worker_task(task)?;}Ok(tasks)
     }
     async fn get_worker_delegation_context(&self,tenant:&TenantId,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,StorageError>;
+    async fn get_worker_callback(&self,tenant:Option<&TenantId>, token:&str)->Result<Option<crate::worker_callback::WorkerCallbackBinding>,StorageError>;
     async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
 
     async fn create_worker_task(
@@ -2131,6 +2179,7 @@ passthrough_impl! {
         let sealed=intent.encrypted(task.into_owned())?;
         self.inner.admit_worker_dispatch(&sealed).await
     }
+    async fn list_worker_task_archive_page(&self, instance: &TaskInstance, after: Option<Uuid>, limit: u32) -> Result<Vec<crate::restore::WorkerTaskArchive>, StorageError>;
     async fn get_worker_dispatch_admission(&self,tenant_id:&TenantId,task_id:Uuid)->Result<Option<crate::worker_admission::WorkerDispatchAdmission>,StorageError>;
     async fn create_worker_task_bound(&self, task: &orch8_types::worker::WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError> {
         let encrypted=self.encrypt_worker_task(task)?;
@@ -2379,6 +2428,9 @@ passthrough_impl! {
             **retry_task=self.encrypt_worker_task(retry_task)?.into_owned();
             if let Some(output)=retry_output{**output=self.encrypt_block_output(output)?.into_owned();}
         }
+        if let orch8_types::worker::WorkerTaskResolutionAction::FailNode{failure_output:Some(output),..}=&mut sealed.action {
+            **output=self.encrypt_block_output(output)?.into_owned();
+        }
         self.inner.apply_worker_resolution_integration(&sealed).await
     }
     async fn get_worker_resolution_outcome(&self,tenant_id:Option<&TenantId>,task_id:Uuid,claim:Option<&orch8_types::worker::WorkerClaim>)->Result<Option<crate::worker_resolution::WorkerResolutionOutcome>,StorageError>{
@@ -2415,6 +2467,15 @@ passthrough_impl! {
             };
             return self.inner.resolve_worker_task_with_evidence(&sealed,&evidence).await;
         }
+        if let Action::FailNode { failure_output: Some(output), node_id, fire_at } = &resolution.action {
+            let mut sealed = resolution.clone();
+            sealed.action = Action::FailNode {
+                failure_output: Some(Box::new(self.encrypt_block_output(output)?.into_owned())),
+                node_id: *node_id,
+                fire_at: *fire_at,
+            };
+            return self.inner.resolve_worker_task_with_evidence(&sealed,&evidence).await;
+        }
         self.inner.resolve_worker_task_with_evidence(resolution,&evidence).await
     }
     async fn cancel_worker_tasks_for_blocks_claimed(&self, instance_id: InstanceId, block_ids: &[String], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
@@ -2427,9 +2488,9 @@ passthrough_impl! {
         request: &crate::worker_claim::WorkerReconnectRequest,
         protocol: Option<&orch8_types::delegation_definition::protocol::DelegationProtocolCapabilities>,
     ) -> Result<crate::worker_claim::WorkerClaimBatch, StorageError> {
-        let (mut tasks, contexts) = self.inner.held_worker_tasks_with_transport(request, protocol).await?.into_parts();
-        for task in &mut tasks { self.decrypt_worker_task(task)?; }
-        crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
+        let mut batch = self.inner.held_worker_tasks_with_transport(request, protocol).await?;
+        for task in batch.tasks_mut() { self.decrypt_worker_task(task)?; }
+        Ok(batch)
     }
 
     async fn held_worker_tasks_for_reporter(
@@ -2596,6 +2657,7 @@ passthrough_impl! {
 passthrough_impl! {
     impl crate::SchedulingStore for EncryptingStorage {
         async fn create_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
+        async fn import_cron_migration(&self, snapshot: &orch8_types::cron::CronMigrationSnapshot, schedule: &orch8_types::cron::CronSchedule, epoch: i64, digest: &str) -> Result<(), StorageError>;
         async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
         async fn list_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
         async fn list_all_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
@@ -2646,6 +2708,7 @@ passthrough_impl! {
     async fn list_plugins(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::plugin::PluginDef>, StorageError>;
     async fn update_plugin(&self, plugin: &orch8_types::plugin::PluginDef) -> Result<(), StorageError>;
     async fn delete_plugin(&self, name: &str) -> Result<(), StorageError>;
+    async fn delete_plugin_exact(&self, tenant_id: &str, name: &str) -> Result<(), StorageError>;
 
     // --- Triggers (secret encrypted at rest) ---
     // `TriggerDef.secret` is the HMAC key used to authenticate inbound webhook
@@ -2837,6 +2900,8 @@ passthrough_impl! {
     // --- Cluster (pass-through) ---
     async fn register_node(&self, node: &orch8_types::cluster::ClusterNode) -> Result<(), StorageError>;
     async fn heartbeat_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+    async fn record_wasm_revision_ready(&self, node: Uuid, revision: orch8_types::ids::SequenceId, ready_until: chrono::DateTime<chrono::Utc>) -> Result<(), StorageError>;
+    async fn list_wasm_ready_nodes(&self, revision: orch8_types::ids::SequenceId, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Uuid>, StorageError>;
     async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError>;
     async fn deregister_node(&self, node_id: Uuid) -> Result<(), StorageError>;
     async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError>;
@@ -3016,6 +3081,12 @@ passthrough_impl! {
             None => Ok(None),
         }
     }
+
+    // Module objects carry an externally verifiable content address over the
+    // binary itself, independently of the framing used for run attachments.
+    async fn put_shared_wasm_module(&self, tenant: &str, digest: &orch8_types::plugin::WasmArtifactDigest, bytes: bytes::Bytes) -> Result<(), StorageError>;
+    async fn get_shared_wasm_module(&self, tenant: &str, digest: &orch8_types::plugin::WasmArtifactDigest, limit: u64) -> Result<Option<bytes::Bytes>, StorageError>;
+    async fn collect_unused_wasm_modules(&self, tenant: &orch8_types::ids::TenantId, before: chrono::DateTime<chrono::Utc>, limit: u32, apply: bool) -> Result<Vec<String>, StorageError>;
     async fn delete_artifact(&self, key: &str) -> Result<(), StorageError>;
     async fn list_artifacts(&self, instance_id: InstanceId) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError>;
     // Artifact deletion needs no crypto (delete-by-key is opaque), so delegate
@@ -3037,6 +3108,19 @@ passthrough_impl! {
     // Holds step-handler-defined state, including the agent step's
     // `__agent__:{block_id}` conversation-history checkpoint -- same data
     // class as `context.data`.
+    async fn list_instance_kv_page(&self, instance: InstanceId, after: Option<&str>, limit: u32) -> Result<Vec<crate::restore::InstanceKvEntry>, StorageError> {
+        let mut entries = self.inner.list_instance_kv_page(instance, after, limit).await?;
+        for entry in &mut entries {
+            entry.value = self.decrypt_json_value(&entry.value)?;
+        }
+        Ok(entries)
+    }
+
+    async fn set_instance_kv_expiring(&self, instance: InstanceId, key: &str, value: &serde_json::Value, expires_at: DateTime<Utc>) -> Result<(), StorageError> {
+        let value = self.encrypt_json_value(value)?;
+        self.inner.set_instance_kv_expiring(instance, key, &value, expires_at).await
+    }
+
     async fn set_instance_kv(
         &self,
         instance_id: InstanceId,
@@ -3233,6 +3317,12 @@ passthrough_impl! {
         cp.checkpoint_data = self.encrypt_json_value(&cp.checkpoint_data)?;
         self.inner.save_checkpoint(&cp).await
     }
+    async fn save_checkpoint_at_epoch(&self, tenant: &TenantId, expected_epoch: u64, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<bool, StorageError> {
+        let mut cp = checkpoint.clone();
+        cp.checkpoint_data = self.encrypt_json_value(&cp.checkpoint_data)?;
+        self.inner.save_checkpoint_at_epoch(tenant, expected_epoch, &cp).await
+    }
+    async fn prune_checkpoints_at_epoch(&self, tenant: &TenantId, instance_id: InstanceId, expected_epoch: u64, keep: u32) -> Result<Option<u64>, StorageError>;
     async fn get_latest_checkpoint(
         &self,
         instance_id: InstanceId,
@@ -3254,6 +3344,19 @@ passthrough_impl! {
         }
         Ok(cps)
     }
+    async fn list_checkpoint_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
+        let mut checkpoints = self.inner.list_checkpoint_page(instance_id, after, limit).await?;
+        for checkpoint in &mut checkpoints {
+            checkpoint.checkpoint_data = self.decrypt_json_value(&checkpoint.checkpoint_data)?;
+        }
+        Ok(checkpoints)
+    }
+
     async fn prune_checkpoints(&self, instance_id: InstanceId, keep: u32) -> Result<u64, StorageError>;
     }
 }
@@ -3423,6 +3526,8 @@ impl EncryptingStorage {
         // Pre-allocate the key string outside the CAS loop to avoid
         // redundant heap allocations on each retry.
         let key_owned = key.to_string();
+        let mut value = value.clone();
+        crate::externalizing::escape_literals(&mut value);
 
         // Encrypted context is a single blob -- read -> decrypt -> merge ->
         // encrypt -> CAS write. Retry on contention (another writer

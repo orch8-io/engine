@@ -53,6 +53,7 @@ pub(crate) async fn compile_draft(
                 consumer: "sequence".into(),
                 reference: String::new(),
                 summary,
+                source: None,
             }
         }));
     Ok(Json(response))

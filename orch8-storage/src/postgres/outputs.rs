@@ -96,6 +96,31 @@ pub(super) async fn get(
     row.map(BlockOutputRow::into_output).transpose()
 }
 
+pub(super) async fn get_scoped_attempt(
+    store: &PostgresStorage,
+    tenant: &TenantId,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+    attempt: u16,
+) -> Result<Option<BlockOutput>, StorageError> {
+    let Ok(attempt) = i16::try_from(attempt) else {
+        return Ok(None);
+    };
+    let row = sqlx::query_as::<_, BlockOutputRow>(
+        "SELECT o.* FROM block_outputs o JOIN task_instances i ON i.id=o.instance_id
+         WHERE i.tenant_id=$1 AND o.instance_id=$2 AND o.block_id=$3 AND o.attempt=$4
+           AND o.output_ref IS DISTINCT FROM '__in_progress__'
+         ORDER BY o.created_at DESC,o.id DESC LIMIT 1",
+    )
+    .bind(tenant.as_str())
+    .bind(instance_id.into_uuid())
+    .bind(block_id.as_str())
+    .bind(attempt)
+    .fetch_optional(&store.pool)
+    .await?;
+    row.map(BlockOutputRow::into_output).transpose()
+}
+
 pub(super) async fn get_claimed(
     store: &PostgresStorage,
     instance_id: InstanceId,

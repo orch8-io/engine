@@ -24,14 +24,18 @@ What the engine does with a file-backed SQLite database (`orch8-storage/src/sqli
 | Setting         | Value                          | Consequence                                                                                                                                   |
 | --------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | Journal mode    | WAL                            | Readers don't block the writer. Litestream requires WAL.                                                                                      |
-| Busy timeout    | 5 s                            | A writer waits up to 5 s for the lock before failing with `SQLITE_BUSY`.                                                                      |
-| Connection pool | 8 connections, fixed           | `database.max_connections` doesn't apply to file-backed SQLite.                                                                               |
+| Busy timeout    | 5 s                            | Set `database.sqlite_busy_timeout_ms` to change how long a writer waits for a lock.                                                                      |
+| Connection pool | 8 connections | Set `database.sqlite_max_connections` to tune the pool. |
 | Foreign keys    | on                             | Cascading deletes work as they do on PostgreSQL.                                                                                              |
 | Schema          | created and reconciled at boot | A database from an older binary gains new tables and columns on startup. `ORCH8_RUN_MIGRATIONS` and `orch8 migrate` apply only to PostgreSQL. |
 
 ## Limits (read these first)
 
 - **One engine process per database file.** Run exactly one `orch8-server` against the file.
+  Before creating tables or recovering work, the server locks the canonical
+  database file's `.orch8-owner` companion. Opening the same database through a
+  symlink uses the same lock. Keep the companion beside the database.
+  Read-only administrative snapshots remain available while the server runs.
   Don't put the file on NFS, SMB, EFS, or any other network filesystem, and don't point two
   containers at the same volume. SQLite locking isn't reliable across network
   filesystems, and a Litestream replica must have exactly one writer.
@@ -165,3 +169,35 @@ zero-downtime deploys, a recovery point tighter than Litestream's sync interval,
 write throughput than one SQLite writer gives you. This guide doesn't cover copying data
 between backends. Plan the move as a cutover: stop starting new instances and let running
 ones finish, or recreate them on the new backend.
+
+## Offline schema reconciliation
+
+Use a local file path to preview or apply the reconciliation used by server
+startup.
+
+```sh
+orch8 --output json sqlite-schema plan --database /var/lib/orch8/orch8.db
+orch8 sqlite-schema apply --database /var/lib/orch8/orch8.db
+```
+
+The plan runs against a temporary, consistent copy and lists schema objects and
+columns that would change. The copy needs enough temporary space for the
+database. The apply command requires exclusive recovery ownership. Stop the
+server before applying changes. Once applied, rerunning the command reports
+whether the schema is current.
+
+## Bounded maintenance
+
+```sh
+orch8 --output json sqlite-schema maintain --database /var/lib/orch8/orch8.db \
+  --max-ms 250 --max-pages 64
+```
+
+The command reclaims at most the requested number of freelist pages and
+attempts a passive WAL checkpoint. It can run while the engine is serving
+traffic. A reader holding an older snapshot can leave WAL frames pending.
+The report gives the number of reclaimed pages, the observed WAL progress, and
+whether it encountered contention or reached the deadline. Set `--max-pages 0`
+for checkpoint only. Page reclamation requires incremental auto-vacuum mode.
+An in-flight SQLite operation can finish after the deadline. The report counts
+completed work observed before the deadline.

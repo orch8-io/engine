@@ -28,7 +28,9 @@ pub mod instances;
 pub mod jobs;
 pub mod license;
 pub mod mcp_server;
+mod media_uploads;
 pub mod metrics;
+mod migration_chunks;
 pub mod migrations;
 pub mod mobile_sync;
 pub mod model_pricing;
@@ -305,6 +307,7 @@ fn api_routes() -> Router<AppState> {
         .merge(dataflow::routes())
         .merge(triggers::routes())
         .merge(plugins::routes())
+        .merge(media_uploads::routes())
         .merge(credentials::routes())
         .merge(api_keys::routes())
         .merge(telemetry::routes())

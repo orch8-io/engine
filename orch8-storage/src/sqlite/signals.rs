@@ -33,9 +33,16 @@ pub(super) fn bind_signal_insert<'q>(
         .bind(s.delivered_at.map(ts)))
 }
 
-pub(super) async fn enqueue(storage: &SqliteStorage, signal: &Signal) -> Result<(), StorageError> {
+pub(super) async fn enqueue(store: &SqliteStorage, signal: &Signal) -> Result<(), StorageError> {
+    insert_on(&store.pool, signal).await
+}
+
+pub(super) async fn insert_on<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    signal: &Signal,
+) -> Result<(), StorageError> {
     bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal)?
-        .execute(&storage.pool)
+        .execute(executor)
         .await?;
     Ok(())
 }
@@ -61,18 +68,26 @@ pub(super) async fn enqueue_if_active(
     signal: &Signal,
 ) -> Result<(), StorageError> {
     let mut conn = begin_immediate(&storage.pool).await?;
-    let row: Option<(String,)> = sqlx::query_as("SELECT state FROM task_instances WHERE id = ?1")
-        .bind(signal.instance_id.into_uuid().to_string())
-        .fetch_optional(&mut *conn)
-        .await?;
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT i.state, cut.target_base FROM task_instances i
+         LEFT JOIN cloud_migration_signal_cuts cut ON cut.instance_id = i.id WHERE i.id = ?1",
+    )
+    .bind(signal.instance_id.into_uuid().to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
 
-    let Some((state_str,)) = row else {
+    let Some((state_str, signal_target)) = row else {
         return Err(StorageError::NotFound {
             entity: "task_instance",
             id: signal.instance_id.into_uuid().to_string(),
         });
     };
 
+    if let Some(target) = signal_target {
+        return Err(StorageError::Conflict(format!(
+            "signal intake moved to {target}"
+        )));
+    }
     let state = InstanceState::from_str(&state_str).map_err(StorageError::Query)?;
 
     if state.is_terminal() {
@@ -131,12 +146,29 @@ pub(super) async fn enqueue_for_caller(
     Ok(true)
 }
 
+pub(super) async fn list_history_page(
+    store: &SqliteStorage,
+    instance: InstanceId,
+    after: Option<Uuid>,
+    limit: u32,
+) -> Result<Vec<Signal>, StorageError> {
+    let rows = sqlx::query(
+        "SELECT * FROM signal_inbox WHERE instance_id = ?1 AND id > COALESCE(?2, '') ORDER BY id LIMIT ?3",
+    )
+    .bind(instance.into_uuid().to_string())
+    .bind(after.map(|id| id.to_string()))
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.iter().map(row_to_signal).collect()
+}
+
 pub(super) async fn get_pending(
     storage: &SqliteStorage,
     instance_id: InstanceId,
 ) -> Result<Vec<Signal>, StorageError> {
     let rows = sqlx::query(
-        "SELECT * FROM signal_inbox WHERE instance_id=?1 AND delivered=0 ORDER BY created_at ASC",
+        "SELECT * FROM signal_inbox WHERE instance_id=?1 AND delivered=0 ORDER BY created_at ASC, id ASC",
     )
     .bind(instance_id.into_uuid().to_string())
     .fetch_all(&storage.pool)
@@ -166,7 +198,7 @@ pub(super) async fn get_pending_batch(
         for id in chunk {
             separated.push_bind(id.to_string());
         }
-        separated.push_unseparated(") AND delivered=0 ORDER BY created_at ASC");
+        separated.push_unseparated(") AND delivered=0 ORDER BY created_at ASC, id ASC");
         let rows = qb.build().fetch_all(&mut *tx).await?;
         for row in &rows {
             let signal = row_to_signal(row)?;

@@ -151,6 +151,8 @@ CREATE TABLE IF NOT EXISTS worker_tasks (
     error_retryable INTEGER,
     attempt INTEGER NOT NULL DEFAULT 0,
     timeout_ms INTEGER,
+    heartbeat_timeout_secs INTEGER CHECK(heartbeat_timeout_secs BETWEEN 1 AND 4294967295),
+    wait_for_callback INTEGER NOT NULL DEFAULT FALSE,
     claimed_at TEXT,
     heartbeat_at TEXT,
     claim_epoch INTEGER NOT NULL DEFAULT 0 CHECK(claim_epoch >= 0),
@@ -297,13 +299,28 @@ CREATE TABLE IF NOT EXISTS cluster_nodes (
     execution_handoff_evidence TEXT
 );
 
+CREATE TABLE IF NOT EXISTS wasm_revision_readiness (
+    node_id TEXT NOT NULL REFERENCES cluster_nodes(id) ON DELETE CASCADE,
+    sequence_id TEXT NOT NULL REFERENCES sequences(id) ON DELETE CASCADE,
+    ready_until TEXT NOT NULL,
+    PRIMARY KEY (sequence_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS wasm_artifact_retirements (
+    tenant_id TEXT NOT NULL,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    unreferenced_at TEXT NOT NULL,
+    retired INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0,1)),
+    PRIMARY KEY (tenant_id, digest)
+);
+
 CREATE TABLE IF NOT EXISTS injected_blocks (
     instance_id TEXT PRIMARY KEY,
     blocks TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS plugins (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     plugin_type TEXT NOT NULL DEFAULT 'wasm',
     source TEXT NOT NULL,
     tenant_id TEXT NOT NULL DEFAULT '',
@@ -311,8 +328,11 @@ CREATE TABLE IF NOT EXISTS plugins (
     config TEXT NOT NULL DEFAULT '{}',
     description TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, name)
 );
+
+CREATE INDEX IF NOT EXISTS idx_plugins_name ON plugins (name, tenant_id);
 
 CREATE TABLE IF NOT EXISTS triggers (
     slug TEXT PRIMARY KEY,
@@ -416,6 +436,7 @@ CREATE INDEX IF NOT EXISTS idx_task_instances_cron_active
     ON task_instances(json_extract(metadata, '$.cron_schedule_id'))
     WHERE state IN ('scheduled', 'running', 'waiting', 'paused');
 CREATE INDEX IF NOT EXISTS idx_signal_inbox_instance ON signal_inbox(instance_id, delivered);
+CREATE INDEX IF NOT EXISTS idx_signal_inbox_history ON signal_inbox(instance_id, id);
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_handler ON worker_tasks(handler_name, state);
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_instance_state ON worker_tasks(instance_id, state);
 -- Timeout reaper / stranded-dispatch sweep / task list (Postgres migration 103).
@@ -483,6 +504,7 @@ CREATE TABLE IF NOT EXISTS instance_kv_state (
     key TEXT NOT NULL,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT,
     PRIMARY KEY (instance_id, key)
 );
 
@@ -1025,6 +1047,41 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_event_waits_block
 CREATE INDEX IF NOT EXISTS idx_event_waits_correlation
     ON event_waits(tenant_id, correlation_key, status);
 
+CREATE TABLE IF NOT EXISTS cron_migration_sources (
+    schedule_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    migration_id TEXT NOT NULL,
+    record TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS cron_migration_imports (
+    schedule_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    migration_id TEXT NOT NULL,
+    ownership_epoch INTEGER NOT NULL CHECK (ownership_epoch > 0),
+    last_fire_at TEXT,
+    snapshot_sha256 TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cloud_migration_signal_cuts (
+    instance_id TEXT PRIMARY KEY REFERENCES task_instances(id) ON DELETE CASCADE,
+    migration_id TEXT NOT NULL,
+    target_base TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS migration_import_chunks (
+    tenant_id TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0 AND chunk_index < 64),
+    payload BLOB NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, digest, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS migration_import_chunks_expiry ON migration_import_chunks (tenant_id, expires_at);
+
+CREATE TABLE IF NOT EXISTS readonly_instance_history (
+    instance_id TEXT PRIMARY KEY REFERENCES task_instances(id) ON DELETE CASCADE,
+    migration_id TEXT NOT NULL
+);
 -- Independent of native and continuity history: physical IDs are never reusable.
 CREATE TABLE IF NOT EXISTS physical_instance_retirements (
     instance_id TEXT PRIMARY KEY,
@@ -1723,6 +1780,16 @@ CREATE TABLE IF NOT EXISTS capsule_artifact_retirements (
 CREATE INDEX IF NOT EXISTS idx_capsule_artifact_retirement_due
  ON capsule_artifact_retirements(next_sweep_at,artifact_key);
 
+CREATE TABLE IF NOT EXISTS worker_callback_tokens (
+ task_id TEXT NOT NULL REFERENCES worker_tasks(id) ON DELETE CASCADE,
+ claim_epoch INTEGER NOT NULL CHECK(claim_epoch > 0),
+ tenant_id TEXT NOT NULL,
+ worker_id TEXT NOT NULL,
+ token TEXT NOT NULL UNIQUE CHECK(length(token) = 64),
+ expires_at TEXT NOT NULL,
+ PRIMARY KEY (task_id, claim_epoch)
+);
+
 CREATE TABLE IF NOT EXISTS capsule_source_cuts (
  capsule_id TEXT PRIMARY KEY,
  tenant_id TEXT NOT NULL,
@@ -1749,4 +1816,129 @@ CREATE INDEX IF NOT EXISTS idx_capsule_source_cut_instance
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 76;
+pub(super) const SCHEMA_VERSION: i64 = 87;
+
+pub(super) const WASM_RETIREMENT_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS guard_sequence_wasm_artifacts
+BEFORE INSERT ON sequences
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'WASM artifact was retired; upload it before referencing it')
+        WHERE EXISTS (SELECT 1 FROM wasm_artifact_retirements
+            WHERE tenant_id=NEW.tenant_id AND retired=1 AND EXISTS (SELECT 1 FROM json_tree(json_array(json(NEW.blocks),json(NEW.on_failure),json(NEW.on_cancel))) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest)));
+    DELETE FROM wasm_artifact_retirements
+        WHERE tenant_id=NEW.tenant_id AND retired=0 AND EXISTS (SELECT 1 FROM json_tree(json_array(json(NEW.blocks),json(NEW.on_failure),json(NEW.on_cancel))) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest));
+END;
+CREATE TRIGGER IF NOT EXISTS guard_sequence_edit_wasm_artifacts
+BEFORE UPDATE OF blocks,on_failure,on_cancel,tenant_id ON sequences
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'WASM artifact was retired; upload it before referencing it')
+        WHERE EXISTS (SELECT 1 FROM wasm_artifact_retirements
+            WHERE tenant_id=NEW.tenant_id AND retired=1 AND EXISTS (SELECT 1 FROM json_tree(json_array(json(NEW.blocks),json(NEW.on_failure),json(NEW.on_cancel))) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest)));
+    DELETE FROM wasm_artifact_retirements
+        WHERE tenant_id=NEW.tenant_id AND retired=0 AND EXISTS (SELECT 1 FROM json_tree(json_array(json(NEW.blocks),json(NEW.on_failure),json(NEW.on_cancel))) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest));
+END;
+CREATE TRIGGER IF NOT EXISTS guard_plugin_wasm_artifacts
+BEFORE INSERT ON plugins
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'WASM artifact was retired; upload it before referencing it')
+        WHERE EXISTS (SELECT 1 FROM wasm_artifact_retirements
+            WHERE tenant_id=NEW.tenant_id AND retired=1 AND EXISTS (SELECT 1 FROM json_tree(json_array(NEW.source)) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest)));
+    DELETE FROM wasm_artifact_retirements
+        WHERE tenant_id=NEW.tenant_id AND retired=0 AND EXISTS (SELECT 1 FROM json_tree(json_array(NEW.source)) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest));
+END;
+CREATE TRIGGER IF NOT EXISTS guard_plugin_edit_wasm_artifacts
+BEFORE UPDATE OF source,tenant_id ON plugins
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'WASM artifact was retired; upload it before referencing it')
+        WHERE EXISTS (SELECT 1 FROM wasm_artifact_retirements
+            WHERE tenant_id=NEW.tenant_id AND retired=1 AND EXISTS (SELECT 1 FROM json_tree(json_array(NEW.source)) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest)));
+    DELETE FROM wasm_artifact_retirements
+        WHERE tenant_id=NEW.tenant_id AND retired=0 AND EXISTS (SELECT 1 FROM json_tree(json_array(NEW.source)) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest));
+END;
+CREATE TRIGGER IF NOT EXISTS guard_injection_wasm_artifacts
+BEFORE INSERT ON injected_blocks
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'WASM artifact was retired; upload it before referencing it')
+        WHERE EXISTS (SELECT 1 FROM wasm_artifact_retirements
+            WHERE tenant_id=(SELECT tenant_id FROM task_instances WHERE id=NEW.instance_id) AND retired=1 AND EXISTS (SELECT 1 FROM json_tree(NEW.blocks) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest)));
+    DELETE FROM wasm_artifact_retirements
+        WHERE tenant_id=(SELECT tenant_id FROM task_instances WHERE id=NEW.instance_id) AND retired=0 AND EXISTS (SELECT 1 FROM json_tree(NEW.blocks) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest));
+END;
+CREATE TRIGGER IF NOT EXISTS guard_injection_edit_wasm_artifacts
+BEFORE UPDATE OF blocks,instance_id ON injected_blocks
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'WASM artifact was retired; upload it before referencing it')
+        WHERE EXISTS (SELECT 1 FROM wasm_artifact_retirements
+            WHERE tenant_id=(SELECT tenant_id FROM task_instances WHERE id=NEW.instance_id) AND retired=1 AND EXISTS (SELECT 1 FROM json_tree(NEW.blocks) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest)));
+    DELETE FROM wasm_artifact_retirements
+        WHERE tenant_id=(SELECT tenant_id FROM task_instances WHERE id=NEW.instance_id) AND retired=0 AND EXISTS (SELECT 1 FROM json_tree(NEW.blocks) v
+        WHERE v.value IN ('wasm-artifact:sha256:' || wasm_artifact_retirements.digest,
+                          'wasm://wasm-artifact:sha256:' || wasm_artifact_retirements.digest));
+END;
+";
+
+pub(super) const READONLY_HISTORY_TRIGGER: &str = "
+CREATE TRIGGER IF NOT EXISTS readonly_instance_history_state
+BEFORE UPDATE OF state ON task_instances
+FOR EACH ROW WHEN NEW.state IS NOT OLD.state AND EXISTS (
+    SELECT 1 FROM readonly_instance_history WHERE instance_id = OLD.id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'archived instance history cannot change state');
+END;";
+
+pub(super) const MIGRATION_SIGNAL_CUT_TRIGGER: &str = "
+CREATE TRIGGER IF NOT EXISTS migration_signal_source_cut
+BEFORE INSERT ON signal_inbox
+FOR EACH ROW WHEN EXISTS (
+    SELECT 1 FROM cloud_migration_signal_cuts WHERE instance_id = NEW.instance_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'source signal intake is closed for migration');
+END;";
+
+pub(super) const CRON_MIGRATION_TRIGGERS: &str = "
+CREATE TRIGGER IF NOT EXISTS cron_migration_retired_occurrence
+BEFORE INSERT ON task_instances
+FOR EACH ROW WHEN substr(NEW.idempotency_key,1,5)='cron:'
+ AND EXISTS (SELECT 1 FROM cron_migration_sources
+             WHERE schedule_id=substr(NEW.idempotency_key,6,36) AND tenant_id=NEW.tenant_id)
+BEGIN
+    SELECT RAISE(ABORT,'cron schedule is fenced for migration');
+END;
+CREATE TRIGGER IF NOT EXISTS cron_migration_retired_schedule
+BEFORE UPDATE OF enabled ON cron_schedules
+FOR EACH ROW WHEN NEW.enabled=1 AND EXISTS (
+    SELECT 1 FROM cron_migration_sources WHERE schedule_id=OLD.id
+)
+BEGIN
+    SELECT RAISE(ABORT,'cron schedule is fenced for migration');
+END;";

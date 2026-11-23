@@ -23,6 +23,19 @@ final class MobileScopedBridge: @unchecked Sendable {
         let catalog: String?
         let epoch: String
     }
+    private final class Observation {
+        let handle: String
+        let timer: DispatchSourceTimer
+        var previous: MobileCatalogRunSnapshot?
+        var emitted = false
+        init(handle: String, timer: DispatchSourceTimer) {
+            self.handle = handle
+            self.timer = timer
+        }
+    }
+    private let observationQueue = DispatchQueue(label: "io.orch8.reactnative.scoped-observation", qos: .utility)
+    private var observations: [String: Observation] = [:]
+
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
     private var activeScope: NativeEngineScope?
@@ -34,7 +47,7 @@ final class MobileScopedBridge: @unchecked Sendable {
             return
         }
         let retired = entries.filter { !$0.value.scope.isCurrent }
-        for key in retired.keys { entries.removeValue(forKey: key) }
+        for key in retired.keys { entries.removeValue(forKey: key); stopObservationsLocked(key) }
         lock.unlock()
         withExtendedLifetime(retired) {}  // Native ARC release stays outside the table lock.
     }
@@ -98,16 +111,86 @@ final class MobileScopedBridge: @unchecked Sendable {
             if previous == keys.count { break }
         }
         let retired = entries.filter { keys.contains($0.key) }
-        for id in retired.keys { entries.removeValue(forKey: id) }
+        for id in retired.keys { entries.removeValue(forKey: id); stopObservationsLocked(id) }
         lock.unlock()
         withExtendedLifetime(retired) {}
     }
     private func releaseAccount(_ account: String, epoch: String) {
         lock.lock()
         let retired = entries.filter { $0.value.account == account && $0.value.epoch == epoch }
-        for id in retired.keys { entries.removeValue(forKey: id) }
+        for id in retired.keys { entries.removeValue(forKey: id); stopObservationsLocked(id) }
         lock.unlock()
         withExtendedLifetime(retired) {}
+    }
+    private func stopObservationsLocked(_ handle: String) {
+        let keys = observations.filter { $0.value.handle == handle }.keys
+        for key in keys { observations.removeValue(forKey: key)?.timer.cancel() }
+    }
+    private func stopObservation(_ handle: String, _ key: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        if observations[key]?.handle == handle {
+            observations.removeValue(forKey: key)?.timer.cancel()
+        }
+    }
+    private func startObservation(
+        _ handle: String, _ key: String, _ interval: Int, _ module: MobileScopedCallbacks
+    ) throws {
+        let timer = DispatchSource.makeTimerSource(queue: observationQueue)
+        let observation = Observation(handle: handle, timer: timer)
+        timer.setEventHandler { [weak self, weak module, weak observation] in
+            guard let self, let module, let observation else { return }
+            self.pollObservation(handle, key, observation, module)
+        }
+        lock.lock()
+        let accepted = entries[handle]?.scope.isCurrent == true && observations[key] == nil &&
+            observations.count < 128 && observations.values.filter { $0.handle == handle }.count < 8
+        if accepted { observations[key] = observation }
+        timer.schedule(deadline: .now(), repeating: .milliseconds(interval))
+        timer.activate()
+        if !accepted { timer.cancel() }
+        lock.unlock()
+        guard accepted else { throw MobileError.ResourceLimit(detail: "scoped observation unavailable or exhausted") }
+    }
+    private func pollObservation(
+        _ handle: String, _ key: String, _ observation: Observation, _ module: MobileScopedCallbacks
+    ) {
+        do {
+            let entry = try lookup(handle)
+            guard case .run(let run) = entry.node else { stopObservation(handle, key); return }
+            let snapshot = try run.snapshot()
+            guard !observation.emitted || observation.previous != snapshot else { return }
+            if let snapshot,
+                snapshot.accountId != entry.account || snapshot.catalogId != entry.catalog ||
+                String(snapshot.sessionEpoch) != entry.epoch || snapshot.instanceId != run.instanceId()
+            { stopObservation(handle, key); return }
+            lock.lock()
+            let active = observations[key] === observation && entries[handle]?.scope === entry.scope
+            lock.unlock()
+            guard active else { return }
+            observation.emitted = true
+            observation.previous = snapshot
+            let encoded = try JSONSerialization.data(
+                withJSONObject: snapshot.map(Self.snapshotObject) as Any? ?? NSNull(), options: [.fragmentsAllowed])
+            let sent = module.emit(scope: entry.scope, "orch8:scopedSnapshot", [
+                "observerKey": key, "accountId": entry.account, "catalogId": entry.catalog ?? "",
+                "sessionEpoch": entry.epoch, "instanceId": run.instanceId(),
+                "snapshotJson": String(decoding: encoded, as: UTF8.self),
+            ])
+            if !sent || snapshot.map({ ["completed", "failed", "cancelled"].contains(Self.state($0.state)) }) == true {
+                stopObservation(handle, key)
+            }
+        } catch {
+            stopObservation(handle, key)
+        }
+    }
+    private static func snapshotObject(_ snapshot: MobileCatalogRunSnapshot) -> [String: Any] {
+        [
+            "instanceId": snapshot.instanceId, "accountId": snapshot.accountId, "catalogId": snapshot.catalogId,
+            "sessionEpoch": String(snapshot.sessionEpoch), "state": state(snapshot.state),
+            "dataJson": snapshot.dataJson, "pendingSteps": snapshot.pendingSteps,
+            "createdAt": snapshot.createdAt, "updatedAt": snapshot.updatedAt,
+        ]
     }
     private func lookup(_ id: String) throws -> Entry {
         lock.lock()
@@ -131,6 +214,7 @@ final class MobileScopedBridge: @unchecked Sendable {
         if method == "dispose" {
             lock.lock()
             let retired = entries.removeValue(forKey: handle)
+            stopObservationsLocked(handle)
             lock.unlock()
             withExtendedLifetime(retired) {}
             result = nil
@@ -225,14 +309,15 @@ final class MobileScopedBridge: @unchecked Sendable {
                 try v.start()
                 result = nil
             case (.run(let v), "snapshot"):
-                result = try v.snapshot().map {
-                    [
-                        "instanceId": $0.instanceId, "accountId": $0.accountId, "catalogId": $0.catalogId,
-                        "sessionEpoch": String($0.sessionEpoch), "state": Self.state($0.state),
-                        "dataJson": $0.dataJson, "pendingSteps": $0.pendingSteps, "createdAt": $0.createdAt,
-                        "updatedAt": $0.updatedAt,
-                    ] as [String: Any]
-                }
+                result = try v.snapshot().map(Self.snapshotObject)
+            case (.run, "subscribeSnapshots"):
+                let interval = try args.positiveNumber("intervalMs", maximum: 60_000)
+                guard interval >= 50 else { throw MobileError.InvalidInput(detail: "observation interval must be at least 50 ms") }
+                try startObservation(handle, args.string("observerKey"), Int(interval), module)
+                result = nil
+            case (.run, "unsubscribeSnapshots"):
+                stopObservation(handle, try args.string("observerKey"))
+                result = nil
             case (.run(let v), "cancel"): result = try v.cancel().map(Self.state)
             case (.run(let v), "completeStep"):
                 result = try v.completeStep(

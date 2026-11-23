@@ -1,13 +1,51 @@
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::time::Duration;
 use uuid::Uuid;
 
 use orch8_types::cluster::ClusterNode;
 use orch8_types::error::StorageError;
+use orch8_types::ids::SequenceId;
 
 use super::SqliteStorage;
 use super::helpers::{row_to_cluster_node, ts};
+
+pub(super) async fn record_wasm_revision_ready(
+    storage: &SqliteStorage,
+    node: Uuid,
+    revision: SequenceId,
+    ready_until: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO wasm_revision_readiness(node_id, sequence_id, ready_until) VALUES (?1,?2,?3)
+         ON CONFLICT(sequence_id,node_id) DO UPDATE SET ready_until=excluded.ready_until",
+    )
+    .bind(node.to_string())
+    .bind(revision.to_string())
+    .bind(ts(ready_until))
+    .execute(&storage.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn list_wasm_ready_nodes(
+    storage: &SqliteStorage,
+    revision: SequenceId,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, StorageError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT r.node_id FROM wasm_revision_readiness r JOIN cluster_nodes n ON n.id=r.node_id
+         WHERE r.sequence_id=?1 AND julianday(r.ready_until)>julianday(?2)
+         AND n.status='active' AND n.drain=0 AND n.capabilities_withdrawn=0 ORDER BY r.node_id",
+    )
+    .bind(revision.to_string())
+    .bind(ts(now))
+    .fetch_all(&storage.pool)
+    .await?;
+    ids.iter()
+        .map(|id| Uuid::parse_str(id).map_err(|error| StorageError::Query(error.to_string())))
+        .collect()
+}
 
 pub(super) async fn register(
     storage: &SqliteStorage,

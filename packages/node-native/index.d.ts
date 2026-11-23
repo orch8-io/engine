@@ -19,6 +19,8 @@ export interface StepInput<Data = any, Params = any> {
   instanceId: string
   stepId: string
   attempt: number
+  /** Aborts when this running workflow is durably cancelled. */
+  signal: AbortSignal
 }
 
 export type StepHandler = (input: StepInput) => unknown | Promise<unknown>
@@ -38,6 +40,31 @@ export interface InstanceSnapshot {
   data: Record<string, any>
   /** Latest output per step id. A failed step's output has `__error__: true` and `message`. */
   outputs: Record<string, any>
+}
+
+export interface BlockOutput {
+  id: string
+  instance_id: string
+  block_id: string
+  output: unknown
+  output_ref: string | null
+  output_size: number
+  attempt: number
+  created_at: string
+}
+
+export interface InstanceSummary {
+  id: string
+  sequence_id: string
+  state: InstanceState
+  created_at: string
+}
+
+export interface BatchStartItem {
+  name: string
+  input?: object
+  version?: number
+  idempotencyKey: string
 }
 
 /** Throw from a handler to fail the step without retrying. */
@@ -61,9 +88,19 @@ export class Engine {
     input?: object,
     options?: { idempotencyKey?: string; version?: number },
   ): Promise<string>
+  /** Start a transactional batch of at most 1000 items. Results follow input order. */
+  startBatch(items: readonly BatchStartItem[]): Promise<string[]>
   /** Drive the engine until the instance settles or the scheduling budget elapses. Storage reads can continue past `timeoutMs`. */
-  run(id: string, options?: { timeoutMs?: number }): Promise<InstanceSnapshot>
+  run(id: string, options?: { timeoutMs?: number; observerTimeoutMs?: number }): Promise<InstanceSnapshot>
   get(id: string): Promise<InstanceSnapshot>
+  /** Read one output by block and persisted attempt number. */
+  getOutput(id: string, block: string, attempt: number): Promise<BlockOutput | null>
+  /** Iterate newest-first by instance ID using bounded pages. */
+  iterInstances(options?: {
+    state?: InstanceState
+    sequenceId?: string
+    pageSize?: number
+  }): AsyncIterableIterator<InstanceSummary>
   /** `pause` | `resume` | `cancel` | `update_context`, or a custom signal name. */
   signal(id: string, signal: string, payload?: unknown): Promise<void>
   close(): Promise<void>

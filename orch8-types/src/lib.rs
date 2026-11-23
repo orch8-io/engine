@@ -3,6 +3,7 @@ pub mod alert;
 pub mod api_key;
 pub mod approval_link;
 pub mod artifact;
+pub mod asl_intrinsic;
 pub mod audit;
 pub mod auth;
 pub mod catalog;

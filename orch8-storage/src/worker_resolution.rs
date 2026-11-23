@@ -24,6 +24,18 @@ pub struct WorkerResolutionEvidence {
     pub(crate) logical_sha256: String,
     pub(crate) stored_sha256: String,
     pub(crate) sealed: bool,
+    #[cfg(feature = "postgres")]
+    pub(crate) expired_lease: Option<ExpiredLeaseObservation>,
+}
+
+#[cfg(feature = "postgres")]
+#[derive(Clone)]
+pub(crate) struct ExpiredLeaseObservation {
+    pub(crate) worker_id: Option<String>,
+    pub(crate) claimed_at: Option<DateTime<Utc>>,
+    pub(crate) heartbeat_at: Option<DateTime<Utc>>,
+    pub(crate) checkpoint_seq: u64,
+    pub(crate) default_lease: std::time::Duration,
 }
 impl WorkerResolutionEvidence {
     pub(crate) fn new(resolution: &WorkerTaskResolution) -> Self {
@@ -34,6 +46,43 @@ impl WorkerResolutionEvidence {
             logical_sha256: hash.clone(),
             stored_sha256: hash,
             sealed: false,
+            #[cfg(feature = "postgres")]
+            expired_lease: None,
+        }
+    }
+
+    /// Carry the reaper's observation into the transaction that can adopt legacy work.
+    #[must_use]
+    pub fn expired_lease(
+        resolution: &WorkerTaskResolution,
+        task: &orch8_types::worker::WorkerTask,
+        default_lease: std::time::Duration,
+    ) -> Self {
+        let evidence = Self::new(resolution);
+        #[cfg(feature = "postgres")]
+        {
+            if task.id != resolution.task_id
+                || task.instance_id != resolution.instance_id
+                || task.claim_epoch != resolution.expected_claim_epoch
+                || task.state != resolution.expected_state
+            {
+                return evidence;
+            }
+            Self {
+                expired_lease: Some(ExpiredLeaseObservation {
+                    worker_id: task.worker_id.clone(),
+                    claimed_at: task.claimed_at,
+                    heartbeat_at: task.heartbeat_at,
+                    checkpoint_seq: task.checkpoint_seq,
+                    default_lease,
+                }),
+                ..evidence
+            }
+        }
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = (task, default_lease);
+            evidence
         }
     }
     pub(crate) fn with_stored_reason(&self, reason: Value) -> Self {
@@ -42,6 +91,8 @@ impl WorkerResolutionEvidence {
             reason,
             logical_sha256: self.logical_sha256.clone(),
             sealed: true,
+            #[cfg(feature = "postgres")]
+            expired_lease: self.expired_lease.clone(),
         }
     }
     pub(crate) fn validate(&self, resolution: &WorkerTaskResolution) -> Result<(), StorageError> {
@@ -91,6 +142,8 @@ pub struct WorkerResolutionOutcome {
     pub reason: Value,
     pub logical_reason_sha256: String,
     pub stored_reason_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
     pub retryable: bool,
     pub action: Value,
     pub resolved_at: DateTime<Utc>,
@@ -226,7 +279,9 @@ impl ResolutionSource {
             } => {
                 json!({"kind":"retry","task_id":retry_task.id,"attempt":retry_task.attempt,"node_id":node_id,"fire_at":fire_at})
             }
-            WorkerTaskResolutionAction::FailNode { node_id, fire_at } => {
+            WorkerTaskResolutionAction::FailNode {
+                node_id, fire_at, ..
+            } => {
                 json!({"kind":"fail_node","node_id":node_id,"fire_at":fire_at})
             }
             WorkerTaskResolutionAction::FailInstance => json!({"kind":"fail_instance"}),
@@ -250,6 +305,7 @@ impl ResolutionSource {
             reason: evidence.reason.clone(),
             logical_reason_sha256: evidence.logical_sha256.clone(),
             stored_reason_sha256: evidence.stored_sha256.clone(),
+            error_code: resolution.error_code.clone(),
             retryable: resolution.retryable,
             action,
             resolved_at: Utc::now(),
@@ -351,5 +407,52 @@ pub fn diagnostic_reason(reason: &str) -> std::borrow::Cow<'_, str> {
         std::borrow::Cow::Owned(reason.replace('\0', "\\u0000"))
     } else {
         std::borrow::Cow::Borrowed(reason)
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_lease_evidence_tracks_only_the_matching_task_through_reason_sealing() {
+        let task_id = Uuid::new_v4();
+        let instance_id = InstanceId::new();
+        let observed_at = Utc::now();
+        let mut task: orch8_types::worker::WorkerTask = serde_json::from_value(json!({
+            "id": task_id, "instance_id": instance_id, "block_id": "work",
+            "handler_name": "remote", "params": {}, "context": {}, "attempt": 0,
+            "state": "claimed", "worker_id": "holder", "claim_epoch": 0,
+            "checkpoint_seq": 3, "created_at": observed_at, "heartbeat_at": observed_at,
+        }))
+        .unwrap();
+        let resolution = WorkerTaskResolution {
+            task_id,
+            instance_id,
+            expected_state: WorkerTaskState::Claimed,
+            expected_claim_epoch: 0,
+            expected_worker_id: None,
+            holder_worker_id: None,
+            event: WorkerAttemptEventKind::Reclaimed,
+            effect_resolution: WorkerTaskEffectResolution::Unknown,
+            reason: "lease expired".into(),
+            error_code: None,
+            retryable: true,
+            action: WorkerTaskResolutionAction::Requeue,
+        };
+        let lease = std::time::Duration::from_secs(30);
+        let evidence = WorkerResolutionEvidence::expired_lease(&resolution, &task, lease)
+            .with_stored_reason(json!({"sealed":"reason"}));
+        evidence.validate(&resolution).unwrap();
+        let observation = evidence.expired_lease.unwrap();
+        assert_eq!(observation.heartbeat_at, Some(observed_at));
+        assert_eq!(observation.checkpoint_seq, 3);
+        assert_eq!(observation.default_lease, lease);
+        task.claim_epoch = 1;
+        assert!(
+            WorkerResolutionEvidence::expired_lease(&resolution, &task, lease)
+                .expired_lease
+                .is_none()
+        );
     }
 }

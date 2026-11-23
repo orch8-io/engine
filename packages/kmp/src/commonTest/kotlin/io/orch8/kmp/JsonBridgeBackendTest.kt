@@ -1,6 +1,8 @@
 package io.orch8.kmp
 
 import io.orch8.kmp.bridge.Orch8BridgeCallbacks
+import io.orch8.kmp.bridge.Orch8BridgeCapsuleSignature
+import io.orch8.kmp.bridge.Orch8CapsuleSigningBridge
 import io.orch8.kmp.bridge.Orch8JsonBridge
 import io.orch8.kmp.internal.BlockingStepHandler
 import io.orch8.kmp.internal.BridgeCodec
@@ -16,7 +18,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /** Scripted stand-in for the Swift bridge: records calls, replays envelopes. */
-private class FakeJsonBridge(
+private open class FakeJsonBridge(
     private val protocol: Int = io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL,
 ) : Orch8JsonBridge {
     override fun openAccount(identityJson: String): io.orch8.kmp.bridge.Orch8ScopedReply = error("unexpected scoped account call")
@@ -41,6 +43,36 @@ private class FakeJsonBridge(
 class JsonBridgeBackendTest {
     private fun open(bridge: FakeJsonBridge = FakeJsonBridge()) =
         bridge to JsonBridgeBackend.open(bridge, "/tmp/orch8.db", EngineConfig(deviceId = "dev-1"))
+
+    @Test
+    fun capsuleExportPassesPublicMaterialAndUsesThePerCallSignature() {
+        val digest = "a".repeat(64)
+        var signed = 0
+        val signer = object : Orch8CapsuleSigner {
+            override val keyId = "host-ed25519"
+            override val publicKeyBase64 = "public"
+            override fun signManifestSha256(digest: String): String {
+                signed++
+                assertEquals("a".repeat(64), digest)
+                return "base64-signature"
+            }
+        }
+        val bridge = object : FakeJsonBridge(), Orch8CapsuleSigningBridge {
+            override fun exportCapsule(argsJson: String, signature: Orch8BridgeCapsuleSignature): String {
+                val args = Json.parseToJsonElement(argsJson).jsonObject
+                assertEquals(setOf("instanceId", "destinationRuntimeId", "payloadKeyBase64", "expiresInSeconds", "keyId", "publicKeyBase64"), args.keys)
+                assertEquals("host-ed25519", args["keyId"]!!.jsonPrimitive.content)
+                assertEquals("public", args["publicKeyBase64"]!!.jsonPrimitive.content)
+                assertEquals("base64-signature", BridgeCodec.unwrap("sign", signature.sign(digest)).jsonPrimitive.content)
+                return """{"ok":{"capsuleId":"capsule","continuityId":"continuity","sourceEpoch":7,"capsuleJson":"signed-manifest","payloadBase64":"ciphertext"}}"""
+            }
+        }
+        val (_, backend) = open(bridge)
+        val result = backend.exportContinuityCapsule("run", "receiver", "transfer-key", 60, signer)
+        assertEquals(1, signed)
+        assertEquals(ContinuityExportResult("capsule", "continuity", 7, "signed-manifest", "ciphertext"), result)
+        assertTrue("ciphertext" !in result.toString())
+    }
 
     @Test
     fun openSendsConfigAndInstallsCallbacks() {

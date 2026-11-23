@@ -1,79 +1,103 @@
-//! Externalization marker helpers.
-//!
-//! A "marker" is a JSON object of exactly the shape
-//! `{"_externalized": true, "_ref": "<key>"}`. Producers write these;
-//! the engine inflates them before handlers see the context.
-//!
-//! The "exactly two keys" rule prevents false positives on user payloads
-//! that happen to include a `_ref` field alongside other data.
+//! Hydration of persisted context references and escaped application values.
 
-use orch8_storage::StorageBackend;
+use orch8_storage::{StorageBackend, externalizing};
 use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
+use orch8_types::{instance::TaskInstance, sequence::SequenceDefinition};
 use serde_json::Value;
 
-pub const EXTERNALIZED_FLAG: &str = "_externalized";
-pub const REF_KEY: &str = "_ref";
+pub use externalizing::{EXTERNALIZED_FLAG, REF_KEY, is_marker as is_ref_marker};
 
-/// Return `true` iff `v` is exactly the externalization envelope — an object
-/// with precisely two keys (`_externalized: true`, `_ref: "<string>"`).
+/// Return the reference key for either stored envelope version.
 #[must_use]
-pub fn is_ref_marker(v: &Value) -> bool {
-    let Some(obj) = v.as_object() else {
-        return false;
-    };
-    if obj.len() != 2 {
-        return false;
-    }
-    matches!(obj.get(EXTERNALIZED_FLAG), Some(Value::Bool(true)))
-        && matches!(obj.get(REF_KEY), Some(Value::String(_)))
+pub fn extract_ref_key(value: &Value) -> Option<&str> {
+    externalizing::ref_key(value, true)
 }
 
-/// Return the `_ref` string if `v` is a marker, else `None`.
-#[must_use]
-pub fn extract_ref_key(v: &Value) -> Option<&str> {
-    if !is_ref_marker(v) {
-        return None;
+/// Turn an old payload into an opaque value for the second hydration pass.
+/// Old payload rows contain original application data, including any shapes
+/// that now have meaning in the storage format.
+pub(crate) fn prepare_fetched_context_payload(mut payload: Value, versioned: bool) -> Value {
+    if !versioned {
+        externalizing::escape_literals(&mut payload);
     }
-    v.as_object()?.get(REF_KEY)?.as_str()
+    payload
 }
 
-/// Walk the top-level fields of `ctx.data` and replace any externalization
-/// markers with their resolved payloads.
-///
-/// Non-object `data` and non-marker values are left untouched; broken refs
-/// (payload missing in storage) are also left in place so downstream code
-/// can detect them.
-///
-/// This is the shared inflator used by every engine site that needs to see
-/// user context values: step dispatch (`step_block.rs`), router condition
-/// evaluation (`router.rs`), and any future site that reads `instance.context`
-/// before it is handed to user code.
-///
-/// Only top-level keys are scanned — nested objects are not recursed into.
-/// This mirrors the externalizer's write side: `externalize_fields` only
-/// promotes top-level keys, so the resolver only needs to look there.
-///
-/// Markers are plain JSON a client can forge (worker output, context patch),
-/// so resolution is scoped to `instance_id`: a marker naming another
-/// instance's `ref_key` is treated as a broken ref and left in place.
+/// Resolve owner-scoped references, then decode escaped application literals.
+/// Missing rows keep their markers so callers can see incomplete state.
 pub async fn resolve_context_markers(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
     mut ctx: ExecutionContext,
 ) -> Result<ExecutionContext, StorageError> {
-    let Some(obj) = ctx.data.as_object_mut() else {
-        return Ok(ctx);
-    };
-    for (_key, value) in obj.iter_mut() {
-        if let Some(ref_key) = extract_ref_key(value)
-            && let Some(resolved) = storage.get_externalized_state(instance_id, ref_key).await?
-        {
-            *value = resolved;
+    let mut references = std::collections::BTreeSet::new();
+    externalizing::visit_context_refs(&ctx.data, |key, versioned| {
+        references.insert((key.to_owned(), versioned));
+    });
+    let mut fetched = std::collections::HashMap::with_capacity(references.len());
+    for (key, versioned) in references {
+        if let Some(value) = storage.get_externalized_state(instance_id, &key).await? {
+            fetched.insert(key, prepare_fetched_context_payload(value, versioned));
         }
     }
+    externalizing::replace_context_refs(&mut ctx.data, |key, _| fetched.get(key).cloned());
+    externalizing::unescape_literals(&mut ctx.data);
     Ok(ctx)
+}
+
+pub(crate) async fn resolved_context_for_instance<'a>(
+    storage: &dyn StorageBackend,
+    instance: &'a TaskInstance,
+) -> Result<std::borrow::Cow<'a, ExecutionContext>, StorageError> {
+    if !externalizing::has_context_envelope(&instance.context.data) {
+        return Ok(std::borrow::Cow::Borrowed(&instance.context));
+    }
+    resolve_context_markers(storage, instance.id, instance.context.clone())
+        .await
+        .map(std::borrow::Cow::Owned)
+}
+
+/// Compact configured paths against the authoritative context revision.
+/// The scheduler's prefetched instance can already contain hydrated values.
+pub(crate) async fn compact_claimed_context(
+    storage: &dyn StorageBackend,
+    instance: TaskInstance,
+    sequence: &SequenceDefinition,
+    claim_token: chrono::DateTime<chrono::Utc>,
+) -> Result<TaskInstance, crate::error::EngineError> {
+    if sequence.externalized_context_paths().next().is_none() {
+        return Ok(instance);
+    }
+    let id = instance.id;
+    for _ in 0..4 {
+        let Some(mut current) = storage.get_instance(id).await? else {
+            break;
+        };
+        if current.claimed_at != Some(claim_token) {
+            break;
+        }
+        let payloads = externalizing::externalize_paths(
+            &mut current.context.data,
+            &id.to_string(),
+            sequence.externalized_context_paths(),
+        );
+        if payloads.is_empty()
+            || storage
+                .update_prepared_context_cas(
+                    id,
+                    &current.context,
+                    &payloads,
+                    current.updated_at,
+                    Some(claim_token),
+                )
+                .await?
+        {
+            return Ok(current);
+        }
+    }
+    Err(crate::error::EngineError::ClaimLost { instance_id: id })
 }
 
 #[cfg(test)]

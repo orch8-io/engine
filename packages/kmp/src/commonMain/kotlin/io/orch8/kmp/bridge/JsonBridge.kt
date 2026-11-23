@@ -29,6 +29,16 @@ interface Orch8JsonBridgeFactory {
     fun create(): Orch8JsonBridge
 }
 
+/** Optional extension for per-call capsule signing without a callback registry. */
+interface Orch8CapsuleSigningBridge {
+    fun exportCapsule(argsJson: String, signature: Orch8BridgeCapsuleSignature): String
+}
+
+interface Orch8BridgeCapsuleSignature {
+    /** Return a signature or a sanitized failure in the normal JSON envelope. */
+    fun sign(digest: String): String
+}
+
 /** Engine → Kotlin callbacks. Implemented in Kotlin, invoked by the Swift bridge. */
 interface Orch8BridgeCallbacks {
     /**

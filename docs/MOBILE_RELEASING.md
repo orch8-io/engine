@@ -136,3 +136,11 @@ Review the resulting diffs, then commit, tag and push them yourself.
   at resolvable, version-aligned native packages.
 - `packages/swift/Sources/Orch8Mobile/Orch8Mobile.swift` declares
   `orch8MobileVersion = "X.Y.Z"`; `sync-swift-distribution.sh` fails otherwise.
+## Published Android upgrades
+
+The published mobile starter workflow installs the previous stable Maven SDK
+in the Android fixture and records an inspection with the emulator offline.
+It then installs the candidate APK over the same app data. The upgraded app
+reopens its original database and submits the queued inspection to a
+loopback Orch8 server. The workflow checks the original submission ID, the
+acknowledged execution ID, and the server's count of one receipt.

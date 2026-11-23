@@ -96,6 +96,100 @@ async fn post(
 }
 
 #[tokio::test]
+async fn canary_requires_each_designated_executor_to_have_current_revision_readiness() {
+    use orch8_storage::AdminStore as _;
+    use orch8_types::cluster::{ClusterNode, NodeStatus};
+    use orch8_types::ids::SequenceId;
+
+    let server = spawn_test_server().await;
+    let base = server.v1_url();
+    let client = reqwest::Client::new();
+    let versions = publish_versions(&base, &client).await;
+    let release = create_release(&base, &client, &versions, json!([])).await;
+    let path = format!("/releases/{}", release["id"].as_str().unwrap());
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &format!("{path}/validate"),
+            json!({"skip":true})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let now = chrono::Utc::now();
+    let ids = [Uuid::now_v7(), Uuid::now_v7()];
+    for id in ids {
+        server
+            .storage
+            .register_node(&ClusterNode {
+                id,
+                name: id.to_string(),
+                status: NodeStatus::Active,
+                registered_at: now,
+                last_heartbeat_at: now,
+                drain: false,
+                drain_started_at: None,
+                stopped_at: None,
+                capabilities_withdrawn: false,
+                execution_handoff_evidence: None,
+            })
+            .await
+            .unwrap();
+    }
+    let candidate = SequenceId::from_uuid(versions.candidate_id);
+    let baseline = SequenceId::from_uuid(versions.baseline_id);
+    let expiry = now + chrono::Duration::seconds(90);
+    server
+        .storage
+        .record_wasm_revision_ready(ids[0], candidate, expiry)
+        .await
+        .unwrap();
+    server
+        .storage
+        .record_wasm_revision_ready(ids[1], baseline, expiry)
+        .await
+        .unwrap();
+    let start = format!("{path}/canary");
+    let request = json!({"percent":10, "ready_executor_ids": ids});
+    assert_eq!(
+        post(&base, &client, &start, request.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    server
+        .storage
+        .record_wasm_revision_ready(ids[1], candidate, now - chrono::Duration::seconds(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        post(&base, &client, &start, request.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    server
+        .storage
+        .record_wasm_revision_ready(ids[1], candidate, expiry)
+        .await
+        .unwrap();
+    assert_eq!(
+        post(&base, &client, &start, request).await.0,
+        StatusCode::OK
+    );
+    server.storage.drain_node(ids[1]).await.unwrap();
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &format!("{path}/promote"),
+            json!({"force":true, "ready_executor_ids":ids})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // full lifecycle walkthrough reads better linear
 async fn release_lifecycle_validate_canary_promote() {
     let srv = spawn_test_server().await;

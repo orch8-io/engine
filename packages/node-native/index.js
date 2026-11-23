@@ -26,22 +26,34 @@ function toJson(value, what) {
   }
 }
 
-function wrapHandler(name, fn) {
+function wrapHandler(name, fn, activeHandlers) {
   if (typeof fn !== 'function') throw new TypeError(`handler '${name}' must be a function`)
   // The native side always receives a resolved JSON envelope, so neither a
   // synchronous throw nor a rejection can escape into the addon.
   return async (requestJson) => {
     try {
       const req = JSON.parse(requestJson)
-      const output = await fn({
-        params: req.params,
-        data: req.data,
-        outputs: req.outputs,
-        instanceId: req.instance_id,
-        stepId: req.step_id,
-        attempt: req.attempt,
-      })
-      return JSON.stringify({ ok: output === undefined ? null : output })
+      const controller = new AbortController()
+      const instanceId = req.instance_id
+      const active = activeHandlers.get(instanceId) ?? new Set()
+      activeHandlers.set(instanceId, active)
+      active.add(controller)
+      try {
+        const output = await fn({
+          params: req.params,
+          data: req.data,
+          outputs: req.outputs,
+          instanceId,
+          stepId: req.step_id,
+          attempt: req.attempt,
+          signal: controller.signal,
+        })
+        controller.signal.throwIfAborted()
+        return JSON.stringify({ ok: output === undefined ? null : output })
+      } finally {
+        active.delete(controller)
+        if (active.size === 0) activeHandlers.delete(instanceId)
+      }
     } catch (error) {
       return JSON.stringify({ error: hostError(error) })
     }
@@ -50,6 +62,7 @@ function wrapHandler(name, fn) {
 
 /** A durable workflow engine persisted in one SQLite file, in-process. */
 class Engine {
+  #activeHandlers = new Map()
   /** Open (or create) the database at `path`. */
   static async open(path) {
     if (typeof path !== 'string' || path.length === 0) {
@@ -64,7 +77,7 @@ class Engine {
 
   /** Register a step handler. Register all handlers before the first other call. */
   handler(name, fn) {
-    this._inner.register(name, wrapHandler(name, fn))
+    this._inner.register(name, wrapHandler(name, fn, this.#activeHandlers))
     return this
   }
 
@@ -83,9 +96,20 @@ class Engine {
     )
   }
 
+  /** Start a transactional batch and return one instance ID per input position. */
+  async startBatch(items) {
+    if (!Array.isArray(items)) throw new TypeError('startBatch expects an array')
+    const request = items.map(({ name, input, version, idempotencyKey }) => ({
+      name, input, version, idempotency_key: idempotencyKey,
+    }))
+    return JSON.parse(await this._inner.startBatch(toJson(request, 'batch')))
+  }
+
   /** Drive the engine until the instance settles or the scheduling budget elapses. Storage reads can continue past `timeoutMs`. */
   async run(id, options = {}) {
-    return JSON.parse(await this._inner.run(id, options.timeoutMs ?? undefined))
+    return JSON.parse(await this._inner.run(
+      id, options.timeoutMs ?? undefined, options.observerTimeoutMs ?? undefined,
+    ))
   }
 
   /** Current snapshot `{ id, state, data, outputs }`. */
@@ -93,9 +117,33 @@ class Engine {
     return JSON.parse(await this._inner.get(id))
   }
 
+  /** Read one output by block and persisted attempt number. */
+  async getOutput(id, block, attempt) {
+    return JSON.parse(await this._inner.getOutput(id, block, attempt))
+  }
+
+  /** Iterate newest-first by instance ID. `sequenceId` is returned by deploy. */
+  async *iterInstances({ state, sequenceId, pageSize = 100 } = {}) {
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 1000) {
+      throw new RangeError('pageSize must be an integer between 1 and 1000')
+    }
+    let before
+    while (true) {
+      const page = JSON.parse(await this._inner.listInstancePage(state, sequenceId, before, pageSize))
+      before = page.at(-1)?.id
+      yield* page
+      if (page.length < pageSize) return
+    }
+  }
+
   /** Send `pause` | `resume` | `cancel` | `update_context` or a custom signal. */
-  signal(id, signal, payload) {
-    return this._inner.signal(id, signal, toJson(payload, 'payload'))
+  async signal(id, signal, payload) {
+    await this._inner.signal(id, signal, toJson(payload, 'payload'))
+    const instanceId = id.toLowerCase()
+    if (signal === 'cancel' && this.#activeHandlers.has(instanceId)
+      && await this._inner.interruptRunningInstance(id)) {
+      for (const controller of this.#activeHandlers.get(instanceId) ?? []) controller.abort()
+    }
   }
 
   /** Stop the engine and release the database. */

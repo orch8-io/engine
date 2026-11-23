@@ -845,11 +845,20 @@ pub(super) async fn update_context_externalized(
         &id.to_string(),
         threshold_bytes,
     );
-    let ctx_str = serde_json::to_string(&ctx_clone)?;
+    update_prepared(storage, id, &ctx_clone, &refs).await
+}
+
+pub(super) async fn update_prepared(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    context: &ExecutionContext,
+    payloads: &[(String, serde_json::Value)],
+) -> Result<(), StorageError> {
+    let ctx_str = serde_json::to_string(context)?;
 
     let mut tx = storage.pool.begin().await?;
 
-    for (ref_key, payload) in &refs {
+    for (ref_key, payload) in payloads {
         insert_externalized_row(&mut tx, id, ref_key, payload).await?;
     }
 
@@ -864,6 +873,33 @@ pub(super) async fn update_context_externalized(
     Ok(())
 }
 
+pub(super) async fn update_prepared_cas(
+    storage: &SqliteStorage,
+    id: InstanceId,
+    context: &ExecutionContext,
+    payloads: &[crate::externalizing::ExternalizedRef],
+    expected_updated_at: DateTime<Utc>,
+    claim_token: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
+    let mut tx = if let Some(token) = claim_token {
+        let Some(tx) = super::claimed_writes::begin(storage, id, token).await? else {
+            return Ok(false);
+        };
+        tx
+    } else {
+        super::helpers::begin_immediate(&storage.pool).await?
+    };
+    if !update_context_cas_on(&mut tx, id, context, expected_updated_at).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    for (key, payload) in payloads {
+        insert_externalized_row(&mut tx, id, key, payload).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// Transactional single-instance create with externalization. SQLite twin of
 /// `super::super::postgres::instances::create_externalized`.
 pub(super) async fn create_externalized(
@@ -872,6 +908,7 @@ pub(super) async fn create_externalized(
     threshold_bytes: u32,
 ) -> Result<(), StorageError> {
     let mut inst_clone = instance.clone();
+    crate::externalizing::escape_literals(&mut inst_clone.context.data);
     let refs = crate::externalizing::externalize_fields(
         &mut inst_clone.context.data,
         &instance.id.into_uuid().to_string(),
@@ -906,37 +943,50 @@ pub(super) async fn create_batch_externalized(
         return Ok(0);
     }
 
-    let mut prepared: Vec<(TaskInstance, Vec<(String, serde_json::Value)>)> =
-        Vec::with_capacity(instances.len());
-    for inst in instances {
-        let mut c = inst.clone();
-        let refs = crate::externalizing::externalize_fields(
-            &mut c.context.data,
-            &inst.id.into_uuid().to_string(),
-            threshold_bytes,
-        );
-        prepared.push((c, refs));
+    let prepared: Vec<_> = instances
+        .iter()
+        .cloned()
+        .map(|mut instance| {
+            crate::externalizing::escape_literals(&mut instance.context.data);
+            let payloads = crate::externalizing::externalize_fields(
+                &mut instance.context.data,
+                &instance.id.to_string(),
+                threshold_bytes,
+            );
+            crate::externalizing::PreparedInstance { instance, payloads }
+        })
+        .collect();
+    create_prepared(storage, &prepared).await
+}
+
+pub(super) async fn create_prepared(
+    storage: &SqliteStorage,
+    prepared: &[crate::externalizing::PreparedInstance],
+) -> Result<u64, StorageError> {
+    if prepared.is_empty() {
+        return Ok(0);
     }
 
     let mut tx = storage.pool.begin().await?;
 
     // Step 1: insert marker-swapped task_instances rows first so the FK
     // on externalized_state.instance_id is satisfied when children land.
-    for (inst, _) in &prepared {
+    for entry in prepared {
+        let inst = &entry.instance;
         bind_instance_insert(sqlx::query(INSTANCE_INSERT_SQL), inst)?
             .execute(&mut *tx)
             .await?;
     }
 
     // Step 2: externalized rows (per-instance keyed).
-    for (inst, refs) in &prepared {
-        for (ref_key, payload) in refs {
-            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
+    for entry in prepared {
+        for (ref_key, payload) in &entry.payloads {
+            insert_externalized_row(&mut tx, entry.instance.id, ref_key, payload).await?;
         }
     }
 
     tx.commit().await?;
-    Ok(instances.len() as u64)
+    Ok(prepared.len() as u64)
 }
 
 /// Insert (or upsert via INSERT OR REPLACE) one externalized_state row
@@ -1042,7 +1092,9 @@ pub(super) async fn merge_context_data_on(
             ctx.data = serde_json::Value::Object(serde_json::Map::new());
         }
         if let Some(obj) = ctx.data.as_object_mut() {
-            obj.insert(key.to_string(), value.clone());
+            let mut value = value.clone();
+            crate::externalizing::escape_literals(&mut value);
+            obj.insert(key.to_string(), value);
         }
         let ctx_json = serde_json::to_string(&ctx).map_err(StorageError::Serialization)?;
         sqlx::query("UPDATE task_instances SET context=?2, updated_at=?3 WHERE id=?1")

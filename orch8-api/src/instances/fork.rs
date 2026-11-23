@@ -141,7 +141,13 @@ pub async fn fork_instance(
 
     // Assemble the fork: same sequence/tenant/namespace, fresh identity and
     // runtime state, source context with the optional patch applied.
-    let mut context = source.context.clone();
+    let mut context = orch8_engine::externalized::resolve_context_markers(
+        state.storage.as_ref(),
+        source_id,
+        source.context.clone(),
+    )
+    .await
+    .map_err(|error| ApiError::from_storage(error, "instance context"))?;
     if let Some(patch) = patch {
         if !context.data.is_object() {
             context.data = serde_json::json!({});
@@ -154,6 +160,7 @@ pub async fn fork_instance(
     }
     // The fork starts from a clean engine slate (no current step, attempt 0);
     // only the requested execution mode carries over.
+    orch8_storage::externalizing::escape_literals(&mut context.data);
     context.runtime = RuntimeContext {
         dry_run: req.dry_run,
         ..RuntimeContext::default()

@@ -35,6 +35,8 @@ fn mk_task(queue: Option<&str>) -> WorkerTask {
         created_at: chrono::Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,

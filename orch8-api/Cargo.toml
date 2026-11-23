@@ -31,6 +31,7 @@ reqwest.workspace = true
 url.workspace = true
 hmac.workspace = true
 sha2.workspace = true
+tempfile.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 bytes.workspace = true
@@ -42,7 +43,6 @@ orch8-engine = { path = "../orch8-engine", default-features = false, features = 
 # Exercise identical durable results across the HTTP and gRPC transports.
 orch8-grpc = { path = "../orch8-grpc" }
 tonic.workspace = true
-tempfile.workspace = true
 # Direct database fixtures verify transport behavior after continuity history GC.
 sqlx.workspace = true
 tokio = { workspace = true, features = ["full"] }

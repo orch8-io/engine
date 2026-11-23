@@ -3,7 +3,7 @@ use super::SqliteStorage;
 use chrono::{DateTime, Utc};
 use orch8_types::{error::StorageError, ids::InstanceId, output::BlockOutput};
 
-async fn begin(
+pub(super) async fn begin(
     store: &SqliteStorage,
     instance_id: InstanceId,
     claim_token: DateTime<Utc>,
@@ -310,9 +310,46 @@ pub(super) async fn retire_effect_attempts(
     let Some(mut tx) = begin(store, id, token).await? else {
         return Ok(None);
     };
-    let count = super::effect_attempt::retire_on(&mut tx, tenant, id, blocks).await?;
+    let count = super::effect_attempt::retire_on(&mut tx, tenant, id, blocks, false).await?;
     tx.commit().await?;
     Ok(Some(count))
+}
+
+pub(super) async fn retire_composite_retry_effects(
+    store: &SqliteStorage,
+    tenant: &orch8_types::ids::TenantId,
+    id: InstanceId,
+    blocks: &[orch8_types::ids::BlockId],
+    token: DateTime<Utc>,
+) -> Result<crate::ClaimedRead<Option<orch8_types::continuity::EffectReceipt>>, StorageError> {
+    let Some(mut tx) = begin(store, id, token).await? else {
+        return Ok(crate::ClaimedRead::Lost);
+    };
+    for block in blocks {
+        let unresolved: Option<String> = sqlx::query_scalar(
+            "SELECT e.record FROM effect_receipts e
+             WHERE e.tenant_id=?1 AND e.state IN ('dispatched','unknown')
+               AND json_extract(e.record,'$.block_id')=?3
+               AND (e.instance_id=?2 OR EXISTS (
+                   SELECT 1 FROM continuity_locations l WHERE l.tenant_id=e.tenant_id
+                     AND l.instance_id=?2 AND l.continuity_id=e.continuity_id
+               ))
+             ORDER BY e.created_at, e.id LIMIT 1",
+        )
+        .bind(tenant.as_str())
+        .bind(id.to_string())
+        .bind(block.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(record) = unresolved {
+            let receipt = super::continuity::decode(&record)?;
+            tx.rollback().await?;
+            return Ok(crate::ClaimedRead::Value(Some(receipt)));
+        }
+    }
+    super::effect_attempt::retire_on(&mut tx, tenant, id, blocks, true).await?;
+    tx.commit().await?;
+    Ok(crate::ClaimedRead::Value(None))
 }
 
 /// The parent row stays locked until the new child has committed.

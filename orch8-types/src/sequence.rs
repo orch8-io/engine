@@ -14,6 +14,7 @@ pub const MOBILE_DEFAULT_BUILTINS: &[&str] = &[
     "noop",
     "log",
     "sleep",
+    "asl_wait",
     "fail",
     "transform",
     "assert",
@@ -1194,6 +1195,9 @@ pub struct EscalationDef {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct RetryPolicy {
     pub max_attempts: u32,
+    /// Distribution applied to the capped exponential delay.
+    #[serde(default, skip_serializing_if = "RetryJitter::is_legacy")]
+    pub jitter: RetryJitter,
     #[serde(default = "default_initial_backoff", with = "crate::serde_duration")]
     #[schema(value_type = u64)]
     pub initial_backoff: Duration,
@@ -1206,6 +1210,57 @@ pub struct RetryPolicy {
     pub retry_if: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_retryable_codes: Option<Vec<String>>,
+    /// Ordered error-specific policies. The first matching rule owns the
+    /// result even when its budget is exhausted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(no_recursion)]
+    pub rules: Vec<NamedRetryRule>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct NamedRetryRule {
+    pub error_equals: Vec<String>,
+    #[serde(flatten)]
+    #[schema(no_recursion)]
+    pub retry: RetryPolicy,
+}
+
+impl RetryPolicy {
+    pub fn matching_rule(&self, actual: &str) -> Option<(usize, &Self)> {
+        self.rules.iter().enumerate().find_map(|(index, rule)| {
+            rule.error_equals
+                .iter()
+                .any(|pattern| asl_error_matches(pattern, actual))
+                .then_some((index, &rule.retry))
+        })
+    }
+}
+
+pub fn asl_error_matches(pattern: &str, actual: &str) -> bool {
+    match pattern {
+        "States.ALL" => !matches!(actual, "States.Runtime" | "States.DataLimitExceeded"),
+        "States.TaskFailed" => !matches!(
+            actual,
+            "States.Runtime" | "States.DataLimitExceeded" | "States.Timeout"
+        ),
+        other => actual == other,
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryJitter {
+    #[default]
+    Legacy,
+    None,
+    Full,
+}
+
+impl RetryJitter {
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde requires a borrowed argument.
+    fn is_legacy(&self) -> bool {
+        *self == Self::Legacy
+    }
 }
 
 fn default_initial_backoff() -> Duration {
@@ -1437,6 +1492,7 @@ pub const BUILTIN_HANDLER_NAMES: &[&str] = &[
     "noop",
     "log",
     "sleep",
+    "asl_wait",
     "fail",
     "http_request",
     "llm_call",
@@ -1507,9 +1563,123 @@ pub fn is_engine_only_builtin(handler: &str) -> bool {
 }
 
 impl SequenceDefinition {
+    /// Optional object schema for workflow-managed KV values.
+    #[must_use]
+    pub fn state_schema(&self) -> Option<&serde_json::Value> {
+        self.input_schema.as_ref()?.get("x-orch8-state-schema")
+    }
+
+    /// Optional schema for the immutable activation configuration. The
+    /// extension travels with the existing input schema across backends.
+    #[must_use]
+    pub fn config_schema(&self) -> Option<&serde_json::Value> {
+        self.input_schema.as_ref()?.get("x-orch8-config-schema")
+    }
+
+    /// Optional schema for the output history returned to a parent workflow.
+    #[must_use]
+    pub fn child_result_schema(&self) -> Option<&serde_json::Value> {
+        self.input_schema
+            .as_ref()?
+            .get("x-orch8-child-result-schema")
+    }
+
+    /// JSON Pointers relative to `context.data` declared on the input schema.
+    pub fn externalized_context_paths(&self) -> impl Iterator<Item = &str> {
+        self.input_schema
+            .as_ref()
+            .and_then(|schema| schema.get("x-orch8-externalize"))
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+    }
+
+    fn validate_externalized_context_paths(&self) -> Result<(), SequenceValidationError> {
+        let Some(paths) = self
+            .input_schema
+            .as_ref()
+            .and_then(|schema| schema.get("x-orch8-externalize"))
+        else {
+            return Ok(());
+        };
+        let invalid = || {
+            block_err(
+                "(root)",
+                "x-orch8-externalize must contain distinct, non-overlapping JSON Pointers into context.data",
+            )
+        };
+        let paths = paths.as_array().ok_or_else(invalid)?;
+        let mut seen = std::collections::BTreeSet::new();
+        for path in paths {
+            let path = path
+                .as_str()
+                .filter(|path| is_context_pointer(path))
+                .ok_or_else(invalid)?;
+            if !seen.insert(path) {
+                return Err(invalid());
+            }
+        }
+        for path in seen.iter().copied() {
+            if path
+                .match_indices('/')
+                .skip(1)
+                .any(|(index, _)| seen.contains(&path[..index]))
+            {
+                return Err(invalid());
+            }
+        }
+        Ok(())
+    }
+
+    /// Ordered retry policy emitted by the Step Functions importer for a
+    /// Parallel or inline Map block.
+    pub fn composite_retry_policy(
+        &self,
+        block_id: &BlockId,
+    ) -> Result<Option<RetryPolicy>, serde_json::Error> {
+        self.composite_retry_values()
+            .and_then(|policies| policies.get(block_id.as_str()))
+            .map(|policy| serde_json::from_value(policy.clone()))
+            .transpose()
+    }
+
+    pub fn has_composite_retry_policies(&self) -> bool {
+        self.composite_retry_values()
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|policies| !policies.is_empty())
+    }
+
+    fn composite_retry_values(&self) -> Option<&serde_json::Value> {
+        self.input_schema.as_ref()?.get("x-orch8-composite-retry")
+    }
+
+    fn validate_composite_retries(
+        &self,
+        seen: &std::collections::HashSet<String>,
+    ) -> Result<(), SequenceValidationError> {
+        let Some(policies) = self.composite_retry_values() else {
+            return Ok(());
+        };
+        let policies = policies
+            .as_object()
+            .ok_or_else(|| block_err("(root)", "x-orch8-composite-retry must be an object"))?;
+        for (id, value) in policies {
+            if !seen.contains(id) {
+                return Err(block_err(id, "unknown block in x-orch8-composite-retry"));
+            }
+            let policy: RetryPolicy = serde_json::from_value(value.clone()).map_err(|error| {
+                block_err(id, format!("invalid composite retry policy: {error}"))
+            })?;
+            validate_retry(&policy, id)?;
+        }
+        Ok(())
+    }
+
     /// Structural validation performed at submit time (before the sequence
     /// reaches storage).
     pub fn validate(&self) -> Result<(), SequenceValidationError> {
+        self.validate_externalized_context_paths()?;
         if self.schema_version == 0 || self.schema_version > SEQUENCE_SCHEMA_VERSION {
             return Err(SequenceValidationError::InvalidBlock {
                 block_id: "(root)".into(),
@@ -1529,6 +1699,7 @@ impl SequenceDefinition {
         for block in &self.blocks {
             validate_block(block, &mut seen, 0)?;
         }
+        self.validate_composite_retries(&seen)?;
         // Depth is bounded by `validate_block` above, so this recursion is
         // safe to run afterwards.
         for block in self
@@ -1820,6 +1991,74 @@ pub fn visit_steps<'a>(block: &'a BlockDefinition, visit: &mut dyn FnMut(&'a Ste
     }
 }
 
+/// Visit mutable step definitions in execution order.
+pub fn visit_steps_mut(block: &mut BlockDefinition, visit: &mut dyn FnMut(&mut StepDef)) {
+    let all = |blocks: &mut [BlockDefinition], visit: &mut dyn FnMut(&mut StepDef)| {
+        for child in blocks {
+            visit_steps_mut(child, visit);
+        }
+    };
+    match block {
+        BlockDefinition::Step(s) => visit(s),
+        BlockDefinition::Parallel(p) => {
+            for branch in &mut p.branches {
+                all(branch, visit);
+            }
+        }
+        BlockDefinition::Race(r) => {
+            for branch in &mut r.branches {
+                all(branch, visit);
+            }
+        }
+        BlockDefinition::Loop(l) => all(&mut l.body, visit),
+        BlockDefinition::ForEach(fe) => all(&mut fe.body, visit),
+        BlockDefinition::Router(r) => {
+            for route in &mut r.routes {
+                all(&mut route.blocks, visit);
+            }
+            if let Some(default) = &mut r.default {
+                all(default, visit);
+            }
+        }
+        BlockDefinition::TryCatch(tc) => {
+            all(&mut tc.try_block, visit);
+            all(&mut tc.catch_block, visit);
+            if let Some(finally) = &mut tc.finally_block {
+                all(finally, visit);
+            }
+        }
+        BlockDefinition::SubSequence(_) => {}
+        BlockDefinition::ABSplit(ab) => {
+            for variant in &mut ab.variants {
+                all(&mut variant.blocks, visit);
+            }
+        }
+        BlockDefinition::CancellationScope(cs) => all(&mut cs.blocks, visit),
+        BlockDefinition::Saga(saga) => {
+            for step in &mut saga.steps {
+                visit_steps_mut(&mut step.action, visit);
+                if let Some(compensation) = &mut step.compensation {
+                    visit_steps_mut(compensation, visit);
+                }
+            }
+        }
+    }
+}
+
+/// A non-root RFC 6901 JSON Pointer.
+pub fn is_context_pointer(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
+            return false;
+        }
+    }
+    true
+}
+
 fn block_err(id: &str, msg: impl Into<String>) -> SequenceValidationError {
     SequenceValidationError::InvalidBlock {
         block_id: id.into(),
@@ -1914,40 +2153,7 @@ fn validate_step(
     }
 
     if let Some(retry) = &s.retry {
-        if retry.max_attempts == 0 {
-            return Err(block_err(id, "retry.max_attempts must be > 0"));
-        }
-        if retry.max_attempts > MAX_RETRY_ATTEMPTS {
-            return Err(block_err(
-                id,
-                format!("retry.max_attempts must not exceed {MAX_RETRY_ATTEMPTS}"),
-            ));
-        }
-        if !retry.backoff_multiplier.is_finite() || retry.backoff_multiplier <= 0.0 {
-            return Err(block_err(
-                id,
-                "retry.backoff_multiplier must be finite and > 0",
-            ));
-        }
-        if retry.initial_backoff > retry.max_backoff {
-            return Err(block_err(
-                id,
-                "retry.initial_backoff must be <= retry.max_backoff",
-            ));
-        }
-        if let Some(expr) = &retry.retry_if
-            && expr.trim().is_empty()
-        {
-            return Err(block_err(id, "retry.retry_if must not be empty"));
-        }
-        if let Some(codes) = &retry.non_retryable_codes
-            && codes.iter().any(|c| c.trim().is_empty())
-        {
-            return Err(block_err(
-                id,
-                "retry.non_retryable_codes must not contain empty strings",
-            ));
-        }
+        validate_retry(retry, id)?;
     }
 
     if let Some(sw) = &s.send_window {
@@ -1982,6 +2188,60 @@ fn validate_step(
             })?;
     }
 
+    Ok(())
+}
+
+fn validate_retry(retry: &RetryPolicy, id: &str) -> Result<(), SequenceValidationError> {
+    if retry.max_attempts == 0 {
+        return Err(block_err(id, "retry.max_attempts must be > 0"));
+    }
+    if retry.max_attempts > MAX_RETRY_ATTEMPTS {
+        return Err(block_err(
+            id,
+            format!("retry.max_attempts must not exceed {MAX_RETRY_ATTEMPTS}"),
+        ));
+    }
+    if !retry.backoff_multiplier.is_finite() || retry.backoff_multiplier <= 0.0 {
+        return Err(block_err(
+            id,
+            "retry.backoff_multiplier must be finite and > 0",
+        ));
+    }
+    if retry.initial_backoff > retry.max_backoff {
+        return Err(block_err(
+            id,
+            "retry.initial_backoff must be <= retry.max_backoff",
+        ));
+    }
+    if retry.rules.len() > 64
+        || retry.rules.iter().any(|rule| {
+            rule.error_equals.is_empty()
+                || rule
+                    .error_equals
+                    .iter()
+                    .any(|code| code.is_empty() || code.len() > 256)
+                || !rule.retry.rules.is_empty()
+                || rule.retry.max_attempts > MAX_RETRY_ATTEMPTS
+                || !rule.retry.backoff_multiplier.is_finite()
+                || rule.retry.backoff_multiplier <= 0.0
+                || rule.retry.initial_backoff > rule.retry.max_backoff
+        })
+    {
+        return Err(block_err(id, "invalid ordered retry rules"));
+    }
+    if let Some(expr) = &retry.retry_if
+        && expr.trim().is_empty()
+    {
+        return Err(block_err(id, "retry.retry_if must not be empty"));
+    }
+    if let Some(codes) = &retry.non_retryable_codes
+        && codes.iter().any(|c| c.trim().is_empty())
+    {
+        return Err(block_err(
+            id,
+            "retry.non_retryable_codes must not contain empty strings",
+        ));
+    }
     Ok(())
 }
 
@@ -3587,6 +3847,8 @@ mod tests {
         };
         definition.retry = Some(RetryPolicy {
             max_attempts: 2,
+            jitter: RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(10),
             backoff_multiplier: 2.0,
@@ -3969,6 +4231,8 @@ mod tests {
         if let BlockDefinition::Step(ref mut sd) = s {
             sd.retry = Some(RetryPolicy {
                 max_attempts: 0,
+                jitter: RetryJitter::Legacy,
+                rules: Vec::new(),
                 initial_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(10),
                 backoff_multiplier: 2.0,
@@ -3987,6 +4251,8 @@ mod tests {
         if let BlockDefinition::Step(ref mut sd) = s {
             sd.retry = Some(RetryPolicy {
                 max_attempts: 3,
+                jitter: RetryJitter::Legacy,
+                rules: Vec::new(),
                 initial_backoff: Duration::from_secs(60),
                 max_backoff: Duration::from_secs(10),
                 backoff_multiplier: 2.0,
@@ -4053,6 +4319,8 @@ mod tests {
         if let BlockDefinition::Step(ref mut sd) = s {
             sd.retry = Some(RetryPolicy {
                 max_attempts: 3,
+                jitter: RetryJitter::Legacy,
+                rules: Vec::new(),
                 initial_backoff: Duration::from_secs(1),
                 max_backoff: Duration::from_secs(30),
                 backoff_multiplier: 2.0,

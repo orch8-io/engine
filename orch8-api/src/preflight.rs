@@ -115,10 +115,103 @@ async fn build_report(
     seq: &SequenceDefinition,
 ) -> PreflightReport {
     let now = Utc::now();
-    let inventory = collect_inventory(state, tenant_id).await;
+    let mut inventory = collect_inventory(state, tenant_id).await;
+    collect_pinned_wasm_modules(state, tenant_id, seq, &mut inventory).await;
     let mut report = run_preflight(seq, &inventory, now);
     deep_check_input_schema(seq, &mut report, now);
+    if !orch8_engine::child_contracts::pinned_child_revisions(seq).is_empty() {
+        let check = match pinned_child_findings(state, tenant_id, seq, now).await {
+            Ok(findings) if findings.is_empty() => PreflightCheck::pass(
+                "pinned_child_contracts",
+                "no pinned child boundary mismatch",
+            ),
+            Ok(findings) => PreflightCheck::with_status(
+                "pinned_child_contracts",
+                PreflightStatus::Fail,
+                "incompatible pinned child boundaries",
+                findings,
+            ),
+            Err(_) => PreflightCheck::with_status(
+                "pinned_child_contracts",
+                PreflightStatus::Unknown,
+                "could not load pinned child contracts",
+                vec![],
+            ),
+        };
+        report.overall = report.overall.max(check.status);
+        report.checks.push(check);
+    }
     report
+}
+
+pub(crate) async fn pinned_child_findings(
+    state: &AppState,
+    tenant: &TenantId,
+    parent: &SequenceDefinition,
+    now: chrono::DateTime<Utc>,
+) -> Result<Vec<Finding>, ApiError> {
+    let mut children = std::collections::BTreeMap::new();
+    for (name, version) in orch8_engine::child_contracts::pinned_child_revisions(parent) {
+        if let Some(child) = state
+            .storage
+            .get_sequence_by_name(tenant, &parent.namespace, &name, Some(version))
+            .await
+            .map_err(|error| ApiError::from_storage(error, "pinned child sequence"))?
+        {
+            children.insert((name, version), child);
+        }
+    }
+    Ok(orch8_engine::child_contracts::analyze(
+        parent, &children, now,
+    ))
+}
+
+async fn collect_pinned_wasm_modules(
+    state: &AppState,
+    tenant_id: &TenantId,
+    sequence: &SequenceDefinition,
+    inventory: &mut RuntimeInventory,
+) {
+    use orch8_types::plugin::{MAX_SHARED_WASM_BYTES, WasmArtifactDigest};
+    use orch8_types::sequence::{StepDef, visit_steps};
+    let mut addresses = std::collections::BTreeSet::new();
+    let mut collect = |step: &StepDef| {
+        if let Some(source) = orch8_engine::handlers::wasm_plugin::parse_plugin_name(&step.handler)
+            && WasmArtifactDigest::from_source(source)
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            addresses.insert(source.to_owned());
+        }
+    };
+    for block in sequence
+        .blocks
+        .iter()
+        .chain(sequence.on_cancel.iter().flatten())
+        .chain(sequence.on_failure.iter().flatten())
+    {
+        visit_steps(block, &mut collect);
+    }
+    for source in addresses {
+        let Ok(Some(digest)) = WasmArtifactDigest::from_source(&source) else {
+            continue;
+        };
+        if state
+            .storage
+            .get_shared_wasm_module(tenant_id.as_str(), &digest, MAX_SHARED_WASM_BYTES as u64)
+            .await
+            .is_ok_and(|bytes| bytes.is_some())
+        {
+            inventory
+                .plugins
+                .get_or_insert_with(Vec::new)
+                .push(PluginInfo {
+                    name: source,
+                    enabled: true,
+                });
+        }
+    }
 }
 
 /// Replace the engine's structural `input_schema_valid` check with a full

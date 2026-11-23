@@ -20,8 +20,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use orch8::{
-    CreateInstanceOptions, Engine, EngineError, ExecutionContext, InstanceId, InstanceState,
-    Namespace, SequenceId, SignalType, StepContext, StepError, Storage,
+    CreateInstanceOptions, Engine, EngineError, ExecutionContext, InstanceFilter, InstanceId,
+    InstanceState, Namespace, SequenceId, SignalType, StepContext, StepError, Storage,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::Mutex as AsyncMutex;
@@ -35,6 +35,14 @@ mod passes;
 pub type InvokeFuture = Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
 /// A host handler: takes the JSON request, resolves to the JSON reply.
 pub type Invoke = Arc<dyn Fn(Invocation) -> InvokeFuture + Send + Sync>;
+
+#[derive(Debug)]
+pub enum RunError {
+    ObserverTimeout,
+    Engine(String),
+}
+
+pub const OBSERVER_TIMEOUT_MESSAGE: &str = "run observer deadline elapsed";
 
 #[derive(Clone)]
 struct Deployed {
@@ -61,6 +69,7 @@ pub struct DurableEngine {
     closed: Arc<AtomicBool>,
     passes: passes::Passes,
     callbacks: Arc<callbacks::Budget>,
+    callback_drain: Arc<callbacks::Drain>,
     database: Mutex<Option<Arc<database::Owner>>>,
 }
 
@@ -92,6 +101,7 @@ impl DurableEngine {
             closed: Arc::new(AtomicBool::new(false)),
             passes: passes::Passes::new(pass_limit),
             callbacks: callbacks::Budget::shared(),
+            callback_drain: Arc::default(),
             database: Mutex::new(None),
         }
     }
@@ -170,7 +180,12 @@ impl DurableEngine {
         for (name, invoke) in handlers {
             builder = builder.deferred_effect_handler(
                 &name,
-                owned_host_handler_with_budget(invoke, self.closed.clone(), self.callbacks.clone()),
+                owned_host_handler_with_budget(
+                    invoke,
+                    self.closed.clone(),
+                    self.callbacks.clone(),
+                    self.callback_drain.clone(),
+                ),
             );
         }
         let (engine, database) = database::initialize(database, builder.build()).await?;
@@ -250,20 +265,7 @@ impl DurableEngine {
         version: Option<i32>,
     ) -> Result<String, String> {
         let engine = self.engine().await?;
-        let deployed = {
-            let sequences = lock(&self.sequences);
-            let versions = sequences.get(name).map(Vec::as_slice).unwrap_or_default();
-            match version {
-                Some(v) => versions.iter().find(|d| d.version == v).cloned(),
-                None => versions.iter().max_by_key(|d| d.version).cloned(),
-            }
-        }
-        .ok_or_else(|| {
-            format!(
-                "sequence '{name}' is not deployed by this engine; call deploy() first \
-                 (deploy is idempotent, so do it on every startup)"
-            )
-        })?;
+        let deployed = self.deployed_sequence(name, version)?;
         let data = match input_json.map(serde_json::from_str::<Value>).transpose() {
             Ok(None | Some(Value::Null)) => json!({}),
             Ok(Some(value @ Value::Object(_))) => value,
@@ -288,11 +290,135 @@ impl DurableEngine {
         Ok(id.to_string())
     }
 
-    /// Drive the scheduler until the instance is completed, failed,
-    /// cancelled, paused or waiting (for a signal/event), or the scheduling
-    /// budget elapses. Initialization and snapshot reads can continue beyond
-    /// that budget. Returns the snapshot JSON either way.
+    pub async fn start_batch(&self, items_json: &str) -> Result<String, String> {
+        let values: Vec<Value> = serde_json::from_str(items_json)
+            .map_err(|error| format!("invalid start batch: {error}"))?;
+        if values.len() > 1000 {
+            return Err("instance batch may contain at most 1000 entries".into());
+        }
+        let mut items = Vec::with_capacity(values.len());
+        for (index, value) in values.into_iter().enumerate() {
+            let item = (|| {
+                let Value::Object(mut object) = value else {
+                    return Err("expected an object".into());
+                };
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or("name is required")?;
+                let version = object
+                    .get("version")
+                    .map(|value| serde_json::from_value::<Option<i32>>(value.clone()).map_err(err))
+                    .transpose()?
+                    .flatten();
+                let deployed = self.deployed_sequence(name, version)?;
+                let key = match object.remove("idempotency_key") {
+                    Some(Value::String(key)) if !key.is_empty() => key,
+                    _ => return Err("a nonempty idempotency key is required".into()),
+                };
+                let data = match object.remove("input") {
+                    None | Some(Value::Null) => json!({}),
+                    Some(value @ Value::Object(_)) => value,
+                    _ => return Err("input must be a JSON object".into()),
+                };
+                Ok((
+                    deployed.id,
+                    CreateInstanceOptions {
+                        namespace: deployed.namespace,
+                        context: ExecutionContext {
+                            data,
+                            ..Default::default()
+                        },
+                        idempotency_key: Some(key),
+                        ..Default::default()
+                    },
+                ))
+            })()
+            .map_err(|error: String| format!("batch item {index}: {error}"))?;
+            items.push(item);
+        }
+        let ids = self
+            .engine()
+            .await?
+            .create_instance_batch(items)
+            .await
+            .map_err(err)?;
+        serde_json::to_string(&ids).map_err(err)
+    }
+
+    fn deployed_sequence(&self, name: &str, version: Option<i32>) -> Result<Deployed, String> {
+        let sequences = lock(&self.sequences);
+        let versions = sequences.get(name).map(Vec::as_slice).unwrap_or_default();
+        match version {
+            Some(v) => versions.iter().find(|d| d.version == v).cloned(),
+            None => versions.iter().max_by_key(|d| d.version).cloned(),
+        }
+        .ok_or_else(|| {
+            format!(
+                "sequence '{name}' is not deployed by this engine; call deploy() first \
+                 (deploy is idempotent, so do it on every startup)"
+            )
+        })
+    }
+
+    /// Bound observation independently of the scheduling budget. A timeout
+    /// leaves any admitted scheduler pass in its original owner.
+    pub async fn run_with_observer_deadline(
+        self: &Arc<Self>,
+        id: &str,
+        scheduling_timeout: Option<Duration>,
+        observer_timeout: Option<Duration>,
+    ) -> Result<String, RunError> {
+        let Some(timeout) = observer_timeout else {
+            return self
+                .run(id, scheduling_timeout)
+                .await
+                .map_err(RunError::Engine);
+        };
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            RunError::Engine("observer timeout is too large for the monotonic clock".into())
+        })?;
+        if timeout.is_zero() {
+            return Err(RunError::ObserverTimeout);
+        }
+        let engine = self.clone();
+        let id = id.to_owned();
+        // SQL decoding can do synchronous work after I/O resolves. Keep it
+        // outside the task that observes the deadline.
+        let mut observation = tokio::spawn(async move {
+            engine
+                .run_until(&id, scheduling_timeout, Some(deadline))
+                .await
+        });
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(deadline.into()) => {
+                observation.abort();
+                Err(RunError::ObserverTimeout)
+            },
+            result = &mut observation => {
+                if Instant::now() >= deadline {
+                    Err(RunError::ObserverTimeout)
+                } else {
+                    result.map_err(|error| RunError::Engine(format!("run observation failed: {error}")))?
+                        .map_err(RunError::Engine)
+                }
+            }
+        }
+    }
+
+    /// Drive scheduling and read the instance snapshot once it settles or the
+    /// scheduling budget expires.
     pub async fn run(&self, id: &str, timeout: Option<Duration>) -> Result<String, String> {
+        self.run_until(id, timeout, None).await
+    }
+
+    async fn run_until(
+        &self,
+        id: &str,
+        timeout: Option<Duration>,
+        observer_deadline: Option<Instant>,
+    ) -> Result<String, String> {
         let id = parse_instance_id(id)?;
         let now = Instant::now();
         let deadline = timeout
@@ -300,7 +426,10 @@ impl DurableEngine {
                 now.checked_add(duration)
                     .ok_or_else(|| "run timeout is too large for the monotonic clock".to_string())
             })
-            .transpose()?;
+            .transpose()?
+            .into_iter()
+            .chain(observer_deadline)
+            .min();
         let engine = self.engine().await?;
         let mut observed_unparked = false;
         loop {
@@ -366,6 +495,63 @@ impl DurableEngine {
         self.snapshot(&engine, parse_instance_id(id)?).await
     }
 
+    pub async fn get_output(&self, id: &str, block: &str, attempt: u16) -> Result<String, String> {
+        let engine = self.engine().await?;
+        let output = engine
+            .get_output(
+                parse_instance_id(id)?,
+                &orch8_types::ids::BlockId::new(block),
+                attempt,
+            )
+            .await
+            .map_err(err)?;
+        serde_json::to_string(&output).map_err(err)
+    }
+
+    pub async fn list_instance_page(
+        &self,
+        state: Option<&str>,
+        sequence_id: Option<&str>,
+        before: Option<&str>,
+        page_size: u32,
+    ) -> Result<String, String> {
+        if !(1..=1000).contains(&page_size) {
+            return Err("page size must be between 1 and 1000".into());
+        }
+        let filter = InstanceFilter {
+            states: state
+                .map(str::parse::<InstanceState>)
+                .transpose()?
+                .map(|state| vec![state]),
+            sequence_id: sequence_id
+                .map(|id| {
+                    serde_json::from_value(Value::String(id.into()))
+                        .map_err(|_| format!("invalid sequence id '{id}'"))
+                })
+                .transpose()?,
+            ..Default::default()
+        };
+        let before = before.map(parse_instance_id).transpose()?;
+        let instances = self
+            .engine()
+            .await?
+            .list_instances_before(&filter, before, page_size)
+            .await
+            .map_err(err)?;
+        let summaries: Vec<_> = instances
+            .into_iter()
+            .map(|instance| {
+                json!({
+                    "id": instance.id,
+                    "sequence_id": instance.sequence_id,
+                    "state": instance.state,
+                    "created_at": instance.created_at,
+                })
+            })
+            .collect();
+        serde_json::to_string(&summaries).map_err(err)
+    }
+
     async fn snapshot(&self, engine: &Engine, id: InstanceId) -> Result<String, String> {
         let instance = engine.get_instance(id).await.map_err(err)?;
         let outputs = latest_outputs(engine.current_block_outputs(id).await.map_err(err)?, true);
@@ -405,6 +591,15 @@ impl DurableEngine {
             .map_err(err)
     }
 
+    #[allow(dead_code)] // The Node binding exposes cooperative cancellation.
+    pub async fn interrupt_running_instance(&self, id: &str) -> Result<bool, String> {
+        self.engine()
+            .await?
+            .interrupt_running_instance(parse_instance_id(id)?)
+            .await
+            .map_err(err)
+    }
+
     fn release_database(&self) {
         if let Some(owner) = lock(&self.database).take() {
             owner.release();
@@ -413,8 +608,17 @@ impl DurableEngine {
 
     /// Stop accepting calls and release the database. Idempotent.
     pub async fn close(&self) {
+        self.close_with_drain(false).await;
+    }
+
+    /// Optionally retain database ownership until host invocations settle.
+    pub async fn close_with_drain(&self, drain: bool) {
+        self.callback_drain.close();
         self.closed.store(true, Ordering::Release);
         self.passes.stop();
+        if drain {
+            self.callback_drain.wait().await;
+        }
         let mut cached = self.engine.lock().await;
         if let Some(engine) = cached.as_ref() {
             engine.close().await;
@@ -439,6 +643,7 @@ impl Drop for DurableEngine {
     fn drop(&mut self) {
         // Signal the owned pass without blocking a host finalizer. Its
         // coordinator requests engine shutdown and retains any live join.
+        self.callback_drain.close();
         self.closed.store(true, Ordering::Release);
         self.passes.stop();
     }
@@ -480,18 +685,20 @@ pub(crate) fn owned_host_handler(
     invoke: Invoke,
     closed: Arc<AtomicBool>,
 ) -> impl Fn(StepContext) -> InvokeStepFuture + Send + Sync + 'static {
-    owned_host_handler_with_budget(invoke, closed, callbacks::Budget::shared())
+    owned_host_handler_with_budget(invoke, closed, callbacks::Budget::shared(), Arc::default())
 }
 
 fn owned_host_handler_with_budget(
     invoke: Invoke,
     closed: Arc<AtomicBool>,
     budget: Arc<callbacks::Budget>,
+    drain: Arc<callbacks::Drain>,
 ) -> impl Fn(StepContext) -> InvokeStepFuture + Send + Sync + 'static {
     move |ctx: StepContext| {
         let invoke = Arc::clone(&invoke);
         let closed = Arc::clone(&closed);
         let budget = budget.clone();
+        let drain = drain.clone();
         Box::pin(async move {
             if closed.load(Ordering::Acquire) {
                 return Err(StepError::ClaimLost);
@@ -537,7 +744,8 @@ fn owned_host_handler_with_budget(
             if closed.load(Ordering::Acquire) {
                 return Err(StepError::ClaimLost);
             }
-            let reply = invoke(Invocation::new(request, physical))
+            let active = drain.enter().ok_or(StepError::ClaimLost)?;
+            let reply = invoke(Invocation::new(request, physical, active))
                 .await
                 .map_err(retryable)?;
             decode_reply(&reply)
@@ -569,5 +777,69 @@ fn decode_reply(reply: &str) -> Result<Value, StepError> {
         Err(StepError::Permanent { message, details })
     } else {
         Err(StepError::Retryable { message, details })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn transactional_start_batches_resolve_overlapping_idempotency_keys() {
+        let engine = DurableEngine::new(":memory:");
+        engine
+            .deploy(r#"{"name":"batch","blocks":[{"type":"step","id":"one","handler":"noop"}]}"#)
+            .await
+            .unwrap();
+        let left = r#"[{"name":"batch","idempotency_key":"left"},{"name":"batch","idempotency_key":"shared"}]"#;
+        let right = r#"[{"name":"batch","idempotency_key":"shared"},{"name":"batch","idempotency_key":"right"}]"#;
+        let (left, right) = tokio::join!(engine.start_batch(left), engine.start_batch(right));
+        let left: Vec<String> = serde_json::from_str(&left.unwrap()).unwrap();
+        let right: Vec<String> = serde_json::from_str(&right.unwrap()).unwrap();
+        assert_eq!(left[1], right[0]);
+        assert_ne!(left[0], right[1]);
+        let rows = engine
+            .list_instance_page(None, None, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Vec<Value>>(&rows).unwrap().len(), 3);
+        engine.close().await;
+    }
+
+    #[tokio::test]
+    async fn instance_page_rejects_invalid_arguments_before_opening_database() {
+        let engine = DurableEngine::new(":memory:");
+        for (state, sequence, cursor, size, message) in [
+            (None, None, None, 0, "page size"),
+            (None, None, None, 1001, "page size"),
+            (Some("bad"), None, None, 1, "unknown instance state"),
+            (None, Some("bad"), None, 1, "invalid sequence id"),
+            (None, None, Some("bad"), 1, "invalid instance id"),
+        ] {
+            let error = engine
+                .list_instance_page(state, sequence, cursor, size)
+                .await
+                .unwrap_err();
+            assert!(error.contains(message), "{error}");
+        }
+        assert!(engine.engine.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn observer_deadline_bounds_waiting_for_engine_open() {
+        let engine = Arc::new(DurableEngine::new(":memory:"));
+        let opening = engine.engine.lock().await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            engine.run_with_observer_deadline(
+                &InstanceId::new().to_string(),
+                None,
+                Some(Duration::from_millis(10)),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(RunError::ObserverTimeout)));
+        assert!(opening.is_none());
     }
 }

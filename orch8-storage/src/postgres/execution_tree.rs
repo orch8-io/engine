@@ -98,6 +98,27 @@ pub(super) async fn get_tree_on(
     rows.into_iter().map(ExecutionNodeRow::into_node).collect()
 }
 
+pub(super) async fn get_page(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    after: Option<ExecutionNodeId>,
+    limit: u32,
+) -> Result<Vec<ExecutionNode>, StorageError> {
+    let query = if after.is_some() {
+        "SELECT id, instance_id, block_id, parent_id, block_type, branch_index, state, started_at, completed_at FROM execution_tree WHERE instance_id = $1 AND id > $3 ORDER BY id LIMIT $2"
+    } else {
+        "SELECT id, instance_id, block_id, parent_id, block_type, branch_index, state, started_at, completed_at FROM execution_tree WHERE instance_id = $1 ORDER BY id LIMIT $2"
+    };
+    let mut query = sqlx::query_as::<_, ExecutionNodeRow>(query)
+        .bind(instance_id.into_uuid())
+        .bind(i64::from(limit.min(1000)));
+    if let Some(after) = after.map(ExecutionNodeId::into_uuid) {
+        query = query.bind(after);
+    }
+    let rows = query.fetch_all(&store.pool).await?;
+    rows.into_iter().map(ExecutionNodeRow::into_node).collect()
+}
+
 pub(super) async fn update_node_state(
     store: &PostgresStorage,
     node_id: ExecutionNodeId,

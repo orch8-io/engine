@@ -275,6 +275,62 @@ pub const CATALOG: &[ErrorCodeEntry] = &[
         "Internal: the typed-dataflow compiler could not serialize the definition.",
         "Report this with the definition attached; other checks still ran."
     ),
+    entry!(
+        "ORCH8-V020",
+        "NUMERIC_OPERAND_TYPE",
+        Validation,
+        "Numeric operand is declared as a string",
+        "An arithmetic operator reads a value whose schema declares it as a string.",
+        "Provide a numeric value and declare its numeric type in the schema."
+    ),
+    entry!(
+        "ORCH8-V021",
+        "PRODUCER_RUNS_LATER",
+        Validation,
+        "Output producer executes after its consumer",
+        "A mandatory workflow input reads an output before its sequential producer can execute.",
+        "Move the producer earlier or supply a fallback for the missing value."
+    ),
+    entry!(
+        "ORCH8-V022",
+        "PRODUCER_MAY_NOT_RUN",
+        Validation,
+        "Output producer is conditional",
+        "A branch, guard, or loop can leave this output absent when another block reads it.",
+        "Make the producer unconditional or provide a fallback for paths where it has no output."
+    ),
+    entry!(
+        "ORCH8-V023",
+        "CHILD_INPUT_CONTRACT_MISMATCH",
+        Validation,
+        "Pinned child input is incompatible",
+        "A value supplied by a parent workflow conflicts with the pinned child input schema.",
+        "Align the input mapping with the named child revision's input schema."
+    ),
+    entry!(
+        "ORCH8-V024",
+        "CHILD_OUTPUT_CONTRACT_MISMATCH",
+        Validation,
+        "Pinned child output is incompatible",
+        "A parent workflow consumes a value that the pinned child result contract cannot supply.",
+        "Align the parent reference with the pinned child's output contract."
+    ),
+    entry!(
+        "ORCH8-V025",
+        "INVALID_CONFIG_SCHEMA",
+        Validation,
+        "Configuration schema is not a valid JSON Schema",
+        "The sequence's configuration schema could not be compiled.",
+        "Fix the reported schema error before supplying activation configuration."
+    ),
+    entry!(
+        "ORCH8-V026",
+        "INVALID_STATE_SCHEMA",
+        Validation,
+        "State schema is not a valid JSON Schema",
+        "The sequence's state schema could not be compiled.",
+        "Fix the reported schema error before deploying the sequence."
+    ),
     // ── Preflight readiness ───────────────────────────────────────────────
     entry!(
         "ORCH8-P001",

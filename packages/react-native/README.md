@@ -318,9 +318,15 @@ for an earlier revision of the same submission.
 />
 ```
 
-Implement `commitApproval` as a durable conditional write using the decision's
-`expectedRevision` and `idempotencyKey`. Return `"stale"` when the revision
-has changed, then refresh the inbox.
+Open `SqliteApprovalCommitAdapter` with an app-owned SQLite handle and the
+same account/catalog scope passed to the inbox. Call `recordApproval` with
+each source revision before displaying it and pass the adapter's `commit`
+as `onDecide`. The adapter stores one decision for the activation and
+returns `"accepted"` for an exact retry. Refresh the inbox on `"stale"`.
+If SQLite returns a storage-full error, the adapter returns `"storage_full"`
+and the same decision can be retried after space is reclaimed.
+Read the committed decision with `getDecision` when the host needs to
+apply that outcome to its workflow.
 
 `resolveOfflineConflict` returns a write against the observed server revision
 or an explicit review outcome. Apply its expected revision in the same atomic
@@ -328,9 +334,55 @@ write that stores the new value. `previewDataVisibility` lists field paths
 for your configured destination allowlists. Use the same policy at each
 actual disclosure boundary.
 
-`DurableMediaUploader` resumes chunks from storage callbacks supplied by the
-host. Back `compareAndSet` with a durable transaction, retain the same file
-contents throughout the upload, and use an idempotent server range endpoint.
+`DurableMediaUploader` resumes from the last server-acknowledged offset.
+Open `SqliteMediaUploadJournal` with a dedicated SQLite handle and create a
+record before scheduling the upload. The server range endpoint stores each
+validated range under the owning instance and verifies the whole-file
+SHA-256 before acknowledging the final range. The instance's configured
+artifact storage and encryption apply to the upload.
 Call `advance` again in a later eligible window if the connection drops.
 `orch8.getBackgroundDiagnostics()` reports outcomes for windows observed in
 the current client lifecycle.
+
+Use `prepareMediaUploadFile` to capture the identity, whole-file SHA-256,
+and per-chunk SHA-256 digests of an app-owned regular file on Android or iOS. The journal binds
+the manifest to the upload ID. The uploader uses its chunk size and verifies
+each requested range before sending it. If a file changes, the uploader
+keeps its last acknowledged offset and reports `MEDIA_FILE_CHANGED`.
+
+```ts
+import { openDatabaseAsync } from "expo-sqlite";
+import {
+  DurableMediaUploader,
+  createHttpMediaUploadTransport,
+  fileMediaUploadSource,
+  prepareMediaUploadFile,
+  SqliteMediaUploadJournal,
+} from "@orch8.io/react-native-orch8";
+
+const database = await openDatabaseAsync("uploads.db");
+const journal = await SqliteMediaUploadJournal.open(database);
+const file = await prepareMediaUploadFile(absoluteLocalPath);
+await journal.create(uploadId, file.length, file);
+const transport = createHttpMediaUploadTransport(
+  instanceId, accountBoundRequest, fileMediaUploadSource(),
+);
+await transport.begin(uploadId, file);
+const uploader = new DurableMediaUploader(journal, transport);
+```
+
+Use a UUID as the upload ID. The request function resolves paths against
+`/v1` and supplies authorization for the account that owns the instance.
+
+
+Call `run.observeSnapshots(listener)` to receive scoped run snapshots from
+the native bridge. Remove the returned subscription when the view leaves.
+Retiring an account detaches its observations, and events from an earlier
+session epoch are discarded.
+
+Create an outcome reporter with
+`catalog.outcomeReporter(journal, credentials, deliver)` and a
+`SqliteAccountOutcomeJournal`. Enqueue a stable submission ID and revision.
+The reporter sends pending rows for that catalog with credentials for the
+same account. It records a receipt only when the account, catalog,
+submission ID, and revision match.

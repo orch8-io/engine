@@ -570,3 +570,70 @@ mod tests {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod sqlite_ownership_tests {
+    use super::*;
+    use sqlx::Connection as _;
+
+    #[test]
+    fn sqlite_server_rejects_symbolic_alias_while_administrators_can_snapshot() {
+        let plane = ControlPlane::new(&Backend::Sqlite);
+        let mut first = plane.spawn("sqlite-owner", &[]);
+        let Db::Sqlite {
+            url,
+            _dir: directory,
+        } = &plane.db
+        else {
+            unreachable!();
+        };
+        let alias = directory.path().join("alias.db");
+        std::os::unix::fs::symlink(url, &alias).unwrap();
+        let env = vec![
+            ("ORCH8_STORAGE_BACKEND".into(), "sqlite".into()),
+            (
+                "ORCH8_DATABASE_URL".into(),
+                format!("sqlite://{}?mode=rwc", alias.display()),
+            ),
+            ("ORCH8_API_KEY".into(), ROOT_KEY.into()),
+            ("ORCH8_ENCRYPTION_KEY".into(), NODE_ENCRYPTION_KEY.into()),
+        ];
+        let mut second = ServerProcess::spawn(
+            "sqlite-contender",
+            env.clone(),
+            plane.logs.path().to_path_buf(),
+            free_addrs(),
+        );
+        let error = second.wait_ready(&plane.rt, &plane.http).unwrap_err();
+        assert!(
+            error.contains("SQLite database is already owned"),
+            "{error}"
+        );
+        second.kill();
+
+        let snapshot = directory.path().join("snapshot.db");
+        plane.block_on(async {
+            let options = sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(url)
+                .read_only(true);
+            let mut connection = sqlx::SqliteConnection::connect_with(&options)
+                .await
+                .unwrap();
+            sqlx::query("VACUUM main INTO ?")
+                .bind(snapshot.to_str().unwrap())
+                .execute(&mut connection)
+                .await
+                .unwrap();
+            connection.close().await.unwrap();
+        });
+        assert!(snapshot.metadata().unwrap().len() > 0);
+        first.kill();
+        let mut successor = ServerProcess::spawn(
+            "sqlite-successor",
+            env,
+            plane.logs.path().to_path_buf(),
+            free_addrs(),
+        );
+        successor.wait_initial_ready(&plane.rt, &plane.http);
+    }
+}

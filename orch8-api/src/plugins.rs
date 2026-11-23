@@ -6,15 +6,17 @@
 //! resolve to a host:port/Service.Method endpoint.
 
 use axum::Router;
-use axum::extract::{Json, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Json, Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use orch8_types::ids::TenantId;
-use orch8_types::plugin::{PluginDef, PluginType};
+use orch8_types::plugin::{
+    MAX_SHARED_WASM_BYTES, PluginDef, PluginType, WASM_ARTIFACT_SOURCE_PREFIX, WasmArtifactDigest,
+};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -22,10 +24,103 @@ use crate::error::ApiError;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/plugins", get(list_plugins).post(create_plugin))
+        .route("/plugins/modules/gc", post(collect_unused_modules))
+        .route(
+            "/plugins/modules/{digest}",
+            put(upload_module).layer(DefaultBodyLimit::max(MAX_SHARED_WASM_BYTES)),
+        )
         .route(
             "/plugins/{name}",
             get(get_plugin).delete(delete_plugin).patch(update_plugin),
         )
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct WasmCollectionRequest {
+    /// Age in seconds before an unreferenced module can be collected.
+    #[serde(default = "default_wasm_collection_grace")]
+    grace_seconds: u32,
+    /// Maximum number of modules to collect in this batch.
+    #[serde(default = "default_wasm_collection_limit")]
+    limit: u32,
+    /// Delete the selected modules. The default only produces a plan.
+    #[serde(default)]
+    apply: bool,
+}
+
+const fn default_wasm_collection_grace() -> u32 {
+    86_400
+}
+const fn default_wasm_collection_limit() -> u32 {
+    32
+}
+
+#[utoipa::path(
+    post, path = "/plugins/modules/gc", tag = "plugins",
+    request_body = WasmCollectionRequest,
+    responses((status = 200, description = "Unreferenced modules selected", body = serde_json::Value))
+)]
+pub(crate) async fn collect_unused_modules(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Query(query): Query<PluginQuery>,
+    Json(request): Json<WasmCollectionRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !(60..=31_536_000).contains(&request.grace_seconds) || !(1..=100).contains(&request.limit) {
+        return Err(ApiError::InvalidArgument(
+            "grace_seconds must be 60–31536000 and limit must be 1–100".into(),
+        ));
+    }
+    let tenant = crate::auth::enforce_tenant_create(
+        &tenant_ctx,
+        &TenantId::unchecked(query.tenant_id.unwrap_or_default()),
+    )?;
+    let cutoff = chrono::Utc::now() - chrono::Duration::seconds(i64::from(request.grace_seconds));
+    let digests = state
+        .storage
+        .collect_unused_wasm_modules(&tenant, cutoff, request.limit, request.apply)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "WASM module collection"))?;
+    Ok(Json(
+        serde_json::json!({"applied":request.apply,"sha256":digests}),
+    ))
+}
+
+#[utoipa::path(
+    put, path = "/plugins/modules/{digest}", tag = "plugins",
+    params(("digest" = String, Path, description = "Lowercase SHA-256 of the WASM binary"),
+           ("tenant_id" = Option<String>, Query)),
+    request_body(content = Vec<u8>, content_type = "application/wasm"),
+    responses((status = 200, description = "Verified source address", body = serde_json::Value),
+              (status = 413, description = "Module is too large"))
+)]
+pub(crate) async fn upload_module(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(digest): Path<String>,
+    Query(query): Query<PluginQuery>,
+    bytes: axum::body::Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let digest = WasmArtifactDigest::parse(&digest)
+        .map_err(|error| ApiError::InvalidArgument(error.into()))?;
+    if !bytes.starts_with(b"\0asm") || WasmArtifactDigest::for_bytes(&bytes) != digest {
+        return Err(ApiError::InvalidArgument(
+            "WASM artifact content does not match its address".into(),
+        ));
+    }
+    let tenant = crate::auth::enforce_tenant_create(
+        &tenant_ctx,
+        &TenantId::unchecked(query.tenant_id.unwrap_or_default()),
+    )?;
+    state
+        .storage
+        .put_shared_wasm_module(tenant.as_str(), &digest, bytes)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "WASM module"))?;
+    Ok(Json(serde_json::json!({
+        "sha256": digest.as_str(),
+        "source": format!("{WASM_ARTIFACT_SOURCE_PREFIX}{}", digest.as_str()),
+    })))
 }
 
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -115,6 +210,12 @@ async fn create_plugin(
 /// is the real boundary since the filesystem can change after registration.
 fn validate_source(plugin_type: &PluginType, source: &str) -> Result<(), ApiError> {
     if *plugin_type != PluginType::Wasm {
+        return Ok(());
+    }
+    if WasmArtifactDigest::from_source(source)
+        .map_err(|error| ApiError::InvalidArgument(error.into()))?
+        .is_some()
+    {
         return Ok(());
     }
     let bad = source.chars().any(char::is_control)
@@ -240,7 +341,7 @@ async fn delete_plugin(
 
     state
         .storage
-        .delete_plugin(&name)
+        .delete_plugin_exact(&plugin.tenant_id, &name)
         .await
         .map_err(|e| ApiError::from_storage(e, "plugin"))?;
 

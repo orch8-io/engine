@@ -174,12 +174,12 @@ pub fn run_preflight(
     let refs = serialized
         .as_ref()
         .map_or_else(SequenceRefs::default, collect_refs);
-    let checks = vec![
+    let mut checks = vec![
         check_definition(seq, now),
         check_lint(seq, now),
         check_input_schema(seq, now),
         check_output_schemas(serialized.as_ref(), now),
-        check_typed_dataflow(seq, now),
+        crate::dataflow_analysis::check_typed_dataflow(seq, now),
         check_when_guards(serialized.as_ref(), now),
         check_handlers(seq, &refs, inventory, now),
         check_plugins(&refs, inventory, now),
@@ -187,52 +187,43 @@ pub fn run_preflight(
         check_queues(&refs, inventory, now),
         check_sub_sequences(seq, &refs, inventory, now),
     ];
-    PreflightReport::new(seq.name.clone(), i64::from(seq.version), checks, now)
-}
-
-fn check_typed_dataflow(seq: &SequenceDefinition, now: DateTime<Utc>) -> PreflightCheck {
-    let report = crate::dataflow::compile(seq);
-    if report.findings.is_empty() {
-        return PreflightCheck::pass(
-            "typed_dataflow_compatible",
-            format!(
-                "{} typed reference(s) are compatible",
-                report.references_checked
+    if let Some(schema) = seq.config_schema() {
+        let check = match crate::input_schema::validate_config_schema(Some(schema)) {
+            Ok(()) => PreflightCheck::pass("config_schema_valid", "configuration schema validates"),
+            Err(error) => PreflightCheck::with_status(
+                "config_schema_valid",
+                PreflightStatus::Fail,
+                "configuration schema is invalid",
+                vec![Finding::new(
+                    "INVALID_CONFIG_SCHEMA",
+                    FindingSeverity::Error,
+                    error.to_string(),
+                    Confidence::Certain,
+                    now,
+                )],
             ),
-        );
+        };
+        checks.push(check);
     }
-    let findings: Vec<_> = report
-        .findings
-        .iter()
-        .map(|finding| {
-            let severity = match finding.severity {
-                crate::dataflow::DataflowSeverity::Warning => FindingSeverity::Warning,
-                crate::dataflow::DataflowSeverity::Error => FindingSeverity::Error,
-            };
-            Finding::new(
-                finding.code.clone(),
-                severity,
-                format!(
-                    "producer/reference '{}' -> consumer '{}': {}",
-                    finding.reference, finding.consumer, finding.summary
-                ),
-                Confidence::Certain,
-                now,
-            )
-            .with_resource(ResourceRef::new("block", finding.consumer.clone()))
-        })
-        .collect();
-    let status = if report.is_compatible() {
-        PreflightStatus::Warning
-    } else {
-        PreflightStatus::Fail
-    };
-    PreflightCheck::with_status(
-        "typed_dataflow_compatible",
-        status,
-        format!("{} typed dataflow finding(s)", findings.len()),
-        findings,
-    )
+    if let Some(schema) = seq.state_schema() {
+        let check = match crate::input_schema::validate_state_schema(Some(schema)) {
+            Ok(()) => PreflightCheck::pass("state_schema_valid", "state schema validates"),
+            Err(error) => PreflightCheck::with_status(
+                "state_schema_valid",
+                PreflightStatus::Fail,
+                "state schema is invalid",
+                vec![Finding::new(
+                    "INVALID_STATE_SCHEMA",
+                    FindingSeverity::Error,
+                    error.to_string(),
+                    Confidence::Certain,
+                    now,
+                )],
+            ),
+        };
+        checks.push(check);
+    }
+    PreflightReport::new(seq.name.clone(), i64::from(seq.version), checks, now)
 }
 
 fn unknown(id: &str, what: &str) -> PreflightCheck {
@@ -1517,7 +1508,7 @@ mod tests {
         let sources = [
             include_str!("preflight.rs"),
             include_str!("doctor.rs"),
-            include_str!("dataflow.rs"),
+            include_str!("dataflow_analysis.rs"),
             include_str!("../../orch8-api/src/preflight.rs"),
         ];
         let mut codes = Vec::new();
@@ -1530,8 +1521,10 @@ mod tests {
         }
         codes.extend(
             [
-                crate::dataflow::MISSING_PRODUCER,
-                crate::dataflow::SCHEMA_PATH_MISSING,
+                crate::dataflow_analysis::MISSING_PRODUCER,
+                crate::dataflow_analysis::PRODUCER_MAY_NOT_RUN,
+                crate::dataflow_analysis::PRODUCER_RUNS_LATER,
+                crate::dataflow_analysis::SCHEMA_PATH_MISSING,
             ]
             .map(String::from),
         );

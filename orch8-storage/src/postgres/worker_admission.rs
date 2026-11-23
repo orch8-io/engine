@@ -215,12 +215,20 @@ async fn publish_on(
     }
     super::worker_invocations::capture(conn, actual.id, Some(fence.expected_target())).await?;
     let admission = intent.admission(actual.id, receipt.as_ref());
-    sqlx::query("INSERT INTO worker_task_admissions(task_id,invocation_key,tenant_id,instance_id,record) VALUES($1,$2,$3,$4,$5)")
-        .bind(actual.id).bind(&admission.invocation_key).bind(fence.tenant_id.as_str()).bind(actual.instance_id.into_uuid()).bind(serde_json::to_value(&admission)?).execute(&mut *conn).await?;
+    insert_on(conn, &admission).await?;
     Ok(Publication::Published {
         task_id: actual.id,
         receipt: receipt.map(Box::new),
     })
+}
+
+pub(super) async fn insert_on(
+    conn: &mut sqlx::PgConnection,
+    admission: &WorkerDispatchAdmission,
+) -> Result<(), StorageError> {
+    sqlx::query("INSERT INTO worker_task_admissions(task_id,invocation_key,tenant_id,instance_id,record) VALUES($1,$2,$3,$4,$5)")
+        .bind(admission.invocation.task_id).bind(&admission.invocation_key).bind(admission.invocation.tenant_id.as_str()).bind(admission.invocation.instance_id.into_uuid()).bind(serde_json::to_value(admission)?).execute(&mut *conn).await?;
+    Ok(())
 }
 
 enum EffectSelection {
@@ -287,10 +295,10 @@ async fn store_payload_on(
     if reserved {
         let params = super::json_encoding::encode(&task.params)?;
         let context = super::json_encoding::encode(&task.context)?;
-        Ok(sqlx::query("UPDATE worker_tasks SET tenant_id=(SELECT native.tenant_id FROM task_instances native WHERE native.id=worker_tasks.instance_id),handler_name=$2,queue_name=$3,requirements=$4,params=$5,context=$6,timeout_ms=$7,carries_credentials=$8,effect_id=$9,continuity_epoch=$10,created_at=$11,awaiting_dispatch=FALSE,params_encoding=$13,context_encoding=$14 WHERE id=$1 AND state='pending' AND awaiting_dispatch AND attempt=$12")
+        Ok(sqlx::query("UPDATE worker_tasks SET tenant_id=(SELECT native.tenant_id FROM task_instances native WHERE native.id=worker_tasks.instance_id),handler_name=$2,queue_name=$3,requirements=$4,params=$5,context=$6,timeout_ms=$7,carries_credentials=$8,effect_id=$9,continuity_epoch=$10,created_at=$11,awaiting_dispatch=FALSE,params_encoding=$13,context_encoding=$14,heartbeat_timeout_secs=$15,wait_for_callback=$16 WHERE id=$1 AND state='pending' AND awaiting_dispatch AND attempt=$12")
             .bind(task.id).bind(&task.handler_name).bind(&task.queue_name).bind(serde_json::to_value(&task.requirements)?).bind(params.value).bind(context.value)
             .bind(task.timeout_ms).bind(task.carries_credentials).bind(task.effect_id.map(orch8_types::continuity::EffectId::into_uuid)).bind(task.continuity_epoch.map(i64::try_from).transpose().map_err(|_|invalid())?).bind(task.created_at).bind(i16::try_from(task.attempt).map_err(|_| invalid())?)
-            .bind(params.encoding).bind(context.encoding)
+            .bind(params.encoding).bind(context.encoding).bind(task.heartbeat_timeout_secs.map(i64::from)).bind(task.wait_for_callback)
             .execute(&mut *conn).await?.rows_affected()==1)
     } else {
         let Some(row) = super::workers::insert_task_query(task, false)?
@@ -308,7 +316,7 @@ pub(super) async fn matches_hot_on(
     admission: &WorkerDispatchAdmission,
 ) -> Result<bool, StorageError> {
     let task_id = admission.invocation.task_id;
-    let row=sqlx::query("SELECT params_encoding,context_encoding,jsonb_build_object('handler',handler_name,'queue',queue_name,'requirements',requirements,'params',params,'context',context,'attempt',attempt,'timeout_ms',timeout_ms,'carries_credentials',carries_credentials) AS spec FROM worker_tasks WHERE id=$1")
+    let row=sqlx::query("SELECT params_encoding,context_encoding,heartbeat_timeout_secs,wait_for_callback,jsonb_build_object('handler',handler_name,'queue',queue_name,'requirements',requirements,'params',params,'context',context,'attempt',attempt,'timeout_ms',timeout_ms,'carries_credentials',carries_credentials) AS spec FROM worker_tasks WHERE id=$1")
         .bind(task_id).fetch_optional(&mut *conn).await?;
     let Some(row) = row else { return Ok(false) };
     let mut value: serde_json::Value = row.get("spec");
@@ -320,5 +328,11 @@ pub(super) async fn matches_hot_on(
         value["context"].take(),
         row.get::<Option<String>, _>("context_encoding").as_deref(),
     )?;
+    if let Some(seconds) = row.get::<Option<i64>, _>("heartbeat_timeout_secs") {
+        value["heartbeat_timeout_secs"] = serde_json::json!(seconds);
+    }
+    if row.get::<bool, _>("wait_for_callback") {
+        value["wait_for_callback"] = serde_json::Value::Bool(true);
+    }
     Ok(crate::worker_admission::digest(&value) == admission.stored_spec_sha256)
 }

@@ -72,6 +72,27 @@ pub(super) async fn get_tree_on(
     rows.iter().map(row_to_node).collect()
 }
 
+pub(super) async fn get_page(
+    storage: &SqliteStorage,
+    instance_id: InstanceId,
+    after: Option<ExecutionNodeId>,
+    limit: u32,
+) -> Result<Vec<ExecutionNode>, StorageError> {
+    let query = if after.is_some() {
+        "SELECT * FROM execution_tree WHERE instance_id = ?1 AND id > ?3 ORDER BY id LIMIT ?2"
+    } else {
+        "SELECT * FROM execution_tree WHERE instance_id = ?1 ORDER BY id LIMIT ?2"
+    };
+    let mut query = sqlx::query(query)
+        .bind(instance_id.to_string())
+        .bind(i64::from(limit.min(1000)));
+    if let Some(after) = after.map(|id| id.to_string()) {
+        query = query.bind(after);
+    }
+    let rows = query.fetch_all(&storage.pool).await?;
+    rows.iter().map(row_to_node).collect()
+}
+
 pub(super) async fn update_node_state(
     storage: &SqliteStorage,
     node_id: ExecutionNodeId,

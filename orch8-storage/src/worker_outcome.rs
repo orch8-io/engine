@@ -23,6 +23,7 @@ pub struct WorkerCompletion {
     pub(crate) provider_receipt_id: Option<String>,
     pub(crate) delegation: Option<WorkerDelegationCompletion>,
     pub(crate) reconciliation: Option<crate::worker_reconciliation::WorkerReconciliationApproval>,
+    pub(crate) callback: Option<crate::worker_callback::WorkerCallbackBinding>,
 }
 
 /// Host-supplied application data travels with the original accepted result.
@@ -70,7 +71,18 @@ impl WorkerCompletion {
             provider_receipt_id,
             delegation: None,
             reconciliation: None,
+            callback: None,
         }
+    }
+    /// Accept a result only if this exact issued callback is still live at commit.
+    #[must_use]
+    pub fn for_callback(
+        output: Value,
+        binding: crate::worker_callback::WorkerCallbackBinding,
+    ) -> Self {
+        let mut completion = Self::new(output);
+        completion.callback = Some(binding);
+        completion
     }
     /// A trusted operator explicitly accepts this exact legacy report.
     pub fn for_legacy_reconciliation(
@@ -103,6 +115,7 @@ impl WorkerCompletion {
             provider_receipt_id: self.provider_receipt_id.clone(),
             delegation: self.delegation.clone(),
             reconciliation: self.reconciliation.clone(),
+            callback: self.callback.clone(),
         }
     }
     /// Only a hosting runtime uses this constructor; worker HTTP/gRPC reports

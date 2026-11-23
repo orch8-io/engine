@@ -5,6 +5,7 @@ pub mod approval_links;
 pub mod blob;
 pub mod builtin;
 pub mod cancellation_scope;
+pub(crate) mod composite_retry;
 #[cfg(feature = "email")]
 pub mod email;
 pub mod emit_event;
@@ -153,6 +154,20 @@ impl StepContext {
 
     /// Mutate this instance's KV state under the original execution claim.
     pub async fn set_state(&self, key: &str, value: &serde_json::Value) -> Result<(), StepError> {
+        if let Some(instance) = self
+            .storage
+            .get_instance(self.instance_id)
+            .await
+            .map_err(|error| state_storage_error(&error))?
+            && let Some(sequence) = self
+                .storage
+                .get_sequence(instance.sequence_id)
+                .await
+                .map_err(|error| state_storage_error(&error))?
+            && let Some(schema) = sequence.state_schema()
+        {
+            crate::input_schema::validate_state_write(schema, key, value)?;
+        }
         if let Some(token) = self.claim_token {
             if !self
                 .storage

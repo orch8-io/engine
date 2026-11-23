@@ -1103,6 +1103,8 @@ async fn sla_deadline_breached_fails_node() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,
@@ -1155,6 +1157,8 @@ async fn sla_deadline_with_escalation_handler_called() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,
@@ -1197,6 +1201,8 @@ async fn sla_deadline_escalation_handler_not_found_still_fails() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,
@@ -1250,6 +1256,8 @@ async fn sla_deadline_escalation_handler_fails_still_fails_node() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,
@@ -1391,6 +1399,8 @@ async fn sla_deadline_multiple_nodes_some_breached() {
                 delay: None,
                 retry: Some(RetryPolicy {
                     max_attempts: 100,
+                    jitter: orch8_types::sequence::RetryJitter::Legacy,
+                    rules: Vec::new(),
                     initial_backoff: Duration::from_millis(1),
                     max_backoff: Duration::from_millis(1),
                     backoff_multiplier: 1.0,
@@ -1434,6 +1444,8 @@ async fn sla_deadline_zero_duration_immediately_breaches() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,
@@ -1489,6 +1501,8 @@ async fn sla_deadline_records_block_output_on_breach() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,
@@ -1535,6 +1549,8 @@ async fn sla_deadline_breach_metadata_in_output() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 100,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(1),
             backoff_multiplier: 1.0,

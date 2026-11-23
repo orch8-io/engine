@@ -103,6 +103,27 @@ data class ContinuityImportResult(
     val state: String,
 )
 
+/** Host-owned Ed25519 signing key. The engine receives public material and signatures. */
+interface Orch8CapsuleSigner {
+    val keyId: String
+    /** Base64 encoding of the raw 32-byte public key. */
+    val publicKeyBase64: String
+
+    /** Sign the ASCII hexadecimal digest and return a base64 Ed25519 signature. */
+    fun signManifestSha256(digest: String): String
+}
+
+/** Signed manifest and encrypted execution payload for the destination runtime. */
+data class ContinuityExportResult(
+    val capsuleId: String,
+    val continuityId: String,
+    val sourceEpoch: Long,
+    val capsuleJson: String,
+    val payloadBase64: String,
+) {
+    override fun toString(): String = "ContinuityExportResult(capsuleId=$capsuleId, continuityId=$continuityId, sourceEpoch=$sourceEpoch)"
+}
+
 /** Version of the Orch8 engine the KMP wrapper was released against. */
 const val ORCH8_KMP_VERSION: String = "0.7.1"
 

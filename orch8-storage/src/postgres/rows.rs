@@ -388,6 +388,8 @@ pub(super) struct WorkerTaskRow {
     pub context: serde_json::Value,
     pub attempt: i16,
     pub timeout_ms: Option<i64>,
+    pub heartbeat_timeout_secs: Option<i64>,
+    pub wait_for_callback: bool,
     pub state: String,
     pub worker_id: Option<String>,
     pub claimed_at: Option<DateTime<Utc>>,
@@ -415,7 +417,7 @@ pub(super) struct WorkerTaskRow {
 macro_rules! worker_task_columns {
     () => {
         "id, instance_id, block_id, handler_name, queue_name, requirements, params, context, \
-         attempt, timeout_ms, state, worker_id, claimed_at, heartbeat_at, \
+         attempt, timeout_ms, heartbeat_timeout_secs, wait_for_callback, state, worker_id, claimed_at, heartbeat_at, \
          claim_epoch, resume_checkpoint, checkpoint_seq, \
          completed_at, output, error_message, error_retryable, created_at, \
          effect_id, continuity_epoch, lease_secs, carries_credentials, claimed_runtime_kind, \
@@ -443,6 +445,12 @@ impl WorkerTaskRow {
             context: super::json_encoding::decode(self.context, self.context_encoding.as_deref())?,
             attempt: self.attempt as u16,
             timeout_ms: self.timeout_ms,
+            wait_for_callback: self.wait_for_callback,
+            heartbeat_timeout_secs: self
+                .heartbeat_timeout_secs
+                .map(u32::try_from)
+                .transpose()
+                .map_err(|_| StorageError::Query("invalid worker heartbeat_timeout_secs".into()))?,
             state,
             worker_id: self.worker_id,
             claimed_at: self.claimed_at,

@@ -418,6 +418,8 @@ async fn scheduler_fast_path_retryable_failure_honours_max_attempts() {
     let mut step_def = mk_step_def("flaky", "always_retryable", serde_json::json!({}));
     step_def.retry = Some(orch8_types::sequence::RetryPolicy {
         max_attempts: 2,
+        jitter: orch8_types::sequence::RetryJitter::Legacy,
+        rules: Vec::new(),
         initial_backoff: std::time::Duration::from_millis(0),
         max_backoff: std::time::Duration::from_millis(0),
         backoff_multiplier: 1.0,
@@ -2432,14 +2434,14 @@ async fn run_process_instance(storage: &Arc<dyn StorageBackend>, instance: TaskI
         lease_lost: &lease_lost,
         claim_token: instance.updated_at,
     };
-    process_instance(
+    Box::pin(process_instance(
         &ctx,
         instance,
         PrefetchedData {
             signals: Vec::new(),
             completed_block_ids: Vec::new(),
         },
-    )
+    ))
     .await
     .unwrap();
 }

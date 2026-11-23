@@ -30,6 +30,38 @@ with closing(sqlite3.connect(sys.argv[1])) as database, database:
 
 
 class CurrentSnapshotTest(unittest.TestCase):
+    def test_get_output_selects_one_attempt_after_reopening(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "engine.db")
+            attempts = {}
+            with Engine.open(path) as writer:
+                @writer.handler("value")
+                def value(ctx):
+                    attempts[ctx["step_id"]] = ctx["attempt"]
+                    return {"value": 42} if ctx["step_id"] == "wanted" else "x" * (256 * 1024)
+
+                writer.deploy({"name": "selected-output", "blocks": [
+                    {"type": "step", "id": "wanted", "handler": "value"},
+                    {"type": "step", "id": "unrelated", "handler": "value"},
+                ]})
+                instance = writer.start("selected-output")
+                self.assertEqual(writer.run(instance, timeout=5)["state"], "completed")
+
+            self.assertGreater(write_database(
+                path, "UPDATE block_outputs SET output = ? WHERE instance_id = ? AND block_id = ?",
+                ("{damaged JSON", instance, "unrelated"),
+            ), 0)
+            with Engine.open(path) as reader:
+                with self.assertRaisesRegex(RuntimeError, "serialization"):
+                    reader.get(instance)
+                attempt = attempts["wanted"]
+                output = reader.get_output(instance, "wanted", attempt)
+                self.assertIsNotNone(output)
+                self.assertEqual(output["output"], {"value": 42})
+                self.assertEqual(output["attempt"], attempt)
+                self.assertEqual(output["instance_id"], instance)
+                self.assertIsNone(reader.get_output(instance, "wanted", attempt + 1))
+
     def test_get_and_run_keep_current_retry_diagnostics_after_damaged_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "engine.db")

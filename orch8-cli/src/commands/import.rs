@@ -440,6 +440,7 @@ fn snake(text: &str) -> String {
 
 struct Builder {
     used_ids: HashSet<String>,
+    composite_retries: serde_json::Map<String, Value>,
     report: ConversionReport,
 }
 
@@ -447,6 +448,7 @@ impl Builder {
     fn new(source: &str, workflow: &str, sequence_name: &str) -> Self {
         Self {
             used_ids: HashSet::new(),
+            composite_retries: serde_json::Map::new(),
             report: ConversionReport {
                 source: source.into(),
                 workflow: workflow.into(),
@@ -538,7 +540,7 @@ fn finish(b: Builder, options: &ConvertOptions, blocks: Vec<Value>) -> Result<Co
     if blocks.is_empty() {
         bail!("the workflow has no convertible steps after its trigger");
     }
-    let sequence = json!({
+    let mut sequence = json!({
         "$schema": "https://orch8.io/contracts/sequence.schema.json",
         "schema_version": orch8_types::sequence::SEQUENCE_SCHEMA_VERSION,
         "tenant_id": options.tenant_id,
@@ -547,6 +549,9 @@ fn finish(b: Builder, options: &ConvertOptions, blocks: Vec<Value>) -> Result<Co
         "version": 1,
         "blocks": blocks,
     });
+    if !b.composite_retries.is_empty() {
+        sequence["input_schema"] = json!({"x-orch8-composite-retry": b.composite_retries});
+    }
     Ok(Conversion {
         sequence,
         report: b.report,

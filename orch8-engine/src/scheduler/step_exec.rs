@@ -17,7 +17,9 @@ use orch8_types::instance::InstanceState;
 
 use crate::error::EngineError;
 use crate::handlers::HandlerRegistry;
-use crate::handlers::param_resolve::IN_PROGRESS_SENTINEL;
+use crate::handlers::param_resolve::{
+    IN_PROGRESS_SENTINEL, OutputsSnapshot, resolve_templates_in_params,
+};
 
 use super::{StepOutcome, wake_parent_if_child};
 
@@ -174,6 +176,7 @@ async fn step_delay_until(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
+    outputs: &OutputsSnapshot,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
     // D-06: a legacy `sleep` step over the in-process cap is served as a
     // durable delay (same marker, same early-wake semantics) instead of
@@ -183,7 +186,8 @@ async fn step_delay_until(
     } else {
         None
     };
-    if step_def.delay.is_none() && sleep_ms.is_none() {
+    let dynamic = step_def.handler == "asl_wait";
+    if step_def.delay.is_none() && sleep_ms.is_none() && !dynamic {
         return Ok(None);
     }
 
@@ -208,6 +212,16 @@ async fn step_delay_until(
     }
 
     let fire_at = match (&step_def.delay, sleep_ms) {
+        (None, None) if dynamic => {
+            let backend = storage.backend();
+            let context =
+                crate::handlers::step_block::context_for_step(backend, instance, step_def).await?;
+            let params =
+                resolve_templates_in_params(backend, instance, &context, &step_def.params, outputs)
+                    .await?;
+            crate::calendar_delay::asl_wait_deadline(now, &params)
+                .map_err(|error| EngineError::InvalidConfig(error.to_owned()))?
+        }
         (Some(delay), _) => crate::scheduling::delay::calculate_next_fire_at(
             now,
             delay,
@@ -229,7 +243,7 @@ async fn step_delay_until(
             &serde_json::json!({ marker_key: fire_at.to_rfc3339() }),
         )
         .await?;
-    Ok(Some(fire_at))
+    Ok((!dynamic || now < fire_at).then_some(fire_at))
 }
 
 /// Next opening of the step's `send_window`, or `None` when inside it (or
@@ -288,6 +302,7 @@ pub(crate) async fn step_preamble_deferral(
     instance: &orch8_types::instance::TaskInstance,
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
+    outputs: &OutputsSnapshot,
 ) -> Result<Option<DateTime<Utc>>, EngineError> {
     if step_def.retry.is_some()
         && let Some(previous) = storage
@@ -309,7 +324,7 @@ pub(crate) async fn step_preamble_deferral(
             return Ok(Some(retry_at));
         }
     }
-    if let Some(fire_at) = step_delay_until(storage, instance, step_def, clock).await? {
+    if let Some(fire_at) = step_delay_until(storage, instance, step_def, clock, outputs).await? {
         debug!(
             instance_id = %instance.id,
             block_id = %step_def.id,
@@ -411,7 +426,9 @@ pub(super) async fn check_step_delay(
     step_def: &orch8_types::sequence::StepDef,
     clock: &SharedClock,
 ) -> Result<bool, EngineError> {
-    let Some(fire_at) = step_delay_until(storage, instance, step_def, clock).await? else {
+    let Some(fire_at) =
+        step_delay_until(storage, instance, step_def, clock, &OutputsSnapshot::new()).await?
+    else {
         return Ok(false);
     };
     defer_flat_instance(storage, instance, fire_at).await?;
@@ -1213,7 +1230,9 @@ pub(super) async fn execute_step_block(
 
     // Shared preamble (delay → send_window → rate limit), also run by the
     // tree path in `step_block::execute_step_node_with_clock`.
-    if let Some(fire_at) = step_preamble_deferral(&control, instance, step_def, clock).await? {
+    if let Some(fire_at) =
+        step_preamble_deferral(&control, instance, step_def, clock, &outputs_snap).await?
+    {
         defer_flat_instance(storage.as_ref(), instance, fire_at).await?;
         return Ok(StepOutcome::Deferred);
     }
@@ -1344,6 +1363,13 @@ pub(super) async fn execute_step_block(
         &step_def.id,
     )
     .await?;
+    let mut retry_counts = crate::handlers::step::read_retry_counts(
+        storage.as_ref(),
+        instance_id,
+        &step_def.id,
+        step_def.retry.as_ref(),
+    )
+    .await?;
 
     // Resolve context snapshot + templates + credentials + cache key (shared
     // with the tree path via `step_block::prepare_step`). Reuses the outputs
@@ -1450,6 +1476,12 @@ pub(super) async fn execute_step_block(
     // `$runtime`; hard placement (region, labels, residency) always goes to
     // the worker queue so it is enforced by the claim predicate.
     let mut resolved_params = resolved_params;
+    let imported_worker = crate::handlers::step_dispatch::requires_asl_worker(step_def);
+    if local_only && imported_worker {
+        return Err(EngineError::InvalidConfig(
+            "imported task requires an external worker".into(),
+        ));
+    }
     if local_only
         && resolved_params
             .get(orch8_types::worker::RUNTIME_REQUIREMENTS_PARAM)
@@ -1495,7 +1527,8 @@ pub(super) async fn execute_step_block(
     let placed_remotely = hard_placed
         || orch8_types::worker::peek_runtime_requirements(&resolved_params)
             .is_ok_and(|requirements| requirements.is_remote_placement());
-    if !local_only && (placed_remotely || !handlers.contains(&step_def.handler)) {
+    if !local_only && (imported_worker || placed_remotely || !handlers.contains(&step_def.handler))
+    {
         return match dispatch_to_external_worker(
             storage.as_ref(),
             instance,
@@ -1541,7 +1574,7 @@ pub(super) async fn execute_step_block(
     // free handlers simply re-run. Same contract as the tree path. The real
     // output is appended as a new row afterwards; `get_block_output`
     // (most-recent) will return the real one.
-    let sentinel = orch8_types::output::BlockOutput {
+    let mut sentinel = orch8_types::output::BlockOutput {
         id: uuid::Uuid::now_v7(),
         instance_id,
         block_id: step_def.id.clone(),
@@ -1559,6 +1592,9 @@ pub(super) async fn execute_step_block(
         attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
         created_at: chrono::Utc::now(),
     };
+    if !retry_counts.is_empty() {
+        sentinel.output["_retry_counts"] = serde_json::json!(retry_counts);
+    }
     crate::handlers::step::persist_output(storage.as_ref(), &sentinel, Some(claim_token)).await?;
 
     let exec_params = crate::handlers::step::StepExecParams {
@@ -1663,17 +1699,25 @@ pub(super) async fn execute_step_block(
             }
         }
         Err(EngineError::StepFailed {
-            retryable: true,
+            retryable,
             ref message,
             ref details,
             ..
-        }) => {
+        }) if retryable
+            || step_def
+                .retry
+                .as_ref()
+                .is_some_and(|policy| !policy.rules.is_empty()) =>
+        {
             crate::metrics::inc(crate::metrics::STEPS_FAILED);
             // Record the failure with the circuit breaker. Retryable failures
             // count toward tripping the breaker so a consistently-failing
             // dependency eventually protects the workers from burning retries
             // on a hopeless handler.
-            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+            if retryable
+                && breaker_tracked
+                && let Some(cb) = handlers.circuit_breakers()
+            {
                 cb.record_failure(
                     &instance.tenant_id,
                     &crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params),
@@ -1711,7 +1755,18 @@ pub(super) async fn execute_step_block(
                     "failed to delete in-progress sentinel after retryable failure -- leaked row"
                 );
             }
-            let retry_marker = orch8_types::output::BlockOutput {
+            let retry_schedule = step_def.retry.as_ref().and_then(|policy| {
+                crate::handlers::step::choose_retry(
+                    policy,
+                    attempt,
+                    message,
+                    details.as_ref(),
+                    &instance.context,
+                    clock.now(),
+                    &mut retry_counts,
+                )
+            });
+            let mut retry_marker = orch8_types::output::BlockOutput {
                 id: uuid::Uuid::now_v7(),
                 instance_id,
                 block_id: step_def.id.clone(),
@@ -1721,6 +1776,12 @@ pub(super) async fn execute_step_block(
                 attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
                 created_at: chrono::Utc::now(),
             };
+            if let Some((_, fire_at)) = retry_schedule {
+                retry_marker.output["_retry_fire_at"] = serde_json::json!(fire_at);
+            }
+            if !retry_counts.is_empty() {
+                retry_marker.output["_retry_counts"] = serde_json::json!(retry_counts);
+            }
             if let Err(err) = crate::handlers::step::persist_output(
                 storage.as_ref(),
                 &retry_marker,
@@ -1759,9 +1820,8 @@ pub(super) async fn execute_step_block(
                 attempt,
                 webhook_config,
                 message,
-                details.as_ref(),
+                retry_schedule,
                 cancel,
-                clock,
             )
             .await?;
             Ok(StepOutcome::Failed)
@@ -1909,14 +1969,13 @@ pub(super) async fn handle_retryable_failure(
     attempt: u32,
     webhook_config: &WebhookConfig,
     message: &str,
-    details: Option<&serde_json::Value>,
+    retry_schedule: Option<(std::time::Duration, DateTime<Utc>)>,
     cancel: &CancellationToken,
-    clock: &SharedClock,
 ) -> Result<(), EngineError> {
     let instance_id = instance.id;
     if let Some(retry) = &step_def.retry {
         // Check if max_attempts has been exhausted.
-        if attempt >= retry.max_attempts {
+        if retry.rules.is_empty() && attempt >= retry.max_attempts {
             warn!(
                 instance_id = %instance_id,
                 block_id = %step_def.id,
@@ -1937,13 +1996,7 @@ pub(super) async fn handle_retryable_failure(
             return Ok(());
         }
 
-        if !crate::handlers::step::should_retry(
-            retry,
-            message,
-            details,
-            &instance.context,
-            &serde_json::Value::Null,
-        ) {
+        let Some((backoff, fire_at)) = retry_schedule else {
             warn!(
                 instance_id = %instance_id,
                 block_id = %step_def.id,
@@ -1962,20 +2015,9 @@ pub(super) async fn handle_retryable_failure(
             )
             .await?;
             return Ok(());
-        }
+        };
 
         crate::metrics::inc(crate::metrics::STEPS_RETRIED);
-
-        let backoff = crate::handlers::step::honor_retry_after(
-            crate::handlers::step::calculate_backoff_with_jitter(
-                attempt,
-                retry.initial_backoff,
-                retry.max_backoff,
-                retry.backoff_multiplier,
-            ),
-            details,
-        );
-        let fire_at = clamped_fire_at(clock.now(), backoff);
 
         warn!(
             instance_id = %instance_id,

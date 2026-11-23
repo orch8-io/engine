@@ -160,4 +160,17 @@ RCT_EXTERN_METHOD(resolveStep:(NSString *)requestId
                   error:(NSString *)error
                   permanent:(BOOL)permanent)
 
+RCT_EXTERN_METHOD(describeMediaFile:(NSString *)path
+                  chunkBytes:(nonnull NSNumber *)chunkBytes
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
+RCT_EXTERN_METHOD(readMediaFileRange:(NSString *)path
+                  offset:(nonnull NSNumber *)offset
+                  length:(nonnull NSNumber *)length
+                  identity:(nullable NSString *)identity
+                  sha256:(nullable NSString *)sha256
+                  resolver:(RCTPromiseResolveBlock)resolve
+                  rejecter:(RCTPromiseRejectBlock)reject)
+
 @end

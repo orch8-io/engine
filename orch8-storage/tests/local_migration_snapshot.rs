@@ -320,3 +320,21 @@ orch8_storage::backend_test!(async fn relay_records_cannot_be_exported_or_migrat
     assert_eq!(b.storage.get_continuity_execution(&request.execution.tenant_id,request.execution.continuity_id).await.unwrap().unwrap(),request.execution);
     assert_eq!(b.raw.count("capsule_source_cuts","source_instance_id",&request.execution.current_instance_id.to_string()).await,0);
 });
+
+orch8_storage::backend_test!(async fn migration_chunk_staging_enforces_tenant_scope_and_immutable_positions(b) {
+    let storage = b.storage.as_ref();
+    let first = TenantId::new("migration-a").unwrap();
+    let second = TenantId::new("migration-b").unwrap();
+    let digest = "4".repeat(64);
+    assert!(storage.stage_migration_chunk(&first, &digest, 0, b"first tenant").await.unwrap());
+    assert!(!storage.stage_migration_chunk(&first, &digest, 0, b"replacement").await.unwrap());
+    assert_eq!(storage.read_migration_chunk(&first, &digest, 0).await.unwrap(), Some(b"first tenant".to_vec()));
+    assert_eq!(storage.read_migration_chunk(&second, &digest, 0).await.unwrap(), None);
+    assert!(storage.stage_migration_chunk(&second, &digest, 0, b"second tenant").await.unwrap());
+    assert!(storage.stage_migration_chunk(&first, &digest, 1, &[0, 255, 22]).await.unwrap());
+    assert_eq!(storage.read_migration_chunk(&first, &digest, 1).await.unwrap(), Some(vec![0, 255, 22]));
+    storage.clear_migration_chunks(&first, &digest).await.unwrap();
+    assert_eq!(storage.read_migration_chunk(&first, &digest, 0).await.unwrap(), None);
+    assert_eq!(storage.read_migration_chunk(&first, &digest, 1).await.unwrap(), None);
+    assert_eq!(storage.read_migration_chunk(&second, &digest, 0).await.unwrap(), Some(b"second tenant".to_vec()));
+});

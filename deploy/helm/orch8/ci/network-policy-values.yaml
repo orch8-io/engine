@@ -1,0 +1,20 @@
+mode: split
+externalDatabase:
+  url: postgres://orch8:orch8@postgres:5432/orch8
+networkPolicy:
+  enabled: true
+  database:
+    peers:
+      - podSelector:
+          matchLabels:
+            orch8-test: postgres
+  roles:
+    control:
+      extraIngress:
+        - from:
+            - podSelector:
+                matchLabels:
+                  orch8-test: trusted-client
+          ports:
+            - port: 8080
+              protocol: TCP

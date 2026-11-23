@@ -743,7 +743,7 @@ async fn process_tick(ctx: &TickContext<'_>) -> Result<Vec<JoinHandle<()>>, Engi
                     lease_lost: &lease_lost_inner,
                     claim_token,
                 };
-                process_instance(&ctx, instance, data).await
+                Box::pin(process_instance(&ctx, instance, data)).await
             })
             .await;
 
@@ -1393,6 +1393,9 @@ async fn process_one_signalled_instance(
     let relay =
         orch8_storage::delegation_publication::is_proxy_instance(storage.as_ref(), instance_id)
             .await?;
+    if !relay && signal_intake_retired(storage.as_ref(), instance_id).await? {
+        return Ok(());
+    }
     if relay && current_state == InstanceState::Scheduled {
         // Older resumes may have armed a relay. Its signals still need to be
         // consumed even though native candidate selection correctly skips it.
@@ -1417,24 +1420,17 @@ async fn process_one_signalled_instance(
     // step delay was a livelock (ENG-R-N1). Storage already filters
     // these rows; this is the backend-independent guard.
     if current_state == InstanceState::Scheduled && !relay {
-        if !signals
+        if signals
             .iter()
             .any(|s| wakes_scheduled_instance(&s.signal_type))
-        {
-            return Ok(());
-        }
-        debug!(
-            instance_id = %instance_id,
-            "waking scheduled instance with pending signal"
-        );
-        if let Err(e) = storage
-            .conditional_update_instance_state(
-                instance_id,
-                InstanceState::Scheduled,
-                InstanceState::Scheduled,
-                Some(clock.now()),
-            )
-            .await
+            && let Err(e) = storage
+                .conditional_update_instance_state(
+                    instance_id,
+                    InstanceState::Scheduled,
+                    InstanceState::Scheduled,
+                    Some(clock.now()),
+                )
+                .await
         {
             warn!(
                 instance_id = %instance_id,
@@ -1515,6 +1511,20 @@ async fn process_one_signalled_instance(
         }
     }
     Ok(())
+}
+
+async fn signal_intake_retired(
+    storage: &dyn StorageBackend,
+    id: InstanceId,
+) -> Result<bool, EngineError> {
+    use crate::ownership::{LocalOwnership, local_ownership};
+    let Some(instance) = storage.get_instance(id).await? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        local_ownership(storage, &instance.tenant_id, id).await?,
+        LocalOwnership::Transferring | LocalOwnership::Superseded
+    ))
 }
 
 /// Max cleanup / escalation hooks the sweeps run concurrently off the tick
@@ -2268,7 +2278,7 @@ pub(crate) async fn dispatch_cleanup_step(
         .then(|| crate::handlers::wasm_plugin::parse_plugin_name(&step.handler))
         .flatten()
     {
-        let Some(wasm_path) = crate::handlers::step_dispatch::resolve_plugin_source(
+        let Some(plugin) = crate::handlers::step_dispatch::resolve_plugin(
             storage.as_ref(),
             &instance.tenant_id,
             plugin_name,
@@ -2285,7 +2295,7 @@ pub(crate) async fn dispatch_cleanup_step(
             return None;
         };
         dispatch_hook_bounded(async move {
-            crate::handlers::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await
+            crate::handlers::wasm_plugin::handle_registered_wasm_plugin(ctx, &plugin).await
         })
         .await
     } else {
@@ -2969,73 +2979,9 @@ async fn process_instance(
         sequence_cache,
         ..
     } = *ctx;
-    let instance_id = instance.id;
 
-    // Continuity fencing: never advance an instance whose portable execution
-    // is being exported, or has been handed to another runtime. A superseded
-    // source parks for good; a transferring one re-checks shortly (the
-    // export may still be revoked or fail).
-    match crate::ownership::local_ownership(storage.as_ref(), &instance.tenant_id, instance_id)
-        .await?
-    {
-        crate::ownership::LocalOwnership::Owned => {}
-        crate::ownership::LocalOwnership::Transferring => {
-            info!(%instance_id, "continuity execution is transferring; deferring instance");
-            crate::lifecycle::transition_claimed_instance(
-                storage.as_ref(),
-                instance_id,
-                Some(&instance.tenant_id),
-                ctx.claim_token,
-                InstanceState::Running,
-                InstanceState::Scheduled,
-                Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
-            )
-            .await?;
-            return Ok(());
-        }
-        crate::ownership::LocalOwnership::Compensating => {
-            crate::lifecycle::transition_claimed_instance(
-                storage.as_ref(),
-                instance_id,
-                Some(&instance.tenant_id),
-                ctx.claim_token,
-                InstanceState::Running,
-                InstanceState::Paused,
-                None,
-            )
-            .await?;
-            return Ok(());
-        }
-        crate::ownership::LocalOwnership::Superseded => {
-            warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
-            if storage.is_physical_instance_retired(instance_id).await? {
-                // Permanent retirement authorizes halting this physical ID
-                // regardless of an inconsistent legacy claim. Forward claim
-                // predicates deliberately refuse retired rows. The state CAS
-                // still lets a concurrent terminal outcome win without overwrite.
-                crate::lifecycle::transition_instance(
-                    storage.as_ref(),
-                    instance_id,
-                    Some(&instance.tenant_id),
-                    InstanceState::Running,
-                    InstanceState::Paused,
-                    None,
-                )
-                .await?;
-            } else {
-                crate::lifecycle::transition_claimed_instance(
-                    storage.as_ref(),
-                    instance_id,
-                    Some(&instance.tenant_id),
-                    ctx.claim_token,
-                    InstanceState::Running,
-                    InstanceState::Waiting,
-                    None,
-                )
-                .await?;
-            }
-            return Ok(());
-        }
+    if park_instance_for_ownership(ctx, &instance).await? {
+        return Ok(());
     }
 
     // Fetch sequence definition early — needed for cancellation scopes and evaluation.
@@ -3044,9 +2990,34 @@ async fn process_instance(
         .await?;
     let optimization = sequence_cache.optimization_for(&sequence).await;
 
+    if instance.context.runtime.run_id.is_none()
+        && let Err(error) =
+            crate::input_schema::validate_config(sequence.config_schema(), &instance.context.config)
+    {
+        step_exec::fail_instance_with_error(
+            storage,
+            &instance,
+            ctx.webhook_config,
+            ctx.cancel,
+            &error.to_string(),
+        )
+        .await?;
+        return Ok(());
+    }
+
     let instance = ensure_run_started(ctx, instance).await?;
 
     if process_pending_signals(ctx, &instance, prefetched.signals, &sequence).await? {
+        return Ok(());
+    }
+    let instance = crate::externalized::compact_claimed_context(
+        storage.as_ref(),
+        instance,
+        &sequence,
+        ctx.claim_token,
+    )
+    .await?;
+    if !prepare_wasm_revision(ctx, &instance, &sequence).await? {
         return Ok(());
     }
 
@@ -3087,6 +3058,32 @@ async fn process_instance(
 
     // All blocks completed.
     finalize_completed(ctx, &instance, &sequence).await
+}
+
+async fn prepare_wasm_revision(
+    ctx: &InstanceRunCtx<'_>,
+    instance: &orch8_types::instance::TaskInstance,
+    sequence: &SequenceDefinition,
+) -> Result<bool, EngineError> {
+    match crate::handlers::wasm_plugin::prewarm_pinned_sequence(ctx.storage.as_ref(), sequence)
+        .await
+    {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            warn!(instance = %instance.id, sequence = %sequence.id, %error, "executor is not ready for this WASM revision");
+            crate::lifecycle::transition_claimed_instance(
+                ctx.storage.as_ref(),
+                instance.id,
+                Some(&instance.tenant_id),
+                ctx.claim_token,
+                InstanceState::Running,
+                InstanceState::Scheduled,
+                Some(ctx.clock.now() + chrono::Duration::seconds(2)),
+            )
+            .await?;
+            Ok(false)
+        }
+    }
 }
 
 /// Finalize an instance whose step loop finished every block: emit the
@@ -3136,6 +3133,82 @@ async fn finalize_completed(
     Ok(())
 }
 
+async fn park_instance_for_ownership(
+    ctx: &InstanceRunCtx<'_>,
+    instance: &orch8_types::instance::TaskInstance,
+) -> Result<bool, EngineError> {
+    let storage = ctx.storage;
+    let instance_id = instance.id;
+    // Continuity fencing: never advance an instance whose portable execution
+    // is being exported, or has been handed to another runtime. A superseded
+    // source parks for good; a transferring one re-checks shortly (the
+    // export may still be revoked or fail).
+    match crate::ownership::local_ownership(storage.as_ref(), &instance.tenant_id, instance_id)
+        .await?
+    {
+        crate::ownership::LocalOwnership::Owned => {}
+        crate::ownership::LocalOwnership::Transferring => {
+            info!(%instance_id, "continuity execution is transferring; deferring instance");
+            crate::lifecycle::transition_claimed_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&instance.tenant_id),
+                ctx.claim_token,
+                InstanceState::Running,
+                InstanceState::Scheduled,
+                Some(chrono::Utc::now() + chrono::Duration::seconds(30)),
+            )
+            .await?;
+            return Ok(true);
+        }
+        crate::ownership::LocalOwnership::Compensating => {
+            crate::lifecycle::transition_claimed_instance(
+                storage.as_ref(),
+                instance_id,
+                Some(&instance.tenant_id),
+                ctx.claim_token,
+                InstanceState::Running,
+                InstanceState::Paused,
+                None,
+            )
+            .await?;
+            return Ok(true);
+        }
+        crate::ownership::LocalOwnership::Superseded => {
+            warn!(%instance_id, "continuity execution is owned elsewhere; parking local instance");
+            if storage.is_physical_instance_retired(instance_id).await? {
+                // Permanent retirement authorizes halting this physical ID
+                // regardless of an inconsistent legacy claim. Forward claim
+                // predicates deliberately refuse retired rows. The state CAS
+                // still lets a concurrent terminal outcome win without overwrite.
+                crate::lifecycle::transition_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    InstanceState::Running,
+                    InstanceState::Paused,
+                    None,
+                )
+                .await?;
+            } else {
+                crate::lifecycle::transition_claimed_instance(
+                    storage.as_ref(),
+                    instance_id,
+                    Some(&instance.tenant_id),
+                    ctx.claim_token,
+                    InstanceState::Running,
+                    InstanceState::Waiting,
+                    None,
+                )
+                .await?;
+            }
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
 /// `claim_due_instances` already set state to Running.
 /// Ensure the run identity and start timestamp together. Retry/resume may
 /// already have installed a fresh `run_id`; first execution creates one.
@@ -3179,6 +3252,55 @@ async fn ensure_run_started(
         inst
     };
     Ok(instance)
+}
+
+/// Process a queued embedded cancellation during the active scheduler pass.
+pub async fn interrupt_running_instance(
+    storage: &Arc<dyn StorageBackend>,
+    handlers: &Arc<HandlerRegistry>,
+    instance: orch8_types::instance::TaskInstance,
+) -> Result<bool, EngineError> {
+    if instance.state != InstanceState::Running {
+        return Ok(instance.state == InstanceState::Cancelled);
+    }
+    let Some(sequence) = storage.get_sequence(instance.sequence_id).await? else {
+        return Ok(false);
+    };
+    let pending = storage.get_pending_signals(instance.id).await?;
+    let cancels = pending
+        .into_iter()
+        .filter(|signal| matches!(signal.signal_type, orch8_types::signal::SignalType::Cancel))
+        .collect();
+    let aborted = crate::signals::process_signals_prefetched_owned(
+        storage,
+        instance.id,
+        instance.state,
+        cancels,
+        Some(&sequence),
+    )
+    .await?;
+    let cancelled = storage
+        .get_instance(instance.id)
+        .await?
+        .is_some_and(|fresh| fresh.state == InstanceState::Cancelled);
+    if aborted && cancelled {
+        let storage = Arc::clone(storage);
+        let handlers = Arc::clone(handlers);
+        tokio::spawn(async move {
+            crate::handlers::saga::compensate_aborted_sagas(
+                &storage,
+                &handlers,
+                &instance,
+                &sequence,
+                "cancelled",
+            )
+            .await;
+            if let Some(ref blocks) = sequence.on_cancel {
+                run_cleanup_hooks(&storage, &handlers, &instance, blocks, "on_cancel").await;
+            }
+        });
+    }
+    Ok(cancelled)
 }
 
 /// Process any pending signals (using pre-fetched data). Returns `true` when

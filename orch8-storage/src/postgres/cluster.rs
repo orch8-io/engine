@@ -1,9 +1,45 @@
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use orch8_types::error::StorageError;
+use orch8_types::ids::SequenceId;
 
 use super::PostgresStorage;
 use super::rows::ClusterNodeRow;
+
+pub(super) async fn record_wasm_revision_ready(
+    store: &PostgresStorage,
+    node: Uuid,
+    revision: SequenceId,
+    ready_until: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO wasm_revision_readiness(node_id, sequence_id, ready_until) VALUES ($1,$2,$3)
+         ON CONFLICT(sequence_id,node_id) DO UPDATE SET ready_until=excluded.ready_until",
+    )
+    .bind(node)
+    .bind(revision.into_uuid())
+    .bind(ready_until)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn list_wasm_ready_nodes(
+    store: &PostgresStorage,
+    revision: SequenceId,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, StorageError> {
+    Ok(sqlx::query_scalar(
+        "SELECT r.node_id FROM wasm_revision_readiness r JOIN cluster_nodes n ON n.id=r.node_id
+         WHERE r.sequence_id=$1 AND r.ready_until>$2
+         AND n.status='active' AND NOT n.drain AND NOT n.capabilities_withdrawn ORDER BY r.node_id",
+    )
+    .bind(revision.into_uuid())
+    .bind(now)
+    .fetch_all(&store.pool)
+    .await?)
+}
 
 pub(super) async fn register(
     store: &PostgresStorage,

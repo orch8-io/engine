@@ -1,0 +1,28 @@
+{
+  "input": {
+    "title": "  café  ",
+    "replacement": "item",
+    "nullable": null,
+    "number": 3.14
+  },
+  "templates": {
+    "chain": "{{ data.title | trim | upper }}",
+    "fallback": "{{ data.missing | data.nullable | 'none' | upper }}",
+    "replacement": "{{ data.title | trim | replace('café', data.replacement) }}",
+    "array": "{{ data.title | trim | split('f') }}",
+    "null": "{{ data.nullable | default(null) }}",
+    "inline": "value={{ data.nullable | default(null) }}"
+  },
+  "expected": {
+    "chain": "CAFÉ",
+    "fallback": "NONE",
+    "replacement": "item",
+    "array": ["ca", "é"],
+    "null": null,
+    "inline": "value=null"
+  },
+  "invalid": [
+    {"template": "{{ data.number | round('bad') }}", "message": "round() requires integer arg"},
+    {"template": "{{ data.title | replace('', 'x') }}", "message": "search string cannot be empty"}
+  ]
+}

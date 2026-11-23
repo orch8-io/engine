@@ -331,7 +331,12 @@ fn blocking_callback_keeps_its_permit_after_its_source_runtime_is_destroyed() {
     let (finished, finish) = std::sync::mpsc::channel();
     let owner = budget.clone();
     source.block_on(async move {
-        let invocation = durable::Invocation::new("{}".into(), owner.reserve().unwrap());
+        let drain = Arc::new(durable::callbacks::Drain::default());
+        let invocation = durable::Invocation::new(
+            "{}".into(),
+            owner.reserve().unwrap(),
+            drain.enter().unwrap(),
+        );
         let work = tokio::task::spawn_blocking(move || {
             entered.send(()).unwrap();
             let _ = held.recv_timeout(Duration::from_secs(10));

@@ -4,6 +4,7 @@ plugins {
 }
 
 val orch8Version = providers.gradleProperty("orch8Version").getOrElse("0.7.1")
+val inspectionVersionCode = providers.gradleProperty("inspectionVersionCode").getOrElse("1").toInt()
 require(orch8Version.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?"))) {
     "orch8Version must be an exact release version"
 }
@@ -17,7 +18,7 @@ android {
         applicationId = "io.orch8.inspection"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
+        versionCode = inspectionVersionCode
         versionName = "1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "ORCH8_VERSION", "\"$orch8Version\"")

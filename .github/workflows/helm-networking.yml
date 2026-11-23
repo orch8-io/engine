@@ -1,0 +1,63 @@
+name: Helm networking
+
+on:
+  pull_request:
+    paths:
+      - "deploy/helm/orch8/**"
+      - "scripts/helm-test.sh"
+      - "scripts/helm-network-policy-e2e.sh"
+      - "scripts/helm-sqlite-snapshot-e2e.sh"
+      - "scripts/test-helm-sqlite-snapshot.py"
+      - "scripts/build-helm-airgap.sh"
+      - "scripts/test-helm-airgap.sh"
+      - ".github/workflows/helm-networking.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  helm-networking:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Kind
+        run: |
+          export GOBIN="$RUNNER_TEMP/orch8-test-tools"
+          go install sigs.k8s.io/kind@v0.29.0
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Test chart rendering and invalid combinations
+        run: bash scripts/helm-test.sh
+      - name: Complete a split workflow under enforced default-deny networking
+        run: bash scripts/helm-network-policy-e2e.sh
+
+  helm-airgap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Kind
+        run: |
+          export GOBIN="$RUNNER_TEMP/orch8-test-tools"
+          go install sigs.k8s.io/kind@v0.29.0
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Check bundle inventory and tamper detection
+        run: bash scripts/test-helm-airgap.sh --unit
+      - name: Install the offline bundle and complete a workflow with registry egress disabled
+        run: bash scripts/test-helm-airgap.sh
+
+  helm-sqlite-snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Kind
+        run: |
+          export GOBIN="$RUNNER_TEMP/orch8-test-tools"
+          go install sigs.k8s.io/kind@v0.29.0
+          echo "$GOBIN" >> "$GITHUB_PATH"
+      - name: Verify interruption and fence recovery
+        run: python3 scripts/test-helm-sqlite-snapshot.py
+      - name: Restore a waiting workflow from a CSI volume snapshot
+        run: bash scripts/helm-sqlite-snapshot-e2e.sh

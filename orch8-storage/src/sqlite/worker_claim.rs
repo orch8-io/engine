@@ -1,5 +1,5 @@
 //! Claim transition and immutable claimant evidence share one transaction.
-use crate::worker_claim::{WorkerClaimPrincipal, WorkerIssuedClaim, invalid};
+use crate::worker_claim::{IssuedTransport, WorkerClaimPrincipal, WorkerIssuedClaim, invalid};
 use orch8_types::{
     error::StorageError,
     ids::{InstanceId, TenantId},
@@ -8,21 +8,12 @@ use orch8_types::{
 use sqlx::Row;
 use uuid::Uuid;
 
-pub(super) async fn record_on(
-    conn: &mut sqlx::SqliteConnection,
-    tasks: &[WorkerTask],
-    principal: Option<&WorkerClaimPrincipal>,
-) -> Result<(), StorageError> {
-    record_with_context_on(conn, tasks, principal)
-        .await
-        .map(|_| ())
-}
 pub(super) async fn record_with_context_on(
     conn: &mut sqlx::SqliteConnection,
     tasks: &[WorkerTask],
     principal: Option<&WorkerClaimPrincipal>,
-) -> Result<Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>, StorageError> {
-    let mut contexts = Vec::new();
+) -> Result<IssuedTransport, StorageError> {
+    let mut transport = IssuedTransport::default();
     // Bound statement parameters and avoid a read roundtrip per claimed task.
     for batch in tasks.chunks(128) {
         let tasks: std::collections::HashMap<_, _> =
@@ -105,6 +96,12 @@ pub(super) async fn record_with_context_on(
                 return Err(invalid());
             }
             let source = admission.as_ref().map(|a| a.invocation.clone()).or(legacy);
+            if let Some(callback) =
+                crate::worker_callback::WorkerCallbackBinding::issue(task, tenant.clone())?
+            {
+                super::worker_callbacks::insert_on(conn, &callback).await?;
+                transport.callbacks.push(callback);
+            }
             let claim = WorkerIssuedClaim::new(task, tenant, principal, source, admission)?;
             let record = serde_json::to_string(&claim)?;
             let epoch = i64::try_from(claim.claim.claim_epoch).map_err(|_| invalid())?;
@@ -129,11 +126,13 @@ pub(super) async fn record_with_context_on(
                 .as_ref()
                 .is_some_and(crate::worker_invocation::WorkerInvocation::is_published_mailbox)
             {
-                contexts.push(super::delegation_claim_contexts::capture_on(conn, claim).await?);
+                transport
+                    .contexts
+                    .push(super::delegation_claim_contexts::capture_on(conn, claim).await?);
             }
         }
     }
-    Ok(contexts)
+    Ok(transport)
 }
 pub(super) async fn get(
     store: &super::SqliteStorage,
@@ -215,7 +214,7 @@ pub(super) async fn reconnect(
         .push_bind(i64::from(request.limit));
     let rows = query.build().fetch_all(&store.pool).await?;
     let mut tasks = Vec::with_capacity(rows.len());
-    let mut contexts = Vec::new();
+    let mut transport = IssuedTransport::default();
     for row in rows {
         let task = super::helpers::row_to_worker_task(&row)?;
         let tenant = TenantId::unchecked(row.get::<String, _>("actual_tenant"));
@@ -237,11 +236,27 @@ pub(super) async fn reconnect(
             row.get::<Option<String>, _>("delegation_record"),
             protocol,
         )? {
-            contexts.push(context);
+            transport.contexts.push(context);
+        }
+        if task.wait_for_callback {
+            let Some(worker_id) = task.worker_id.clone() else {
+                return Err(invalid());
+            };
+            let mut conn = store.pool.acquire().await?;
+            let claim = WorkerClaim::new(worker_id, task.claim_epoch);
+            let Some(binding) =
+                super::worker_callbacks::get_for_claim_on(&mut conn, task.id, &claim).await?
+            else {
+                continue;
+            };
+            if binding.tenant_id != tenant {
+                return Err(invalid());
+            }
+            transport.callbacks.push(binding);
         }
         tasks.push(task);
     }
-    crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
 }
 
 // Screening a held row is not lease renewal or provider admission.
@@ -249,6 +264,7 @@ pub(super) async fn reconnect(
 const RECONNECT_FORWARD_GUARDS: &str = concat!(
     " AND ti.state NOT IN ('completed','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM delegation_proxy_native_history h WHERE h.instance_id=wt.instance_id) AND NOT EXISTS(SELECT 1 FROM physical_instance_retirements r WHERE r.instance_id=wt.instance_id) AND NOT EXISTS(SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed'))",
     " AND NOT EXISTS(SELECT 1 FROM continuity_executions ce WHERE ce.tenant_id=ti.tenant_id AND ce.state='compensating' AND json_extract(ce.record,'$.current_instance_id')=wt.instance_id)",
-    " AND (wt.lease_secs IS NULL OR (wt.lease_secs>0 AND julianday(COALESCE(wt.heartbeat_at,wt.claimed_at))+wt.lease_secs/86400.0>julianday('now')))",
+    " AND (wt.wait_for_callback OR wt.heartbeat_timeout_secs IS NOT NULL OR wt.lease_secs IS NULL OR (wt.lease_secs>0 AND julianday(COALESCE(wt.heartbeat_at,wt.claimed_at))+wt.lease_secs/86400.0>julianday('now')))",
+    " AND (wt.heartbeat_timeout_secs IS NULL OR COALESCE(julianday(COALESCE(wt.heartbeat_at, wt.claimed_at)) + wt.heartbeat_timeout_secs / 86400.0 > julianday('now'), FALSE))",
     " AND (wt.timeout_ms IS NULL OR (wt.timeout_ms>0 AND julianday(wt.created_at)+wt.timeout_ms/86400000.0>julianday('now')))",
 );

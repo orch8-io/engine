@@ -589,6 +589,7 @@ impl Modify for EmbedSecurity {
         crate::workers::poll_tasks,
         crate::workers::poll_tasks_from_queue,
         crate::workers::complete_task,
+        crate::workers::callback::complete,
         crate::workers::reconciliation::reconcile_completion,
         crate::workers::upload_task_artifact,
         crate::workers::definition::read,
@@ -649,6 +650,11 @@ impl Modify for EmbedSecurity {
         crate::receipts::signing_key,
         // Embedded -> remote migration
         crate::migrations::import,
+        crate::migrations::capabilities,
+        crate::migrations::import_terminal_history,
+        crate::migrations::import_cron_schedule,
+        crate::plugins::upload_module,
+        crate::plugins::collect_unused_modules,
         // Usage
         crate::usage::get_usage,
         crate::usage::purge_llm_cache,
@@ -737,6 +743,7 @@ impl Modify for EmbedSecurity {
         orch8_types::contract::ContractDefinition,
         orch8_engine::dataflow::DataflowSeverity,
         orch8_engine::dataflow::DataflowFinding,
+        orch8_engine::dataflow::DataflowSource,
         orch8_engine::dataflow::DataflowReport,
         orch8_engine::dataflow::GeneratedDataflowTypes,
         crate::dataflow::DataflowResponse,

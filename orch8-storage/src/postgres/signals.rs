@@ -36,9 +36,16 @@ pub(super) fn bind_signal_insert<'q>(
 }
 
 pub(super) async fn enqueue(store: &PostgresStorage, signal: &Signal) -> Result<(), StorageError> {
+    insert_on(&store.pool, signal).await
+}
+
+pub(super) async fn insert_on<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
+    signal: &Signal,
+) -> Result<(), StorageError> {
     let signal_type_str = signal.signal_type.to_string();
     bind_signal_insert(sqlx::query(SIGNAL_INSERT_SQL), signal, &signal_type_str)
-        .execute(&store.pool)
+        .execute(executor)
         .await?;
     Ok(())
 }
@@ -136,6 +143,25 @@ pub(super) async fn enqueue_for_caller(
     Ok(true)
 }
 
+pub(super) async fn list_history_page(
+    store: &PostgresStorage,
+    instance: InstanceId,
+    after: Option<Uuid>,
+    limit: u32,
+) -> Result<Vec<Signal>, StorageError> {
+    let rows = sqlx::query_as::<_, SignalRow>(
+        "SELECT id, instance_id, signal_type, payload, delivered, created_at, delivered_at
+         FROM signal_inbox WHERE instance_id = $1 AND ($2::uuid IS NULL OR id > $2)
+         ORDER BY id LIMIT $3",
+    )
+    .bind(instance.into_uuid())
+    .bind(after)
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter().map(SignalRow::into_signal).collect()
+}
+
 pub(super) async fn get_pending(
     store: &PostgresStorage,
     instance_id: InstanceId,
@@ -143,7 +169,7 @@ pub(super) async fn get_pending(
     let rows = sqlx::query_as::<_, SignalRow>(
         r"SELECT id, instance_id, signal_type, payload, delivered, created_at, delivered_at
            FROM signal_inbox WHERE instance_id = $1 AND delivered = FALSE
-           ORDER BY created_at ASC",
+           ORDER BY created_at ASC, id ASC",
     )
     .bind(instance_id.into_uuid())
     .fetch_all(&store.pool)
@@ -162,7 +188,7 @@ pub(super) async fn get_pending_batch(
     let rows = sqlx::query_as::<_, SignalRow>(
         r"SELECT id, instance_id, signal_type, payload, delivered, created_at, delivered_at
            FROM signal_inbox WHERE instance_id = ANY($1) AND delivered = FALSE
-           ORDER BY created_at ASC",
+           ORDER BY created_at ASC, id ASC",
     )
     .bind(&uuids)
     .fetch_all(&store.pool)

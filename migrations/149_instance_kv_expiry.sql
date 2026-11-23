@@ -1,0 +1,1 @@
+ALTER TABLE instance_kv_state ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;

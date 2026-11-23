@@ -249,9 +249,7 @@ async fn trigger_cron_schedule(
     // runs on a later tick, so `now` would differ between the original
     // attempt and the retry and the key would never collide, silently
     // defeating the whole point of setting it.
-    let idempotency_key = schedule
-        .next_fire_at
-        .map(|fire_at| format!("cron:{}:{}", schedule.id, fire_at.to_rfc3339()));
+    let idempotency_key = schedule.occurrence_key();
     let instance = TaskInstance {
         claimed_at: None,
         sub_tenant: None,

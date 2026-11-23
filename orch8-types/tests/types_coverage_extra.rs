@@ -90,6 +90,8 @@ fn full_step(id: &str) -> StepDef {
         }),
         retry: Some(RetryPolicy {
             max_attempts: 5,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(200),
             max_backoff: Duration::from_secs(60),
             backoff_multiplier: 3.0,
@@ -166,6 +168,8 @@ fn seq_11_retry_policy_zero_attempts_rejected_by_validation() {
     if let BlockDefinition::Step(ref mut sd) = s {
         sd.retry = Some(RetryPolicy {
             max_attempts: 0,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(100),
             max_backoff: Duration::from_secs(1),
             backoff_multiplier: 2.0,
@@ -182,6 +186,8 @@ fn seq_11_retry_policy_zero_attempts_rejected_by_validation() {
 fn seq_12_retry_policy_huge_backoff_serde() {
     let rp = RetryPolicy {
         max_attempts: 100,
+        jitter: orch8_types::sequence::RetryJitter::Legacy,
+        rules: Vec::new(),
         initial_backoff: Duration::from_millis(1),
         max_backoff: Duration::from_secs(86400), // 24 hours
         backoff_multiplier: 10.0,
@@ -201,6 +207,8 @@ fn seq_13_retry_policy_zero_initial_backoff_valid() {
     if let BlockDefinition::Step(ref mut sd) = s {
         sd.retry = Some(RetryPolicy {
             max_attempts: 3,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::ZERO,
             max_backoff: Duration::from_secs(10),
             backoff_multiplier: 2.0,
@@ -218,6 +226,8 @@ fn seq_14_retry_policy_equal_initial_max_backoff_valid() {
     if let BlockDefinition::Step(ref mut sd) = s {
         sd.retry = Some(RetryPolicy {
             max_attempts: 1,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_secs(5),
             max_backoff: Duration::from_secs(5),
             backoff_multiplier: 1.0,
@@ -235,6 +245,8 @@ fn seq_15_retry_policy_negative_multiplier_rejected() {
     if let BlockDefinition::Step(ref mut sd) = s {
         sd.retry = Some(RetryPolicy {
             max_attempts: 3,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_secs(1),
             max_backoff: Duration::from_secs(30),
             backoff_multiplier: -1.0,
@@ -403,6 +415,7 @@ fn cfg_36_config_serde_with_all_sections() {
             max_connections: 4,
             run_migrations: true,
             search_path: Some("test_schema".into()),
+            ..orch8_types::config::DatabaseConfig::default()
         },
         engine: SchedulerConfig::default(),
         api: ApiConfig::default(),

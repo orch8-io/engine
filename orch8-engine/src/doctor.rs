@@ -1036,6 +1036,8 @@ mod tests {
             created_at: t0() - Duration::seconds(age_secs),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,

@@ -225,6 +225,21 @@ class Orch8Engine internal constructor(
     suspend fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) =
         offload { backend.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
 
+    /** Export a paused or waiting execution using a signer owned by the host application. */
+    @Throws(Orch8Exception::class, IllegalArgumentException::class, CancellationException::class)
+    suspend fun exportContinuityCapsule(
+        instanceId: String,
+        destinationRuntimeId: String,
+        payloadKeyBase64: String,
+        expiresInSeconds: Int,
+        signer: Orch8CapsuleSigner,
+    ): ContinuityExportResult {
+        require(expiresInSeconds in 1..3600) { "capsule expiry must be between 1 and 3600 seconds" }
+        return offload {
+            backend.exportContinuityCapsule(instanceId, destinationRuntimeId, payloadKeyBase64, expiresInSeconds, signer)
+        }
+    }
+
     // -- Runtime node / worker ---------------------------------------------
     //
     // Needs the engine release after 0.7.1. Handlers registered with

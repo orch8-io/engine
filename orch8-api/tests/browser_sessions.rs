@@ -131,6 +131,8 @@ async fn seed_task_in_queue(
         created_at: now,
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,

@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use chrono::Utc;
 use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -143,6 +144,17 @@ pub(crate) async fn validate_and_persist_sequence(
     decode_warnings: Vec<String>,
 ) -> Result<serde_json::Value, ApiError> {
     validate_sequence_definition(seq)?;
+    let boundaries =
+        crate::preflight::pinned_child_findings(state, &seq.tenant_id, seq, Utc::now()).await?;
+    if !boundaries.is_empty() {
+        return Err(ApiError::UnprocessableEntity(
+            boundaries
+                .iter()
+                .map(|finding| finding.summary.as_str())
+                .collect::<Vec<_>>()
+                .join("; "),
+        ));
+    }
 
     let mut warnings = decode_warnings;
     warnings.extend(seq.unknown_handler_warnings());
@@ -157,9 +169,11 @@ pub(crate) async fn validate_and_persist_sequence(
         warnings.push(lw.to_string());
     }
 
+    let mut revision = seq.clone();
+    pin_sequence_modules(state.storage.as_ref(), &mut revision).await?;
     state
         .storage
-        .create_sequence(seq)
+        .create_sequence(&revision)
         .await
         .map_err(|e| ApiError::from_storage(e, "sequence"))?;
 
@@ -169,6 +183,20 @@ pub(crate) async fn validate_and_persist_sequence(
     }
 
     Ok(body)
+}
+
+async fn pin_sequence_modules(
+    storage: &dyn orch8_storage::StorageBackend,
+    sequence: &mut SequenceDefinition,
+) -> Result<(), ApiError> {
+    orch8_engine::handlers::wasm_plugin::pin_sequence_modules(storage, sequence)
+        .await
+        .map_err(|error| match error {
+            orch8_types::error::StorageError::Constraint(message) => {
+                ApiError::InvalidArgument(message)
+            }
+            other => ApiError::from_storage(other, "WASM module"),
+        })
 }
 
 /// Validate the contents of a sequence before publishing it.
@@ -194,6 +222,15 @@ pub fn validate_sequence_definition(seq: &SequenceDefinition) -> Result<(), ApiE
     // instance create.
     if let Some(schema) = &seq.input_schema {
         crate::input_schema::validate_schema_is_well_formed(schema)?;
+    }
+
+    orch8_engine::input_schema::validate_config_schema(seq.config_schema())
+        .map_err(|error| ApiError::validation("INVALID_CONFIG_SCHEMA", error.to_string()))?;
+
+    orch8_engine::input_schema::validate_state_schema(seq.state_schema())
+        .map_err(|error| ApiError::validation("INVALID_STATE_SCHEMA", error.to_string()))?;
+    if let Some(schema) = seq.child_result_schema() {
+        crate::input_schema::validate_output_schema_is_well_formed(schema)?;
     }
 
     // Reject malformed `output_schema` on any step at authoring time.
@@ -700,6 +737,7 @@ pub(crate) async fn promote_sequence(
     promoted.version += 1;
     promoted.status = SequenceStatus::Production;
     promoted.created_at = chrono::Utc::now();
+    pin_sequence_modules(state.storage.as_ref(), &mut promoted).await?;
 
     state
         .storage

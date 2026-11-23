@@ -52,11 +52,54 @@ impl ObjectArtifactStore {
         match self.never {}
     }
 
+    pub async fn put_wasm_module(
+        &self,
+        _tenant: &str,
+        _digest: &orch8_types::plugin::WasmArtifactDigest,
+        _bytes: Bytes,
+    ) -> Result<(), StorageError> {
+        match self.never {}
+    }
+
+    pub async fn get_wasm_module(
+        &self,
+        _tenant: &str,
+        _digest: &orch8_types::plugin::WasmArtifactDigest,
+        _limit: u64,
+    ) -> Result<Option<Bytes>, StorageError> {
+        match self.never {}
+    }
+
     pub async fn delete(&self, _key: &str) -> Result<(), StorageError> {
         match self.never {}
     }
 
     pub async fn list(&self, _instance_id: &str) -> Result<Vec<ArtifactMeta>, StorageError> {
+        match self.never {}
+    }
+
+    pub(crate) async fn old_wasm_modules(
+        &self,
+        _tenant: &str,
+        _before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<orch8_types::plugin::WasmArtifactDigest>, StorageError> {
+        match self.never {}
+    }
+
+    pub(crate) async fn wasm_module_is_old(
+        &self,
+        _tenant: &str,
+        _digest: &orch8_types::plugin::WasmArtifactDigest,
+        _before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        match self.never {}
+    }
+
+    pub(crate) async fn delete_wasm_module(
+        &self,
+        _tenant: &str,
+        _digest: &orch8_types::plugin::WasmArtifactDigest,
+    ) -> Result<(), StorageError> {
         match self.never {}
     }
 }

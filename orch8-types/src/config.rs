@@ -574,6 +574,9 @@ pub struct NodeConfig {
     /// Coarse region label for this node (e.g. `eu-west-1`). Empty = unset.
     #[serde(default)]
     pub region: String,
+    /// Exact sequence revisions to prewarm on this native executor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wasm_prewarm_revisions: Vec<crate::ids::SequenceId>,
 }
 
 /// Selectable durable artifact backends. In-memory is intentionally absent —
@@ -678,6 +681,12 @@ pub struct DatabaseConfig {
     pub url: SecretString,
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// Maximum size of the file-backed `SQLite` pool.
+    #[serde(default = "default_sqlite_max_connections")]
+    pub sqlite_max_connections: u32,
+    /// Time a file-backed `SQLite` writer may wait for a database lock.
+    #[serde(default = "default_sqlite_busy_timeout_ms")]
+    pub sqlite_busy_timeout_ms: u32,
     #[serde(default)]
     pub run_migrations: bool,
     /// Postgres schema to use for this instance (schema-per-instance isolation).
@@ -691,6 +700,8 @@ impl Default for DatabaseConfig {
             backend: default_backend(),
             url: default_database_url(),
             max_connections: default_max_connections(),
+            sqlite_max_connections: default_sqlite_max_connections(),
+            sqlite_busy_timeout_ms: default_sqlite_busy_timeout_ms(),
             run_migrations: false,
             search_path: None,
         }
@@ -709,6 +720,14 @@ fn default_database_url() -> SecretString {
 
 const fn default_max_connections() -> u32 {
     64
+}
+
+const fn default_sqlite_max_connections() -> u32 {
+    8
+}
+
+const fn default_sqlite_busy_timeout_ms() -> u32 {
+    5_000
 }
 
 /// How the engine decides which payloads leave the inline context and
@@ -1188,6 +1207,9 @@ impl EngineConfig {
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
 
+        if self.node.wasm_prewarm_revisions.len() > 64 {
+            errors.push("node.wasm_prewarm_revisions accepts at most 64 revisions".into());
+        }
         if self.node.role == NodeRole::Gateway {
             if self.api.api_key.is_empty() {
                 errors.push("node.role=gateway requires api.api_key".into());
@@ -1266,6 +1288,12 @@ impl EngineConfig {
         }
         if self.database.max_connections == 0 {
             errors.push("database.max_connections must be > 0".into());
+        }
+        if self.database.sqlite_max_connections == 0 {
+            errors.push("database.sqlite_max_connections must be > 0".into());
+        }
+        if !(1..=i32::MAX as u32).contains(&self.database.sqlite_busy_timeout_ms) {
+            errors.push("database.sqlite_busy_timeout_ms must be between 1 and 2147483647".into());
         }
         // Engine / scheduler
         if self.engine.tick_interval_ms == 0 {
@@ -2135,5 +2163,25 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.executor.transport, ExecutorTransport::Http);
         assert_eq!(parsed.executor.max_concurrent_tasks, 16);
+    }
+
+    #[test]
+    fn sqlite_file_tuning_defaults_and_validation() {
+        let mut config = EngineConfig::default();
+        assert_eq!(config.database.sqlite_max_connections, 8);
+        assert_eq!(config.database.sqlite_busy_timeout_ms, 5_000);
+        config.database.sqlite_max_connections = 0;
+        config.database.sqlite_busy_timeout_ms = u32::MAX;
+        let errors = config.validate().unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("sqlite_max_connections"))
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("sqlite_busy_timeout_ms"))
+        );
     }
 }

@@ -1,5 +1,9 @@
 import type { EventSource, Subscription } from "./core";
 import type { InstanceStateKind, SyncResult } from "./types";
+import {
+  AccountOutcomeReporter, type AccountOutcomeCredentials, type AccountOutcomeDelivery,
+  type SqliteAccountOutcomeJournal,
+} from "./outcomeReporting";
 
 /** Trusted host identity; tokens and the currently selected UI account are not identity keys. */
 export interface AccountIdentity { accountKey: string; issuer: string; subject: string }
@@ -82,6 +86,18 @@ function owned(value: unknown, owner: Descriptor, run = false): Record<string, a
     throw new Error("Scoped native owner mismatch");
   return v;
 }
+function runSnapshot(value: unknown, owner: Descriptor): CatalogRunSnapshot | null {
+  if (value === null) return null;
+  const v = owned(value, owner, true);
+  if (v.sessionEpoch !== owner.sessionEpoch) throw new Error("Snapshot session mismatch");
+  state(v.state); text(v.updatedAt); text(v.createdAt); text(v.dataJson);
+  if (!Array.isArray(v.pendingSteps) || v.pendingSteps.some((step: unknown) => typeof step !== "string")) {
+    throw new Error("Invalid pending steps");
+  }
+  return Object.freeze({ ...v, pendingSteps: Object.freeze([...v.pendingSteps]) }) as CatalogRunSnapshot;
+}
+type SnapshotObserver = (snapshot: CatalogRunSnapshot | null) => void;
+
 let nextCallback = 0;
 const callbackKey = () => {
   if (nextCallback >= Number.MAX_SAFE_INTEGER) throw new Error("Scoped callback identity space exhausted");
@@ -124,6 +140,7 @@ export class ScopedClient {
   private pendingRegistrations = 0;
   private tokens = new Map<string, { fence: Fence; owner: Descriptor; source: CatalogTokenSource }>();
   private pendingSyncs = 0;
+  private observers = new Map<string, { fence: Fence; owner: Descriptor; callback: SnapshotObserver }>();
   private accountSessions = new Map<string, { epoch: string; fence: Fence }>();
   constructor(private native: NativeScopedCall, private events: EventSource,
     private resolveStep: (id: string, output: string | null, error: string | null, permanent: boolean) => void,
@@ -135,6 +152,7 @@ export class ScopedClient {
     this.handlerNames.clear();
     this.registrationTails.clear();
     this.accountSessions.clear();
+    for (const key of this.observers.keys()) this.stopObservation(key);
     for (const sub of this.subscriptions) sub.remove();
     this.subscriptions = [];
   }
@@ -143,7 +161,51 @@ export class ScopedClient {
     this.subscriptions = [
       this.events.addListener("orch8:scopedExecuteStep", event => { void this.execute(event); }),
       this.events.addListener("orch8:scopedRefreshToken", event => { void this.refresh(event); }),
+      this.events.addListener("orch8:scopedSnapshot", event => this.deliverSnapshot(event)),
     ];
+  }
+  stopViewObservations(handle: string): void {
+    for (const [key, observer] of this.observers) {
+      if (observer.owner.handle === handle) this.stopObservation(key);
+    }
+  }
+  private deliverSnapshot(event: unknown): void {
+    try {
+      const record = object(event);
+      const key = text(record.observerKey);
+      const observer = this.observers.get(key);
+      if (!observer) return;
+      check(observer.fence);
+      owned(record, observer.owner, true);
+      if (epoch(record.sessionEpoch) !== observer.owner.sessionEpoch) return;
+      const snapshot = runSnapshot(JSON.parse(text(record.snapshotJson)), observer.owner);
+      if (snapshot && ["completed", "failed", "cancelled"].includes(snapshot.state)) this.stopObservation(key);
+      observer.callback(snapshot);
+    } catch {
+      // Invalid, retired, and throwing host callbacks are isolated.
+    }
+  }
+  private stopObservation(key: string): void {
+    const observer = this.observers.get(key);
+    if (!observer) return;
+    this.observers.delete(key);
+    void this.native(observer.owner.handle, "unsubscribeSnapshots", JSON.stringify({ observerKey: key })).catch(() => {});
+  }
+  async observe(owner: Descriptor, fence: Fence, callback: SnapshotObserver, intervalMs: number): Promise<Subscription> {
+    if (typeof callback !== "function" || !Number.isInteger(intervalMs) || intervalMs < 50 || intervalMs > 60_000) {
+      throw new TypeError("Invalid snapshot observer or polling interval");
+    }
+    if (this.observers.size >= 128) throw new Error("Scoped snapshot observation capacity exhausted");
+    this.listen();
+    const key = callbackKey();
+    this.observers.set(key, { fence, owner, callback });
+    try {
+      await this.call(fence, owner.handle, "subscribeSnapshots", { observerKey: key, intervalMs });
+    } catch (error) {
+      this.stopObservation(key);
+      throw error;
+    }
+    return { remove: () => { this.stopObservation(key); } };
   }
   private replyStep(id: string, output: string | null, error: string | null, permanent: boolean): void {
     try { this.resolveStep(id, output, error, permanent); } catch { /* Detached native bridge. */ }
@@ -267,6 +329,10 @@ export class ScopedClient {
       let current: Fence | undefined = value.fence;
       while (current) { if (current === fence) { this.handlers.delete(key); break; } current = current.parent; }
     }
+    for (const [key, observer] of this.observers) {
+      let current: Fence | undefined = observer.fence;
+      while (current) { if (current === fence) { this.stopObservation(key); break; } current = current.parent; }
+    }
     for (const [name, key] of this.handlerNames) { if (!this.handlers.has(key)) this.handlerNames.delete(name); }
   }
 }
@@ -292,6 +358,7 @@ class ScopedView {
     if (this.disposed) return;
     // Disposal also works after closeView; it must not use the closed view fence.
     await this.transport.call({ closed: false }, this.owner.handle, "dispose");
+    this.transport.stopViewObservations(this.owner.handle);
     this.disposed = true;
   }
 }
@@ -308,6 +375,12 @@ export class Orch8Account extends ScopedView {
 }
 export class Orch8Catalog extends ScopedView {
   get catalogId(): string { return this.owner.catalogId!; }
+  outcomeReporter(
+    journal: SqliteAccountOutcomeJournal, credentials: AccountOutcomeCredentials, deliver: AccountOutcomeDelivery,
+  ): AccountOutcomeReporter {
+    this.ensureUsable();
+    return new AccountOutcomeReporter(this, journal, credentials, deliver, () => this.ensureUsable());
+  }
   async registerHandler(name: string, handler: CatalogStepHandler, timeoutMs = 30000): Promise<void> {
     this.ensureUsable();
     return this.transport.register(this.owner, this.fence, name, handler, timeoutMs);
@@ -356,13 +429,12 @@ export class Orch8CatalogRun extends ScopedView {
   get instanceId(): string { return this.owner.instanceId!; }
   async start(): Promise<void> { await this.call("start"); }
   async snapshot(): Promise<CatalogRunSnapshot | null> {
-    const value: unknown = await this.call("snapshot");
-    if (value === null) return null;
-    const v = owned(value, this.owner, true);
-    if (v.sessionEpoch !== this.sessionEpoch) throw new Error("Snapshot session mismatch");
-    state(v.state); text(v.updatedAt); text(v.createdAt); text(v.dataJson);
-    if (!Array.isArray(v.pendingSteps) || v.pendingSteps.some((s: unknown) => typeof s !== "string")) throw new Error("Invalid pending steps");
-    return Object.freeze({ ...v, pendingSteps: Object.freeze([...v.pendingSteps]) }) as CatalogRunSnapshot;
+    return runSnapshot(await this.call("snapshot"), this.owner);
+  }
+  /** Observe native snapshots for this run and ownership epoch. */
+  async observeSnapshots(callback: SnapshotObserver, intervalMs = 500): Promise<Subscription> {
+    this.ensureUsable();
+    return this.transport.observe(this.owner, this.fence, callback, intervalMs);
   }
   async cancel(): Promise<InstanceStateKind | null> {
     const value: unknown = await this.call("cancel"); return value === null ? null : state(value);

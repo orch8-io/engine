@@ -9,18 +9,23 @@
 //! virtual: delays, `sleep`, retry backoff and loop poll intervals advance a
 //! millisecond counter instead of waiting.
 
-use std::collections::BTreeMap;
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, VecDeque},
+};
 
+use chrono::{DateTime, TimeDelta, Utc};
 use orch8_types::context::ExecutionContext;
 use orch8_types::sequence::{
-    ABSplitDef, BlockDefinition, ForEachDef, LoopDef, RaceSemantics, RetryPolicy,
+    ABSplitDef, BlockDefinition, ForEachDef, HumanInputDef, LoopDef, RaceSemantics, RetryPolicy,
     SequenceDefinition, StepDef,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::expression;
+use crate::expression::{self, ExpressionRuntime};
+use crate::template_filters;
 
 /// Builtins the playground executes for real because they only touch the
 /// instance context/state.
@@ -28,6 +33,7 @@ pub const LOCAL_HANDLERS: &[&str] = &[
     "noop",
     "log",
     "sleep",
+    "asl_wait",
     "fail",
     "transform",
     "assert",
@@ -69,7 +75,7 @@ const DEFAULT_INSTANCE_ID: &str = "00000000-0000-7000-8000-000000000001";
 #[serde(deny_unknown_fields)]
 pub struct Mock {
     /// Output returned instead of running / stubbing the handler.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "present_value")]
     pub output: Option<Value>,
     /// If set, the step fails with this message.
     #[serde(default)]
@@ -83,6 +89,22 @@ pub struct Mock {
     /// Fail only the first N attempts (retryable), then return `output`.
     #[serde(default)]
     pub fail_attempts: Option<u32>,
+}
+
+fn present_value<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+/// One signal scheduled on the preview's virtual clock.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TimedSignal {
+    pub at_ms: u64,
+    pub signal_type: String,
+    #[serde(default)]
+    pub payload: Value,
 }
 
 /// Options for [`run`].
@@ -107,6 +129,21 @@ pub struct RunOptions {
     /// variant.
     #[serde(default)]
     pub instance_id: Option<String>,
+    /// Virtual instant at zero elapsed time. Defaults to the Unix epoch.
+    #[serde(default = "default_start_at")]
+    pub start_at: DateTime<Utc>,
+    /// Instance timezone for local delays and business calendars.
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+    /// Seed for reproducible `random()` and `uuid()` expression calls.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Inject cancellation on the first visit to this block boundary.
+    #[serde(default)]
+    pub cancel_before: Option<String>,
+    /// Providing fixtures enables simulated signal waits.
+    #[serde(default)]
+    pub signals: Option<Vec<TimedSignal>>,
 }
 
 fn empty_object() -> Value {
@@ -117,6 +154,14 @@ const fn default_max_ticks() -> u32 {
     1_000
 }
 
+const fn default_start_at() -> DateTime<Utc> {
+    DateTime::UNIX_EPOCH
+}
+
+fn default_timezone() -> String {
+    "UTC".to_owned()
+}
+
 impl Default for RunOptions {
     fn default() -> Self {
         Self {
@@ -125,12 +170,19 @@ impl Default for RunOptions {
             mocks: BTreeMap::new(),
             max_ticks: default_max_ticks(),
             instance_id: None,
+            start_at: default_start_at(),
+            timezone: default_timezone(),
+            seed: None,
+            cancel_before: None,
+            signals: None,
         }
     }
 }
 
 enum Halt {
     Failed { block_id: String, message: String },
+    Cancelled,
+    Waiting,
     TickLimit,
     OperationLimit,
 }
@@ -143,8 +195,14 @@ struct Interp<'a> {
     operations: u32,
     options: &'a RunOptions,
     instance_uuid: [u8; 16],
+    entropy_cursor: Cell<u64>,
+    cancel_before: Option<&'a str>,
+    cancellation_protected: bool,
+    cancellation_pending: bool,
+    timed_signals: BTreeMap<&'a str, VecDeque<&'a TimedSignal>>,
     context: ExecutionContext,
     outputs: Map<String, Value>,
+    mock_schemas: BTreeMap<String, Result<jsonschema::Validator, String>>,
     state: Map<String, Value>,
     timeline: Vec<Value>,
     would_call: Vec<Value>,
@@ -166,12 +224,18 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
         operations: 0,
         options,
         instance_uuid,
+        entropy_cursor: Cell::new(0),
+        cancel_before: options.cancel_before.as_deref(),
+        cancellation_protected: false,
+        cancellation_pending: false,
+        timed_signals: queue_signals(options),
         context: ExecutionContext {
             data: options.input.clone(),
             config: options.config.clone(),
             ..Default::default()
         },
         outputs: Map::new(),
+        mock_schemas: BTreeMap::new(),
         state: Map::new(),
         timeline: Vec::new(),
         would_call: Vec::new(),
@@ -187,6 +251,23 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
     let result = interp.run_blocks(&sequence.blocks, "");
     let (status, error) = match result {
         Ok(()) => ("completed", Value::Null),
+        Err(Halt::Waiting) => ("waiting", Value::Null),
+        Err(Halt::Cancelled) => {
+            if let Some(cleanup) = &sequence.on_cancel {
+                for block in cleanup {
+                    if matches!(
+                        interp.run_block(block, "on_cancel"),
+                        Err(Halt::TickLimit | Halt::OperationLimit)
+                    ) {
+                        interp
+                            .notes
+                            .push("on_cancel stopped at the preview execution budget".into());
+                        break;
+                    }
+                }
+            }
+            ("cancelled", Value::Null)
+        }
         Err(Halt::TickLimit) => (
             "tick_limit",
             json!({ "message": format!("stopped after {} step attempts (max_ticks)", options.max_ticks) }),
@@ -221,6 +302,19 @@ pub fn run(sequence: &SequenceDefinition, options: &RunOptions) -> Value {
         "would_call": interp.would_call,
         "notes": interp.notes,
     })
+}
+
+fn queue_signals(options: &RunOptions) -> BTreeMap<&str, VecDeque<&TimedSignal>> {
+    let mut signals: Vec<_> = options.signals.iter().flatten().collect();
+    signals.sort_by_key(|signal| signal.at_ms);
+    let mut pending = BTreeMap::<_, VecDeque<_>>::new();
+    for signal in signals {
+        pending
+            .entry(signal.signal_type.as_str())
+            .or_default()
+            .push_back(signal);
+    }
+    pending
 }
 
 fn parse_uuid_bytes(s: &str) -> Option<[u8; 16]> {
@@ -317,11 +411,32 @@ impl Interp<'_> {
     }
 
     fn expr_value(&self, expr: &str) -> Value {
-        expression::evaluate(expr, &self.context, &self.outputs_value())
+        self.expr_value_in(expr, None)
+    }
+
+    fn expr_value_in(&self, expr: &str, context: Option<&ExecutionContext>) -> Value {
+        expression::evaluate_with(
+            expr,
+            context.unwrap_or(&self.context),
+            &self.outputs_value(),
+            self,
+        )
     }
 
     fn truthy(&self, expr: &str) -> bool {
         expression::is_truthy(&self.expr_value(expr))
+    }
+
+    fn seeded_bytes<const N: usize>(&self, domain: u8) -> Option<[u8; N]> {
+        let seed = self.options.seed?;
+        let counter = self.entropy_cursor.get();
+        self.entropy_cursor.set(counter.wrapping_add(1));
+        let mut hash = Sha256::new();
+        hash.update(b"orch8-playground-entropy-v1\0");
+        hash.update([domain]);
+        hash.update(seed.to_be_bytes());
+        hash.update(counter.to_be_bytes());
+        hash.finalize().get(..N)?.try_into().ok()
     }
 
     fn push(&mut self, entry: Value) {
@@ -376,6 +491,19 @@ impl Interp<'_> {
         self.operation()?;
         let id = block_id(block).to_string();
         let path = join_path(parent, &id);
+        if self.cancel_before == Some(id.as_str()) {
+            self.cancel_before = None;
+            self.decision(
+                &id,
+                &path,
+                "cancel",
+                &json!({"deferred":self.cancellation_protected}),
+            );
+            if !self.cancellation_protected {
+                return Err(Halt::Cancelled);
+            }
+            self.cancellation_pending = true;
+        }
         match block {
             BlockDefinition::Step(step) => self.run_step(step, &path),
             BlockDefinition::Parallel(def) => self.run_parallel(&def.branches, &path),
@@ -400,7 +528,14 @@ impl Interp<'_> {
             }
             BlockDefinition::TryCatch(def) => {
                 let outcome = match self.run_blocks(&def.try_block, &format!("{path}/try")) {
-                    Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
+                    Err(
+                        halt @ (Halt::TickLimit
+                        | Halt::OperationLimit
+                        | Halt::Cancelled
+                        | Halt::Waiting),
+                    ) => {
+                        return Err(halt);
+                    }
                     Err(Halt::Failed { block_id, message }) => {
                         self.decision(
                             &id,
@@ -444,13 +579,32 @@ impl Interp<'_> {
                 self.decision(&id, &path, "ab_split", &json!({ "variant": name }));
                 self.run_blocks(&def.variants[index].blocks, &path)
             }
-            BlockDefinition::CancellationScope(def) => self.run_blocks(&def.blocks, &path),
+            BlockDefinition::CancellationScope(def) => {
+                let nested = std::mem::replace(&mut self.cancellation_protected, true);
+                let outcome = self.run_blocks(&def.blocks, &path);
+                self.cancellation_protected = nested;
+                if !nested
+                    && self.cancellation_pending
+                    && matches!(outcome, Ok(()) | Err(Halt::Failed { .. }))
+                {
+                    self.cancellation_pending = false;
+                    return Err(Halt::Cancelled);
+                }
+                outcome
+            }
             BlockDefinition::Saga(def) => {
                 let mut completed = Vec::new();
                 for saga_step in &def.steps {
                     match self.run_block(&saga_step.action, &path) {
                         Ok(()) => completed.push(saga_step),
-                        Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
+                        Err(
+                            halt @ (Halt::TickLimit
+                            | Halt::OperationLimit
+                            | Halt::Cancelled
+                            | Halt::Waiting),
+                        ) => {
+                            return Err(halt);
+                        }
                         Err(Halt::Failed { block_id, message }) => {
                             self.decision(
                                 &id,
@@ -460,7 +614,12 @@ impl Interp<'_> {
                             );
                             for done in completed.iter().rev() {
                                 if let Some(compensation) = &done.compensation
-                                    && let Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) =
+                                    && let Err(
+                                        halt @ (Halt::TickLimit
+                                        | Halt::OperationLimit
+                                        | Halt::Cancelled
+                                        | Halt::Waiting),
+                                    ) =
                                         self.run_block(compensation, &format!("{path}/compensate"))
                                 {
                                     return Err(halt);
@@ -484,7 +643,14 @@ impl Interp<'_> {
             let result = self.run_blocks(branch, &format!("{path}[{index}]"));
             end = end.max(self.now);
             match result {
-                Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
+                Err(
+                    halt @ (Halt::TickLimit
+                    | Halt::OperationLimit
+                    | Halt::Cancelled
+                    | Halt::Waiting),
+                ) => {
+                    return Err(halt);
+                }
                 Err(failure) if first_failure.is_none() => first_failure = Some(failure),
                 _ => {}
             }
@@ -512,7 +678,10 @@ impl Interp<'_> {
             self.now = start;
             let first_entry = self.timeline.len();
             let result = self.run_blocks(branch, &format!("{path}[{index}]"));
-            if let Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) = result {
+            if let Err(
+                halt @ (Halt::TickLimit | Halt::OperationLimit | Halt::Cancelled | Halt::Waiting),
+            ) = result
+            {
                 return Err(halt);
             }
             runs.push(BranchRun {
@@ -563,7 +732,14 @@ impl Interp<'_> {
             }
             self.decision(id, path, "loop", &json!({ "iteration": iterations }));
             match self.run_blocks(&def.body, &format!("{path}#{iterations}")) {
-                Err(halt @ (Halt::TickLimit | Halt::OperationLimit)) => return Err(halt),
+                Err(
+                    halt @ (Halt::TickLimit
+                    | Halt::OperationLimit
+                    | Halt::Cancelled
+                    | Halt::Waiting),
+                ) => {
+                    return Err(halt);
+                }
                 Err(failure) if !def.continue_on_error => return Err(failure),
                 _ => {}
             }
@@ -602,6 +778,7 @@ impl Interp<'_> {
             if let Some(data) = self.context.data.as_object_mut() {
                 data.insert(def.item_var.clone(), item.clone());
             }
+            self.outputs.insert(id.to_owned(), json!({"_index":index}));
             self.decision(
                 id,
                 path,
@@ -637,108 +814,179 @@ impl Interp<'_> {
         Ok(())
     }
 
-    fn resolve_params(&mut self, value: &Value) -> Value {
+    fn resolve_params(
+        &self,
+        value: &Value,
+        context: Option<&ExecutionContext>,
+    ) -> Result<Value, String> {
         match value {
-            Value::String(s) => self.resolve_string(s),
-            Value::Array(items) => {
-                Value::Array(items.iter().map(|v| self.resolve_params(v)).collect())
-            }
-            Value::Object(map) => Value::Object(
-                map.iter()
-                    .map(|(k, v)| (k.clone(), self.resolve_params(v)))
-                    .collect(),
-            ),
-            other => other.clone(),
+            Value::String(s) => self.resolve_string(s, context),
+            Value::Array(items) => items
+                .iter()
+                .map(|v| self.resolve_params(v, context))
+                .collect::<Result<_, _>>()
+                .map(Value::Array),
+            Value::Object(map) => map
+                .iter()
+                .map(|(k, v)| Ok((k.clone(), self.resolve_params(v, context)?)))
+                .collect::<Result<_, _>>()
+                .map(Value::Object),
+            other => Ok(other.clone()),
         }
     }
 
     /// Resolve `{{ expr }}` templates. A string that is exactly one template
     /// keeps the value's JSON type; embedded templates are stringified.
-    /// Pipe filters (`| upper`) are engine-only and left unresolved.
-    fn resolve_string(&mut self, s: &str) -> Value {
+    fn resolve_string(&self, s: &str, context: Option<&ExecutionContext>) -> Result<Value, String> {
         if !s.contains("{{") {
-            return Value::String(s.to_string());
+            return Ok(Value::String(s.to_string()));
         }
-        let has_filter = |inner: &str| inner.replace("||", "").contains('|');
         let trimmed = s.trim();
-        if trimmed.starts_with("{{")
-            && trimmed.ends_with("}}")
-            && trimmed.matches("{{").count() == 1
+        if trimmed.starts_with("{{@")
+            && let Some(result) = template_filters::resolve_asl_intrinsic(
+                trimmed,
+                context.unwrap_or(&self.context),
+                &self.outputs_value(),
+                None,
+            )
         {
-            let inner = &trimmed[2..trimmed.len() - 2];
-            if has_filter(inner) {
-                self.notes.push(format!(
-                    "template filter not supported in the playground: {s}"
-                ));
-                return Value::String(s.to_string());
-            }
-            return self.expr_value(inner);
+            return result.map_err(|error| error.0);
+        }
+        if let Some(inner) = trimmed
+            .strip_prefix("{{")
+            .and_then(|text| text.strip_suffix("}}"))
+            && template_filters::is_single_template_expr(inner)
+        {
+            return self.template_expression(inner, context);
         }
         let mut out = String::new();
         let mut rest = s;
         while let Some(start) = rest.find("{{") {
             out.push_str(&rest[..start]);
             let after = &rest[start + 2..];
-            let Some(end) = after.find("}}") else {
+            let Some(end) = template_filters::find_closing_braces(after) else {
                 out.push_str(&rest[start..]);
                 rest = "";
                 break;
             };
             let inner = &after[..end];
-            if has_filter(inner) {
-                self.notes.push(format!(
-                    "template filter not supported in the playground: {inner}"
-                ));
-                out.push_str(&rest[start..start + 2 + end + 2]);
-            } else {
-                match self.expr_value(inner) {
-                    Value::String(text) => out.push_str(&text),
-                    Value::Null => {}
-                    other => out.push_str(&other.to_string()),
-                }
+            match self.template_expression(inner, context)? {
+                Value::String(text) => out.push_str(&text),
+                Value::Null if !has_filter_pipe(inner) => {}
+                other => out.push_str(&other.to_string()),
             }
             rest = &after[end + 2..];
         }
         out.push_str(rest);
-        Value::String(out)
+        Ok(Value::String(out))
+    }
+
+    fn template_expression(
+        &self,
+        expr: &str,
+        context: Option<&ExecutionContext>,
+    ) -> Result<Value, String> {
+        if !has_filter_pipe(expr) {
+            return Ok(self.expr_value_in(expr, context));
+        }
+        let state = expr
+            .contains("state.")
+            .then(|| Value::Object(self.state.clone()));
+        template_filters::resolve_path(
+            expr.trim(),
+            context.unwrap_or(&self.context),
+            &self.outputs_value(),
+            state.as_ref(),
+        )
+        .map_err(|error| error.0)
+    }
+
+    fn advance_step_delay(&mut self, step: &StepDef) -> Flow {
+        let from = self.now();
+        let deadline = if let Some(delay) = &step.delay {
+            crate::calendar_delay::calendar_deadline(
+                from,
+                delay,
+                &self.options.timezone,
+                Some(&self.context.config),
+                |limit| {
+                    let span = i128::from(limit) * 2 + 1;
+                    let offset = i128::from(self.random_u64()) % span - i128::from(limit);
+                    i64::try_from(offset).expect("offset lies within the jitter limit")
+                },
+            )
+        } else if step.handler == "asl_wait" {
+            let context = step
+                .context_access
+                .as_ref()
+                .map(|access| self.context.filtered(access));
+            let on_error = |message| Halt::Failed {
+                block_id: step.id.to_string(),
+                message,
+            };
+            let params = self
+                .resolve_params(&step.params, context.as_ref())
+                .map_err(on_error)?;
+            crate::calendar_delay::asl_wait_deadline(from, &params)
+                .map_err(|message| on_error(message.to_owned()))?
+        } else {
+            return Ok(());
+        };
+        let ms = u64::try_from((deadline - from).num_milliseconds()).unwrap_or_default();
+        self.now = self.now.saturating_add(ms);
+        Ok(())
     }
 
     fn run_step(&mut self, step: &StepDef, path: &str) -> Flow {
         let id = step.id.as_str().to_string();
         if let Some(guard) = &step.when {
-            let passed =
-                expression::evaluate_condition_strict(guard, &self.context, &self.outputs_value())
-                    .map_err(|error| Halt::Failed {
-                        block_id: id.clone(),
-                        message: format!("invalid `when` guard: {error}"),
-                    })?;
+            let passed = expression::evaluate_condition_strict_with(
+                guard,
+                &self.context,
+                &self.outputs_value(),
+                self,
+            )
+            .map_err(|error| Halt::Failed {
+                block_id: id.clone(),
+                message: format!("invalid `when` guard: {error}"),
+            })?;
             if !passed {
                 self.push(step_entry(&id, path, &step.handler, self.now, "skipped"));
                 return Ok(());
             }
         }
-        if let Some(delay) = &step.delay {
-            let ms = u64::try_from(delay.duration.as_millis()).unwrap_or(u64::MAX);
-            if delay.fire_at_local.is_some() || delay.business_days_only {
+        self.advance_step_delay(step)?;
+        if let Some(gate) = &step.wait_for_input {
+            if self.options.signals.is_some() {
+                if !self.await_input(&id, path, gate)? {
+                    return Ok(());
+                }
+            } else {
                 self.notes.push(format!(
-                    "step `{id}`: fire_at_local / business_days_only depend on the real calendar; the playground applies only `duration`"
+                    "step `{id}`: supply `signals` fixtures to simulate waiting for input"
                 ));
             }
-            self.now = self.now.saturating_add(ms);
         }
-        if step.wait_for_input.is_some() {
-            self.notes.push(format!(
-                "step `{id}`: human input is not awaited in the playground; mock it via `mocks.{id}`"
-            ));
+        let step_context = step
+            .context_access
+            .as_ref()
+            .map(|access| self.context.filtered(access));
+        let params = if step.handler == "asl_wait" {
+            Ok(json!({}))
+        } else {
+            self.resolve_params(&step.params, step_context.as_ref())
         }
-        let params = self.resolve_params(&step.params);
+        .map_err(|message| Halt::Failed {
+            block_id: id.clone(),
+            message,
+        })?;
         let max_attempts = step.retry.as_ref().map_or(1, |r| r.max_attempts.max(1));
         let mut attempt = 0u32;
         loop {
             attempt += 1;
             self.tick()?;
             let started = self.now;
-            let (status, result) = self.dispatch(step, &params, attempt);
+            let (status, result) = self.dispatch(step, &params, attempt, step_context.as_ref());
             let mut entry = step_entry(&id, path, &step.handler, started, status);
             entry["finished_at_virtual_ms"] = json!(self.now);
             entry["attempt"] = json!(attempt);
@@ -769,6 +1017,86 @@ impl Interp<'_> {
         }
     }
 
+    /// Returns false if the gate escalated and the handler should be skipped.
+    fn await_input(&mut self, id: &str, path: &str, gate: &HumanInputDef) -> Result<bool, Halt> {
+        let signal_type = format!("custom:human_input:{id}");
+        let deadline = gate.timeout.map(|timeout| {
+            self.now
+                .saturating_add(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX))
+        });
+        let choices = gate.effective_choices();
+        while let Some(signal) = self
+            .timed_signals
+            .get(signal_type.as_str())
+            .and_then(|signals| signals.front().copied())
+        {
+            if deadline.is_some_and(|deadline| signal.at_ms > deadline) {
+                break;
+            }
+            self.operation()?;
+            let _ = self
+                .timed_signals
+                .get_mut(signal_type.as_str())
+                .and_then(VecDeque::pop_front);
+            self.now = self.now.max(signal.at_ms);
+            let Some(value) = signal
+                .payload
+                .get("value")
+                .and_then(Value::as_str)
+                .filter(|value| choices.iter().any(|choice| choice.value == *value))
+            else {
+                self.decision(
+                    id,
+                    path,
+                    "signal_rejected",
+                    &json!({"signal_type":signal_type}),
+                );
+                continue;
+            };
+            if !self.context.data.is_object() {
+                self.context.data = json!({});
+            }
+            let key = gate.store_as.as_deref().unwrap_or(id);
+            self.context.data[key] = json!(value);
+            self.outputs.insert(
+                id.to_owned(),
+                json!({"value":value,"_orch8_human_gate":true}),
+            );
+            self.decision(
+                id,
+                path,
+                "signal_delivered",
+                &json!({"signal_type":signal_type,"at_ms":signal.at_ms}),
+            );
+            return Ok(true);
+        }
+        let Some(deadline) = deadline else {
+            self.decision(
+                id,
+                path,
+                "waiting_for_input",
+                &json!({"signal_type":signal_type}),
+            );
+            return Err(Halt::Waiting);
+        };
+        self.now = deadline;
+        if let Some(handler) = &gate.escalation_handler {
+            self.outputs.insert(
+                id.to_owned(),
+                json!({
+                    "_escalated":true,"_escalation_handler":handler,
+                    "_timeout_seconds":gate.timeout.map_or(0, |timeout| timeout.as_secs())
+                }),
+            );
+            self.decision(id, path, "input_timeout", &json!({"escalated":true}));
+            return Ok(false);
+        }
+        Err(Halt::Failed {
+            block_id: id.to_owned(),
+            message: "waiting for input timed out".into(),
+        })
+    }
+
     /// Execute one attempt. Returns the timeline status and the result;
     /// errors carry `(message, retryable)`.
     fn dispatch(
@@ -776,6 +1104,7 @@ impl Interp<'_> {
         step: &StepDef,
         params: &Value,
         attempt: u32,
+        context: Option<&ExecutionContext>,
     ) -> (&'static str, Result<Value, (String, bool)>) {
         let id = step.id.as_str();
         if let Some(mock) = self.options.mocks.get(id).cloned() {
@@ -789,10 +1118,14 @@ impl Interp<'_> {
                 let retryable = mock.retryable || mock.fail_attempts.is_some();
                 return ("mocked", Err((message, retryable)));
             }
-            return ("mocked", Ok(mock.output.unwrap_or_else(|| json!({}))));
+            let output = mock.output.unwrap_or_else(|| json!({}));
+            return (
+                "mocked",
+                self.validate_mock_output(step, &output).map(|()| output),
+            );
         }
         if LOCAL_HANDLERS.contains(&step.handler.as_str()) {
-            return ("completed", self.run_local(&step.handler, params));
+            return ("completed", self.run_local(&step.handler, params, context));
         }
         self.record_call(id, &step.handler, params);
         (
@@ -801,7 +1134,34 @@ impl Interp<'_> {
         )
     }
 
-    fn run_local(&mut self, handler: &str, params: &Value) -> Result<Value, (String, bool)> {
+    fn validate_mock_output(
+        &mut self,
+        step: &StepDef,
+        output: &Value,
+    ) -> Result<(), (String, bool)> {
+        let Some(schema) = &step.output_schema else {
+            return Ok(());
+        };
+        let id = step.id.as_str();
+        if self.mock_schemas.len() >= 256 && !self.mock_schemas.contains_key(id) {
+            self.mock_schemas.clear();
+        }
+        match self.mock_schemas.entry(id.to_owned()).or_insert_with(|| {
+            jsonschema::validator_for(schema)
+                .map_err(|error| format!("output_schema is not a valid JSON Schema: {error}"))
+        }) {
+            Ok(validator) => crate::output_schema::violation(validator, output)
+                .map_or(Ok(()), |message| Err((message, false))),
+            Err(message) => Err((message.clone(), false)),
+        }
+    }
+
+    fn run_local(
+        &mut self,
+        handler: &str,
+        params: &Value,
+        context: Option<&ExecutionContext>,
+    ) -> Result<Value, (String, bool)> {
         let str_param = |key: &str| params.get(key).and_then(Value::as_str).map(str::to_string);
         let required = |name: &str, key: &str, kind: &str| {
             (format!("{name}: `{key}` ({kind}) is required"), false)
@@ -830,7 +1190,12 @@ impl Interp<'_> {
                 let condition = str_param("condition")
                     .ok_or_else(|| required("assert", "condition", "string"))?;
                 // The engine evaluates `assert` against the context only.
-                if expression::evaluate_condition(&condition, &self.context, &json!({})) {
+                if expression::is_truthy(&expression::evaluate_with(
+                    &condition,
+                    context.unwrap_or(&self.context),
+                    &json!({}),
+                    self,
+                )) {
                     Ok(json!({ "condition": condition, "passed": true }))
                 } else {
                     let message = str_param("message").unwrap_or_else(|| "assertion failed".into());
@@ -868,6 +1233,41 @@ impl Interp<'_> {
             // "noop" and anything else in LOCAL_HANDLERS without state.
             _ => Ok(json!({})),
         }
+    }
+}
+
+fn has_filter_pipe(expression: &str) -> bool {
+    let bytes = expression.as_bytes();
+    let mut piped = false;
+    template_filters::scan_quote_aware(expression, |index, character, quoted| {
+        piped = !quoted
+            && character == '|'
+            && bytes.get(index.wrapping_sub(1)) != Some(&b'|')
+            && bytes.get(index + 1) != Some(&b'|');
+        !piped
+    });
+    piped
+}
+
+impl expression::ExpressionRuntime for Interp<'_> {
+    fn now(&self) -> DateTime<Utc> {
+        i64::try_from(self.now)
+            .ok()
+            .and_then(TimeDelta::try_milliseconds)
+            .and_then(|elapsed| self.options.start_at.checked_add_signed(elapsed))
+            .unwrap_or(DateTime::<Utc>::MAX_UTC)
+    }
+
+    fn random_u64(&self) -> u64 {
+        self.seeded_bytes(b'r')
+            .map_or_else(rand::random, u64::from_be_bytes)
+    }
+
+    fn uuid(&self) -> uuid::Uuid {
+        self.seeded_bytes(b'u')
+            .map_or_else(uuid::Uuid::new_v4, |bytes| {
+                uuid::Builder::from_random_bytes(bytes).into_uuid()
+            })
     }
 }
 
@@ -911,6 +1311,25 @@ mod tests {
         assert_eq!(r["outputs"]["a"]["message"], "hi Ada");
         assert_eq!(r["timeline"][1]["started_at_virtual_ms"], 60_000);
         assert_eq!(r["timeline"][1]["finished_at_virtual_ms"], 65_000);
+    }
+
+    #[test]
+    fn imported_dynamic_waits_use_virtual_time_and_reject_invalid_inputs() {
+        let source = r#"{"blocks":[
+          {"type":"step","id":"relative","handler":"asl_wait","params":{"seconds":"{{ data.seconds }}"}},
+          {"type":"step","id":"absolute","handler":"asl_wait","params":{"timestamp":"{{ data.timestamp }}"}}
+        ]}"#;
+        let mut options = RunOptions {
+            start_at: "2026-01-01T00:00:00Z".parse().unwrap(),
+            input: json!({"seconds":4,"timestamp":"2026-01-01T00:00:12.900Z"}),
+            ..Default::default()
+        };
+        let result = run_json(source, &options);
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["timeline"][0]["started_at_virtual_ms"], 4_000);
+        assert_eq!(result["virtual_duration_ms"], 12_000);
+        options.input["seconds"] = json!(1.5);
+        assert_eq!(run_json(source, &options)["status"], "failed");
     }
 
     #[test]

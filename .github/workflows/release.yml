@@ -227,11 +227,79 @@ jobs:
             orch8-*.zip.sha256
 
   # -- Docker image (uses pre-built binaries, no QEMU compilation) -----------
+  rolling-postgres:
+    name: PostgreSQL rolling upgrade
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    env:
+      ORCH8_ROLLING_DB_URL: postgresql://postgres:orch8-test@127.0.0.1:5432/orch8_rolling
+    services:
+      postgres:
+        image: postgres:17-bookworm
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: orch8-test
+          POSTGRES_DB: orch8_rolling
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d orch8_rolling"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: binaries-x86_64-unknown-linux-gnu
+          path: candidate
+
+      - name: Download the previous published stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ github.ref_name }}
+        run: |
+          previous="$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/releases?per_page=100" | jq -er --arg candidate "$CANDIDATE_TAG" '
+            def version: sub("^v"; "") | split("-")[0] | split(".") | map(tonumber);
+            ($candidate | version) as $wanted |
+            [ .[][] | select((.draft or .prerelease) | not)
+              | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))
+              | select(version < $wanted) ] | sort_by(version) | last
+          ')"
+          previous_dir="orch8-${previous}-x86_64-unknown-linux-gnu"
+          mkdir previous
+          gh release download "$previous" --pattern "$previous_dir.tar.gz" \
+            --pattern "$previous_dir.tar.gz.sha256" --dir previous
+          (
+            cd previous
+            sha256sum --check "$previous_dir.tar.gz.sha256"
+            tar -xzf "$previous_dir.tar.gz"
+          )
+          echo "ORCH8_PREVIOUS_SERVER=previous/$previous_dir/orch8-server" >> "$GITHUB_ENV"
+
+      - name: Verify real old and candidate servers against the upgraded database
+        env:
+          CANDIDATE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 scripts/test-rolling-postgres-unit.py
+          candidate_dir="orch8-${CANDIDATE_TAG}-x86_64-unknown-linux-gnu"
+          (
+            cd candidate
+            sha256sum --check "$candidate_dir.tar.gz.sha256"
+            tar -xzf "$candidate_dir.tar.gz"
+          )
+          python3 scripts/test-rolling-postgres.py --previous "$ORCH8_PREVIOUS_SERVER" \
+            --candidate "candidate/$candidate_dir/orch8-server"
+
   docker:
     name: Docker ${{ matrix.platform }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [build]
+    needs: [build, rolling-postgres]
     strategy:
       matrix:
         include:
@@ -655,12 +723,20 @@ jobs:
             Orch8KmpBridge-*.swift
             Orch8KmpBridge-*.swift.sha256
 
+  node-native-musl:
+    needs: [verify]
+    uses: ./.github/workflows/node-native-musl.yml
+    permissions:
+      contents: read
+    with:
+      version: ${{ github.ref_name }}
+
   # -- GitHub Release --------------------------------------------------------
   release:
     name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [build, build-windows, docker-manifest, xcframework, aar, bindings-archive]
+    needs: [build, build-windows, docker-manifest, xcframework, aar, bindings-archive, node-native-musl]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -669,7 +745,7 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
-          pattern: "{binaries-*,xcframework,aar,bindings-archive}"
+          pattern: "{binaries-*,xcframework,aar,bindings-archive,node-native-musl-*}"
           merge-multiple: true
 
       - name: Record Rust lockfile checksum

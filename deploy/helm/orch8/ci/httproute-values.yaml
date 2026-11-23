@@ -1,0 +1,22 @@
+mode: split
+externalDatabase:
+  url: postgres://orch8:test@postgres.example:5432/orch8
+httpRoute:
+  enabled: true
+  parent:
+    name: edge
+    namespace: edge-system
+    sectionName: https
+  hostnames:
+    - engine.example.com
+control:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      minDomains: 2
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+executor:
+  topologySpreadConstraints:
+    - maxSkew: 2
+      topologyKey: kubernetes.io/hostname
+      whenUnsatisfiable: ScheduleAnyway

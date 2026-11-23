@@ -1,6 +1,45 @@
-from typing import Any, Callable, Mapping, Optional, TypeVar, Union, overload
+from typing import Any, AsyncIterator, Callable, Iterator, Mapping, Optional, Sequence, TypedDict, TypeVar, Union, overload
 
-_H = TypeVar("_H", bound=Callable[[dict], Any])
+class HandlerInput(TypedDict):
+    params: Any
+    data: Any
+    outputs: dict[str, Any]
+    instance_id: str
+    step_id: str
+    attempt: int
+
+class InstanceSnapshot(TypedDict):
+    id: str
+    state: str
+    data: Any
+    outputs: dict[str, Any]
+
+class InstanceSummary(TypedDict):
+    id: str
+    sequence_id: str
+    state: str
+    created_at: str
+
+class _BatchStartOptions(TypedDict, total=False):
+    input: Mapping[str, Any]
+    version: int
+
+class BatchStartItem(_BatchStartOptions):
+    name: str
+    idempotency_key: str
+
+class BlockOutput(TypedDict):
+    id: str
+    instance_id: str
+    block_id: str
+    output: Any
+    output_ref: Optional[str]
+    output_size: int
+    attempt: int
+    created_at: str
+
+_Handler = Union[Callable[[HandlerInput], Any], Callable[[dict[str, Any]], Any]]
+_H = TypeVar("_H", bound=_Handler)
 
 def validate_sequence_json(input: str) -> str: ...
 def sequence_schema_version() -> int: ...
@@ -9,6 +48,38 @@ def run_sequence_json(
 ) -> str: ...
 
 class PermanentError(Exception): ...
+
+class AsyncEngine:
+    @classmethod
+    async def open(cls, path: str, *, shutdown_timeout: float = 5.0) -> AsyncEngine: ...
+    @property
+    def path(self) -> str: ...
+    @overload
+    def handler(self, name: str) -> Callable[[_H], _H]: ...
+    @overload
+    def handler(self, name: str, fn: _H) -> _H: ...
+    async def deploy(self, sequence: Union[Mapping[str, Any], str]) -> str: ...
+    async def start(
+        self,
+        name: str,
+        input: Optional[Mapping[str, Any]] = None,
+        *,
+        idempotency_key: Optional[str] = None,
+        version: Optional[int] = None,
+    ) -> str: ...
+    async def start_batch(self, items: Sequence[BatchStartItem]) -> list[str]: ...
+    async def run(
+        self, id: str, *, timeout: Optional[float] = None, observer_timeout: Optional[float] = None
+    ) -> InstanceSnapshot: ...
+    async def get(self, id: str) -> InstanceSnapshot: ...
+    async def get_output(self, id: str, block: str, attempt: int) -> Optional[BlockOutput]: ...
+    def iter_instances(
+        self, *, state: Optional[str] = None, sequence_id: Optional[str] = None, page_size: int = 100
+    ) -> AsyncIterator[InstanceSummary]: ...
+    async def signal(self, id: str, signal: str, payload: Any = None) -> None: ...
+    async def close(self) -> None: ...
+    async def __aenter__(self) -> AsyncEngine: ...
+    async def __aexit__(self, *exc: object) -> None: ...
 
 class Engine:
     def __init__(self, path: str) -> None: ...
@@ -29,8 +100,15 @@ class Engine:
         idempotency_key: Optional[str] = None,
         version: Optional[int] = None,
     ) -> str: ...
-    def run(self, id: str, *, timeout: Optional[float] = None) -> dict: ...
-    def get(self, id: str) -> dict: ...
+    def start_batch(self, items: Sequence[BatchStartItem]) -> list[str]: ...
+    def run(
+        self, id: str, *, timeout: Optional[float] = None, observer_timeout: Optional[float] = None
+    ) -> InstanceSnapshot: ...
+    def get(self, id: str) -> InstanceSnapshot: ...
+    def get_output(self, id: str, block: str, attempt: int) -> Optional[BlockOutput]: ...
+    def iter_instances(
+        self, *, state: Optional[str] = None, sequence_id: Optional[str] = None, page_size: int = 100
+    ) -> Iterator[InstanceSummary]: ...
     def signal(self, id: str, signal: str, payload: Any = None) -> None: ...
     def close(self) -> None: ...
     def __enter__(self) -> Engine: ...

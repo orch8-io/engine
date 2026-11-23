@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,7 +16,7 @@ use orch8_types::context::ExecutionContext;
 use orch8_types::continuity::EffectReceipt;
 use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
-use orch8_types::ids::{InstanceId, Namespace, SequenceId, TenantId};
+use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{Budget, InstanceState, Priority, TaskInstance};
 use orch8_types::output::BlockOutput;
 use orch8_types::sequence::SequenceDefinition;
@@ -244,6 +245,8 @@ impl Engine {
         seq.tenant_id = self.inner.tenant.clone();
         seq.validate()
             .map_err(|e| Error::InvalidSequence(e.to_string()))?;
+        orch8_engine::input_schema::validate_config_schema(seq.config_schema())?;
+        orch8_engine::input_schema::validate_state_schema(seq.state_schema())?;
         if let Some(existing) = self
             .inner
             .storage
@@ -252,6 +255,11 @@ impl Engine {
         {
             return Ok(existing.id);
         }
+        orch8_engine::handlers::wasm_plugin::pin_sequence_modules(
+            self.inner.storage.as_ref(),
+            &mut seq,
+        )
+        .await?;
         // Concurrent upserts of the same `(name, version)` can both miss the
         // lookup above; on backends with a unique index the loser gets a
         // conflict. Resolve it to the winner's id, matching the doc contract.
@@ -287,25 +295,16 @@ impl Engine {
         opts: CreateInstanceOptions,
     ) -> Result<InstanceId, Error> {
         let now = Utc::now();
-
-        // Resolve the sequence up-front so a missing id surfaces as NotFound
-        // rather than a foreign-key violation from the storage layer.
-        // A sequence owned by another tenant is reported as missing (M6).
-        self.inner
-            .storage
-            .get_sequence(sequence_id)
-            .await?
-            .filter(|sequence| sequence.tenant_id == self.inner.tenant)
-            .ok_or_else(|| Error::NotFound(format!("sequence {}", sequence_id.into_uuid())))?;
+        let sequence = self.require_sequence(sequence_id).await?;
 
         // Normalize an empty key to `None`: the unique index on
         // `(tenant_id, idempotency_key)` includes every non-NULL value, so
         // storing `""` would make a *second* create with an empty key fail
         // with a constraint violation even though the caller opted out of
         // idempotency.
-        let idempotency_key = opts.idempotency_key.filter(|k| !k.is_empty());
+        let idempotency_key = opts.idempotency_key.as_deref().filter(|k| !k.is_empty());
 
-        if let Some(ref key) = idempotency_key
+        if let Some(key) = idempotency_key
             && let Some(existing) = self
                 .inner
                 .storage
@@ -315,7 +314,146 @@ impl Engine {
             return Ok(existing.id);
         }
 
-        let instance = TaskInstance {
+        orch8_engine::input_schema::validate_config(
+            sequence.config_schema(),
+            &opts.context.config,
+        )?;
+        let instance = self.new_instance(sequence_id, opts, now);
+
+        // Resolve an overlapping create which committed after our key lookup.
+        if let Err(error) = self.inner.storage.create_instance(&instance).await {
+            if let Some(key) = &instance.idempotency_key
+                && matches!(error, StorageError::Conflict(_))
+                && let Some(existing) = self
+                    .inner
+                    .storage
+                    .find_by_idempotency_key(&self.inner.tenant, key)
+                    .await?
+            {
+                return Ok(existing.id);
+            }
+            return Err(error.into());
+        }
+        Ok(instance.id)
+    }
+
+    /// Atomically create all missing instances in a batch of at most 1000.
+    /// Every input requires a nonempty idempotency key. The returned IDs
+    /// follow input order, and repeated keys reuse the first instance.
+    pub async fn create_instance_batch(
+        &self,
+        items: Vec<(SequenceId, CreateInstanceOptions)>,
+    ) -> Result<Vec<InstanceId>, Error> {
+        if items.len() > 1000 {
+            return Err(Error::Config(
+                "instance batch may contain at most 1000 entries".into(),
+            ));
+        }
+        let now = Utc::now();
+        let mut checked_sequences = HashMap::new();
+        let mut seen = HashSet::new();
+        let mut positions = Vec::with_capacity(items.len());
+        let mut pending = Vec::new();
+        for (index, (sequence, options)) in items.into_iter().enumerate() {
+            let key = options
+                .idempotency_key
+                .as_ref()
+                .filter(|key| !key.is_empty())
+                .ok_or_else(|| {
+                    Error::Config(format!(
+                        "batch item {index} requires a nonempty idempotency key"
+                    ))
+                })?;
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                checked_sequences.entry(sequence)
+            {
+                entry.insert(
+                    self.require_sequence(sequence)
+                        .await?
+                        .config_schema()
+                        .cloned(),
+                );
+            }
+            positions.push(key.clone());
+            if seen.insert(key.clone()) {
+                pending.push(self.new_instance(sequence, options, now));
+            }
+        }
+
+        let mut resolved = HashMap::with_capacity(seen.len());
+        let mut conflict = None;
+        while !pending.is_empty() {
+            let previous_len = pending.len();
+            let mut missing = Vec::with_capacity(previous_len);
+            for instance in pending {
+                let key = instance
+                    .idempotency_key
+                    .as_ref()
+                    .expect("batch keys are required");
+                if let Some(existing) = self
+                    .inner
+                    .storage
+                    .find_by_idempotency_key(&self.inner.tenant, key)
+                    .await?
+                {
+                    resolved.insert(key.clone(), existing.id);
+                } else {
+                    let schema = checked_sequences
+                        .get(&instance.sequence_id)
+                        .and_then(Option::as_ref);
+                    orch8_engine::input_schema::validate_config(schema, &instance.context.config)?;
+                    missing.push(instance);
+                }
+            }
+            if missing.is_empty() {
+                break;
+            }
+            if let Some(error) = conflict.take()
+                && missing.len() == previous_len
+            {
+                return Err(error);
+            }
+            match self.inner.storage.create_instances_batch(&missing).await {
+                Ok(_) => {
+                    for instance in missing {
+                        resolved.insert(
+                            instance.idempotency_key.expect("batch keys are required"),
+                            instance.id,
+                        );
+                    }
+                    break;
+                }
+                Err(error @ StorageError::Conflict(_)) => {
+                    // The unsuccessful transaction inserted nothing. Retry only
+                    // if the next lookup resolves at least one more raced key.
+                    conflict = Some(error.into());
+                    pending = missing;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+
+        Ok(positions.iter().map(|key| resolved[key]).collect())
+    }
+
+    async fn require_sequence(&self, sequence_id: SequenceId) -> Result<SequenceDefinition, Error> {
+        self.inner
+            .storage
+            .get_sequence(sequence_id)
+            .await?
+            .filter(|sequence| sequence.tenant_id == self.inner.tenant)
+            .ok_or_else(|| Error::NotFound(format!("sequence {}", sequence_id.into_uuid())))
+    }
+
+    fn new_instance(
+        &self,
+        sequence_id: SequenceId,
+        opts: CreateInstanceOptions,
+        now: DateTime<Utc>,
+    ) -> TaskInstance {
+        let mut context = opts.context;
+        orch8_storage::externalizing::escape_literals(&mut context.data);
+        TaskInstance {
             claimed_at: None,
             sub_tenant: None,
             id: InstanceId::new(),
@@ -330,35 +468,16 @@ impl Engine {
             priority: opts.priority,
             timezone: opts.timezone,
             metadata: opts.metadata,
-            context: opts.context,
+            context,
             concurrency_key: None,
             max_concurrency: None,
-            idempotency_key: idempotency_key.clone(),
+            idempotency_key: opts.idempotency_key.filter(|key| !key.is_empty()),
             session_id: None,
             parent_instance_id: None,
             budget: opts.budget,
             created_at: now,
             updated_at: now,
-        };
-
-        // Two concurrent creates with the same key can both miss the lookup
-        // above; the loser then hits the unique index. Map that conflict
-        // back to the documented "returns the existing instance's id"
-        // behavior instead of surfacing a raw storage error.
-        if let Err(error) = self.inner.storage.create_instance(&instance).await {
-            if let Some(ref key) = idempotency_key
-                && matches!(error, StorageError::Conflict(_))
-                && let Some(existing) = self
-                    .inner
-                    .storage
-                    .find_by_idempotency_key(&self.inner.tenant, key)
-                    .await?
-            {
-                return Ok(existing.id);
-            }
-            return Err(error.into());
         }
-        Ok(instance.id)
     }
 
     /// Current result per block, including retry diagnostics. In-progress
@@ -382,6 +501,33 @@ impl Engine {
     ) -> Result<Vec<orch8_types::output::BlockOutput>, Error> {
         self.scoped_instance(id).await?;
         Ok(self.inner.storage.get_all_outputs(id).await?)
+    }
+
+    /// Read one block attempt without decoding any unrelated outputs or context.
+    /// When a loop repeats the same attempt number, return its latest output.
+    pub async fn get_output(
+        &self,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        attempt: u16,
+    ) -> Result<Option<BlockOutput>, Error> {
+        let mut output = self
+            .inner
+            .storage
+            .get_scoped_block_output_attempt(&self.inner.tenant, instance_id, block_id, attempt)
+            .await?;
+        if let Some(row) = &mut output
+            && let Some(reference) = row.output_ref.as_deref()
+            && !matches!(reference, "__in_progress__" | "__retry__" | "__error__")
+        {
+            row.output = self
+                .inner
+                .storage
+                .get_externalized_state(instance_id, reference)
+                .await?
+                .ok_or_else(|| Error::NotFound(format!("payload of block output {}", row.id)))?;
+        }
+        Ok(output)
     }
 
     /// List the durable effect ledger for an instance (oldest first).
@@ -414,7 +560,14 @@ impl Engine {
     /// Fetch the current snapshot of an instance (state, context, timestamps).
     /// Instances of other tenants are reported as [`Error::NotFound`].
     pub async fn get_instance(&self, id: InstanceId) -> Result<TaskInstance, Error> {
-        self.scoped_instance(id).await
+        let mut instance = self.scoped_instance(id).await?;
+        instance.context = orch8_engine::externalized::resolve_context_markers(
+            self.inner.storage.as_ref(),
+            id,
+            instance.context,
+        )
+        .await?;
+        Ok(instance)
     }
 
     /// List instances matching `filter` (most recently updated first,
@@ -435,6 +588,25 @@ impl Engine {
             .list_instances(&filter, &Pagination::default().capped())
             .await?;
         Ok(instances)
+    }
+
+    /// List a page for this tenant in descending instance ID order. Pass the
+    /// last returned ID as `before` to continue. The page is capped at 1000.
+    pub async fn list_instances_before(
+        &self,
+        filter: &InstanceFilter,
+        before: Option<InstanceId>,
+        limit: u32,
+    ) -> Result<Vec<TaskInstance>, Error> {
+        let filter = InstanceFilter {
+            tenant_id: Some(self.inner.tenant.clone()),
+            ..filter.clone()
+        };
+        Ok(self
+            .inner
+            .storage
+            .list_instances_keyset(&filter, before, limit.min(1000))
+            .await?)
     }
 
     /// Ingest an external event for durable correlation (see the
@@ -460,6 +632,18 @@ impl Engine {
         orch8_engine::event_correlation::ingest(&self.inner.storage, envelope)
             .await
             .map_err(Error::Storage)
+    }
+
+    /// Apply a queued cancellation to a running workflow so a host handler
+    /// can be notified while its physical callback is still active.
+    pub async fn interrupt_running_instance(&self, id: InstanceId) -> Result<bool, Error> {
+        let instance = self.scoped_instance(id).await?;
+        Ok(orch8_engine::scheduler::interrupt_running_instance(
+            &self.inner.storage,
+            &self.inner.handlers,
+            instance,
+        )
+        .await?)
     }
 
     /// Send a signal to a live instance: `Pause`, `Resume`, `Cancel`,

@@ -977,9 +977,13 @@ async fn init_storage(config: &EngineConfig) -> anyhow::Result<Arc<dyn StorageBa
                 .await
                 .context("Failed to create in-memory SQLite storage")?
         } else {
-            SqliteStorage::file(url)
-                .await
-                .context("Failed to open SQLite database")?
+            SqliteStorage::file_server_owned(
+                url,
+                config.database.sqlite_max_connections,
+                std::time::Duration::from_millis(u64::from(config.database.sqlite_busy_timeout_ms)),
+            )
+            .await
+            .context("Failed to open SQLite database")?
         };
         if let Some(store) = artifacts {
             sqlite = sqlite.with_artifact_store(store);
@@ -1468,7 +1472,8 @@ fn spawn_engine_now(
             },
         ));
     }
-    let mut engine = Engine::new(storage, config.engine.clone(), handlers, shutdown.clone());
+    let mut engine = Engine::new(storage, config.engine.clone(), handlers, shutdown.clone())
+        .with_wasm_prewarm_revisions(config.node.wasm_prewarm_revisions.clone());
     if let Some(liveness) = liveness {
         engine = engine.with_liveness(liveness);
     }
@@ -1784,6 +1789,15 @@ fn apply_executor_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()>
 
 #[allow(clippy::too_many_lines)]
 fn apply_env_overrides(config: &mut EngineConfig) -> anyhow::Result<()> {
+    if let Ok(value) = std::env::var("ORCH8_WASM_PREWARM_REVISIONS") {
+        config.node.wasm_prewarm_revisions = value
+            .split(',')
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(|id| uuid::Uuid::parse_str(id).map(orch8_types::ids::SequenceId::from_uuid))
+            .collect::<Result<_, _>>()
+            .context("ORCH8_WASM_PREWARM_REVISIONS must contain comma-separated sequence UUIDs")?;
+    }
     if let Ok(val) = std::env::var("ORCH8_ARTIFACT_BACKEND") {
         config.artifacts.backend = val;
     }

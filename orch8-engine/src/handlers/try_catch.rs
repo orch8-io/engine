@@ -43,29 +43,7 @@ pub async fn execute_try_catch(
         let (catch_state, _) = evaluator::sequence_cursor(&catch_children);
         let catch_not_started = catch_children.iter().all(|c| c.state == NodeState::Pending);
         if catch_not_started {
-            // Inject error context once, before the first catch block starts.
-            // Find which try block failed and expose via context.data._error.
-            let failed_blocks: Vec<String> = try_children
-                .iter()
-                .filter(|c| matches!(c.state, NodeState::Failed | NodeState::Cancelled))
-                .map(|c| c.block_id.as_str().to_owned())
-                .collect();
-            let error_ctx = serde_json::json!({
-                "failed_blocks": failed_blocks,
-                "source": "try_catch",
-                "block_id": tc_def.id.as_str(),
-            });
-            storage
-                .merge_context_data(instance.id, "_error", &error_ctx)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        instance_id = %instance.id,
-                        error = %e,
-                        "failed to inject error context for catch block"
-                    );
-                    e
-                })?;
+            inject_error_context(storage, instance.id, tc_def.id.as_str(), &try_children).await?;
         }
         if !catch_state.is_settled() {
             // Sequential cursor: only the next Pending catch child starts.
@@ -128,6 +106,67 @@ pub async fn execute_try_catch(
     );
 
     Ok(true)
+}
+
+async fn inject_error_context(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance_id: orch8_types::ids::InstanceId,
+    block_id: &str,
+    try_children: &[&ExecutionNode],
+) -> Result<(), EngineError> {
+    // Inject error context once, before the first catch block starts.
+    // Find which try block failed and expose via context.data._error.
+    let failed_children: Vec<_> = try_children
+        .iter()
+        .filter(|c| matches!(c.state, NodeState::Failed | NodeState::Cancelled))
+        .collect();
+    let mut error_ctx = serde_json::json!({
+        "failed_blocks": failed_children.iter().map(|c| c.block_id.as_str()).collect::<Vec<_>>(),
+        "source": "try_catch",
+        "block_id": block_id,
+        "code": "States.TaskFailed",
+        "message": "workflow state failed",
+    });
+    if let Some(failed) = failed_children.first()
+        && let Some(outcome) = storage
+            .backend()
+            .get_block_output(instance_id, &failed.block_id)
+            .await?
+        && matches!(
+            outcome.output_ref.as_deref(),
+            Some("__retry__" | "__error__")
+        )
+        && failed
+            .started_at
+            .is_none_or(|started| outcome.created_at >= started)
+    {
+        if let Some(code) = outcome
+            .output
+            .get("error_code")
+            .and_then(serde_json::Value::as_str)
+        {
+            error_ctx["code"] = serde_json::json!(code);
+        }
+        if let Some(message) = outcome
+            .output
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+        {
+            error_ctx["message"] = serde_json::json!(message);
+        }
+    }
+    storage
+        .merge_context_data(instance_id, "_error", &error_ctx)
+        .await
+        .map_err(|e| {
+            tracing::warn!(
+                instance_id = %instance_id,
+                error = %e,
+                "failed to inject error context for catch block"
+            );
+            e
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]

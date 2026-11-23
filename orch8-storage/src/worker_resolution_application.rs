@@ -57,16 +57,23 @@ impl WorkerResolutionIntegration {
                 node_id,
                 ..
             } => {
-                if !report.retryable || !source.accepts_node(*node_id) {
+                if (!report.retryable && report.error_code.is_none())
+                    || !source.accepts_node(*node_id)
+                {
                     return Err(invalid());
                 }
                 source.validate_retry_task(retry_task)?;
                 source.validate_retry_output(retry_output.as_deref())?;
             }
-            WorkerTaskResolutionAction::FailNode { node_id, .. } => {
+            WorkerTaskResolutionAction::FailNode {
+                node_id,
+                failure_output,
+                ..
+            } => {
                 if !source.accepts_node(*node_id) || node_id.is_none() {
                     return Err(invalid());
                 }
+                source.validate_resolution_output(failure_output.as_deref(), "__error__")?;
             }
             WorkerTaskResolutionAction::FailInstance => {
                 if !matches!(source.target, WorkerInvocationTarget::Flat { .. }) {

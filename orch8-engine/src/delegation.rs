@@ -250,6 +250,8 @@ pub async fn enqueue_delegation_task(
             .as_ref()
             .map(crate::effect_guard::EffectGuard::effect_id),
         continuity_epoch,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,

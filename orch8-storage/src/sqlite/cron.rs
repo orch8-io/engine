@@ -1,14 +1,25 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use orch8_types::cron::CronSchedule;
+use orch8_types::cron::{CronMigrationSnapshot, CronSchedule};
 use orch8_types::error::StorageError;
 use orch8_types::ids::*;
 
 use super::SqliteStorage;
-use super::helpers::{begin_immediate, row_to_cron, ts};
+use super::helpers::{begin_immediate, parse_ts_opt, row_to_cron, ts};
 
-pub(super) async fn create(storage: &SqliteStorage, s: &CronSchedule) -> Result<(), StorageError> {
+pub(super) async fn create(
+    storage: &SqliteStorage,
+    schedule: &CronSchedule,
+) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    create_on(&mut conn, schedule).await
+}
+
+async fn create_on(
+    conn: &mut sqlx::SqliteConnection,
+    s: &CronSchedule,
+) -> Result<(), StorageError> {
     sqlx::query(
         "INSERT INTO cron_schedules (id,tenant_id,namespace,sequence_id,cron_expr,timezone,enabled,metadata,overlap_policy,skipped_fires,last_skipped_at,next_fire_at,last_triggered_at,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"
     )
@@ -27,7 +38,38 @@ pub(super) async fn create(storage: &SqliteStorage, s: &CronSchedule) -> Result<
     .bind(s.last_triggered_at.map(ts))
     .bind(ts(s.created_at))
     .bind(ts(s.updated_at))
-    .execute(&storage.pool).await?;
+    .execute(conn).await?;
+    Ok(())
+}
+
+pub(super) async fn import_migration(
+    storage: &SqliteStorage,
+    snapshot: &CronMigrationSnapshot,
+    schedule: &CronSchedule,
+    epoch: i64,
+    digest: &str,
+) -> Result<(), StorageError> {
+    let mut tx = begin_immediate(&storage.pool).await?;
+    let inserted = sqlx::query(
+        "INSERT INTO cron_migration_imports(schedule_id,tenant_id,migration_id,ownership_epoch,last_fire_at,snapshot_sha256) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT DO NOTHING",
+    )
+    .bind(schedule.id.to_string()).bind(schedule.tenant_id.as_str()).bind(snapshot.migration_id.to_string())
+    .bind(epoch).bind(snapshot.last_fire_at.map(ts)).bind(digest)
+    .execute(&mut *tx).await?.rows_affected() == 1;
+    if inserted {
+        create_on(&mut tx, schedule).await?;
+    } else {
+        let same: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM cron_migration_imports ci JOIN cron_schedules cs ON cs.id=ci.schedule_id WHERE ci.schedule_id=?1 AND ci.tenant_id=?2 AND ci.migration_id=?3 AND ci.ownership_epoch=?4 AND ci.snapshot_sha256=?5)",
+        ).bind(schedule.id.to_string()).bind(schedule.tenant_id.as_str()).bind(snapshot.migration_id.to_string())
+          .bind(epoch).bind(digest).fetch_one(&mut *tx).await?;
+        if !same {
+            return Err(StorageError::Conflict(
+                "cron schedule already belongs to another migration".into(),
+            ));
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -214,4 +256,79 @@ pub(super) async fn active_instance_ids_for_cron(
             Ok(InstanceId::from_uuid(uuid))
         })
         .collect()
+}
+
+impl SqliteStorage {
+    /// Disable and snapshot the source schedule under one write lock.
+    pub async fn fence_cron_for_cloud_migration(
+        &self,
+        tenant: &TenantId,
+        id: Uuid,
+        migration_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<CronMigrationSnapshot, StorageError> {
+        use sqlx::Row as _;
+        let mut tx = begin_immediate(&self.pool).await?;
+        if let Some(record) = sqlx::query_scalar::<_, String>(
+            "SELECT record FROM cron_migration_sources WHERE schedule_id=?1 AND tenant_id=?2",
+        )
+        .bind(id.to_string())
+        .bind(tenant.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        {
+            let snapshot: CronMigrationSnapshot = serde_json::from_str(&record)?;
+            if snapshot.migration_id != migration_id {
+                return Err(StorageError::Conflict(
+                    "cron schedule is fenced by a different migration".into(),
+                ));
+            }
+            tx.commit().await?;
+            return Ok(snapshot);
+        }
+
+        let row = sqlx::query("SELECT * FROM cron_schedules WHERE id=?1 AND tenant_id=?2")
+            .bind(id.to_string())
+            .bind(tenant.as_str())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StorageError::NotFound {
+                entity: "cron schedule",
+                id: id.to_string(),
+            })?;
+        if parse_ts_opt(row.try_get("claimed_until")?)?.is_some_and(|until| until >= now) {
+            return Err(StorageError::Conflict(
+                "cron schedule has an active fire lease".into(),
+            ));
+        }
+        let schedule = row_to_cron(&row)?;
+        let epoch = sqlx::query_scalar::<_, i64>(
+            "SELECT ownership_epoch FROM cron_migration_imports WHERE schedule_id=?1 AND tenant_id=?2",
+        ).bind(id.to_string()).bind(tenant.as_str()).fetch_optional(&mut *tx).await?.unwrap_or(0);
+        let mut last_fire_at = schedule.last_triggered_at;
+        if let Some(key) = schedule.occurrence_key() {
+            let fired: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM task_instances WHERE tenant_id=?1 AND idempotency_key=?2)",
+            ).bind(tenant.as_str()).bind(key).fetch_one(&mut *tx).await?;
+            if fired {
+                last_fire_at = last_fire_at.max(schedule.next_fire_at);
+            }
+        }
+        let snapshot = CronMigrationSnapshot {
+            migration_id,
+            source_epoch: u64::try_from(epoch)
+                .map_err(|_| StorageError::Constraint("invalid cron ownership epoch".into()))?,
+            last_fire_at,
+            schedule,
+        };
+        sqlx::query("INSERT INTO cron_migration_sources(schedule_id,tenant_id,migration_id,record) VALUES (?1,?2,?3,?4)")
+            .bind(id.to_string()).bind(tenant.as_str()).bind(migration_id.to_string())
+            .bind(serde_json::to_string(&snapshot)?).execute(&mut *tx).await?;
+        sqlx::query("UPDATE cron_schedules SET enabled=0, claimed_until=NULL WHERE id=?1")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(snapshot)
+    }
 }

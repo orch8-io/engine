@@ -1,0 +1,12 @@
+storage:
+  backend: sqlite
+allInOne:
+  replicas: 1
+sqlite:
+  persistence:
+    storageClass: csi-hostpath-sc
+  snapshot:
+    enabled: true
+    name: release-backup
+    volumeSnapshotClassName: csi-hostpath-snapclass
+    image: registry.k8s.io/kubectl:v1.34.1

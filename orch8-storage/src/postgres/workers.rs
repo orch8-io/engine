@@ -11,6 +11,13 @@ use sqlx::Postgres;
 use super::PostgresStorage;
 use super::rows::{WorkerTaskRow, worker_task_columns};
 
+// A workflow deadline is part of mutation authority even before the reaper runs.
+macro_rules! workflow_deadline_live {
+    () => {
+        "((heartbeat_timeout_secs IS NULL OR (COALESCE(EXTRACT(EPOCH FROM COALESCE(heartbeat_at, claimed_at)) + heartbeat_timeout_secs > EXTRACT(EPOCH FROM clock_timestamp()), FALSE) AND (timeout_ms IS NULL OR EXTRACT(EPOCH FROM created_at) + timeout_ms / 1000.0 > EXTRACT(EPOCH FROM clock_timestamp())))) AND (NOT wait_for_callback OR (timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM created_at) + timeout_ms / 1000.0 > EXTRACT(EPOCH FROM clock_timestamp()))))"
+    };
+}
+
 const REAPER_BATCH_SIZE: i64 = 1_000;
 
 pub(super) async fn insert_attempt_events(
@@ -85,9 +92,9 @@ pub(super) fn insert_task_query(
         r"INSERT INTO worker_tasks
             (id, instance_id, block_id, handler_name, queue_name, requirements, params, context,
              attempt, timeout_ms, state, claim_epoch, resume_checkpoint, checkpoint_seq, created_at,
-             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch, tenant_id, params_encoding, context_encoding, checkpoint_encoding)
+             effect_id, continuity_epoch, carries_credentials, awaiting_dispatch, tenant_id, params_encoding, context_encoding, checkpoint_encoding, heartbeat_timeout_secs, wait_for_callback)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
-                  (SELECT tenant_id FROM task_instances WHERE id = $2),$20,$21,$22)
+                  (SELECT tenant_id FROM task_instances WHERE id = $2),$20,$21,$22,$23,$24)
           ON CONFLICT (instance_id, block_id) DO UPDATE SET
               effect_id = COALESCE(worker_tasks.effect_id, EXCLUDED.effect_id),
               continuity_epoch = COALESCE(worker_tasks.continuity_epoch, EXCLUDED.continuity_epoch),
@@ -122,7 +129,9 @@ pub(super) fn insert_task_query(
     .bind(awaiting_dispatch)
     .bind(params.encoding)
     .bind(context.encoding)
-    .bind(checkpoint_encoding))
+    .bind(checkpoint_encoding)
+    .bind(task.heartbeat_timeout_secs.map(i64::from))
+    .bind(task.wait_for_callback))
 }
 
 pub(super) async fn create(store: &PostgresStorage, task: &WorkerTask) -> Result<(), StorageError> {
@@ -178,7 +187,7 @@ pub(super) async fn claim(
               claim_epoch = claim_epoch + 1, lease_secs = NULL, claimed_runtime_kind = NULL
           WHERE id IN (
               SELECT id FROM worker_tasks
-              WHERE handler_name = $1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch
+              WHERE handler_name = $1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND (NOT wait_for_callback OR (timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM created_at) + timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp()))) AND NOT awaiting_dispatch
                 AND (requirements = '{}'::jsonb OR (requirements - 'prefer' = '{}'::jsonb AND (requirements->'prefer'->>'worker_id' = $2 OR (requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND NOT EXISTS (SELECT 1 FROM task_instances tix WHERE tix.id = worker_tasks.instance_id AND tix.state IN ('completed', 'failed', 'cancelled')) AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed')) AND NOT EXISTS (SELECT 1 FROM continuity_executions ce WHERE ce.state='compensating' AND ce.tenant_id=(SELECT ti_owner.tenant_id FROM task_instances ti_owner WHERE ti_owner.id=worker_tasks.instance_id) AND ce.record->>'current_instance_id'=worker_tasks.instance_id::text)
               ORDER BY created_at
@@ -210,9 +219,9 @@ pub(super) async fn claim(
             )
         })
         .collect();
-    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
+    let transport = super::worker_claim::record_with_context_on(&mut tx, &tasks, principal).await?;
     insert_attempt_events(&mut tx, &events).await?;
-    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
+    crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
     }.await;
     super::finish_transaction(tx, result).await
 }
@@ -253,7 +262,7 @@ pub(super) async fn claim_for_tenant(
               JOIN task_instances ti ON ti.id = wt.instance_id
               WHERE wt.handler_name = $1 AND wt.handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=wt.id)
                 AND wt.tenant_id = $4
-                AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807
+                AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND (NOT wt.wait_for_callback OR (wt.timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM wt.created_at) + wt.timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp())))
                 AND NOT wt.awaiting_dispatch
                 AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
                 AND ti.tenant_id = $4
@@ -287,9 +296,9 @@ pub(super) async fn claim_for_tenant(
             )
         })
         .collect();
-    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
+    let transport = super::worker_claim::record_with_context_on(&mut tx, &tasks, principal).await?;
     insert_attempt_events(&mut tx, &events).await?;
-    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
+    crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
     }.await;
     super::finish_transaction(tx, result).await
 }
@@ -308,7 +317,7 @@ async fn fill_pending_tenants(
           FROM task_instances ti
           WHERE ti.id = wt.instance_id
             AND wt.handler_name = $1
-            AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807
+            AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND (NOT wt.wait_for_callback OR (wt.timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM wt.created_at) + wt.timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp())))
             AND wt.tenant_id IS NULL",
     )
     .bind(handler_name)
@@ -370,7 +379,7 @@ pub(super) async fn claim_matching(
             .push_bind(handler_name);
         // A retry row is claimable only once its re-dispatch bound the
         // attempt's effect id (see `insert_task_query`).
-        query.push(" AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND NOT wt.awaiting_dispatch");
+        query.push(" AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND (NOT wt.wait_for_callback OR (wt.timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM wt.created_at) + wt.timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp()))) AND NOT wt.awaiting_dispatch");
         // Never hand out work for an instance that already finished or was
         // cancelled (its tasks are purged on cancel, but a racing dispatch
         // or an older row may remain).
@@ -489,11 +498,14 @@ pub(super) async fn complete(
     let mut tx = store.pool.begin().await?;
     let result = async {
         let Some((instance_id,effect_id)) = super::worker_outcome::lock_on(&mut tx,task_id).await? else { return Ok(false); };
+        if !super::worker_callbacks::authorized_on(&mut tx, task_id, claim, completion.callback.as_ref()).await? {
+            return Ok(false);
+        }
         let row: Option<(i64,)> = sqlx::query_as(
-            r"UPDATE worker_tasks
+            concat!(r"UPDATE worker_tasks
           SET state = 'completed', output = $3, output_encoding=$7, completed_at = NOW()
-          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed' AND instance_id=$5 AND effect_id IS NOT DISTINCT FROM $6
-          RETURNING claim_epoch",
+          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $4 AND state = 'claimed' AND instance_id=$5 AND effect_id IS NOT DISTINCT FROM $6 AND ", workflow_deadline_live!(), r"
+          RETURNING claim_epoch"),
         )
         .bind(task_id)
         .bind(&claim.worker_id)
@@ -533,12 +545,14 @@ pub(super) async fn fail(
     retryable: bool,
 ) -> Result<bool, StorageError> {
     let mut tx = store.pool.begin().await?;
-    let row: Option<(i64,)> = sqlx::query_as(
+    let row: Option<(i64,)> = sqlx::query_as(concat!(
         r"UPDATE worker_tasks
           SET state = 'failed', error_message = $3, error_retryable = $4, completed_at = NOW()
-          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $5 AND state = 'claimed'
-          RETURNING claim_epoch",
-    )
+          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $5 AND state = 'claimed' AND ",
+        workflow_deadline_live!(),
+        r"
+          RETURNING claim_epoch"
+    ))
     .bind(task_id)
     .bind(&claim.worker_id)
     .bind(message)
@@ -568,10 +582,11 @@ pub(super) async fn heartbeat(
     task_id: Uuid,
     claim: &WorkerClaim,
 ) -> Result<bool, StorageError> {
-    let result = sqlx::query(
-        "UPDATE worker_tasks SET heartbeat_at = NOW() \
-         WHERE id = $1 AND worker_id = $2 AND claim_epoch = $3 AND state = 'claimed'",
-    )
+    let result = sqlx::query(concat!(
+        "UPDATE worker_tasks SET heartbeat_at = clock_timestamp() \
+         WHERE id = $1 AND worker_id = $2 AND claim_epoch = $3 AND state = 'claimed' AND ",
+        workflow_deadline_live!()
+    ))
     .bind(task_id)
     .bind(&claim.worker_id)
     .bind(crate::worker_claim::sql_counter(claim.claim_epoch)?)
@@ -594,10 +609,10 @@ pub(super) async fn checkpoint(
         .ok_or_else(|| StorageError::Query("checkpoint sequence overflow".into()))?;
     let encoded = super::json_encoding::encode(checkpoint)?;
     let result = sqlx::query(
-        "UPDATE worker_tasks
-         SET heartbeat_at = NOW(), resume_checkpoint = $5, checkpoint_seq = $6, checkpoint_encoding=$7
+        concat!("UPDATE worker_tasks
+         SET heartbeat_at = clock_timestamp(), resume_checkpoint = $5, checkpoint_seq = $6, checkpoint_encoding=$7
          WHERE id = $1 AND worker_id = $2 AND claim_epoch = $3
-           AND state = 'claimed' AND checkpoint_seq = $4",
+           AND state = 'claimed' AND checkpoint_seq = $4 AND ", workflow_deadline_live!()),
     )
     .bind(task_id)
     .bind(&claim.worker_id)
@@ -679,7 +694,7 @@ pub(super) async fn reap_stale(
     let rows: Vec<(Uuid, i64, Option<String>)> = sqlx::query_as(
         r"WITH stale AS (
               SELECT id, claim_epoch, worker_id FROM worker_tasks
-              WHERE state = 'claimed'
+              WHERE state = 'claimed' AND heartbeat_timeout_secs IS NULL AND NOT wait_for_callback
                 -- A claimed row with no heartbeat yet ages from its claim
                 -- time (a row with neither is reclaimable at once); a bare
                 -- `heartbeat_at < cutoff` never matched NULL, so such rows
@@ -772,7 +787,7 @@ pub(super) async fn list_expired_leases(
         "SELECT ",
         worker_task_columns!(),
         r" FROM worker_tasks
-           WHERE state = 'claimed'
+           WHERE state = 'claimed' AND heartbeat_timeout_secs IS NULL AND NOT wait_for_callback
              AND (COALESCE(heartbeat_at, claimed_at) IS NULL
                   OR COALESCE(heartbeat_at, claimed_at)
                      < NOW() - make_interval(secs => COALESCE(lease_secs::double precision, $1::double precision)))
@@ -794,9 +809,9 @@ pub(super) async fn list_timed_out(
         "SELECT ",
         worker_task_columns!(),
         r" FROM worker_tasks
-           WHERE state IN ('pending', 'claimed')
-             AND timeout_ms IS NOT NULL
-             AND created_at + make_interval(secs => timeout_ms::double precision / 1000.0) < NOW()
+           WHERE state IN ('pending', 'claimed') AND (
+              (timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM created_at) + timeout_ms::numeric / 1000 <= EXTRACT(EPOCH FROM clock_timestamp()))
+              OR (state='claimed' AND heartbeat_timeout_secs IS NOT NULL AND NOT ", workflow_deadline_live!(), r"))
            ORDER BY created_at ASC
            LIMIT $1"
     ))
@@ -890,10 +905,15 @@ pub(super) async fn resolve(
     }
     // Parent-before-worker ordering matches enqueue. Lock the dispatch before
     // validating its optional node so concurrent resolution cannot retarget it.
-    let block: Option<String> = sqlx::query_scalar("SELECT block_id FROM worker_tasks WHERE id=$1 AND instance_id=$2 AND state=$3 AND claim_epoch=$4 AND ($5::text IS NULL OR worker_id=$5) FOR UPDATE")
+    let block: Option<String> = sqlx::query_scalar(concat!(
+        "SELECT block_id FROM worker_tasks WHERE id=$1 AND instance_id=$2 AND state=$3 AND claim_epoch=$4 AND ($5::text IS NULL OR worker_id=$5)
+         AND (state<>'claimed' OR (heartbeat_timeout_secs IS NULL AND NOT wait_for_callback) OR ", workflow_deadline_live!(), " <> $6) FOR UPDATE"
+    ))
         .bind(resolution.task_id).bind(resolution.instance_id.into_uuid())
         .bind(resolution.expected_state.to_string()).bind(expected_epoch)
-        .bind(resolution.expected_worker_id.as_deref()).fetch_optional(&mut *tx).await?;
+        .bind(resolution.expected_worker_id.as_deref())
+        .bind(matches!(resolution.event, WorkerAttemptEventKind::TimedOut))
+        .fetch_optional(&mut *tx).await?;
     let Some(block) = block else {
         return Ok(false);
     };
@@ -924,9 +944,16 @@ pub(super) async fn resolve(
     let source = if matches!(&resolution.action, Action::FailTaskOnly) {
         None
     } else {
-        let Some(source) =
-            super::worker_invocations::source_on(&mut tx, resolution.task_id).await?
-        else {
+        let mut source = super::worker_invocations::source_on(&mut tx, resolution.task_id).await?;
+        if source.is_none()
+            && matches!(resolution.action, Action::Requeue)
+            && resolution.event == WorkerAttemptEventKind::Reclaimed
+            && resolution.effect_resolution == orch8_types::worker::WorkerTaskEffectResolution::Unknown
+            && let Some(lease) = &evidence.expired_lease
+        {
+            source = super::legacy_worker_checkpoint::adopt_on(&mut tx, resolution.task_id, lease).await?;
+        }
+        let Some(source) = source else {
             return Ok(false);
         };
         if matches!(
@@ -989,6 +1016,9 @@ pub(super) async fn resolve(
         }
     };
     if affected != 1 {
+        if evidence.expired_lease.is_some() {
+            return Err(super::legacy_worker_checkpoint::adoption_changed());
+        }
         return Ok(false);
     }
     super::worker_resolution::record_on(&mut tx,&report_source,resolution,evidence).await?;
@@ -1460,7 +1490,17 @@ pub(super) async fn apply_resolution_action_on(
             }
             schedule_live_instance(&mut *conn, instance_id, *fire_at).await?;
         }
-        Action::FailNode { node_id, fire_at } => {
+        Action::FailNode {
+            node_id,
+            fire_at,
+            failure_output,
+        } => {
+            if let Some(output) = failure_output.as_deref() {
+                let source = source
+                    .ok_or_else(|| StorageError::Constraint("missing failure source".into()))?;
+                source.validate_resolution_output(Some(output), "__error__")?;
+                super::outputs::save_on(&mut *conn, output).await?;
+            }
             if let Some(node_id) = node_id {
                 sqlx::query(
                 "UPDATE execution_tree SET state = 'failed', completed_at = COALESCE(completed_at, NOW()) \

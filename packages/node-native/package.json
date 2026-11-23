@@ -5,7 +5,12 @@
   "main": "index.js",
   "types": "index.d.ts",
   "files": ["index.js", "index.d.ts", "binding.js", "host-errors.js", "*.node"],
-  "napi": { "binaryName": "orch8_engine_native", "targets": ["x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-msvc"] },
+  "napi": { "binaryName": "orch8_engine_native", "targets": ["x86_64-apple-darwin", "aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl", "x86_64-pc-windows-msvc"] },
+  "repository": { "type": "git", "url": "https://github.com/orch8-io/engine.git", "directory": "packages/node-native" },
+  "optionalDependencies": {
+    "@orch8/engine-native-linux-arm64-musl": "0.7.1",
+    "@orch8/engine-native-linux-x64-musl": "0.7.1"
+  },
   "scripts": {
     "build": "napi build --platform --release --no-js --dts native.d.ts",
     "build:debug": "napi build --platform --no-js --dts native.d.ts",

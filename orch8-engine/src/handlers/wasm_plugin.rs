@@ -11,7 +11,7 @@
 //! - Input: JSON bytes written to WASM memory via `alloc`
 //! - Output: JSON bytes read from WASM memory at the returned pointer
 //!
-//! WASM modules are cached by file path to avoid repeated compilation.
+//! WASM modules are cached by digest. Cold compilations share a bounded queue.
 
 use serde_json::Value;
 #[cfg(feature = "wasm")]
@@ -31,18 +31,248 @@ pub fn parse_plugin_name(handler: &str) -> Option<&str> {
     handler.strip_prefix("wasm://")
 }
 
+/// Resolve and compile every artifact pin on this executor.
+pub async fn prewarm_pinned_sequence(
+    storage: &dyn orch8_storage::StorageBackend,
+    sequence: &orch8_types::sequence::SequenceDefinition,
+) -> Result<(), StepError> {
+    use orch8_types::plugin::{WASM_ARTIFACT_SOURCE_PREFIX, WasmArtifactDigest};
+    use orch8_types::sequence::visit_steps;
+    let mut addresses = std::collections::BTreeSet::new();
+    for block in sequence
+        .blocks
+        .iter()
+        .chain(sequence.on_cancel.iter().flatten())
+        .chain(sequence.on_failure.iter().flatten())
+    {
+        visit_steps(block, &mut |step| {
+            if let Some(source) = parse_plugin_name(&step.handler)
+                .and_then(|name| name.strip_prefix(WASM_ARTIFACT_SOURCE_PREFIX))
+            {
+                addresses.insert(source.to_owned());
+            }
+        });
+    }
+    for address in addresses {
+        let digest =
+            WasmArtifactDigest::parse(&address).map_err(|message| StepError::Permanent {
+                message: message.into(),
+                details: None,
+            })?;
+        prewarm_digest(storage, &sequence.tenant_id, digest).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn run_prewarm_loop(
+    storage: std::sync::Arc<dyn orch8_storage::StorageBackend>,
+    node_id: uuid::Uuid,
+    revisions: Vec<orch8_types::ids::SequenceId>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(10));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            _ = ticker.tick() => {
+                for &revision in &revisions {
+                    tokio::select! {
+                        () = cancel.cancelled() => return,
+                        () = refresh_executor_readiness(storage.as_ref(), node_id, revision) => {}
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn refresh_executor_readiness(
+    storage: &dyn orch8_storage::StorageBackend,
+    node_id: uuid::Uuid,
+    revision: orch8_types::ids::SequenceId,
+) {
+    let sequence = match storage.get_sequence(revision).await {
+        Ok(Some(sequence)) => sequence,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(%node_id, %revision, %error, "could not read WASM prewarm revision");
+            return;
+        }
+    };
+    let ready_until = match prewarm_pinned_sequence(storage, &sequence).await {
+        Ok(()) => chrono::Utc::now() + chrono::Duration::seconds(30),
+        Err(error) => {
+            tracing::warn!(%node_id, %revision, %error, "executor cannot prepare the pinned revision");
+            chrono::Utc::now()
+        }
+    };
+    if let Err(error) = storage
+        .record_wasm_revision_ready(node_id, revision, ready_until)
+        .await
+    {
+        tracing::warn!(%node_id, %revision, %error, "could not record WASM executor readiness");
+    }
+}
+
+#[cfg(feature = "wasm")]
+async fn prewarm_digest(
+    storage: &dyn orch8_storage::StorageBackend,
+    tenant: &orch8_types::ids::TenantId,
+    digest: orch8_types::plugin::WasmArtifactDigest,
+) -> Result<(), StepError> {
+    let limits = limits::for_tenant(tenant).map_err(permanent)?;
+    let bytes = storage
+        .get_shared_wasm_module(tenant.as_str(), &digest, limits.max_module_bytes)
+        .await
+        .map_err(|error| {
+            tracing::warn!(digest = digest.as_str(), %error, "executor could not fetch a pinned WASM module");
+            permanent("cannot read pinned WASM module".into())
+        })?
+        .ok_or_else(|| permanent(format!("pinned WASM module {} is missing", digest.as_str())))?;
+    let tenant = tenant.clone();
+    tokio::task::spawn_blocking(move || {
+        let module = cache::get_or_compile_binary(&bytes, &digest, &tenant)?;
+        validate_compiled_module(&module, &limits).map_err(permanent)
+    })
+    .await
+    .map_err(|error| permanent(format!("WASM preparation task failed: {error}")))?
+}
+
+#[cfg(not(feature = "wasm"))]
+#[allow(clippy::unused_async)] // Shared asynchronous call sites in both builds.
+async fn prewarm_digest(
+    _storage: &dyn orch8_storage::StorageBackend,
+    _tenant: &orch8_types::ids::TenantId,
+    _digest: orch8_types::plugin::WasmArtifactDigest,
+) -> Result<(), StepError> {
+    Err(StepError::Permanent {
+        message: "executor has no WASM runtime".into(),
+        details: None,
+    })
+}
+
+/// Freeze artifact-backed aliases in a newly published sequence revision.
+pub async fn pin_sequence_modules(
+    storage: &dyn orch8_storage::StorageBackend,
+    sequence: &mut orch8_types::sequence::SequenceDefinition,
+) -> Result<(), orch8_types::error::StorageError> {
+    use orch8_types::error::StorageError;
+    use orch8_types::plugin::{
+        MAX_SHARED_WASM_BYTES, PluginType, WASM_ARTIFACT_SOURCE_PREFIX, WasmArtifactDigest,
+    };
+    use orch8_types::sequence::{StepDef, visit_steps, visit_steps_mut};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut names = BTreeSet::new();
+    let mut collect = |step: &StepDef| {
+        if let Some(name) = parse_plugin_name(&step.handler) {
+            names.insert(name.to_owned());
+        }
+    };
+    for block in sequence
+        .blocks
+        .iter()
+        .chain(sequence.on_cancel.iter().flatten())
+        .chain(sequence.on_failure.iter().flatten())
+    {
+        visit_steps(block, &mut collect);
+    }
+
+    let tenant = &sequence.tenant_id;
+    let mut bindings = BTreeMap::new();
+    for name in names {
+        let explicit = WasmArtifactDigest::from_source(&name)
+            .map_err(|error| StorageError::Constraint(error.into()))?;
+        let (digest, owner) = if let Some(digest) = explicit {
+            (digest, tenant.to_string())
+        } else {
+            let Some(plugin) = storage.get_plugin(Some(tenant), &name).await? else {
+                continue;
+            };
+            if !plugin.enabled || plugin.plugin_type != PluginType::Wasm {
+                continue;
+            }
+            let Some(digest) = WasmArtifactDigest::from_source(&plugin.source)
+                .map_err(|error| StorageError::Constraint(error.into()))?
+            else {
+                continue;
+            };
+            (digest, plugin.tenant_id)
+        };
+        let bytes = storage
+            .get_shared_wasm_module(&owner, &digest, MAX_SHARED_WASM_BYTES as u64)
+            .await?
+            .ok_or_else(|| {
+                StorageError::Constraint(format!("WASM module for '{name}' is missing"))
+            })?;
+        if owner != tenant.as_str() {
+            storage
+                .put_shared_wasm_module(tenant.as_str(), &digest, bytes)
+                .await?;
+        }
+        bindings.insert(
+            name,
+            format!("wasm://{WASM_ARTIFACT_SOURCE_PREFIX}{}", digest.as_str()),
+        );
+    }
+
+    let mut pin = |step: &mut StepDef| {
+        if let Some(handler) = parse_plugin_name(&step.handler).and_then(|name| bindings.get(name))
+        {
+            step.handler.clone_from(handler);
+        }
+    };
+    for block in sequence
+        .blocks
+        .iter_mut()
+        .chain(sequence.on_cancel.iter_mut().flatten())
+        .chain(sequence.on_failure.iter_mut().flatten())
+    {
+        visit_steps_mut(block, &mut pin);
+    }
+    Ok(())
+}
+
 /// Execute a step by running a WASM module.
 #[cfg(feature = "wasm")]
 pub async fn handle_wasm_plugin(ctx: StepContext, wasm_path: &str) -> Result<Value, StepError> {
-    use tracing::debug;
+    invoke_wasm(ctx, WasmModuleSource::Local(wasm_path.to_owned())).await
+}
 
-    debug!(
-        instance_id = %ctx.instance_id,
-        block_id = %ctx.block_id,
-        wasm_path,
-        "dispatching step to WASM plugin"
-    );
+#[cfg(feature = "wasm")]
+enum WasmModuleSource {
+    Local(String),
+    Shared(orch8_types::plugin::WasmArtifactDigest, bytes::Bytes),
+}
 
+pub(crate) async fn handle_registered_wasm_plugin(
+    ctx: StepContext,
+    plugin: &orch8_types::plugin::PluginDef,
+) -> Result<Value, StepError> {
+    #[cfg(feature = "wasm")]
+    if let Some(digest) = orch8_types::plugin::WasmArtifactDigest::from_source(&plugin.source)
+        .map_err(|error| permanent(error.into()))?
+    {
+        let limit = limits::current().max_module_bytes;
+        let module = ctx.storage.get_shared_wasm_module(&plugin.tenant_id, &digest, limit).await
+            .map_err(|error| {
+                tracing::warn!(plugin = %plugin.name, %error, "shared wasm module could not be loaded");
+                permanent("wasm plugin: shared module could not be loaded".into())
+            })?
+            .ok_or_else(|| permanent("wasm plugin: shared module does not exist".into()))?;
+        if module.len() as u64 > limit {
+            return Err(permanent(
+                "wasm plugin: shared module exceeds the module size limit".into(),
+            ));
+        }
+        return invoke_wasm(ctx, WasmModuleSource::Shared(digest, module)).await;
+    }
+    handle_wasm_plugin(ctx, &plugin.source).await
+}
+
+#[cfg(feature = "wasm")]
+async fn invoke_wasm(ctx: StepContext, source: WasmModuleSource) -> Result<Value, StepError> {
     let input = json!({
         "instance_id": ctx.instance_id.to_string(),
         "block_id": ctx.block_id.to_string(),
@@ -57,16 +287,27 @@ pub async fn handle_wasm_plugin(ctx: StepContext, wasm_path: &str) -> Result<Val
         message: format!("wasm plugin: failed to serialize input: {e}"),
         details: None,
     })?;
+    let limits = limits::for_tenant(&ctx.tenant_id).map_err(permanent)?;
 
     // Run WASM execution on a blocking thread since wasmtime is sync.
-    let wasm_path_owned = wasm_path.to_string();
-    let result =
-        tokio::task::spawn_blocking(move || execute_wasm_sync(&wasm_path_owned, &input_bytes))
-            .await
-            .map_err(|e| StepError::Permanent {
-                message: format!("wasm plugin: task join error: {e}"),
-                details: None,
-            })??;
+    let result = tokio::task::spawn_blocking(move || {
+        let (module, source_name) = match &source {
+            WasmModuleSource::Local(path) => (
+                cache::get_or_compile(path, limits.max_module_bytes, Some(&ctx.tenant_id))?,
+                path.as_str(),
+            ),
+            WasmModuleSource::Shared(digest, bytes) => (
+                cache::get_or_compile_binary(bytes, digest, &ctx.tenant_id)?,
+                digest.as_str(),
+            ),
+        };
+        execute_wasm_module(&module, source_name, &input_bytes, &limits)
+    })
+    .await
+    .map_err(|e| StepError::Permanent {
+        message: format!("wasm plugin: task join error: {e}"),
+        details: None,
+    })??;
 
     Ok(result)
 }
@@ -79,8 +320,11 @@ pub async fn handle_wasm_plugin(ctx: StepContext, wasm_path: &str) -> Result<Val
 /// limit off.
 #[cfg(feature = "wasm")]
 pub mod limits {
+    use std::collections::HashMap;
     use std::sync::OnceLock;
     use std::time::Duration;
+
+    use orch8_types::ids::TenantId;
 
     /// Fuel per invocation (`ORCH8_WASM_FUEL`).
     pub const FUEL_ENV: &str = "ORCH8_WASM_FUEL";
@@ -92,6 +336,18 @@ pub mod limits {
     pub const MAX_MODULE_ENV: &str = "ORCH8_WASM_MAX_MODULE_BYTES";
     /// Largest output a module may return (`ORCH8_WASM_MAX_OUTPUT_BYTES`).
     pub const MAX_OUTPUT_ENV: &str = "ORCH8_WASM_MAX_OUTPUT_BYTES";
+    /// Optional JSON object mapping tenant IDs to tighter execution ceilings.
+    pub const TENANT_LIMITS_ENV: &str = "ORCH8_WASM_TENANT_LIMITS_JSON";
+
+    #[derive(Default, serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct TenantCeilings {
+        fuel: Option<std::num::NonZeroU64>,
+        max_memory_bytes: Option<std::num::NonZeroUsize>,
+        max_output_bytes: Option<std::num::NonZeroUsize>,
+    }
+
+    type TenantPolicies = HashMap<String, TenantCeilings>;
 
     /// Resolved limits. See `docs/WASM_USER_STEPS.md` for the rationale
     /// behind each default.
@@ -176,22 +432,97 @@ pub mod limits {
     }
 
     static CURRENT: OnceLock<WasmSandboxLimits> = OnceLock::new();
+    static TENANTS: OnceLock<Result<TenantPolicies, ()>> = OnceLock::new();
 
     /// Process-wide limits, read from the environment on first use.
     pub fn current() -> &'static WasmSandboxLimits {
         CURRENT.get_or_init(|| WasmSandboxLimits::from_lookup(|k| std::env::var(k).ok()))
+    }
+
+    pub(super) fn for_tenant(tenant: &TenantId) -> Result<WasmSandboxLimits, String> {
+        let policies = TENANTS.get_or_init(|| match std::env::var(TENANT_LIMITS_ENV) {
+            Ok(json) => parse_tenant_limits(&json),
+            Err(std::env::VarError::NotPresent) => Ok(HashMap::new()),
+            Err(error) => {
+                tracing::error!(variable = TENANT_LIMITS_ENV, %error, "invalid WASM tenant limits");
+                Err(())
+            }
+        });
+        let ceilings = policies
+            .as_ref()
+            .map_err(|()| "WASM tenant limits are invalid".to_owned())?;
+        Ok(effective_limits(*current(), ceilings.get(tenant.as_str())))
+    }
+
+    fn parse_tenant_limits(json: &str) -> Result<TenantPolicies, ()> {
+        let policies: TenantPolicies = serde_json::from_str(json).map_err(|error| {
+            tracing::error!(variable = TENANT_LIMITS_ENV, %error, "invalid WASM tenant limits");
+        })?;
+        if policies.keys().any(|tenant| tenant.trim().is_empty()) {
+            tracing::error!(
+                variable = TENANT_LIMITS_ENV,
+                "WASM tenant limits include an empty tenant ID"
+            );
+            return Err(());
+        }
+        Ok(policies)
+    }
+
+    fn effective_limits(
+        mut process: WasmSandboxLimits,
+        tenant: Option<&TenantCeilings>,
+    ) -> WasmSandboxLimits {
+        if let Some(tenant) = tenant {
+            if let Some(fuel) = tenant.fuel {
+                process.fuel = process.fuel.min(fuel.get());
+            }
+            if let Some(memory) = tenant.max_memory_bytes {
+                process.max_memory_bytes = process.max_memory_bytes.min(memory.get());
+            }
+            if let Some(output) = tenant.max_output_bytes {
+                process.max_output_bytes = process.max_output_bytes.min(output.get());
+            }
+        }
+        process
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn tenant_limits_are_independent_and_only_tighten_the_process_limits() {
+            let process = WasmSandboxLimits::default();
+            let tenants = parse_tenant_limits(
+                r#"{
+                "north":{"fuel":1000,"max_memory_bytes":65536,"max_output_bytes":9},
+                "south":{"max_output_bytes":90000000}
+            }"#,
+            )
+            .unwrap();
+            let north = effective_limits(process, tenants.get("north"));
+            assert_eq!(
+                (north.fuel, north.max_memory_bytes, north.max_output_bytes),
+                (1000, 65536, 9)
+            );
+            assert_eq!(effective_limits(process, tenants.get("south")), process);
+            assert_eq!(effective_limits(process, tenants.get("new")), process);
+            assert!(parse_tenant_limits(r#"{"north":{"fuel":0}}"#).is_err());
+            assert!(parse_tenant_limits(r#"{"north":{"max_imaginary":5}}"#).is_err());
+        }
     }
 }
 
 /// Cached WASM engine (expensive to create) and compiled modules.
 #[cfg(feature = "wasm")]
 pub(crate) mod cache {
-    use std::collections::HashMap;
     use std::io::Read;
     use std::path::{Path, PathBuf};
-    use std::sync::{OnceLock, RwLock};
+    use std::sync::{Condvar, Mutex, OnceLock};
     use std::time::{Duration, SystemTime};
 
+    use moka::{policy::EvictionPolicy, sync::Cache};
+    use sha2::{Digest as _, Sha256};
     use wasmtime::{Config, Engine, Module};
 
     use orch8_types::error::StepError;
@@ -206,6 +537,8 @@ pub(crate) mod cache {
         let mut config = Config::new();
         // Metered execution — a store out of fuel traps (deterministic CPU cap).
         config.consume_fuel(true);
+        // One admitted compilation occupies one compiler thread.
+        config.parallel_compilation(false);
         // Epoch-based interruption — the wall-clock cap. Driven by the ticker
         // thread below; each store sets its own deadline in ticks.
         config.epoch_interruption(true);
@@ -229,8 +562,8 @@ pub(crate) mod cache {
         Ok(engine)
     }
 
-    /// Most modules kept compiled at once; the cache is cleared when full.
-    const MAX_CACHED_MODULES: usize = 256;
+    /// Maximum number of compiled modules retained after cache maintenance.
+    const MAX_CACHED_MODULES: u64 = 256;
 
     /// Optional directory that every WASM plugin `source` must resolve inside
     /// (after canonicalization, so symlinks and `..` cannot escape it).
@@ -243,9 +576,156 @@ pub(crate) mod cache {
     /// File identity used to invalidate a cached module when the file changes.
     type Stamp = (u64, Option<SystemTime>);
 
-    // RwLock so multiple executors can read-compare the cache without contending.
-    // Only misses take the write lock to insert.
-    static MODULES: OnceLock<RwLock<HashMap<PathBuf, (Stamp, Module)>>> = OnceLock::new();
+    type ModuleDigest = [u8; 32];
+    type ModuleCache = Cache<ModuleDigest, Module>;
+
+    // The path index avoids reading unchanged files. It stores only digests,
+    // so evicting a compiled module also releases its cached code.
+    static PATHS: OnceLock<Cache<PathBuf, (Stamp, ModuleDigest)>> = OnceLock::new();
+    // The compiler configuration is fixed by the process-wide Wasmtime engine.
+    static MODULES: OnceLock<Result<ModuleCaches, StepError>> = OnceLock::new();
+
+    const TENANT_CACHE_SLOTS_ENV: &str = "ORCH8_WASM_TENANT_CACHE_SLOTS_JSON";
+
+    struct ModuleCaches {
+        shared: ModuleCache,
+        reserved: std::collections::BTreeMap<String, ModuleCache>,
+    }
+
+    impl ModuleCaches {
+        fn new(configuration: &str, max_slots: u64) -> Result<Self, StepError> {
+            use orch8_types::ids::TenantId;
+
+            let invalid = || super::permanent(format!("invalid {TENANT_CACHE_SLOTS_ENV}"));
+            let slots: std::collections::BTreeMap<String, u64> =
+                serde_json::from_str(configuration).map_err(|_| invalid())?;
+            let available = slots
+                .iter()
+                .try_fold(max_slots, |remaining, (tenant, &slots)| {
+                    TenantId::new(tenant).map_err(|_| invalid())?;
+                    remaining
+                        .checked_sub(slots)
+                        .filter(|&remaining| slots != 0 && remaining != 0)
+                        .ok_or_else(&invalid)
+                })?;
+            let reserved = slots
+                .into_iter()
+                .map(|(tenant, slots)| (tenant, lru_cache(slots)))
+                .collect();
+            Ok(Self {
+                shared: lru_cache(available),
+                reserved,
+            })
+        }
+    }
+
+    static COMPILER: OnceLock<CompileSemaphore> = OnceLock::new();
+
+    // The two counters form a blocking semaphore with bounded waiters. The
+    // executor uses it exclusively inside its existing blocking task.
+    pub(super) struct CompileSemaphore {
+        state: Mutex<CompilationCounts>,
+        slot_available: Condvar,
+        active_limit: usize,
+        queue_limit: usize,
+        wait: Duration,
+    }
+
+    #[derive(Default)]
+    struct CompilationCounts {
+        active: usize,
+        queued: usize,
+    }
+
+    pub(super) struct CompilePermit<'a>(&'a CompileSemaphore);
+
+    impl CompileSemaphore {
+        fn new(active_limit: usize, queue_limit: usize, wait: Duration) -> Self {
+            Self {
+                state: Mutex::default(),
+                slot_available: Condvar::new(),
+                active_limit,
+                queue_limit,
+                wait,
+            }
+        }
+
+        pub(super) fn acquire(&self) -> Option<CompilePermit<'_>> {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if state.active == self.active_limit {
+                if state.queued == self.queue_limit {
+                    return None;
+                }
+                state.queued += 1;
+                (state, _) = self
+                    .slot_available
+                    .wait_timeout_while(state, self.wait, |state| state.active == self.active_limit)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.queued -= 1;
+                if state.active == self.active_limit {
+                    return None;
+                }
+            }
+            state.active += 1;
+            Some(CompilePermit(self))
+        }
+    }
+
+    impl Drop for CompilePermit<'_> {
+        fn drop(&mut self) {
+            let mut state = self
+                .0
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.active -= 1;
+            self.0.slot_available.notify_one();
+        }
+    }
+
+    pub(super) fn compiler() -> &'static CompileSemaphore {
+        COMPILER.get_or_init(|| {
+            fn limit(
+                key: &str,
+                default: usize,
+                accepted: std::ops::RangeInclusive<usize>,
+            ) -> usize {
+                let Some(value) = std::env::var_os(key) else {
+                    return default;
+                };
+                value
+                    .to_str()
+                    .and_then(|value| value.trim().parse().ok())
+                    .filter(|value| accepted.contains(value))
+                    .unwrap_or_else(|| {
+                        tracing::warn!(
+                            key,
+                            default,
+                            "invalid WASM compilation limit, using the default"
+                        );
+                        default
+                    })
+            }
+            let active = limit("ORCH8_WASM_COMPILE_CONCURRENCY", 2, 1..=32);
+            let queued = limit("ORCH8_WASM_COMPILE_QUEUE", 16, 0..=128);
+            let wait_ms = limit("ORCH8_WASM_COMPILE_QUEUE_MS", 250, 1..=5000);
+            CompileSemaphore::new(active, queued, Duration::from_millis(wait_ms as u64))
+        })
+    }
+
+    fn lru_cache<K, V>(capacity: u64) -> Cache<K, V>
+    where
+        K: std::hash::Hash + Eq + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+    {
+        Cache::builder()
+            .max_capacity(capacity)
+            .eviction_policy(EvictionPolicy::lru())
+            .build()
+    }
 
     pub fn engine() -> Result<&'static Engine, StepError> {
         ENGINE
@@ -323,73 +803,306 @@ pub(crate) mod cache {
         Ok(bytes)
     }
 
-    pub fn get_or_compile(path: &str, max_module_bytes: u64) -> Result<Module, StepError> {
+    pub fn get_or_compile(
+        path: &str,
+        max_module_bytes: u64,
+        tenant: Option<&orch8_types::ids::TenantId>,
+    ) -> Result<Module, StepError> {
         let plugin_dir = std::env::var_os(WASM_PLUGIN_DIR_ENV).filter(|v| !v.is_empty());
-        get_or_compile_in(path, plugin_dir.as_deref().map(Path::new), max_module_bytes)
+        get_or_compile_in(
+            path,
+            plugin_dir.as_deref().map(Path::new),
+            max_module_bytes,
+            tenant,
+        )
     }
 
     pub(crate) fn get_or_compile_in(
         path: &str,
         plugin_dir: Option<&Path>,
         max_module_bytes: u64,
+        tenant: Option<&orch8_types::ids::TenantId>,
     ) -> Result<Module, StepError> {
         let (canonical, meta) = resolve_module_path(path, plugin_dir, max_module_bytes)?;
         let stamp: Stamp = (meta.len(), meta.modified().ok());
 
-        let modules = MODULES.get_or_init(|| RwLock::new(HashMap::new()));
-        // Fast path: read lock, clone on hit (only if the file is unchanged).
-        match modules.read() {
-            Ok(cache) => {
-                if let Some((cached_stamp, m)) = cache.get(&canonical)
-                    && *cached_stamp == stamp
-                {
-                    return Ok(m.clone());
-                }
-            }
-            Err(e) => {
-                // Poisoned read guard means a previous writer panicked holding the lock.
-                // Don't silently reuse possibly-corrupt cache state — surface the failure
-                // so the caller can retry on a fresh invocation.
-                tracing::error!(
-                    path = %path,
-                    "wasm module cache RwLock poisoned on read; failing closed"
-                );
-                // Drop the poisoned guard explicitly; the whole process's cache will keep
-                // returning errors until a manual restart, which is the correct failure mode.
-                drop(e);
-                return Err(StepError::Retryable {
-                    message: "wasm plugin cache temporarily unavailable (lock poisoned)".into(),
-                    details: None,
-                });
-            }
+        let paths = PATHS.get_or_init(|| lru_cache(MAX_CACHED_MODULES));
+        let modules = module_caches()?;
+        load_compiled(
+            &canonical,
+            stamp,
+            max_module_bytes,
+            paths,
+            &modules.shared,
+            tenant.and_then(|tenant| modules.reserved.get(tenant.as_str())),
+            compiler(),
+        )
+    }
+
+    fn module_caches() -> Result<&'static ModuleCaches, StepError> {
+        MODULES
+            .get_or_init(|| {
+                let configuration = match std::env::var(TENANT_CACHE_SLOTS_ENV) {
+                    Ok(configuration) => configuration,
+                    Err(std::env::VarError::NotPresent) => "{}".into(),
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        return Err(super::permanent(format!(
+                            "invalid {TENANT_CACHE_SLOTS_ENV}"
+                        )));
+                    }
+                };
+                ModuleCaches::new(&configuration, MAX_CACHED_MODULES)
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    pub(super) fn get_or_compile_binary(
+        bytes: &[u8],
+        expected: &orch8_types::plugin::WasmArtifactDigest,
+        tenant: &orch8_types::ids::TenantId,
+    ) -> Result<Module, StepError> {
+        let digest = Sha256::digest(bytes).into();
+        if !bytes.starts_with(WASM_MAGIC)
+            || orch8_types::plugin::WasmArtifactDigest::from_sha256(digest) != *expected
+        {
+            return Err(load_failed());
         }
+        let modules = module_caches()?;
+        compile_cached_binary(
+            digest,
+            bytes,
+            &modules.shared,
+            modules.reserved.get(tenant.as_str()),
+            compiler(),
+        )
+    }
 
-        let engine = engine()?;
-        let bytes = read_module_bytes(&canonical, max_module_bytes)?;
-        // `from_binary` never falls back to the WAT text parser.
-        let module = Module::from_binary(engine, &bytes).map_err(|e| {
-            tracing::warn!(path, error = %e, "wasm plugin: module failed to compile");
-            load_failed()
-        })?;
+    fn load_compiled(
+        canonical: &Path,
+        stamp: Stamp,
+        max_module_bytes: u64,
+        paths: &Cache<PathBuf, (Stamp, ModuleDigest)>,
+        modules: &ModuleCache,
+        reserved: Option<&ModuleCache>,
+        compiler: &CompileSemaphore,
+    ) -> Result<Module, StepError> {
+        if let Some((cached_stamp, digest)) = paths.get(canonical)
+            && cached_stamp == stamp
+            && let Some(module) = reserved
+                .and_then(|reservation| reservation.get(&digest))
+                .or_else(|| modules.get(&digest))
+        {
+            if let Some(reservation) = reserved {
+                reservation.insert(digest, module.clone());
+            }
+            return Ok(module);
+        }
+        let bytes = read_module_bytes(canonical, max_module_bytes)?;
+        let digest = Sha256::digest(&bytes).into();
+        let module = compile_cached_binary(digest, &bytes, modules, reserved, compiler)?;
+        paths.insert(canonical.to_path_buf(), (stamp, digest));
+        Ok(module)
+    }
 
-        match modules.write() {
-            Ok(mut cache) => {
-                if cache.len() >= MAX_CACHED_MODULES && !cache.contains_key(&canonical) {
-                    cache.clear();
-                }
-                cache.insert(canonical, (stamp, module.clone()));
-            }
-            Err(e) => {
-                tracing::error!(
-                    path = %path,
-                    "wasm module cache RwLock poisoned on write; running uncached"
-                );
-                drop(e);
-                // Fall through and return the freshly-compiled module even though we
-                // couldn't cache it — execution can still proceed.
-            }
+    fn compile_cached_binary(
+        digest: ModuleDigest,
+        bytes: &[u8],
+        modules: &ModuleCache,
+        reserved: Option<&ModuleCache>,
+        compiler: &CompileSemaphore,
+    ) -> Result<Module, StepError> {
+        if let Some(module) = reserved.and_then(|reservation| reservation.get(&digest)) {
+            return Ok(module);
+        }
+        let module = modules
+            .try_get_with(digest, || {
+                let _permit = compiler.acquire().ok_or_else(|| StepError::Retryable {
+                    message: "wasm plugin: compilation queue is busy".into(),
+                    details: None,
+                })?;
+                // from_binary never falls back to the WAT text parser.
+                Module::from_binary(engine()?, bytes).map_err(|error| {
+                    tracing::warn!(%error, "wasm plugin: module failed to compile");
+                    load_failed()
+                })
+            })
+            .map_err(|error| (*error).clone())?;
+        if let Some(reservation) = reserved {
+            reservation.insert(digest, module.clone());
         }
         Ok(module)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn saturated_compiler_still_loads_cached_module_and_recovers_capacity() {
+            let files = lru_cache(8);
+            let modules = lru_cache(8);
+            let compiler = CompileSemaphore::new(1, 0, Duration::from_millis(15));
+            let directory = tempfile::tempdir().unwrap();
+            let hot = directory.path().join("hot.wasm");
+            let cold = directory.path().join("cold.wasm");
+            std::fs::write(&hot, wat::parse_str("(module)").unwrap()).unwrap();
+            std::fs::write(&cold, wat::parse_str("(module (func))").unwrap()).unwrap();
+            let load = |path: &Path| {
+                let (canonical, metadata) =
+                    resolve_module_path(path.to_str().unwrap(), None, 1024).unwrap();
+                load_compiled(
+                    &canonical,
+                    (metadata.len(), metadata.modified().ok()),
+                    1024,
+                    &files,
+                    &modules,
+                    None,
+                    &compiler,
+                )
+            };
+
+            load(&hot).unwrap();
+            let busy = compiler.acquire().unwrap();
+            assert!(load(&hot).is_ok());
+            assert!(matches!(load(&cold), Err(StepError::Retryable { .. })));
+            drop(busy);
+            assert!(load(&cold).is_ok());
+        }
+
+        #[test]
+        fn compiler_queue_waits_with_a_budget_and_releases_its_place_on_timeout() {
+            let compiler = CompileSemaphore::new(1, 1, Duration::from_millis(15));
+            let busy = compiler.acquire().unwrap();
+            assert!(compiler.acquire().is_none());
+            assert_eq!(compiler.state.lock().unwrap().queued, 0);
+            drop(busy);
+            assert!(compiler.acquire().is_some());
+        }
+
+        #[test]
+        fn compiled_cache_keeps_recent_module_when_capacity_is_exceeded() {
+            let cache = lru_cache(2);
+            cache.insert("hot", 1);
+            cache.run_pending_tasks();
+            cache.insert("cold", 2);
+            cache.run_pending_tasks();
+            assert_eq!(cache.get(&"hot"), Some(1));
+            cache.run_pending_tasks();
+            cache.insert("new", 3);
+            cache.run_pending_tasks();
+            assert_eq!(cache.get(&"hot"), Some(1));
+            assert_eq!(cache.get(&"cold"), None);
+            assert_eq!(cache.get(&"new"), Some(3));
+        }
+
+        #[test]
+        fn identical_module_files_share_a_compilation_and_failed_files_can_be_replaced() {
+            let paths = lru_cache(8);
+            let modules = lru_cache(8);
+            let directory = tempfile::tempdir().unwrap();
+            let first = directory.path().join("one.wasm");
+            let second = directory.path().join("two.wasm");
+            let bytes = wat::parse_str("(module)").unwrap();
+            std::fs::write(&first, &bytes).unwrap();
+            std::fs::write(&second, b"\0asm").unwrap();
+            let load = |path: &Path| {
+                let (canonical, meta) =
+                    resolve_module_path(path.to_str().unwrap(), None, 1024).unwrap();
+                load_compiled(
+                    &canonical,
+                    (meta.len(), meta.modified().ok()),
+                    1024,
+                    &paths,
+                    &modules,
+                    None,
+                    compiler(),
+                )
+            };
+            assert!(load(&second).is_err());
+            std::fs::write(&second, &bytes).unwrap();
+            let barrier = std::sync::Barrier::new(8);
+            let loaded = std::thread::scope(|scope| {
+                (0..8)
+                    .map(|index| {
+                        let path = if index % 2 == 0 { &first } else { &second };
+                        let barrier = &barrier;
+                        let load = &load;
+                        scope.spawn(move || {
+                            barrier.wait();
+                            load(path).unwrap()
+                        })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .map(|thread| thread.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert!(loaded.iter().all(|module| Module::same(&loaded[0], module)));
+            modules.run_pending_tasks();
+            assert_eq!(modules.entry_count(), 1);
+        }
+
+        #[test]
+        fn tenant_reservations_reject_configuration_that_exhausts_shared_slots() {
+            assert!(ModuleCaches::new(r#"{"small":2,"big":1}"#, 4).is_ok());
+            for value in [
+                r#"{"small":0}"#,
+                r#"{"big":4}"#,
+                r#"{"small":2,"big":3}"#,
+                r#"{" ":1}"#,
+            ] {
+                assert!(ModuleCaches::new(value, 4).is_err(), "{value}");
+            }
+        }
+
+        #[test]
+        fn tenant_catalog_churn_preserves_another_tenants_reserved_module() {
+            let caches = ModuleCaches::new(r#"{"north":1,"south":2}"#, 4).unwrap();
+            let paths = lru_cache(12);
+            let compiler = CompileSemaphore::new(1, 0, Duration::from_millis(15));
+            let directory = tempfile::tempdir().unwrap();
+            let load = |name: &str, tenant: &str| {
+                let path = directory.path().join(format!("{name}.wasm"));
+                let (real, metadata) =
+                    resolve_module_path(path.to_str().unwrap(), None, 4096).unwrap();
+                load_compiled(
+                    &real,
+                    (metadata.len(), metadata.modified().ok()),
+                    4096,
+                    &paths,
+                    &caches.shared,
+                    caches.reserved.get(tenant),
+                    &compiler,
+                )
+            };
+            let write = |name: &str, answer: u8| {
+                let module = wat::parse_str(format!(
+                    "(module (func (export \"answer\") (result i32) i32.const {answer}))"
+                ))
+                .unwrap();
+                std::fs::write(directory.path().join(format!("{name}.wasm")), module).unwrap();
+            };
+            write("hot", 0);
+            let hot = load("hot", "north").unwrap();
+            for index in 1..=8 {
+                let name = format!("cold-{index}");
+                write(&name, index);
+                load(&name, "south").unwrap();
+                caches.shared.run_pending_tasks();
+                caches.reserved["south"].run_pending_tasks();
+            }
+            assert_eq!(caches.reserved["south"].entry_count(), 2);
+            assert_eq!(caches.shared.entry_count(), 1);
+            let permit = compiler.acquire().unwrap();
+            let from_reservation = load("hot", "north").unwrap();
+            assert!(Module::same(&hot, &from_reservation));
+            assert!(matches!(
+                load("hot", "unreserved"),
+                Err(StepError::Retryable { .. })
+            ));
+            drop(permit);
+        }
     }
 }
 
@@ -424,7 +1137,7 @@ pub fn validate_module_bytes(
     bytes: &[u8],
     limits: &limits::WasmSandboxLimits,
 ) -> Result<(), String> {
-    use wasmtime::{ExternType, Module, ValType};
+    use wasmtime::Module;
 
     if bytes.len() as u64 > limits.max_module_bytes {
         return Err(format!(
@@ -437,8 +1150,22 @@ pub fn validate_module_bytes(
         return Err("not a binary WebAssembly module (missing \\0asm magic)".into());
     }
     let engine = cache::engine().map_err(|_| "wasm engine unavailable".to_string())?;
-    let module = Module::from_binary(engine, bytes).map_err(|e| format!("invalid module: {e}"))?;
-    reject_imports(&module)?;
+    let module = {
+        let _permit = cache::compiler()
+            .acquire()
+            .ok_or("wasm compilation queue is busy")?;
+        Module::from_binary(engine, bytes).map_err(|e| format!("invalid module: {e}"))?
+    };
+    validate_compiled_module(&module, limits)
+}
+
+#[cfg(feature = "wasm")]
+fn validate_compiled_module(
+    module: &wasmtime::Module,
+    limits: &limits::WasmSandboxLimits,
+) -> Result<(), String> {
+    use wasmtime::{ExternType, ValType};
+    reject_imports(module)?;
 
     let func_sig = |name: &str| -> Result<(Vec<ValType>, Vec<ValType>), String> {
         match module.get_export(name) {
@@ -561,7 +1288,7 @@ fn classify_call_error(what: &str, e: &wasmtime::Error, limits: &WasmLimits) -> 
 }
 
 /// Synchronous WASM execution with the process-wide [`limits::current`].
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", test))]
 fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepError> {
     execute_wasm_with_limits(wasm_path, input_bytes, limits::current())
 }
@@ -577,10 +1304,21 @@ fn execute_wasm_sync(wasm_path: &str, input_bytes: &[u8]) -> Result<Value, StepE
 /// * an empty `Linker` — no host imports; modules with imports are refused
 ///   before instantiation
 /// * output capped at `limits.max_output_bytes`
-#[cfg(feature = "wasm")]
-#[allow(clippy::too_many_lines)]
+#[cfg(all(feature = "wasm", test))]
 fn execute_wasm_with_limits(
     wasm_path: &str,
+    input_bytes: &[u8],
+    limits: &limits::WasmSandboxLimits,
+) -> Result<Value, StepError> {
+    let module = cache::get_or_compile(wasm_path, limits.max_module_bytes, None)?;
+    execute_wasm_module(&module, wasm_path, input_bytes, limits)
+}
+
+#[cfg(feature = "wasm")]
+#[allow(clippy::too_many_lines)]
+fn execute_wasm_module(
+    module: &wasmtime::Module,
+    source: &str,
     input_bytes: &[u8],
     limits: &limits::WasmSandboxLimits,
 ) -> Result<Value, StepError> {
@@ -588,8 +1326,7 @@ fn execute_wasm_with_limits(
     use wasmtime::{Linker, Store};
 
     let engine = cache::engine()?;
-    let module = cache::get_or_compile(wasm_path, limits.max_module_bytes)?;
-    reject_imports(&module).map_err(|m| permanent(format!("wasm plugin: {m}")))?;
+    reject_imports(module).map_err(|m| permanent(format!("wasm plugin: {m}")))?;
 
     let Ok(input_len) = i32::try_from(input_bytes.len()) else {
         return Err(permanent(format!(
@@ -620,7 +1357,7 @@ fn execute_wasm_with_limits(
 
     let linker: Linker<WasmLimits> = Linker::new(engine);
 
-    let instance = match linker.instantiate(&mut store, &module) {
+    let instance = match linker.instantiate(&mut store, module) {
         Ok(i) => i,
         Err(e) if store.data().memory_limit_hit || store.data().table_limit_hit => {
             return Err(classify_call_error("instantiation", &e, store.data()));
@@ -715,7 +1452,7 @@ fn execute_wasm_with_limits(
             // The module broke the JSON contract. Log with enough context to debug
             // but don't crash — wrap the raw bytes so the caller sees the failure.
             warn!(
-                wasm_path,
+                source,
                 result_len,
                 parse_error = %parse_err,
                 "wasm plugin: output is not valid JSON, wrapping raw bytes"
@@ -752,6 +1489,49 @@ pub async fn handle_wasm_plugin(_ctx: StepContext, _wasm_path: &str) -> Result<V
 #[allow(clippy::match_wildcard_for_single_variants)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "wasm")]
+    #[tokio::test]
+    async fn prewarm_validates_cleanup_pins_and_rejects_wrong_module_abi() {
+        use orch8_storage::{
+            ResourceStore as _, artifacts::ObjectArtifactStore, sqlite::SqliteStorage,
+        };
+        use orch8_types::plugin::{WASM_ARTIFACT_SOURCE_PREFIX, WasmArtifactDigest};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = ObjectArtifactStore::local(directory.path().to_str().unwrap()).unwrap();
+        let storage = SqliteStorage::in_memory()
+            .await
+            .unwrap()
+            .with_artifact_store(std::sync::Arc::new(store));
+        let bytes = wat::parse_str(r#"(module (memory (export "memory") 1))"#).unwrap();
+        let digest = WasmArtifactDigest::for_bytes(&bytes);
+        let sequence = serde_json::from_value(json!({
+            "id":uuid::Uuid::now_v7(), "tenant_id":"prewarm", "namespace":"default",
+            "name":"test", "version":1, "created_at":chrono::Utc::now(),
+            "blocks":[{"type":"step","id":"run","handler":"noop"}],
+            "on_cancel":[{"type":"step","id":"cleanup",
+                         "handler":format!("wasm://{WASM_ARTIFACT_SOURCE_PREFIX}{}",digest.as_str())}],
+        })).unwrap();
+        assert!(
+            prewarm_pinned_sequence(&storage, &sequence)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("missing")
+        );
+        storage
+            .put_shared_wasm_module("prewarm", &digest, bytes.into())
+            .await
+            .unwrap();
+        assert!(
+            prewarm_pinned_sequence(&storage, &sequence)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("missing required export `alloc`")
+        );
+    }
 
     #[test]
     fn is_wasm_handler_detects_prefix() {
@@ -1044,14 +1824,20 @@ mod tests {
             let outside = wat_to_tmp_wasm(ECHO_WAT);
 
             assert!(
-                cache::get_or_compile_in(inside.to_str().unwrap(), Some(dir.path()), u64::MAX)
-                    .is_ok()
+                cache::get_or_compile_in(
+                    inside.to_str().unwrap(),
+                    Some(dir.path()),
+                    u64::MAX,
+                    None
+                )
+                .is_ok()
             );
             assert!(
                 cache::get_or_compile_in(
                     outside.path().to_str().unwrap(),
                     Some(dir.path()),
-                    u64::MAX
+                    u64::MAX,
+                    None,
                 )
                 .is_err()
             );
@@ -1062,8 +1848,13 @@ mod tests {
                 .join(outside.path().file_name().unwrap());
             if escape.exists() {
                 assert!(
-                    cache::get_or_compile_in(escape.to_str().unwrap(), Some(dir.path()), u64::MAX)
-                        .is_err()
+                    cache::get_or_compile_in(
+                        escape.to_str().unwrap(),
+                        Some(dir.path()),
+                        u64::MAX,
+                        None
+                    )
+                    .is_err()
                 );
             }
         }

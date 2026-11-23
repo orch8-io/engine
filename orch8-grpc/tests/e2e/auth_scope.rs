@@ -265,6 +265,7 @@ async fn grpc_another_key_cannot_mutate_or_replay_a_recorded_lease() {
         claim_epoch: claimed.claim_epoch,
         message: "foreign".into(),
         retryable: false,
+        error_code: None,
     });
     request
         .metadata_mut()

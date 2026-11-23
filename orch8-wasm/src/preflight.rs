@@ -229,6 +229,7 @@ pub fn preflight(input: &str) -> PreflightReport {
                 expressions_check(sequence),
                 handlers_known_check(sequence),
                 input_schema_check(sequence),
+                crate::dataflow_analysis::check_typed_dataflow(sequence, observed_at()),
                 runtime_check(sequence),
             ];
             PreflightReport::new(

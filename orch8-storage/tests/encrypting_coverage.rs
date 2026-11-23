@@ -1079,12 +1079,10 @@ async fn create_instance_externalized_still_externalizes_under_encryption() {
     );
 
     // The externalized payload itself must be encrypted at rest too.
-    let ref_key = orch8_storage::externalizing::context_data_ref_key(
-        &instance.id.into_uuid().to_string(),
-        "big",
-    );
+    let read = storage.get_instance(instance.id).await.unwrap().unwrap();
+    let ref_key = read.context.data["big"]["_ref"].as_str().unwrap();
     let raw_ref = inner
-        .get_externalized_state(instance.id, &ref_key)
+        .get_externalized_state(instance.id, ref_key)
         .await
         .unwrap()
         .expect("big field must have been persisted to externalized_state");
@@ -1095,7 +1093,7 @@ async fn create_instance_externalized_still_externalizes_under_encryption() {
 
     // Through the wrapper, the externalized payload decrypts transparently.
     let decrypted_ref = storage
-        .get_externalized_state(instance.id, &ref_key)
+        .get_externalized_state(instance.id, ref_key)
         .await
         .unwrap()
         .unwrap();
@@ -1221,6 +1219,8 @@ async fn worker_task_params_context_output_encrypted_at_rest() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1902,4 +1902,132 @@ async fn enc_prefixed_plaintext_is_encrypted_and_round_trips() {
         .unwrap();
     let got = storage.get_instance(instance.id).await.unwrap().unwrap();
     assert_eq!(got.context.data, lookalike);
+}
+
+#[tokio::test]
+async fn encrypted_context_and_payload_writes_roll_back_together() {
+    let inner = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    let storage = EncryptingStorage::new(
+        inner.clone(),
+        FieldEncryptor::from_hex_key(TEST_KEY).unwrap(),
+    );
+    let first = mk_instance("t1", json!({"big": "a".repeat(128), "revision": 1}));
+    seed_sequence(&storage, first.sequence_id, "t1").await;
+    let mut second = first.clone();
+    second.id = InstanceId::new();
+
+    sqlx::query(
+        "CREATE TRIGGER fail_payload_insert BEFORE INSERT ON externalized_state
+         BEGIN SELECT RAISE(ABORT, 'injected payload failure'); END",
+    )
+    .execute(inner.pool())
+    .await
+    .unwrap();
+    assert!(
+        storage
+            .create_instance_externalized(&first, 64)
+            .await
+            .is_err()
+    );
+    assert!(
+        storage
+            .create_instances_batch_externalized(&[first.clone(), second.clone()], 64)
+            .await
+            .is_err()
+    );
+    for id in [first.id, second.id] {
+        assert!(inner.get_instance(id).await.unwrap().is_none());
+    }
+    sqlx::query("DROP TRIGGER fail_payload_insert")
+        .execute(inner.pool())
+        .await
+        .unwrap();
+    storage
+        .create_instance_externalized(&first, 64)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "CREATE TRIGGER fail_context_update BEFORE UPDATE OF context ON task_instances
+         BEGIN SELECT RAISE(ABORT, 'injected context failure'); END",
+    )
+    .execute(inner.pool())
+    .await
+    .unwrap();
+    let mut updated = first.context.clone();
+    updated.data = json!({"big": "b".repeat(128), "revision": 2});
+    assert!(
+        storage
+            .update_instance_context_externalized(first.id, &updated, 64)
+            .await
+            .is_err()
+    );
+
+    let committed = storage.get_instance(first.id).await.unwrap().unwrap();
+    assert_eq!(committed.context.data["revision"], 1);
+    let key = committed.context.data["big"]["_ref"].as_str().unwrap();
+    assert_eq!(
+        storage.get_externalized_state(first.id, key).await.unwrap(),
+        Some(json!("a".repeat(128)))
+    );
+
+    sqlx::query("DROP TRIGGER fail_context_update")
+        .execute(inner.pool())
+        .await
+        .unwrap();
+    storage
+        .update_instance_context_externalized(first.id, &updated, 64)
+        .await
+        .unwrap();
+    let latest = storage.get_instance(first.id).await.unwrap().unwrap();
+    let latest_key = latest.context.data["big"]["_ref"].as_str().unwrap();
+    assert_ne!(key, latest_key);
+    let (old, new) = tokio::join!(
+        storage.get_externalized_state(first.id, key),
+        storage.get_externalized_state(first.id, latest_key),
+    );
+    assert_eq!(old.unwrap(), Some(json!("a".repeat(128))));
+    assert_eq!(new.unwrap(), Some(json!("b".repeat(128))));
+}
+
+#[tokio::test]
+async fn tuned_file_pool_enforces_the_configured_busy_timeout() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tuned.db");
+    let store = SqliteStorage::file_tuned(
+        path.to_str().unwrap(),
+        2,
+        std::time::Duration::from_millis(75),
+    )
+    .await
+    .unwrap();
+    assert_eq!(store.pool().options().get_max_connections(), 2);
+    let timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(timeout_ms, 75);
+    let existing = mk_instance("t1", json!({"version": 1}));
+    seed_sequence(&store, existing.sequence_id, "t1").await;
+    store.create_instance(&existing).await.unwrap();
+
+    let writer = store.pool().begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let mut replacement = existing.context.clone();
+    replacement.data = json!({"version": 2});
+    let start = std::time::Instant::now();
+    let error = store
+        .update_instance_context(existing.id, &replacement)
+        .await
+        .unwrap_err();
+    assert!(error.is_transient(), "{error}");
+    assert!(start.elapsed() >= std::time::Duration::from_millis(50));
+    assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    writer.rollback().await.unwrap();
+
+    store
+        .update_instance_context(existing.id, &replacement)
+        .await
+        .unwrap();
+    let persisted = store.get_instance(existing.id).await.unwrap().unwrap();
+    assert_eq!(persisted.context.data, replacement.data);
 }

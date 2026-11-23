@@ -118,14 +118,14 @@ pub(super) async fn claim(
                 )
             })
             .collect::<Vec<_>>();
-        let contexts = super::worker_claim::record_with_context_on(
+        let transport = super::worker_claim::record_with_context_on(
             &mut tx,
             &tasks,
             crate::worker_claim::claim_principal(selection.runtime.request),
         )
         .await?;
         super::workers::insert_attempt_events(&mut tx, &events).await?;
-        crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
+        crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
     }
     .await;
     super::finish_transaction(tx, result).await
@@ -143,7 +143,7 @@ fn eligibility(query: &mut QueryBuilder<Postgres>, selection: &Selection<'_>) {
     super::delegation_claims::append(query, "worker_tasks", selection.runtime.capabilities);
 }
 fn guards(query: &mut QueryBuilder<Postgres>, tenant: Option<&TenantId>) {
-    query.push(" AND state='pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch AND EXISTS(SELECT 1 FROM task_instances owner WHERE owner.id=worker_tasks.instance_id AND owner.state NOT IN ('completed','failed','cancelled')");
+    query.push(" AND state='pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND (NOT wait_for_callback OR (timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM created_at) + timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp()))) AND NOT awaiting_dispatch AND EXISTS(SELECT 1 FROM task_instances owner WHERE owner.id=worker_tasks.instance_id AND owner.state NOT IN ('completed','failed','cancelled')");
     if let Some(tenant) = tenant {
         query
             .push(" AND owner.tenant_id=")

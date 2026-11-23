@@ -50,7 +50,8 @@ if [[ "$#" == 4 && "$platform" == react-native ]]; then
   echo 'Previous flat-error native library refused by the callback-contract initialization guard.'
   install_runtime "$native/liborch8_mobile.dylib"
 fi
-if ! "$work/tests" "$fixture" "$work" > "$work/output.log" 2>&1; then
+if ! ORCH8_SCOPED_OBSERVATION_TEST="$([[ "$platform" == react-native ]] && echo 1 || echo 0)" \
+  "$work/tests" "$fixture" "$work" > "$work/output.log" 2>&1; then
   cat "$work/output.log" >&2
   exit 1
 fi

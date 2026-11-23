@@ -117,6 +117,8 @@ fn retry(task: &WorkerTask, node: ExecutionNodeId) -> WorkerTaskResolution {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         claimed_runtime_kind: None,
         ..task.clone()
@@ -130,6 +132,7 @@ fn retry(task: &WorkerTask, node: ExecutionNodeId) -> WorkerTaskResolution {
         holder_worker_id: Some("forged-audit-label".into()),
         event: WorkerAttemptEventKind::Failed,
         effect_resolution: WorkerTaskEffectResolution::Unknown,
+        error_code: None,
         reason: "FAILURE_PRIVATE_CANARY".into(),
         retryable: true,
         action: WorkerTaskResolutionAction::Retry {
@@ -232,6 +235,7 @@ fn task_only(task: &WorkerTask) -> WorkerTaskResolution {
         holder_worker_id: task.worker_id.clone(),
         event: WorkerAttemptEventKind::Failed,
         effect_resolution: WorkerTaskEffectResolution::Unknown,
+        error_code: None,
         reason: "failed".into(),
         retryable: false,
         action: WorkerTaskResolutionAction::FailTaskOnly,
@@ -506,7 +510,7 @@ orch8_storage::backend_test!(async fn retained_failure_application_refuses_chang
     use orch8_storage::worker_resolution_application::{WorkerResolutionApplication as A, WorkerResolutionIntegration as Plan};
     let s=b.storage.as_ref();
     let (task,node,report)=pending_failure(s).await;
-    let plan=Plan::new(report.clone(),WorkerTaskResolutionAction::FailNode { node_id:Some(node),fire_at:Utc::now() }).unwrap();
+    let plan=Plan::new(report.clone(),WorkerTaskResolutionAction::FailNode { failure_output: None, node_id:Some(node),fire_at:Utc::now() }).unwrap();
     let mut parent=s.get_instance(task.instance_id).await.unwrap().unwrap();
     let original=parent.context.runtime.run_id.clone();
     parent.context.runtime.run_id=Some(Uuid::now_v7().to_string());
@@ -533,7 +537,7 @@ orch8_storage::backend_test!(async fn retained_failure_recovery_rotates_and_conc
     assert_ne!(a.id,b.id,"a deferred report starved a younger report");
     assert!([a.id,b.id].contains(&report.id));
     assert!([a.id,b.id].contains(&second.id));
-    let plan=Plan::new(report.clone(),WorkerTaskResolutionAction::FailNode {node_id:Some(node),fire_at:Utc::now()}).unwrap();
+    let plan=Plan::new(report.clone(),WorkerTaskResolutionAction::FailNode { failure_output: None, node_id:Some(node),fire_at:Utc::now()}).unwrap();
     s.delete_worker_task(first.id).await.unwrap();
     let (a,b)=tokio::join!(s.apply_worker_resolution_integration(&plan),s.apply_worker_resolution_integration(&plan));
     let results=[a.unwrap(),b.unwrap()];
@@ -585,6 +589,7 @@ async fn assert_failure_application_skips_busy_attempt(effect: bool) {
     let plan = Plan::new(
         report,
         WorkerTaskResolutionAction::FailNode {
+            failure_output: None,
             node_id: Some(node),
             fire_at: Utc::now(),
         },

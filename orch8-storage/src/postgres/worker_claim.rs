@@ -1,5 +1,5 @@
 //! Claim transition and immutable claimant evidence share one transaction.
-use crate::worker_claim::{WorkerClaimPrincipal, WorkerIssuedClaim, invalid};
+use crate::worker_claim::{IssuedTransport, WorkerClaimPrincipal, WorkerIssuedClaim, invalid};
 use orch8_types::{
     error::StorageError,
     ids::{InstanceId, TenantId},
@@ -8,21 +8,12 @@ use orch8_types::{
 use sqlx::Row;
 use uuid::Uuid;
 
-pub(super) async fn record_on(
-    conn: &mut sqlx::PgConnection,
-    tasks: &[WorkerTask],
-    principal: Option<&WorkerClaimPrincipal>,
-) -> Result<(), StorageError> {
-    record_with_context_on(conn, tasks, principal)
-        .await
-        .map(|_| ())
-}
 pub(super) async fn record_with_context_on(
     conn: &mut sqlx::PgConnection,
     tasks: &[WorkerTask],
     principal: Option<&WorkerClaimPrincipal>,
-) -> Result<Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>, StorageError> {
-    let mut contexts = Vec::new();
+) -> Result<IssuedTransport, StorageError> {
+    let mut transport = IssuedTransport::default();
     // Bound statement parameters and avoid a read roundtrip per claimed task.
     for batch in tasks.chunks(128) {
         let tasks: std::collections::HashMap<_, _> =
@@ -69,37 +60,14 @@ pub(super) async fn record_with_context_on(
             }) {
                 return Err(invalid());
             }
-            let publication: Option<crate::delegation_publication::DelegationPublication> = row
-                .get::<Option<serde_json::Value>, _>("publication")
-                .map(serde_json::from_value)
-                .transpose()?;
-            let required=legacy.as_ref().is_some_and(|source|matches!(&source.target,crate::worker_invocation::WorkerInvocationTarget::Unbound{reason} if reason==crate::delegation_publication::INVOCATION_REASON));
-            if required && publication.is_none() {
-                return Err(invalid());
-            }
-            if let Some(publication) = publication
-                && (row
-                    .get::<Option<String>, _>("publication_tenant")
-                    .as_deref()
-                    != Some(tenant.as_str())
-                    || row
-                        .get::<Option<Uuid>, _>("publication_instance")
-                        .map(|id| id.to_string())
-                        != Some(publication.instance_id.to_string())
-                    || row
-                        .get::<Option<Uuid>, _>("publication_id")
-                        .map(|id| id.to_string())
-                        != Some(publication.delegation.id.to_string())
-                    || row
-                        .get::<Option<Uuid>, _>("publication_grant")
-                        .map(|id| id.to_string())
-                        != Some(publication.delegation.grant_id.to_string())
-                    || publication.delegation.tenant_id != tenant
-                    || !publication.matches_hot(task)?)
-            {
-                return Err(invalid());
-            }
+            validate_publication(&row, task, &tenant, legacy.as_ref())?;
             let source = admission.as_ref().map(|a| a.invocation.clone()).or(legacy);
+            if let Some(callback) =
+                crate::worker_callback::WorkerCallbackBinding::issue(task, tenant.clone())?
+            {
+                super::worker_callbacks::insert_on(conn, &callback).await?;
+                transport.callbacks.push(callback);
+            }
             let claim = WorkerIssuedClaim::new(task, tenant, principal, source, admission)?;
             let record = serde_json::to_value(&claim)?;
             let epoch = i64::try_from(claim.claim.claim_epoch).map_err(|_| invalid())?;
@@ -112,12 +80,53 @@ pub(super) async fn record_with_context_on(
                 .as_ref()
                 .is_some_and(crate::worker_invocation::WorkerInvocation::is_published_mailbox)
             {
-                contexts.push(super::delegation_claim_contexts::capture_on(conn, claim).await?);
+                transport
+                    .contexts
+                    .push(super::delegation_claim_contexts::capture_on(conn, claim).await?);
             }
         }
     }
-    Ok(contexts)
+    Ok(transport)
 }
+fn validate_publication(
+    row: &sqlx::postgres::PgRow,
+    task: &WorkerTask,
+    tenant: &TenantId,
+    legacy: Option<&crate::worker_invocation::WorkerInvocation>,
+) -> Result<(), StorageError> {
+    let publication: Option<crate::delegation_publication::DelegationPublication> = row
+        .get::<Option<serde_json::Value>, _>("publication")
+        .map(serde_json::from_value)
+        .transpose()?;
+    let required=legacy.is_some_and(|source|matches!(&source.target,crate::worker_invocation::WorkerInvocationTarget::Unbound{reason} if reason==crate::delegation_publication::INVOCATION_REASON));
+    if required && publication.is_none() {
+        return Err(invalid());
+    }
+    if let Some(publication) = publication
+        && (row
+            .get::<Option<String>, _>("publication_tenant")
+            .as_deref()
+            != Some(tenant.as_str())
+            || row
+                .get::<Option<Uuid>, _>("publication_instance")
+                .map(|id| id.to_string())
+                != Some(publication.instance_id.to_string())
+            || row
+                .get::<Option<Uuid>, _>("publication_id")
+                .map(|id| id.to_string())
+                != Some(publication.delegation.id.to_string())
+            || row
+                .get::<Option<Uuid>, _>("publication_grant")
+                .map(|id| id.to_string())
+                != Some(publication.delegation.grant_id.to_string())
+            || publication.delegation.tenant_id != *tenant
+            || !publication.matches_hot(task)?)
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 pub(super) async fn get(
     store: &super::PostgresStorage,
     tenant: Option<&TenantId>,
@@ -190,7 +199,7 @@ pub(super) async fn reconnect(
         .push_bind(i64::from(request.limit));
     let rows = query.build().fetch_all(&store.pool).await?;
     let mut tasks = Vec::with_capacity(rows.len());
-    let mut contexts = Vec::new();
+    let mut transport = IssuedTransport::default();
     for row in rows {
         let task =
             <super::rows::WorkerTaskRow as sqlx::FromRow<'_, sqlx::postgres::PgRow>>::from_row(
@@ -216,11 +225,27 @@ pub(super) async fn reconnect(
             row.get::<Option<String>, _>("delegation_record"),
             protocol,
         )? {
-            contexts.push(context);
+            transport.contexts.push(context);
+        }
+        if task.wait_for_callback {
+            let Some(worker_id) = task.worker_id.clone() else {
+                return Err(invalid());
+            };
+            let mut conn = store.pool.acquire().await?;
+            let claim = WorkerClaim::new(worker_id, task.claim_epoch);
+            let Some(binding) =
+                super::worker_callbacks::get_for_claim_on(&mut conn, task.id, &claim).await?
+            else {
+                continue;
+            };
+            if binding.tenant_id != tenant {
+                return Err(invalid());
+            }
+            transport.callbacks.push(binding);
         }
         tasks.push(task);
     }
-    crate::worker_claim::WorkerClaimBatch::new(tasks, contexts)
+    crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
 }
 
 async fn insert_records(
@@ -249,6 +274,7 @@ async fn insert_records(
 const RECONNECT_FORWARD_GUARDS: &str = concat!(
     " AND ti.state NOT IN ('completed','failed','cancelled') AND NOT EXISTS(SELECT 1 FROM delegation_proxy_native_history h WHERE h.instance_id=wt.instance_id) AND NOT EXISTS(SELECT 1 FROM physical_instance_retirements r WHERE r.instance_id=wt.instance_id) AND NOT EXISTS(SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=wt.instance_id AND cut.state IN ('captured','sealed'))",
     " AND NOT EXISTS(SELECT 1 FROM continuity_executions ce WHERE ce.tenant_id=ti.tenant_id AND ce.state='compensating' AND ce.record->>'current_instance_id'=wt.instance_id::text)",
-    " AND (wt.lease_secs IS NULL OR (wt.lease_secs>0 AND EXTRACT(EPOCH FROM COALESCE(wt.heartbeat_at,wt.claimed_at))+wt.lease_secs::numeric>EXTRACT(EPOCH FROM clock_timestamp())))",
+    " AND (wt.wait_for_callback OR wt.heartbeat_timeout_secs IS NOT NULL OR wt.lease_secs IS NULL OR (wt.lease_secs>0 AND EXTRACT(EPOCH FROM COALESCE(wt.heartbeat_at,wt.claimed_at))+wt.lease_secs::numeric>EXTRACT(EPOCH FROM clock_timestamp())))",
+    " AND (wt.heartbeat_timeout_secs IS NULL OR COALESCE(EXTRACT(EPOCH FROM COALESCE(wt.heartbeat_at, wt.claimed_at)) + wt.heartbeat_timeout_secs > EXTRACT(EPOCH FROM clock_timestamp()), FALSE))",
     " AND (wt.timeout_ms IS NULL OR (wt.timeout_ms>0 AND EXTRACT(EPOCH FROM wt.created_at)+wt.timeout_ms::numeric/1000>EXTRACT(EPOCH FROM clock_timestamp())))",
 );

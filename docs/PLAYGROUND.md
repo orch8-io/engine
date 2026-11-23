@@ -35,7 +35,7 @@ All functions take and return JSON strings and never throw; a failure is
 | `validate_sequence(json)`                  | `{ok, sequence, defaults_applied, warnings}` — the normalized definition as the server would store it |
 | `preflight(json)`                          | a `PreflightReport` (same shape as `POST /sequences/preflight`)                                       |
 | `run_dry(json, input_json, max_ticks)`     | a run result (below) with `input_json` as `context.data`                                              |
-| `run_dry_with_options(json, options_json)` | same, with `{input, config, mocks, max_ticks, instance_id}`                                           |
+| `run_dry_with_options(json, options_json)` | same, with `{input, config, mocks, max_ticks, instance_id, start_at, timezone, seed, cancel_before, signals}` |
 | `sequence_schema_version()`                | the sequence schema version this build accepts                                                        |
 
 Server-assigned fields (`id`, `tenant_id`, `namespace`, `name`, `version`,
@@ -47,7 +47,7 @@ A run result identifies its `verification_scope` as `simulated_preview`.
 Status describes the outcome of that simulation, including any mocked steps
 or child sequences.
 
-A run result contains `status` (`completed` | `failed` | `tick_limit` | `operation_limit`),
+A run result contains `status` (`completed` | `failed` | `cancelled` | `waiting` | `tick_limit` | `operation_limit`),
 `error`, `virtual_duration_ms`, `ticks`, `operations`, `timeline`, `outputs` (by block id),
 `context`, `state` (instance KV), `would_call`, and `notes`. Each timeline
 entry is `{step_id, path, kind, handler, started_at_virtual_ms,
@@ -57,6 +57,27 @@ finished_at_virtual_ms, status, attempt, output, error}`, where `status` is
 bookkeeping). Repeated outputs, errors, and resolved call parameters share a
 256 KiB detail budget. `trace_truncated` and per-entry `detail_omitted` flag
 omitted details. The compact timeline and final outputs remain available.
+
+`start_at` is an RFC 3339 instant and defaults to the Unix epoch. Expressions
+see virtual time through `now()`, including time consumed by delays and mocked
+work. Supply an unsigned integer `seed` to reproduce `random()` and `uuid()`
+results and the branches that depend on them.
+
+The `timezone` option defaults to UTC. `delay.fire_at_local` uses the step's
+timezone override when supplied. `business_days_only` uses the instance
+timezone and merges `delay.holidays` with `config.holidays`. Dates use
+`YYYY-MM-DD`. Delay jitter draws from the seeded stream when a seed is set.
+
+Set `cancel_before` to a block ID to cancel at its first visit. A protected
+cancellation scope drains first. The sequence's `on_cancel` hooks run once
+within the same execution budget.
+
+Supply `signals` to simulate `wait_for_input`. Use fixtures such as
+`{"at_ms":500,"signal_type":"custom:human_input:approve","payload":{"value":"yes"}}`.
+Delivery times are measured from `start_at`. The preview retains early
+answers until the matching gate opens and rejects answers after its deadline.
+An unresolved gate without a deadline returns `waiting`. An empty list
+enables waits with no supplied answers.
 
 ### Mocks
 
@@ -71,6 +92,10 @@ omitted details. The compact timeline and final outputs remain available.
   }
 }
 ```
+
+A successful mock is checked against the producing step's `output_schema`.
+An invalid output fails that step before another step can consume it. Set
+`"output": null` to mock an explicit JSON null.
 
 `fail_attempts` fails the first N attempts as retryable, so a step's `retry`
 policy and backoff are exercised in virtual time.
@@ -113,16 +138,16 @@ policy and backoff are exercised in virtual time.
 ## Limits
 
 - No durability, crash recovery, scheduler, leases, queues, workers, rate
-  limits, circuit breakers, send windows, SLAs, deadlines, signals, or cancel.
-- `delay.fire_at_local` and `business_days_only` are calendar-dependent and
-  ignored (only `duration` applies; a note is added).
-- Template pipe filters (`{{ x | upper }}`) are engine-only
-  (`template.rs` depends on engine error types) and are left unresolved with a
-  note. Plain `{{ expression }}` templates resolve.
-- Interceptors, `on_cancel`, compensation receipts, output-schema validation,
-  context access filtering, typed-dataflow checks and lint rules are not run.
-- `now()` in expressions reads the browser clock, not virtual time; `uuid()`
-  and `random()` are real random values.
+  limits, circuit breakers, send windows, SLAs, deadlines, or live signals.
+- Template pipe filters, fallback chains, and imported ASL templates use the
+  engine's evaluator. An invalid filter argument fails the producing step.
+- Offline preflight runs the same typed-dataflow compiler as the server.
+- Interceptors, compensation receipts and lint rules are outside
+  the preview. Output schemas are checked for supplied
+  mocks.
+- Step parameters and simulated handlers see context filtered through
+  `context_access`. Workflow guards and routing still see the workflow
+  context, as on the server.
 - Preflight cannot see workers, credentials, plugins or providers: any
   non-local handler makes the `runtime_inventory` check `unknown` (never
   `pass`), so `overall` is `unknown` for most real workflows. That is correct —
@@ -142,3 +167,8 @@ scripts/build-wasm-playground.sh /tmp/orch8-playground  # or anywhere else
 
 The script runs `wasm-opt -Oz` when binaryen is on `PATH`. Native tests:
 `cargo test -p orch8-wasm`.
+
+The CI differential test feeds seeded workflows and identical mocks to the
+native contract runner and the WebAssembly preview. It compares terminal
+state, executed leaf order, and the exact mocked outputs. A mismatch retains
+the original and reduced workflow in the `preview-divergences` artifact.

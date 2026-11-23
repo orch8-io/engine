@@ -123,9 +123,6 @@ async fn decide_branch(
     // marker object instead of the real value. Mirrors the inflation that
     // `step_block::context_for_step` performs for step params.
     //
-    // Fast path: if no top-level `data` field is a marker, avoid the clone
-    // entirely. `is_marker_present` is a sync walk over the existing JSON
-    // object and does not touch storage.
     let ctx_for_conditions: Cow<'_, orch8_types::context::ExecutionContext> =
         if is_marker_present(&instance.context) {
             Cow::Owned(
@@ -152,13 +149,8 @@ async fn decide_branch(
     ))
 }
 
-/// Cheap sync check: does any top-level `context.data` field look like an
-/// externalization marker? Returning `false` lets the caller skip the clone
-/// + async lookup path entirely.
 fn is_marker_present(ctx: &orch8_types::context::ExecutionContext) -> bool {
-    ctx.data
-        .as_object()
-        .is_some_and(|obj| obj.values().any(externalized::is_ref_marker))
+    orch8_storage::externalizing::has_context_envelope(&ctx.data)
 }
 
 /// Select the branch index by evaluating route conditions.

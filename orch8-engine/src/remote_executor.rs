@@ -922,7 +922,7 @@ impl RemoteExecutor {
     /// claim after dropping the callback future.
     async fn execute_leased(&self, claimed: &ClaimedTask, started: &mut bool) -> bool {
         let task = &claimed.task;
-        let (params, context) = match self.prepare(task).await {
+        let (mut params, context) = match self.prepare(task).await {
             Ok(prepared) => prepared,
             Err(message) => {
                 self.deliver(
@@ -951,6 +951,12 @@ impl RemoteExecutor {
             .await;
             return true;
         };
+        if let (Some(token), Some(object)) = (&task.callback_token, params.as_object_mut()) {
+            object.insert(
+                "__orch8_callback_token".into(),
+                Value::String(token.clone()),
+            );
+        }
         let mut with_context = task.clone();
         with_context.context = context;
         let ctx = crate::remote_worker::step_context(
@@ -976,6 +982,11 @@ impl RemoteExecutor {
         let Some(result) = result else {
             return false;
         };
+        if result.is_ok() && task.callback_token.is_some() {
+            // Dispatch succeeded. The callback endpoint now owns completion,
+            // and the lease supervisor continues renewing until it is settled.
+            return std::future::pending::<bool>().await;
+        }
         let Some(outcome) = self.outcome(task, result).await else {
             self.counters.lost.fetch_add(1, Ordering::Relaxed);
             return true;

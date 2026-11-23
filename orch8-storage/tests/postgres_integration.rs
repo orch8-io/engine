@@ -53,6 +53,73 @@ macro_rules! require_postgres {
 }
 
 #[tokio::test]
+async fn postgres_plugin_alias_upgrade_preserves_legacy_rows_and_tenant_isolation() {
+    let storage = require_postgres!();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/150_plugin_tenant_names.sql"
+    ))
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO plugins (name, source, tenant_id, description) VALUES ('score','/legacy.wasm','north','old record')")
+        .execute(storage.pool()).await.unwrap();
+    sqlx::raw_sql(include_str!("../../migrations/150_plugin_tenant_names.sql"))
+        .execute(storage.pool())
+        .await
+        .unwrap();
+
+    let north = TenantId::new("north").unwrap();
+    let south = TenantId::new("south").unwrap();
+    let old = storage
+        .get_plugin(Some(&north), "score")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(old.description.as_deref(), Some("old record"));
+    let mut other = old;
+    other.tenant_id = south.as_str().into();
+    other.source = "/new.wasm".into();
+    storage.create_plugin(&other).await.unwrap();
+    assert!(storage.get_plugin(None, "score").await.is_err());
+    other.enabled = false;
+    storage.update_plugin(&other).await.unwrap();
+    assert!(
+        storage
+            .get_plugin(Some(&north), "score")
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    assert!(
+        !storage
+            .get_plugin(Some(&south), "score")
+            .await
+            .unwrap()
+            .unwrap()
+            .enabled
+    );
+    storage
+        .delete_plugin_exact(north.as_str(), "score")
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .get_plugin(Some(&north), "score")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .get_plugin(Some(&south), "score")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn postgres_unknown_dispatch_mode_is_not_treated_as_poll() {
     let storage = require_postgres!();
     let tenant = format!("dispatch-mode-{}", Uuid::new_v4());
@@ -587,6 +654,8 @@ async fn tenant_worker_claim_does_not_lock_task_instances_row() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -702,6 +771,8 @@ async fn capability_aware_postgres_claim_skips_incompatible_work_atomically() {
             created_at: now,
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,
@@ -787,6 +858,8 @@ async fn worker_claim_epoch_fences_restarted_postgres_worker() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1250,6 +1323,19 @@ async fn outputs_with_equal_timestamps_use_id_tiebreaker_postgres() {
     assert_eq!(
         outputs.iter().map(|o| o.id).collect::<Vec<_>>(),
         vec![low_id, high_id]
+    );
+    let block = BlockId::new("same");
+    let selected = s
+        .get_scoped_block_output_attempt(&TenantId::unchecked(&tenant), instance.id, &block, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.id, high_id);
+    assert!(
+        s.get_scoped_block_output_attempt(&TenantId::unchecked("other"), instance.id, &block, 0,)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -1726,6 +1812,8 @@ async fn postgres_reaper_reclaims_null_heartbeat_by_claimed_at() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -2207,6 +2295,8 @@ async fn worker_claims_skip_tasks_of_terminal_instances_postgres() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -2383,6 +2473,8 @@ async fn tenant_worker_claim_uses_denormalised_tenant_on_postgres() {
             created_at: Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,
@@ -2514,4 +2606,96 @@ async fn postgres_update_event_wait_with_a_stale_match_set_returns_false() {
         .unwrap();
     assert!(!won);
     assert_eq!(stored.matched_names, vec!["a".to_string()]);
+}
+
+#[tokio::test]
+async fn postgres_encrypted_externalized_writes_roll_back_together() {
+    let storage = require_postgres!();
+    let tenant = "encrypted-rollback";
+    let sequence_id = SequenceId::new();
+    storage
+        .create_sequence(&mk_sequence(tenant, sequence_id))
+        .await
+        .unwrap();
+    let (storage, _schema) = storage.into_parts();
+    let inner = Arc::new(storage);
+    let encrypted = orch8_storage::encrypting::EncryptingStorage::new(
+        inner.clone(),
+        orch8_types::encryption::FieldEncryptor::from_hex_key(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap(),
+    );
+    let mut first = mk_instance(tenant, sequence_id, None);
+    first.context.data = serde_json::json!({"big": "a".repeat(128), "revision": 1});
+    let mut second = first.clone();
+    second.id = InstanceId::new();
+
+    sqlx::query("ALTER TABLE externalized_state ADD CONSTRAINT fail_payload CHECK (false)")
+        .execute(inner.pool())
+        .await
+        .unwrap();
+    assert!(
+        encrypted
+            .create_instance_externalized(&first, 64)
+            .await
+            .is_err()
+    );
+    assert!(
+        encrypted
+            .create_instances_batch_externalized(&[first.clone(), second.clone()], 64)
+            .await
+            .is_err()
+    );
+    for id in [first.id, second.id] {
+        assert!(inner.get_instance(id).await.unwrap().is_none());
+    }
+    sqlx::query("ALTER TABLE externalized_state DROP CONSTRAINT fail_payload")
+        .execute(inner.pool())
+        .await
+        .unwrap();
+    encrypted
+        .create_instance_externalized(&first, 64)
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE task_instances ADD CONSTRAINT fail_context CHECK (false) NOT VALID")
+        .execute(inner.pool())
+        .await
+        .unwrap();
+
+    let mut updated = first.context.clone();
+    updated.data = serde_json::json!({"big": "b".repeat(128), "revision": 2});
+    assert!(
+        encrypted
+            .update_instance_context_externalized(first.id, &updated, 64)
+            .await
+            .is_err()
+    );
+    let committed = encrypted.get_instance(first.id).await.unwrap().unwrap();
+    assert_eq!(committed.context.data["revision"], 1);
+    let key = committed.context.data["big"]["_ref"].as_str().unwrap();
+    assert_eq!(
+        encrypted
+            .get_externalized_state(first.id, key)
+            .await
+            .unwrap(),
+        Some(serde_json::json!("a".repeat(128)))
+    );
+    sqlx::query("ALTER TABLE task_instances DROP CONSTRAINT fail_context")
+        .execute(inner.pool())
+        .await
+        .unwrap();
+    encrypted
+        .update_instance_context_externalized(first.id, &updated, 64)
+        .await
+        .unwrap();
+    let latest = encrypted.get_instance(first.id).await.unwrap().unwrap();
+    let latest_key = latest.context.data["big"]["_ref"].as_str().unwrap();
+    assert_ne!(key, latest_key);
+    let (old, new) = tokio::join!(
+        encrypted.get_externalized_state(first.id, key),
+        encrypted.get_externalized_state(first.id, latest_key),
+    );
+    assert_eq!(old.unwrap(), Some(serde_json::json!("a".repeat(128))));
+    assert_eq!(new.unwrap(), Some(serde_json::json!("b".repeat(128))));
 }

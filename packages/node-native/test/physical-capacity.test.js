@@ -36,12 +36,14 @@ test('physical promise capacity survives step timeouts and engine replacement', 
   const path = join(directory, 'app.db')
   const release = []
   const heldIds = new Set()
+  const abortedIds = new Set()
   let active = 0, peak = 0, entered = 0, successor
-  const host = async ({ params, instanceId }) => {
+  const host = async ({ params, instanceId, signal }) => {
     active++; entered++; peak = Math.max(peak, active)
     try {
       if (params.hold) {
         heldIds.add(instanceId)
+        signal.addEventListener('abort', () => abortedIds.add(instanceId), { once: true })
         await new Promise(resolve => release.push(resolve))
       }
       return true
@@ -50,7 +52,18 @@ test('physical promise capacity survives step timeouts and engine replacement', 
   const first = await Engine.open(path)
   first.handler('host', host)
   try {
+    await first.deploy({ name: 'cancellable', blocks: [{ type: 'step', id: 'work', handler: 'host', params: { hold: true }, timeout: 30000 }] })
     await first.deploy({ name: 'held', blocks: [{ type: 'step', id: 'work', handler: 'host', params: { hold: true }, timeout: 50 }] })
+    const cancelled = await first.start('cancellable')
+    const running = first.run(cancelled, { timeoutMs: 3000 })
+    const enterDeadline = performance.now() + 5000
+    while (!heldIds.has(cancelled) && performance.now() < enterDeadline) await delay(5)
+    assert.ok(heldIds.has(cancelled), 'the cancellable callback must be active')
+    await first.signal(cancelled, 'cancel')
+    assert.ok(abortedIds.has(cancelled), 'the active handler must observe its AbortSignal')
+    assert.equal((await first.get(cancelled)).state, 'cancelled')
+    assert.equal(active, 1, 'a cancelled callback still occupies its physical slot')
+    assert.deepEqual((await first.get(cancelled)).outputs, {})
     const created = []
     const fillDeadline = performance.now() + 30000
     for (let attempts = 0; active < 128 && attempts < 256 && performance.now() < fillDeadline; attempts++) {
@@ -64,7 +77,7 @@ test('physical promise capacity survives step timeouts and engine replacement', 
     }
     assert.equal(active, 128)
     assert.equal(heldIds.size, 128, 'each physical callback must have a distinct instance')
-    for (const id of heldIds) await settledSnapshot(first, id, ['failed'])
+    for (const id of heldIds) await settledSnapshot(first, id, id === cancelled ? ['cancelled'] : ['failed'])
     for (const id of created) {
       if (heldIds.has(id) || (await first.get(id)).state === 'failed') continue
       // A spare run may have found full capacity while the final callback
@@ -88,9 +101,11 @@ test('physical promise capacity survives step timeouts and engine replacement', 
     assert.equal(waiting.state, 'scheduled', 'new engine cannot reset unsettled admission')
     assert.equal(entered, 128)
     release.shift()()
+    assert.equal((await running).state, 'cancelled')
     const completed = await successor.run(fast, { timeoutMs: 3000 })
     assert.equal(completed.state, 'completed', JSON.stringify(completed))
     assert.equal(active, 127)
+    assert.deepEqual((await successor.get(cancelled)).outputs, {}, 'late success must never commit')
     assert.equal(peak, 128)
     assert.equal(entered, 129)
   } finally {

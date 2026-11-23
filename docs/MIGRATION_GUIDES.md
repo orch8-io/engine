@@ -53,9 +53,11 @@ worker handlers, and follow the common path above.
 | `Task` `http:invoke`                                         | `http_request`                                                                                                                    |
 | `Task` `states:startExecution.sync`                          | `sub_sequence`                                                                                                                    |
 | other service integrations (`sns:publish`, `aws-sdk:*`, ...) | worker stub `aws_<service>_<action>`                                                                                              |
-| `Retry[0]`                                                   | step `retry` (`MaxAttempts` + 1 attempts, interval, rate, max delay)                                                              |
+| Ordered `Retry`                                              | Step `retry.rules` retain error names, per-rule retry budgets, interval, rate, maximum delay, and `JitterStrategy`.                 |
+| `Parallel` and inline `Map` retries                         | The composite owns the retry budget. Each retry starts all branches or replays all items from the original collection.             |
 | `TimeoutSeconds`                                             | step `timeout`                                                                                                                    |
-| `Catch[0]`                                                   | `try_catch`; when the error path does not rejoin, a marker step + router keeps the success path from running after a caught error |
+| `HeartbeatSeconds` / `HeartbeatSecondsPath`                   | Renewable deadline on worker-backed tasks. The path resolves against the task input.                                             |
+| Ordered `Catch`                                              | `try_catch` with an error router. Named errors match the first applicable rule, with wildcard fallback and per-catcher `ResultPath`. |
 | `Choice`                                                     | `router`, branches converted up to their join state; no `Default` → `fail` with `States.NoChoiceMatched`                          |
 | `Choice` that loops back (polling)                           | `loop` (forward part once, then continue path + forward part per iteration)                                                       |
 | `Parallel` / `Map` (inline)                                  | `parallel` / `for_each` over `{{items path}}`                                                                                     |
@@ -63,18 +65,60 @@ worker handlers, and follow the common path above.
 | `Pass` with `Result`/`Parameters`                            | `transform`                                                                                                                       |
 | `Fail` / `Succeed`                                           | `fail` / end of chain                                                                                                             |
 
+Composite retries preserve effect history from earlier attempts. If a child
+effect's outcome is still unresolved, the engine refuses to start another
+aggregate attempt. For a synchronous child execution, the engine waits for
+the preceding attempt's child tree to settle and requests cancellation of
+children that are still active. A retry starts fresh child executions and keeps
+the old runs and their receipts. Dispatched or unknown child effects require
+reconciliation before replay. The importer reports retry policies on distributed
+maps as unsupported.
+
 JSONPath references are resolved through the data flow: the execution input is
 `data`, a task result is `outputs.<block>` (`ResultPath`, `InputPath`,
 `OutputPath` and the Lambda `Payload` wrapper are tracked), `$$.Map.Item.Value`
-is the `for_each` item. Reported, not translated: additional retriers and
-catchers, `ErrorEquals` filters, dynamic waits, `ResultSelector` reshaping,
-intrinsic functions, JSONata, task tokens (`.waitForTaskToken` — the worker
-task id plays that role), distributed-Map `ItemReader`/`ResultWriter`, and
-heartbeats.
+is the `for_each` item. Inline `ItemSelector` builds the input object before
+each iteration using literals, the item value, and its persisted zero-based
+index. A task's `ResultSelector` creates a projected object
+with nested arrays and direct result references before `ResultPath` exposes it
+to later states. Projections over composite Map and Parallel results remain
+unmapped. Other reported gaps include unsupported intrinsic functions, JSONata,
+and distributed-Map `ItemReader` and `ResultWriter`.
+
+Worker-backed `.waitForTaskToken` tasks receive a `callback_token` on the claim.
+Use `$$.Task.Token` directly in parameters or inside the supported ASL
+intrinsics. The engine resolves workflow references when it enqueues the task
+and inserts the token only into the claim response. Forward
+it to the callback producer, then submit it with the result as `{"token": "...",
+"output": ...}` to `POST /api/v1/workers/callbacks/complete` using a credential
+for the workflow's tenant. The token belongs to one claim, and repeated requests
+return the original acceptance. The task's absolute timeout ends the wait.
+Use `TimeoutSecondsPath` to read that timeout from the state input. The engine
+validates the resolved seconds and persists the deadline when it enqueues the task.
+A task without an explicit timeout uses a 365-day maximum. Imported callback
+tasks accept success through this endpoint; ordinary worker completion cannot
+advance them.
+
+A worker-backed task's heartbeat deadline starts at claim and extends on each
+accepted heartbeat or checkpoint. The claimed task advertises the workflow's
+interval as its lease. An elapsed heartbeat deadline fails the attempt with
+`States.Timeout`, so the source retry and catch rules apply. `TimeoutSeconds`
+or `TimeoutSecondsPath` caps the total attempt duration. The import report flags
+heartbeat and dynamic timeout fields on in-process HTTP and sub-sequence tasks.
 
 Loop conditions read `context.data`, not step outputs. External worker outputs
 merge into `context.data`, so the worker behind the polled task must return
 the checked field at the top level of its output — the report says which.
+
+Wait states using `SecondsPath` or `TimestampPath` read their input on entry
+and persist the resulting wake time. A restart or early wake uses the same
+deadline. Timestamp waits follow Step Functions' whole-second precision.
+
+JSONPath parameters support `States.Format`, `States.Array`, and
+`States.StringToJson`. Nested calls preserve JSON arrays, objects, booleans,
+and nulls. The importer reports unsupported functions or references as
+unmapped. At runtime, malformed JSON and invalid format arguments fail the
+producing step.
 
 ### Code-first engines (Temporal, Inngest, BullMQ)
 

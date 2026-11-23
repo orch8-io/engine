@@ -81,6 +81,32 @@ pub struct CronSchedule {
     pub updated_at: DateTime<Utc>,
 }
 
+impl CronSchedule {
+    /// Stable identity of the currently due occurrence.
+    #[must_use]
+    pub fn occurrence_key(&self) -> Option<String> {
+        self.next_fire_at
+            .map(|fire_at| format!("cron:{}:{}", self.id, fire_at.to_rfc3339()))
+    }
+}
+
+/// Fenced source state used to transfer one recurring schedule.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronMigrationSnapshot {
+    pub migration_id: Uuid,
+    pub source_epoch: u64,
+    pub last_fire_at: Option<DateTime<Utc>>,
+    pub schedule: CronSchedule,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CronMigrationAcknowledgement {
+    pub schedule_id: Uuid,
+    pub migration_id: Uuid,
+    pub ownership_epoch: u64,
+    pub snapshot_sha256: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

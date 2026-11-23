@@ -438,18 +438,25 @@ impl WorkerIssuedClaim {
 #[cfg(test)]
 mod protocol_tests;
 
+/// Transport data captured with the exact issued claim in its transaction.
+#[derive(Default)]
+pub(crate) struct IssuedTransport {
+    pub contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+    pub callbacks: Vec<crate::worker_callback::WorkerCallbackBinding>,
+}
+
 /// Leases and their exact issued transport references, assembled before commit.
 pub struct WorkerClaimBatch {
     tasks: Vec<WorkerTask>,
     version_blocked: bool,
-    contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+    transport: IssuedTransport,
 }
 impl WorkerClaimBatch {
     pub fn empty() -> Self {
         Self {
             tasks: Vec::new(),
             version_blocked: false,
-            contexts: Vec::new(),
+            transport: IssuedTransport::default(),
         }
     }
     pub(crate) fn version_blocked() -> Self {
@@ -467,7 +474,7 @@ impl WorkerClaimBatch {
 
     pub(crate) fn new(
         mut tasks: Vec<WorkerTask>,
-        contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+        transport: IssuedTransport,
     ) -> Result<Self, StorageError> {
         let mut expected = tasks
             .iter()
@@ -475,7 +482,7 @@ impl WorkerClaimBatch {
             .filter(|(_, task)| task.handler_name == "orch8.delegation")
             .map(|(index, task)| (task.id, index))
             .collect::<std::collections::HashMap<_, _>>();
-        for context in &contexts {
+        for context in &transport.contexts {
             let index = expected
                 .remove(&context.scope.task_id)
                 .ok_or_else(invalid)?;
@@ -496,7 +503,7 @@ impl WorkerClaimBatch {
         }
         Ok(Self {
             tasks,
-            contexts,
+            transport,
             version_blocked: false,
         })
     }
@@ -510,21 +517,57 @@ impl WorkerClaimBatch {
     pub fn into_tasks(self) -> Vec<WorkerTask> {
         self.tasks
     }
+    /// Task-only compatibility view. Transport credentials are kept separate.
     pub fn into_parts(
         self,
     ) -> (
         Vec<WorkerTask>,
         Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
     ) {
-        (self.tasks, self.contexts)
+        (self.tasks, self.transport.contexts)
     }
+
+    /// Materialize callback credentials only for a transport delivery.
+    pub fn into_delivery(self) -> Result<WorkerClaimDelivery, StorageError> {
+        let mut callbacks = self
+            .transport
+            .callbacks
+            .into_iter()
+            .map(|binding| (binding.task_id, binding))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut tasks = Vec::with_capacity(self.tasks.len());
+        for mut task in self.tasks {
+            let callback = callbacks.remove(&task.id);
+            if let Some(binding) = &callback {
+                binding.materialize_delivery(&mut task)?;
+            } else if task.wait_for_callback {
+                return Err(invalid());
+            }
+            tasks.push((task, callback));
+        }
+        if !callbacks.is_empty() {
+            return Err(invalid());
+        }
+        Ok(WorkerClaimDelivery {
+            tasks,
+            contexts: self.transport.contexts,
+        })
+    }
+}
+
+pub struct WorkerClaimDelivery {
+    pub tasks: Vec<(
+        WorkerTask,
+        Option<crate::worker_callback::WorkerCallbackBinding>,
+    )>,
+    pub contexts: Vec<orch8_types::delegation_definition::claim::DelegationClaimContext>,
 }
 
 impl std::fmt::Debug for WorkerClaimBatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkerClaimBatch")
             .field("tasks", &self.tasks.len())
-            .field("delegation_contexts", &self.contexts.len())
+            .field("delegation_contexts", &self.transport.contexts.len())
             .field("version_blocked", &self.version_blocked)
             .finish()
     }

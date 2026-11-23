@@ -168,6 +168,9 @@ async fn backup_restore_round_trip_is_complete_and_idempotent() {
             database_url: format!("sqlite:{}", source.display()),
             out: out.clone(),
             include_instances: true,
+            artifacts_dir: None,
+            encrypt_recipients: Vec::new(),
+            signing_key_file: None,
         },
         OutputFormat::Json,
     )
@@ -184,7 +187,8 @@ async fn backup_restore_round_trip_is_complete_and_idempotent() {
 
     let archive = read_archive(&std::fs::read(&out).unwrap()).unwrap();
     assert_eq!(archive.manifest.format, FORMAT);
-    assert_eq!(archive.manifest.format_version, FORMAT_VERSION);
+    assert_eq!(archive.manifest.format_version, WORKER_TASK_FORMAT_VERSION);
+    assert!(archive.members.contains_key(WORKER_TASKS));
     assert!(archive.manifest.include_instances);
     let count = |name: &str| {
         archive
@@ -215,10 +219,13 @@ async fn backup_restore_round_trip_is_complete_and_idempotent() {
             .any(|w| w.contains("ORCH8_ENCRYPTION_KEY"))
     );
     // Secrets are exported as stored, not redacted.
-    let credentials = String::from_utf8(archive.members["credentials.jsonl"].clone()).unwrap();
+    let credentials =
+        String::from_utf8(std::fs::read(&archive.members["credentials.jsonl"].path).unwrap())
+            .unwrap();
     assert!(credentials.contains("enc:v1:c2VjcmV0"), "{credentials}");
     assert!(credentials.contains("refresh-me"));
-    let triggers = String::from_utf8(archive.members["triggers.jsonl"].clone()).unwrap();
+    let triggers =
+        String::from_utf8(std::fs::read(&archive.members["triggers.jsonl"].path).unwrap()).unwrap();
     assert!(triggers.contains("hmac-secret"));
 
     // Dry run into a fresh database writes nothing.
@@ -355,7 +362,7 @@ fn tampered_or_foreign_archives_are_rejected() {
     let manifest = serde_json::to_vec(&archive.manifest).unwrap();
     let mut members: Vec<(&str, Vec<u8>)> = vec![("manifest.json", manifest.clone())];
     for (name, body) in &archive.members {
-        members.push((name.as_str(), body.clone()));
+        members.push((name.as_str(), std::fs::read(&body.path).unwrap()));
     }
     let tampered: Vec<(&str, Vec<u8>)> = members
         .iter()
@@ -376,7 +383,7 @@ fn tampered_or_foreign_archives_are_rejected() {
     assert!(err.contains("unexpected archive member"), "{err}");
 
     let mut newer = archive.manifest.clone();
-    newer.format_version = FORMAT_VERSION + 1;
+    newer.format_version = WORKER_TASK_FORMAT_VERSION + 1;
     let mut future = members.clone();
     future[0] = ("manifest.json", serde_json::to_vec(&newer).unwrap());
     let err = read_archive(&rebuild(&future)).unwrap_err().to_string();
@@ -633,6 +640,9 @@ async fn restore_including_payloads(
             database_url: format!("sqlite:{}", source.display()),
             out: archive_path.clone(),
             include_instances: true,
+            artifacts_dir: None,
+            encrypt_recipients: Vec::new(),
+            signing_key_file: None,
         },
         OutputFormat::Json,
     )
@@ -804,28 +814,70 @@ async fn encrypted_payload_archive_preserves_ciphertexts_and_same_key_restore() 
 }
 
 #[tokio::test]
-async fn legacy_archives_remain_readable_and_v2_requires_payload_member() {
+async fn legacy_archives_remain_readable_and_new_formats_require_their_history_members() {
     let dir = tempfile::tempdir().unwrap();
     let (source, _, id) = seeded_source(dir.path()).await;
     let raw = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
     let mut archive =
         read_archive(&write_archive(&snapshot(&raw, true).await.unwrap(), "sqlite").unwrap())
             .unwrap();
-    archive.members.remove("externalized_state.jsonl");
-    archive
-        .manifest
-        .files
-        .retain(|file| file.name != "externalized_state.jsonl");
     let encode = |archive: &Archive| {
         let mut members = vec![(
             "manifest.json",
             serde_json::to_vec(&archive.manifest).unwrap(),
         )];
         for (name, body) in &archive.members {
-            members.push((name.as_str(), body.clone()));
+            members.push((name.as_str(), std::fs::read(&body.path).unwrap()));
         }
         repack_archive_members(&members)
     };
+    archive.members.remove(WORKER_TASKS);
+    archive
+        .manifest
+        .files
+        .retain(|file| file.name != WORKER_TASKS);
+    assert!(
+        read_archive(&encode(&archive))
+            .unwrap_err()
+            .to_string()
+            .contains("missing worker_tasks")
+    );
+    for version in [FORMAT_VERSION, ARTIFACT_FORMAT_VERSION] {
+        archive.manifest.format_version = version;
+        assert!(read_archive(&encode(&archive)).is_ok());
+    }
+    archive.members.remove("checkpoints.jsonl");
+    archive
+        .manifest
+        .files
+        .retain(|file| file.name != "checkpoints.jsonl");
+    assert!(
+        read_archive(&encode(&archive))
+            .unwrap_err()
+            .to_string()
+            .contains("missing checkpoints")
+    );
+    archive.members.remove("signals.jsonl");
+    archive
+        .manifest
+        .files
+        .retain(|file| file.name != "signals.jsonl");
+    archive.members.remove("instance_kv.jsonl");
+    archive
+        .manifest
+        .files
+        .retain(|file| file.name != "instance_kv.jsonl");
+    for name in ["effect_scopes.jsonl", "effect_receipts.jsonl"] {
+        archive.members.remove(name);
+        archive.manifest.files.retain(|file| file.name != name);
+    }
+    archive.manifest.format_version = 2;
+    assert!(read_archive(&encode(&archive)).is_ok());
+    archive.members.remove("externalized_state.jsonl");
+    archive
+        .manifest
+        .files
+        .retain(|file| file.name != "externalized_state.jsonl");
     assert!(
         read_archive(&encode(&archive))
             .unwrap_err()
@@ -1123,6 +1175,9 @@ async fn postgres_backup_read_failure_closes_the_snapshot_before_returning() {
             database_url: url.to_string(),
             out: out.clone(),
             include_instances: false,
+            artifacts_dir: None,
+            encrypt_recipients: Vec::new(),
+            signing_key_file: None,
         },
         OutputFormat::Json,
     )
@@ -1159,6 +1214,9 @@ async fn dry_restore_archive(dir: &Path) -> PathBuf {
             database_url: source.to_string_lossy().into_owned(),
             out: archive.clone(),
             include_instances: true,
+            artifacts_dir: None,
+            encrypt_recipients: Vec::new(),
+            signing_key_file: None,
         },
         OutputFormat::Json,
     )
@@ -1179,6 +1237,9 @@ async fn restore_dry_run_does_not_create_a_missing_target_or_its_parent() {
             database_url: target.to_string_lossy().into_owned(),
             dry_run: true,
             include_instances: true,
+            artifacts_dir: None,
+            identities: Vec::new(),
+            trusted_key_file: None,
         },
         OutputFormat::Json,
     )
@@ -1189,6 +1250,8 @@ async fn restore_dry_run_does_not_create_a_missing_target_or_its_parent() {
 
 #[tokio::test]
 async fn restore_dry_run_does_not_reconcile_an_existing_target_schema() {
+    use sqlx::Connection as _;
+
     let dir = tempfile::tempdir().unwrap();
     let archive = dry_restore_archive(dir.path()).await;
     let target = dir.path().join("old-target.db");
@@ -1215,6 +1278,9 @@ async fn restore_dry_run_does_not_reconcile_an_existing_target_schema() {
             database_url: target.to_string_lossy().into_owned(),
             dry_run: true,
             include_instances: true,
+            artifacts_dir: None,
+            identities: Vec::new(),
+            trusted_key_file: None,
         },
         OutputFormat::Json,
     )
@@ -1253,6 +1319,9 @@ async fn postgres_restore_dry_run_releases_its_snapshot_on_success_and_read_erro
                 database_url: url.to_string(),
                 dry_run: true,
                 include_instances: true,
+                artifacts_dir: None,
+                identities: Vec::new(),
+                trusted_key_file: None,
             },
             OutputFormat::Json,
         )
@@ -1305,4 +1374,173 @@ async fn instance_backup_refuses_relay_state_that_the_archive_cannot_restore() {
     );
     let error = snapshot(&storage, true).await.unwrap_err();
     assert!(error.to_string().contains("delegation relay"));
+}
+
+#[test]
+fn signed_manifest_requires_an_explicit_trusted_key() {
+    let signing = SigningKey::from_bytes(&[7; 32]);
+    let other = SigningKey::from_bytes(&[8; 32]).verifying_key();
+    let trusted = signing.verifying_key();
+    let signed = write_archive_with_key(&Snapshot::default(), "sqlite", Some(&signing)).unwrap();
+    assert!(read_archive_with_key(&signed, Some(&trusted)).is_ok());
+    assert!(read_archive_with_key(&signed, Some(&other)).is_err());
+    assert!(read_archive(&signed).is_err());
+
+    let unsigned = write_archive(&Snapshot::default(), "sqlite").unwrap();
+    assert!(read_archive(&unsigned).is_ok());
+    assert!(read_archive_with_key(&unsigned, Some(&trusted)).is_err());
+}
+
+#[tokio::test]
+async fn signed_manifest_rejects_rewritten_content_and_checksums_before_opening_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let signing = SigningKey::from_bytes(&[7; 32]);
+    let trusted = signing.verifying_key();
+    let original = Snapshot {
+        sequences: vec![serde_json::json!({"name": "original"})],
+        ..Snapshot::default()
+    };
+    let bytes = write_archive_with_key(&original, "sqlite", Some(&signing)).unwrap();
+    let mut archive = read_archive_with_key(&bytes, Some(&trusted)).unwrap();
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(bytes.as_slice()));
+    let mut original_signature = Vec::new();
+    for entry in tar.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if entry.path().unwrap().as_ref() == std::path::Path::new(MANIFEST_SIGNATURE) {
+            entry.read_to_end(&mut original_signature).unwrap();
+        }
+    }
+    assert_eq!(original_signature.len(), 64);
+    let replacement = b"{\"name\":\"attacker\"}\n".to_vec();
+    let file = archive
+        .manifest
+        .files
+        .iter_mut()
+        .find(|file| file.name == "sequences.jsonl")
+        .unwrap();
+    file.bytes = replacement.len() as u64;
+    file.sha256 = sha256_hex(&replacement);
+    let mut members = vec![
+        (
+            "manifest.json",
+            serde_json::to_vec(&archive.manifest).unwrap(),
+        ),
+        (MANIFEST_SIGNATURE, original_signature),
+    ];
+    members.extend(archive.members.iter().map(|(name, member)| {
+        let body = if name == "sequences.jsonl" {
+            replacement.clone()
+        } else {
+            std::fs::read(&member.path).unwrap()
+        };
+        (name.as_str(), body)
+    }));
+    let archive_path = directory.path().join("tampered.tar.gz");
+    std::fs::write(&archive_path, repack_archive_members(&members)).unwrap();
+    let public_key = directory.path().join("trusted.pub");
+    std::fs::write(&public_key, BASE64.encode(trusted.to_bytes())).unwrap();
+    let target = directory.path().join("must-not-exist.db");
+
+    let error = run_restore(
+        RestoreCmd {
+            archive: archive_path,
+            database_url: target.display().to_string(),
+            dry_run: false,
+            include_instances: false,
+            artifacts_dir: None,
+            identities: Vec::new(),
+            trusted_key_file: Some(public_key),
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("signature verification failed"),
+        "{error:#}"
+    );
+    assert!(!target.exists());
+}
+
+#[test]
+fn streamed_member_tracks_digest_and_records_across_read_boundaries() {
+    use std::io::Cursor;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("records.jsonl");
+    // One long record crosses a staging buffer boundary. Blank lines do
+    // not count, and the final record has no trailing newline.
+    let body = format!("{}\n\n{{}}", "0".repeat(16 * 1024));
+    let member =
+        stage_member(Cursor::new(body.as_bytes()), path, body.len() as u64, false).unwrap();
+    assert_eq!(member.records, 2);
+    assert_eq!(member.sha256, sha256_hex(body.as_bytes()));
+    assert_eq!(std::fs::read(member.path).unwrap(), body.as_bytes());
+}
+
+#[tokio::test]
+async fn streamed_restore_validates_the_final_record_before_opening_the_target() {
+    let directory = tempfile::tempdir().unwrap();
+    let (source, _, _) = seeded_source(directory.path()).await;
+    let source = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let mut snap = snapshot(&source, false).await.unwrap();
+    // JSON with correct length, line count and checksum but the wrong
+    // domain type. The queue routing member comes after valid sequences.
+    snap.queue_routing = vec![serde_json::json!({"id": false})];
+    let archive = directory.path().join("invalid-final-record.tar.gz");
+    std::fs::write(&archive, write_archive(&snap, "sqlite").unwrap()).unwrap();
+    let target = directory.path().join("must-not-exist.db");
+    let error = run_restore(
+        RestoreCmd {
+            archive,
+            database_url: target.display().to_string(),
+            dry_run: false,
+            include_instances: false,
+            artifacts_dir: None,
+            identities: Vec::new(),
+            trusted_key_file: None,
+        },
+        OutputFormat::Json,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("queue_routing.jsonl: record 1 is invalid"),
+        "{error:#}"
+    );
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn signal_history_preflight_rejects_duplicate_ids_and_missing_owners() {
+    use orch8_types::signal::SignalType;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (source, _, id) = seeded_source(dir.path()).await;
+    let raw = SqliteStorage::file(source.to_str().unwrap()).await.unwrap();
+    let mut snap = snapshot(&raw, true).await.unwrap();
+    let mut signal = Signal {
+        id: uuid::Uuid::new_v4(),
+        instance_id: id,
+        signal_type: SignalType::Pause,
+        payload: Value::Null,
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    snap.signals = vec![serde_json::to_value(&signal).unwrap(); 2];
+    let read = |snap: &Snapshot| read_archive(&write_archive(snap, "sqlite").unwrap()).unwrap();
+    let duplicate = instance_snapshots(&read(&snap)).err().unwrap();
+    assert!(duplicate.to_string().contains("duplicate signal ids"));
+
+    signal.instance_id = InstanceId::new();
+    snap.signals = vec![serde_json::to_value(signal).unwrap()];
+    let missing = instance_snapshots(&read(&snap)).err().unwrap();
+    assert!(
+        missing
+            .to_string()
+            .contains("signal has no archived instance")
+    );
 }

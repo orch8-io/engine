@@ -53,6 +53,8 @@ pub fn step_block(id: &str, handler: &str) -> BlockDefinition {
 pub fn retry_policy(max_attempts: u32, initial_backoff: std::time::Duration) -> RetryPolicy {
     RetryPolicy {
         max_attempts,
+        jitter: orch8_types::sequence::RetryJitter::Legacy,
+        rules: Vec::new(),
         initial_backoff,
         max_backoff: std::time::Duration::from_secs(60),
         backoff_multiplier: 2.0,

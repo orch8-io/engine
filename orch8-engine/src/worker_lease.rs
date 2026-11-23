@@ -64,6 +64,7 @@ pub const LEASE_EXPIRED_RESUMABLE_REASON: &str =
     "heartbeat lease expired; checkpointed activity requeued to resume (effect receipt unknown)";
 pub const LEASE_EXPIRED_AMBIGUOUS_REASON: &str =
     "heartbeat lease expired after the side effect may have started (effect receipt unknown)";
+pub const HEARTBEAT_TIMED_OUT_REASON: &str = "task timed out (heartbeat deadline expired)";
 pub const TIMED_OUT_REASON: &str = "task timed out (timeout_ms exceeded)";
 pub const RELEASED_REASON: &str = "released by runtime before starting";
 pub const RELEASED_AFTER_START_REASON: &str =
@@ -100,7 +101,7 @@ pub async fn reap_worker_tasks(
         .list_expired_worker_leases(default_lease, REAPER_BATCH)
         .await?
     {
-        match resolve_expired_lease(storage, &task).await {
+        match resolve_expired_lease(storage, &task, default_lease).await {
             Ok(Some(true)) => report.ambiguous += 1,
             Ok(Some(false)) => report.requeued += 1,
             Ok(None) => {}
@@ -253,6 +254,7 @@ async fn finalize_stranded_dispatch(
 async fn resolve_expired_lease(
     storage: &dyn StorageBackend,
     task: &WorkerTask,
+    default_lease: Duration,
 ) -> Result<Option<bool>, EngineError> {
     let Some(instance) = storage.get_instance(task.instance_id).await? else {
         return Ok(None);
@@ -308,7 +310,22 @@ async fn resolve_expired_lease(
     if ambiguous {
         resolution.effect_resolution = WorkerTaskEffectResolution::Unknown;
     }
-    let applied = storage.resolve_worker_task(&resolution).await?;
+    let applied = if ambiguous
+        && task.claim_epoch == 0
+        && task.effect_id.is_none()
+        && matches!(resolution.action, WorkerTaskResolutionAction::Requeue)
+    {
+        let evidence = orch8_storage::worker_resolution::WorkerResolutionEvidence::expired_lease(
+            &resolution,
+            task,
+            default_lease,
+        );
+        storage
+            .resolve_worker_task_with_evidence(&resolution, &evidence)
+            .await?
+    } else {
+        storage.resolve_worker_task(&resolution).await?
+    };
     if applied {
         integrate_if_delegation(storage, task, &resolution).await?;
         tracing::info!(
@@ -336,16 +353,31 @@ async fn resolve_timed_out(
         WorkerTaskEffectResolution::Unknown
     };
 
-    let action = plan_failure_action(storage, &instance, task, true, TIMED_OUT_REASON).await?;
+    let now = Utc::now();
+    let reason = if task.heartbeat_timeout_secs.is_some_and(|seconds| {
+        task.state == WorkerTaskState::Claimed
+            && task.heartbeat_at.or(task.claimed_at).is_none_or(|renewed| {
+                now.signed_duration_since(renewed) >= chrono::Duration::seconds(i64::from(seconds))
+            })
+    }) {
+        HEARTBEAT_TIMED_OUT_REASON
+    } else {
+        TIMED_OUT_REASON
+    };
+    let error_code = "States.Timeout";
+    let action =
+        plan_failure_action_with_error(storage, &instance, task, true, reason, Some(error_code))
+            .await?;
     let mut resolution = fence(
         task,
         None,
         WorkerAttemptEventKind::TimedOut,
-        TIMED_OUT_REASON,
+        reason,
         true,
         action,
     );
     resolution.effect_resolution = settlement;
+    resolution.error_code = Some(error_code.into());
     let applied = storage.resolve_worker_task(&resolution).await?;
     if applied {
         integrate_if_delegation(storage, task, &resolution).await?;
@@ -427,6 +459,18 @@ pub async fn fail_worker_task(
     message: &str,
     retryable: bool,
 ) -> Result<bool, EngineError> {
+    fail_worker_task_with_error(storage, instance, task, claim, message, retryable, None).await
+}
+
+pub async fn fail_worker_task_with_error(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    task: &WorkerTask,
+    claim: &WorkerClaim,
+    message: &str,
+    retryable: bool,
+    error_code: Option<&str>,
+) -> Result<bool, EngineError> {
     if task.state != WorkerTaskState::Claimed
         || task.claim_epoch != claim.claim_epoch
         || task.worker_id.as_deref() != Some(claim.worker_id.as_str())
@@ -440,7 +484,8 @@ pub async fn fail_worker_task(
     {
         WorkerTaskResolutionAction::FailTaskOnly
     } else {
-        plan_failure_action(storage, instance, task, retryable, message).await?
+        plan_failure_action_with_error(storage, instance, task, retryable, message, error_code)
+            .await?
     };
     let mut resolution = fence(
         task,
@@ -451,6 +496,7 @@ pub async fn fail_worker_task(
         action,
     );
     resolution.effect_resolution = WorkerTaskEffectResolution::Unknown;
+    resolution.error_code = error_code.map(str::to_owned);
     let applied = storage.resolve_worker_task(&resolution).await?;
     if applied && delegation {
         crate::delegation::integrate_delegation_outcome(storage, task, Err(message)).await?;
@@ -487,6 +533,7 @@ fn fence(
         holder_worker_id: task.worker_id.clone(),
         event,
         effect_resolution: WorkerTaskEffectResolution::Keep,
+        error_code: None,
         reason: reason.to_owned(),
         retryable,
         action,
@@ -505,6 +552,20 @@ pub async fn plan_failure_action(
     retryable: bool,
     message: &str,
 ) -> Result<WorkerTaskResolutionAction, EngineError> {
+    plan_failure_action_with_error(storage, instance, task, retryable, message, None).await
+}
+
+async fn plan_failure_action_with_error(
+    storage: &dyn StorageBackend,
+    instance: &TaskInstance,
+    task: &WorkerTask,
+    retryable: bool,
+    message: &str,
+    error_code: Option<&str>,
+) -> Result<WorkerTaskResolutionAction, EngineError> {
+    use crate::handlers::step::{choose_retry, read_retry_counts};
+    use orch8_types::sequence::{BlockDefinition, RetryJitter};
+
     let now = Utc::now();
     // A delegation never fails or retries its parent: the failed outcome is
     // integrated into the parent's context instead.
@@ -519,68 +580,138 @@ pub async fn plan_failure_action(
                 && matches!(node.state, NodeState::Running | NodeState::Waiting)
         })
         .map(|node| node.id);
-    let can_retry = retryable
-        && !instance.state.is_terminal()
-        && match storage.get_sequence(instance.sequence_id).await? {
-            Some(sequence) => matches!(
-                crate::evaluator::find_block(&sequence.blocks, &task.block_id),
-                Some(orch8_types::sequence::BlockDefinition::Step(step))
-                    if step.retry.as_ref().is_some_and(|retry| u32::from(task.attempt) + 1 < retry.max_attempts)
-            ),
-            None => false,
-        };
-    if let Some(next_attempt) = task.attempt.checked_add(1).filter(|_| can_retry) {
-        let marker_output = serde_json::json!({"_retry_marker": true, "error": orch8_storage::worker_resolution::diagnostic_reason(message)});
-        let marker_size = serde_json::to_vec(&marker_output)
-            .map_or(0, |bytes| u32::try_from(bytes.len()).unwrap_or(u32::MAX));
-        let retry_output = orch8_types::output::BlockOutput {
-            id: uuid::Uuid::now_v7(),
-            instance_id: task.instance_id,
-            block_id: task.block_id.clone(),
-            output: marker_output,
-            output_ref: Some("__retry__".into()),
-            output_size: marker_size,
-            attempt: task.attempt,
-            created_at: now,
-        };
-        let retry_task = WorkerTask {
-            id: uuid::Uuid::now_v7(),
-            attempt: next_attempt,
-            state: WorkerTaskState::Pending,
-            worker_id: None,
-            claimed_at: None,
-            heartbeat_at: None,
-            claim_epoch: 0,
-            resume_checkpoint: None,
-            checkpoint_seq: 0,
-            completed_at: None,
-            output: None,
-            error_message: None,
-            error_retryable: None,
-            created_at: now,
-            // The re-dispatch of the next attempt creates that attempt's
-            // receipt and binds its id/epoch onto this pending row; storage
-            // keeps the row unclaimable (`awaiting_dispatch`) until then.
-            effect_id: None,
-            continuity_epoch: None,
-            lease_secs: None,
-            claimed_runtime_kind: None,
-            ..task.clone()
-        };
+    let retry_policy = if instance.state.is_terminal() {
+        None
+    } else {
+        storage
+            .get_sequence(instance.sequence_id)
+            .await?
+            .and_then(|sequence| {
+                match crate::evaluator::find_block(&sequence.blocks, &task.block_id) {
+                    Some(BlockDefinition::Step(step)) => step.retry.clone(),
+                    _ => None,
+                }
+            })
+    };
+    let details = error_code.map(|code| serde_json::json!({ "error_code": code }));
+    let mut counts = read_retry_counts(
+        storage,
+        task.instance_id,
+        &task.block_id,
+        retry_policy.as_ref(),
+    )
+    .await?;
+    let next_attempt = task.attempt.checked_add(1);
+    let deadline = retry_policy
+        .as_ref()
+        .zip(next_attempt)
+        .and_then(|(policy, next_attempt)| {
+            if policy.rules.is_empty() && policy.jitter == RetryJitter::Legacy {
+                return (retryable && u32::from(next_attempt) < policy.max_attempts).then_some(now);
+            }
+            if !retryable && policy.rules.is_empty() {
+                return None;
+            }
+            choose_retry(
+                policy,
+                u32::from(task.attempt),
+                message,
+                details.as_ref(),
+                &instance.context,
+                now,
+                &mut counts,
+            )
+            .map(|(_, deadline)| deadline)
+        });
+    if let Some((next_attempt, fire_at)) = next_attempt.zip(deadline) {
+        let mut marker_output = serde_json::json!({"_retry_marker": true, "error": orch8_storage::worker_resolution::diagnostic_reason(message)});
+        if let Some(error_code) = error_code {
+            marker_output["error_code"] = serde_json::json!(error_code);
+        }
+        if retry_policy
+            .as_ref()
+            .is_some_and(|policy| policy.jitter != RetryJitter::Legacy || !policy.rules.is_empty())
+        {
+            marker_output["_retry_fire_at"] = serde_json::json!(fire_at);
+        }
+        if !counts.is_empty() {
+            marker_output["_retry_counts"] = serde_json::json!(counts);
+        }
+        let retry_output = resolution_marker(task, "__retry__", marker_output, now);
         return Ok(WorkerTaskResolutionAction::Retry {
-            retry_task: Box::new(retry_task),
-            retry_output: Some(Box::new(retry_output)),
+            retry_task: Box::new(reserve_retry_task(task, next_attempt, now)),
+            retry_output: Some(retry_output),
             node_id: live_node,
-            fire_at: now,
+            fire_at,
         });
     }
     if tree.is_empty() {
         Ok(WorkerTaskResolutionAction::FailInstance)
     } else {
+        let failure_output = live_node.and(error_code).map(|code| {
+            let output = serde_json::json!({
+                "__error__": true,
+                "error": orch8_storage::worker_resolution::diagnostic_reason(message),
+                "error_code": code,
+            });
+            resolution_marker(task, "__error__", output, now)
+        });
         Ok(WorkerTaskResolutionAction::FailNode {
+            failure_output,
             node_id: live_node,
             fire_at: now,
         })
+    }
+}
+
+fn resolution_marker(
+    task: &WorkerTask,
+    reference: &str,
+    output: serde_json::Value,
+    now: chrono::DateTime<Utc>,
+) -> Box<orch8_types::output::BlockOutput> {
+    let output_size = serde_json::to_vec(&output)
+        .map_or(0, |bytes| u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+    Box::new(orch8_types::output::BlockOutput {
+        id: uuid::Uuid::now_v7(),
+        instance_id: task.instance_id,
+        block_id: task.block_id.clone(),
+        output,
+        output_ref: Some(reference.into()),
+        output_size,
+        attempt: task.attempt,
+        created_at: now,
+    })
+}
+
+fn reserve_retry_task(
+    task: &WorkerTask,
+    next_attempt: u16,
+    now: chrono::DateTime<Utc>,
+) -> WorkerTask {
+    WorkerTask {
+        id: uuid::Uuid::now_v7(),
+        attempt: next_attempt,
+        state: WorkerTaskState::Pending,
+        worker_id: None,
+        claimed_at: None,
+        heartbeat_at: None,
+        claim_epoch: 0,
+        resume_checkpoint: None,
+        checkpoint_seq: 0,
+        completed_at: None,
+        output: None,
+        error_message: None,
+        error_retryable: None,
+        created_at: now,
+        // The re-dispatch of the next attempt creates that attempt's
+        // receipt and binds its id/epoch onto this pending row; storage
+        // keeps the row unclaimable (`awaiting_dispatch`) until then.
+        effect_id: None,
+        continuity_epoch: None,
+        lease_secs: None,
+        claimed_runtime_kind: None,
+        ..task.clone()
     }
 }
 
@@ -630,7 +761,15 @@ pub async fn recover_worker_failure(
     let message = report.reason.as_str().ok_or_else(|| {
         orch8_types::error::StorageError::Constraint("invalid retained failure reason".into())
     })?;
-    let action = plan_failure_action(storage, &instance, &shell, report.retryable, message).await?;
+    let action = plan_failure_action_with_error(
+        storage,
+        &instance,
+        &shell,
+        report.retryable,
+        message,
+        report.error_code.as_deref(),
+    )
+    .await?;
     let plan = WorkerResolutionIntegration::new(report, action)?;
     Ok(storage.apply_worker_resolution_integration(&plan).await?)
 }

@@ -34,11 +34,16 @@ fault_impl! {
         async fn adopt_child_instance_claimed(&self, parent_id: InstanceId, child_id: InstanceId, expected_activation: &str, activation: &str, claim_token: DateTime<Utc>) -> Result<Option<crate::ChildAdoption>, StorageError>;
         async fn create_child_instance_claimed(&self, parent_id: InstanceId, child: &TaskInstance, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn restore_instance_snapshot(&self, snapshot: &crate::restore::InstanceSnapshot) -> Result<bool, StorageError>;
+        async fn restore_instance_snapshot_with_history(&self, snapshot: &crate::restore::InstanceSnapshot, history: &crate::restore::InstanceHistory) -> Result<bool, StorageError>;
+        async fn read_only_history_migration(&self, instance: InstanceId) -> Result<Option<Uuid>, StorageError>;
         async fn create_instance_admitted(&self, instance: &TaskInstance, max_active_instances: u64) -> Result<(), StorageError>;
         async fn create_instances_batch(&self, instances: &[TaskInstance]) -> Result<u64, StorageError>;
         async fn create_instances_batch_admitted(&self, instances: &[TaskInstance], limits: &std::collections::HashMap<TenantId, u64>) -> Result<u64, StorageError>;
         async fn create_instance_externalized(&self, instance: &TaskInstance, threshold_bytes: u32) -> Result<(), StorageError>;
         async fn create_instances_batch_externalized(&self, instances: &[TaskInstance], threshold_bytes: u32) -> Result<u64, StorageError>;
+        async fn create_prepared_instances(&self, instances: &[crate::externalizing::PreparedInstance]) -> Result<u64, StorageError>;
+        async fn update_prepared_context(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, payloads: &[crate::externalizing::ExternalizedRef]) -> Result<(), StorageError>;
+        async fn update_prepared_context_cas(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext, payloads: &[crate::externalizing::ExternalizedRef], expected_updated_at: DateTime<Utc>, claim_token: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
         async fn get_instance_for_caller(&self, caller: InstanceId, tenant: &TenantId, target: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn get_mobile_instance(&self, access: &MobileInstanceAccess, id: InstanceId) -> Result<Option<TaskInstance>, StorageError>;
         async fn cancel_mobile_instance(&self, access: &MobileInstanceAccess, id: InstanceId) -> Result<Option<InstanceState>, StorageError>;
@@ -108,6 +113,7 @@ fault_impl! {
     async fn batch_activate_nodes_claimed(&self, instance_id: InstanceId, node_ids: &[orch8_types::ids::ExecutionNodeId], claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
 
         async fn get_execution_tree(&self, instance_id: InstanceId) -> Result<Vec<ExecutionNode>, StorageError>;
+        async fn get_execution_tree_page(&self, instance_id: InstanceId, after: Option<ExecutionNodeId>, limit: u32) -> Result<Vec<ExecutionNode>, StorageError>;
         async fn update_node_state(&self, node_id: ExecutionNodeId, state: NodeState) -> Result<(), StorageError>;
     async fn update_node_state_claimed(&self, instance_id: InstanceId, node_id: orch8_types::ids::ExecutionNodeId,
         state: orch8_types::execution::NodeState, claim_token: chrono::DateTime<chrono::Utc>,
@@ -126,6 +132,7 @@ fault_impl! {
         async fn save_block_output_claimed(&self, output: &BlockOutput, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn get_block_output_claimed(&self, instance_id: InstanceId, tenant: &TenantId, block_id: &BlockId, claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError>;
         async fn get_block_output(&self, instance_id: InstanceId, block_id: &BlockId) -> Result<Option<BlockOutput>, StorageError>;
+        async fn get_scoped_block_output_attempt(&self, tenant: &TenantId, instance_id: InstanceId, block_id: &BlockId, attempt: u16) -> Result<Option<BlockOutput>, StorageError>;
         async fn get_block_outputs_batch(&self, keys: &[(InstanceId, &BlockId)]) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
         async fn get_latest_completed_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_latest_diagnostic_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
@@ -156,6 +163,7 @@ fault_impl! {
 
 fault_impl! {
     [SIGNAL_STORE_METHODS] impl SignalStore {
+        async fn list_signal_history_page(&self, instance: InstanceId, after: Option<Uuid>, limit: u32) -> Result<Vec<Signal>, StorageError>;
         async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError>;
         async fn enqueue_signal_for_caller(&self, caller: InstanceId, tenant: &TenantId, signal: &Signal, claim_token: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
         async fn enqueue_signal_if_active(&self, signal: &Signal) -> Result<(), StorageError>;
@@ -190,11 +198,13 @@ fault_impl! {
         async fn claim_worker_tasks_with_transport(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<crate::worker_claim::WorkerClaimBatch,StorageError>;
         async fn claim_worker_tasks_with_authority(&self,request:&crate::worker_claim::WorkerClaimRequest)->Result<Vec<WorkerTask>,StorageError>;
         async fn get_worker_delegation_context(&self,tenant:&TenantId,task_id:Uuid,claim:&orch8_types::worker::WorkerClaim)->Result<Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,StorageError>;
+    async fn get_worker_callback(&self,tenant:Option<&TenantId>, token:&str)->Result<Option<crate::worker_callback::WorkerCallbackBinding>,StorageError>;
     async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
 
         async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
         async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
         async fn admit_worker_dispatch(&self,intent:&crate::worker_admission::WorkerDispatchIntent)->Result<crate::worker_admission::WorkerDispatchPublication,StorageError>;
+        async fn list_worker_task_archive_page(&self, instance: &TaskInstance, after: Option<Uuid>, limit: u32) -> Result<Vec<crate::restore::WorkerTaskArchive>, StorageError>;
         async fn get_worker_dispatch_admission(&self,tenant_id:&TenantId,task_id:Uuid)->Result<Option<crate::worker_admission::WorkerDispatchAdmission>,StorageError>;
         async fn create_worker_task_bound(&self, task: &WorkerTask, fence: &crate::worker_invocation::WorkerDispatchFence) -> Result<Option<Uuid>, StorageError>;
         async fn get_worker_invocation(&self, tenant_id: &TenantId, task_id: Uuid) -> Result<Option<crate::worker_invocation::WorkerInvocation>, StorageError>;
@@ -290,6 +300,7 @@ fault_impl! {
 fault_impl! {
     [SCHEDULING_STORE_METHODS] impl SchedulingStore {
         async fn create_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
+        async fn import_cron_migration(&self, snapshot: &orch8_types::cron::CronMigrationSnapshot, schedule: &orch8_types::cron::CronSchedule, epoch: i64, digest: &str) -> Result<(), StorageError>;
         async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError>;
         async fn list_cron_schedules(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<CronSchedule>, StorageError>;
         async fn list_all_cron_schedules(&self, tenant_id: Option<&TenantId>) -> Result<Vec<CronSchedule>, StorageError>;
@@ -323,6 +334,7 @@ fault_impl! {
         async fn list_plugins(&self, tenant_id: Option<&TenantId>) -> Result<Vec<PluginDef>, StorageError>;
         async fn update_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
         async fn delete_plugin(&self, name: &str) -> Result<(), StorageError>;
+        async fn delete_plugin_exact(&self, tenant_id: &str, name: &str) -> Result<(), StorageError>;
         async fn create_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
         async fn get_trigger(&self, tenant_id: Option<&TenantId>, slug: &str) -> Result<Option<TriggerDef>, StorageError>;
         async fn list_triggers(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<TriggerDef>, StorageError>;
@@ -369,6 +381,8 @@ fault_impl! {
         async fn touch_api_key(&self, id: &str, at: chrono::DateTime<chrono::Utc>) -> Result<(), StorageError>;
         async fn register_node(&self, node: &orch8_types::cluster::ClusterNode) -> Result<(), StorageError>;
         async fn heartbeat_node(&self, node_id: Uuid) -> Result<(), StorageError>;
+        async fn record_wasm_revision_ready(&self, node: Uuid, revision: orch8_types::ids::SequenceId, ready_until: chrono::DateTime<chrono::Utc>) -> Result<(), StorageError>;
+        async fn list_wasm_ready_nodes(&self, revision: orch8_types::ids::SequenceId, now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Uuid>, StorageError>;
         async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError>;
         async fn deregister_node(&self, node_id: Uuid) -> Result<(), StorageError>;
         async fn list_nodes(&self) -> Result<Vec<orch8_types::cluster::ClusterNode>, StorageError>;
@@ -409,6 +423,10 @@ fault_impl! {
 
 fault_impl! {
     [RESOURCE_STORE_METHODS] impl ResourceStore {
+        async fn list_instance_kv_page(&self, instance: InstanceId, after: Option<&str>, limit: u32) -> Result<Vec<crate::restore::InstanceKvEntry>, StorageError>;
+        async fn save_checkpoint_at_epoch(&self, tenant: &TenantId, expected_epoch: u64, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<bool, StorageError>;
+        async fn prune_checkpoints_at_epoch(&self, tenant: &TenantId, instance_id: InstanceId, expected_epoch: u64, keep: u32) -> Result<Option<u64>, StorageError>;
+        async fn set_instance_kv_expiring(&self, instance: InstanceId, key: &str, value: &serde_json::Value, expires_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn set_instance_kv(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value) -> Result<(), StorageError>;
         async fn set_instance_kv_claimed(&self, instance_id: InstanceId, key: &str, value: &serde_json::Value, claim_token: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn get_instance_kv_claimed(&self, instance_id: InstanceId, tenant: &TenantId, key: &str, claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<serde_json::Value>>, StorageError>;
@@ -426,6 +444,9 @@ fault_impl! {
         async fn put_artifact(&self, _instance_id: InstanceId, _content_type: &str, _bytes: bytes::Bytes) -> Result<orch8_types::artifact::ArtifactRef, StorageError>;
         async fn put_artifact_with_id(&self, _instance_id: InstanceId, _artifact_id: Uuid, _content_type: &str, _bytes: bytes::Bytes) -> Result<orch8_types::artifact::ArtifactRef, StorageError>;
         async fn get_artifact(&self, _key: &str) -> Result<Option<Vec<u8>>, StorageError>;
+        async fn put_shared_wasm_module(&self, tenant: &str, digest: &orch8_types::plugin::WasmArtifactDigest, bytes: bytes::Bytes) -> Result<(), StorageError>;
+        async fn get_shared_wasm_module(&self, tenant: &str, digest: &orch8_types::plugin::WasmArtifactDigest, limit: u64) -> Result<Option<bytes::Bytes>, StorageError>;
+        async fn collect_unused_wasm_modules(&self, tenant: &orch8_types::ids::TenantId, before: chrono::DateTime<chrono::Utc>, limit: u32, apply: bool) -> Result<Vec<String>, StorageError>;
         async fn delete_artifact(&self, _key: &str) -> Result<(), StorageError>;
         async fn list_artifacts(&self, _instance_id: InstanceId) -> Result<Vec<orch8_types::artifact::ArtifactMeta>, StorageError>;
         async fn delete_instance_artifacts(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
@@ -458,6 +479,7 @@ fault_impl! {
         async fn save_checkpoint(&self, checkpoint: &orch8_types::checkpoint::Checkpoint) -> Result<(), StorageError>;
         async fn get_latest_checkpoint(&self, instance_id: InstanceId) -> Result<Option<orch8_types::checkpoint::Checkpoint>, StorageError>;
         async fn list_checkpoints(&self, instance_id: InstanceId, limit: u32) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
+        async fn list_checkpoint_page(&self, instance_id: InstanceId, after: Option<Uuid>, limit: u32) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
         async fn prune_checkpoints(&self, instance_id: InstanceId, keep: u32) -> Result<u64, StorageError>;
     }
 }
@@ -505,6 +527,7 @@ fault_impl! {
         async fn get_continuity_execution_touching_instance(&self, tenant_id: &TenantId, instance_id: InstanceId) -> Result<Option<ContinuityExecution>, StorageError>;
         async fn list_continuity_locations(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ContinuityLocation>, StorageError>;
         async fn cas_continuity_owner(&self, tenant_id: &TenantId, id: ContinuityId, expected_epoch: ExecutionEpoch, expected_owner: RuntimeId, next: &ContinuityExecution) -> Result<bool, StorageError>;
+        async fn release_migrated_instance(&self, staged: &ContinuityExecution, state: &orch8_types::migration::MigratedInstanceState) -> Result<bool, StorageError>;
         async fn create_handoff(&self, handoff: &ExecutionHandoff) -> Result<(), StorageError>;
         async fn get_handoff(&self, tenant_id: &TenantId, id: HandoffId) -> Result<Option<ExecutionHandoff>, StorageError>;
         async fn cas_handoff(&self, tenant_id: &TenantId, id: HandoffId, expected_state: HandoffState, expected_version: u64, next: &ExecutionHandoff) -> Result<bool, StorageError>;
@@ -539,6 +562,7 @@ fault_impl! {
         async fn find_unresolved_effect_receipt(&self, tenant_id: &TenantId, continuity_id: ContinuityId, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId, attempt: u32) -> Result<Option<EffectReceipt>, StorageError>;
     async fn delete_effect_receipts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
     async fn retire_effect_attempts_for_blocks_claimed(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn retire_composite_retry_effects(&self, tenant_id: &orch8_types::ids::TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<crate::ClaimedRead<Option<orch8_types::continuity::EffectReceipt>>, StorageError>;
 
         async fn delete_effect_receipts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
         async fn retire_effect_attempts_for_blocks(&self, tenant_id: &TenantId, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
@@ -584,6 +608,9 @@ fault_impl! {
         async fn append_stream_frame(&self, frame: &StreamFrame) -> Result<bool, StorageError>;
         async fn list_stream_frames(&self, tenant_id: &TenantId, stream_id: StreamId, after_sequence: Option<u64>, now: DateTime<Utc>, limit: u32) -> Result<Vec<StreamFrame>, StorageError>;
         async fn retract_stream_frames(&self, tenant_id: &TenantId, stream_id: StreamId, epoch: ExecutionEpoch, after_sequence: u64) -> Result<u64, StorageError>;
+        async fn stage_migration_chunk(&self, tenant: &TenantId, digest: &str, index: u32, payload: &[u8]) -> Result<bool, StorageError>;
+        async fn read_migration_chunk(&self, tenant: &TenantId, digest: &str, index: u32) -> Result<Option<Vec<u8>>, StorageError>;
+        async fn clear_migration_chunks(&self, tenant: &TenantId, digest: &str) -> Result<(), StorageError>;
         async fn save_live_migration(&self, record: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<(), StorageError>;
         async fn get_live_migration(&self, tenant_id: &TenantId, id: orch8_types::continuity_advanced::MigrationPlanId) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError>;
         async fn cas_live_migration(&self, tenant_id: &TenantId, expected: &orch8_types::continuity_advanced::LiveMigrationRecord, next: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<bool, StorageError>;

@@ -1,8 +1,19 @@
+export interface MediaUploadFile {
+  version: 1;
+  path: string;
+  length: number;
+  identity: string;
+  chunkBytes: number;
+  sha256: readonly string[];
+  fileSha256?: string;
+}
+
 export interface MediaUploadState {
   id: string;
   length: number;
   offset: number;
   status: "pending" | "uploaded";
+  file?: MediaUploadFile;
 }
 
 /** Persist the upload record next to an immutable local blob before scheduling it. */
@@ -12,7 +23,7 @@ export interface MediaUploadStore {
 }
 
 export interface MediaUploadTransport {
-  read(id: string, offset: number, length: number): Promise<Uint8Array>;
+  read(id: string, offset: number, length: number, state?: MediaUploadState): Promise<Uint8Array>;
   /**
    * Persist the exact range once for this upload ID and return its end offset.
    * A duplicate request must return the same offset without duplicating data.
@@ -58,8 +69,14 @@ export class DurableMediaUploader {
       if (options.network === "offline" || (options.network === "metered" && !options.allowMetered)) {
         return { status: "deferred", offset: state.offset };
       }
-      const length = Math.min(chunkBytes, state.length - state.offset);
-      const bytes = await this.transport.read(id, state.offset, length);
+      const fileChunkBytes = state.file?.chunkBytes;
+      if (fileChunkBytes !== undefined &&
+          (options.chunkBytes !== undefined && chunkBytes !== fileChunkBytes ||
+           !Number.isSafeInteger(fileChunkBytes) || fileChunkBytes < 1 || fileChunkBytes > 4 * 1024 * 1024)) {
+        throw new RangeError("Upload chunk size must match its file manifest");
+      }
+      const length = Math.min(fileChunkBytes ?? chunkBytes, state.length - state.offset);
+      const bytes = await this.transport.read(id, state.offset, length, state);
       if (bytes.byteLength !== length) throw new Error("Media source length changed");
       const offset = await this.transport.append(id, state.offset, bytes);
       if (offset !== state.offset + length) throw new Error("Unexpected media acknowledgement offset");

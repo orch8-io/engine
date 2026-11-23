@@ -146,3 +146,8 @@ orch8_storage::backend_test!(async fn suppressed_receipt_update_cannot_commit_pr
     assert_eq!(s.get_effect_receipt(&expected.tenant_id,expected.id).await.unwrap(),Some(expected));
     assert!(s.list_provenance(&owner.tenant_id,owner.continuity_id,10).await.unwrap().is_empty());
 });
+
+orch8_storage::backend_test!(async fn public_effect_ledger_conformance(b) {
+    let report = orch8_storage::conformance::run_effect_ledger_conformance(b.storage.as_ref()).await.unwrap();
+    assert_eq!(report.checks.len(), 4);
+});

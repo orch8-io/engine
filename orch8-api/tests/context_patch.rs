@@ -3,15 +3,161 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 
 async fn create(client: &reqwest::Client, base: &str, data: Value) -> String {
+    create_with_schema(client, base, data, Value::Null).await
+}
+
+async fn create_with_schema(
+    client: &reqwest::Client,
+    base: &str,
+    data: Value,
+    schema: Value,
+) -> String {
     let sequence: Value = client.post(format!("{base}/sequences"))
         .header("X-Tenant-Id", "t1")
-        .json(&json!({"id":uuid::Uuid::now_v7(),"created_at":chrono::Utc::now().to_rfc3339(),"deprecated":false,"tenant_id":"t1","namespace":"ns1","name":"context-patch-test","version":1,"blocks":[{"type":"step","id":"s1","handler":"noop","params":{}}]}))
+        .json(&json!({"id":uuid::Uuid::now_v7(),"created_at":chrono::Utc::now().to_rfc3339(),"deprecated":false,"tenant_id":"t1","namespace":"ns1","name":"context-patch-test","version":1,"input_schema":schema,"blocks":[{"type":"step","id":"s1","handler":"noop","params":{}}]}))
         .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     let instance: Value = client.post(format!("{base}/instances"))
         .header("X-Tenant-Id", "t1")
         .json(&json!({"sequence_id":sequence["id"],"tenant_id":"t1","namespace":"ns1","context":{"data":data,"config":{"retained":"config"},"runtime":{"total_steps_executed":7}}}))
         .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
     instance["id"].as_str().unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn marker_shaped_json_round_trips_beside_a_real_legacy_reference() {
+    use orch8_storage::{InstanceStore, ResourceStore, externalizing::literal_payload};
+    use orch8_types::ids::InstanceId;
+
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let literal = json!({"_externalized":true,"_ref":"same-instance"});
+    let id = create(
+        &client,
+        &server.base_url,
+        json!({"literal":literal,"nested":[literal]}),
+    )
+    .await;
+    let owner = InstanceId::from_uuid(id.parse().unwrap());
+    let mut stored = server
+        .storage
+        .get_instance(owner)
+        .await
+        .unwrap()
+        .unwrap()
+        .context;
+    assert_eq!(literal_payload(&stored.data["literal"]), Some(&literal));
+    assert_eq!(literal_payload(&stored.data["nested"][0]), Some(&literal));
+    stored.data["legacy"] = literal.clone();
+    let payload = json!({"resolved":true});
+    server
+        .storage
+        .save_externalized_state(owner, "same-instance", &payload)
+        .await
+        .unwrap();
+    server
+        .storage
+        .update_instance_context(owner, &stored)
+        .await
+        .unwrap();
+
+    let data = &read(&client, &server.base_url, &id).await["context"]["data"];
+    assert_eq!(data["literal"], literal);
+    assert_eq!(data["nested"][0], literal);
+    assert_eq!(data["legacy"], payload);
+}
+
+#[tokio::test]
+async fn sequence_externalizes_nested_value_and_pointer_patch_preserves_its_ref() {
+    use orch8_engine::{
+        handlers::HandlerRegistry, scheduler::tick_once, sequence_cache::SequenceCache,
+    };
+    use orch8_storage::{
+        InstanceStore, OutputStore, ResourceStore, StorageBackend, externalizing::ref_key,
+    };
+    use orch8_types::{
+        config::SchedulerConfig,
+        ids::{BlockId, InstanceId},
+        instance::InstanceState,
+    };
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    use tokio_util::sync::CancellationToken;
+
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let body = "report".repeat(16_384);
+    let id = create_with_schema(
+        &client,
+        &server.base_url,
+        json!({"report":{"body":body,"title":"draft"}}),
+        json!({"type":"object","x-orch8-externalize":["/report/body"]}),
+    )
+    .await;
+    let owner = InstanceId::from_uuid(id.parse().unwrap());
+    let mut handlers = HandlerRegistry::new();
+    handlers.register("noop", |ctx| {
+        Box::pin(async move {
+            Ok(json!({"body_length": ctx.context.data["report"]["body"].as_str().map(str::len)}))
+        })
+    });
+    let storage: Arc<dyn StorageBackend> = server.storage.clone();
+    tick_once(
+        &storage,
+        &Arc::new(handlers),
+        &Arc::new(Semaphore::new(1)),
+        &SchedulerConfig::default(),
+        &Arc::new(SequenceCache::new(100, std::time::Duration::from_secs(60))),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let before = server.storage.get_instance(owner).await.unwrap().unwrap();
+    assert_eq!(before.state, InstanceState::Completed);
+    let marker = &before.context.data["report"]["body"];
+    let reference = ref_key(marker, false).unwrap();
+    assert_eq!(
+        server
+            .storage
+            .get_externalized_state(owner, reference)
+            .await
+            .unwrap(),
+        Some(json!(body))
+    );
+    assert_eq!(
+        server
+            .storage
+            .get_block_output(owner, &BlockId::new("s1"))
+            .await
+            .unwrap()
+            .unwrap()
+            .output["body_length"],
+        json!(body.len())
+    );
+
+    let response = client
+        .patch(format!("{}/instances/{id}/context/data", server.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"pointer_patch":{"/report/title":"published"}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let after = server.storage.get_instance(owner).await.unwrap().unwrap();
+    assert_eq!(after.context.data["report"]["body"], *marker);
+    assert_eq!(after.context.data["report"]["title"], "published");
+    assert_eq!(
+        server
+            .storage
+            .list_externalized_entries(owner, None, 10)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        read(&client, &server.base_url, &id).await["context"]["data"],
+        json!({"report":{"body":body,"title":"published"}}),
+    );
 }
 async fn read(client: &reqwest::Client, base: &str, id: &str) -> Value {
     client

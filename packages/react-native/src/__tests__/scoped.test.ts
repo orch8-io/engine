@@ -41,6 +41,35 @@ function setup() {
 const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
 describe("scoped RN views", () => {
+  it("detaches scoped observations at retirement and drops callbacks from old epochs", async () => {
+    const s = setup(), alice = await s.account();
+    const run = await (await alice.openCatalog(configuration)).run("run");
+    const received = vi.fn();
+    const subscription = await run.observeSnapshots(received, 75);
+    const registration = s.native.mock.calls.find(([, method]) => method === "subscribeSnapshots")!;
+    const key = JSON.parse(registration[2]).observerKey;
+    const snapshot = {
+      instanceId: run.instanceId, accountId: run.accountId, catalogId: run.catalogId,
+      sessionEpoch: run.sessionEpoch, state: "waiting", dataJson: "{}", pendingSteps: [],
+      updatedAt: "updated", createdAt: "created",
+    };
+    const envelope = { ...snapshot, observerKey: key, snapshotJson: JSON.stringify(snapshot) };
+    s.emit("scopedSnapshot", { ...envelope, accountId: "bob" });
+    s.emit("scopedSnapshot", { ...envelope, sessionEpoch: "9007199254740994" });
+    s.emit("scopedSnapshot", envelope);
+    expect(received).toHaveBeenCalledExactlyOnceWith(snapshot);
+    await alice.retire();
+    expect(s.native).toHaveBeenCalledWith(registration[0], "unsubscribeSnapshots", JSON.stringify({ observerKey: key }));
+    s.epoch("9007199254740994");
+    const next = await (await (await s.account()).openCatalog(configuration)).run("run");
+    const latest = vi.fn();
+    await next.observeSnapshots(latest);
+    s.emit("scopedSnapshot", envelope);
+    subscription.remove();
+    expect(latest).not.toHaveBeenCalled();
+    expect(received).toHaveBeenCalledTimes(1);
+  });
+
   it("preserves 64-bit epochs and independent same-named catalog callbacks", async () => {
     const s = setup();
     const alice = await s.account(), bob = await s.account("bob");

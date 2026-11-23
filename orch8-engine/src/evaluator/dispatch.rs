@@ -62,6 +62,15 @@ async fn sub_sequence_activation_key(
             key.push(':');
             key.push_str(&iteration.to_string());
         }
+        if matches!(parent.block_type, BlockType::Parallel | BlockType::ForEach)
+            && let Some(segment) = crate::handlers::composite_retry::child_attempt_segment(
+                storage, instance, parent.id,
+            )
+            .await?
+        {
+            key.push('/');
+            key.push_str(&segment);
+        }
         parent_id = parent.parent_id;
     }
     Ok(key)
@@ -71,6 +80,23 @@ async fn sub_sequence_activation_key(
 /// id), which is stable across a tree rebuild.
 fn activation_suffix(activation: &str) -> &str {
     activation.split_once('/').map_or("", |(_, rest)| rest)
+}
+
+async fn find_child_for_activation(
+    storage: &dyn StorageBackend,
+    parent: orch8_types::ids::InstanceId,
+    block: &str,
+    activation: &str,
+) -> Result<Option<TaskInstance>, EngineError> {
+    let child = storage
+        .get_child_for_activation(parent, block, activation)
+        .await?;
+    // An unversioned legacy child can only belong to the first attempt.
+    Ok(child.filter(|child| {
+        !activation_suffix(activation).split('/').any(|segment| {
+            segment.starts_with(crate::handlers::composite_retry::CHILD_ATTEMPT_PREFIX)
+        }) || child.metadata[PARENT_ACTIVATION_KEY].as_str() == Some(activation)
+    }))
 }
 
 /// Marker `resume-from-block` sets on the children of the blocks it wipes:
@@ -121,8 +147,7 @@ pub(crate) async fn awaited_sub_sequence_child_terminal(
     }
     for node in waiting {
         let activation = sub_sequence_activation_key(storage, instance, node, &tree).await?;
-        if storage
-            .get_child_for_activation(instance.id, node.block_id.as_str(), &activation)
+        if find_child_for_activation(storage, instance.id, node.block_id.as_str(), &activation)
             .await?
             .is_some_and(|child| child.state.is_terminal())
         {
@@ -174,7 +199,7 @@ pub(super) async fn dispatch_block(
     node: &ExecutionNode,
     block: &BlockDefinition,
     tree: &[ExecutionNode],
-    interceptors: Option<&orch8_types::interceptor::InterceptorDef>,
+    sequence: &orch8_types::sequence::SequenceDefinition,
     outputs: &OutputsSnapshot,
     clock: &orch8_types::clock::SharedClock,
     claim_token: chrono::DateTime<chrono::Utc>,
@@ -186,6 +211,30 @@ pub(super) async fn dispatch_block(
         crate::control::ExecutionControl::update_node_state(&control, node.id, NodeState::Running)
             .await?;
     }
+
+    let interceptors = sequence.interceptors.as_ref();
+    let retry = if matches!(
+        block,
+        BlockDefinition::Parallel(_) | BlockDefinition::ForEach(_)
+    ) {
+        sequence
+            .composite_retry_policy(&node.block_id)
+            .map_err(|error| EngineError::InvalidConfig(error.to_string()))?
+    } else {
+        None
+    };
+    let boundary = retry
+        .as_ref()
+        .map(|policy| crate::handlers::composite_retry::Boundary {
+            policy,
+            storage: &control,
+            instance,
+            node,
+            tree,
+            now: clock.now(),
+            claim_token,
+            deferrals: pending_deferrals,
+        });
 
     match block {
         BlockDefinition::Step(step_def) => {
@@ -237,8 +286,13 @@ pub(super) async fn dispatch_block(
             result
         }
         BlockDefinition::Parallel(par_def) => {
-            crate::handlers::parallel::execute_parallel(
-                &control, handlers, instance, node, par_def, tree,
+            crate::handlers::parallel::execute_parallel_with_retry(
+                &control,
+                instance,
+                node,
+                par_def,
+                tree,
+                boundary.as_ref(),
             )
             .await
         }
@@ -260,8 +314,15 @@ pub(super) async fn dispatch_block(
             .await
         }
         BlockDefinition::ForEach(fe_def) => {
-            crate::handlers::for_each::execute_for_each(
-                &control, handlers, instance, node, fe_def, tree, outputs,
+            crate::handlers::for_each::execute_for_each_with_retry(
+                &control,
+                instance,
+                node,
+                fe_def,
+                tree,
+                outputs,
+                boundary.as_ref(),
+                sequence.has_composite_retry_policies(),
             )
             .await
         }
@@ -302,15 +363,23 @@ pub(super) async fn dispatch_block(
             // child rather than reuse iteration 1's completed one.
             let activation =
                 sub_sequence_activation_key(storage.as_ref(), instance, node, tree).await?;
-            let current = storage
-                .get_child_for_activation(instance.id, ss_def.id.as_str(), &activation)
-                .await?;
+            let current = find_child_for_activation(
+                storage.as_ref(),
+                instance.id,
+                ss_def.id.as_str(),
+                &activation,
+            )
+            .await?;
             // Rebuilt trees may adopt an earlier run's child. Native lookup
             // indexes bound both reads; the claimed write rechecks the child.
             let recovered = if node.state != NodeState::Waiting && current.is_none() {
-                if let Some(child) = storage
-                    .get_child_for_activation(instance.id, ss_def.id.as_str(), &activation)
-                    .await?
+                if let Some(child) = find_child_for_activation(
+                    storage.as_ref(),
+                    instance.id,
+                    ss_def.id.as_str(),
+                    &activation,
+                )
+                .await?
                 {
                     Some(child)
                 } else {
@@ -331,8 +400,29 @@ pub(super) async fn dispatch_block(
                         }
                         ChildResultMode::LegacyOutputs => {
                             let child_outputs = storage.get_all_outputs(child.id).await?;
-                            serde_json::to_value(&child_outputs)
-                                .map_err(StorageError::Serialization)?
+                            let value = serde_json::to_value(&child_outputs)
+                                .map_err(StorageError::Serialization)?;
+                            if ss_def.version.is_some()
+                                && let Some(revision) =
+                                    storage.get_sequence(child.sequence_id).await?
+                                && crate::input_schema::validate(
+                                    revision.child_result_schema(),
+                                    &value,
+                                )
+                                .is_err()
+                            {
+                                return Err(EngineError::StepFailed {
+                                    instance_id: instance.id,
+                                    block_id: ss_def.id.clone(),
+                                    message: format!(
+                                        "pinned child '{}' output violates its declared schema",
+                                        revision.name
+                                    ),
+                                    retryable: false,
+                                    details: None,
+                                });
+                            }
+                            value
                         }
                     };
                     let block_output = orch8_types::output::BlockOutput {
@@ -419,10 +509,13 @@ pub(super) async fn dispatch_block(
                 // Resolve `{{…}}` templates in `input` exactly like step params
                 // (context + prior outputs), so each activation passes its own
                 // values — e.g. the current for_each item.
+                let parent_context =
+                    crate::externalized::resolved_context_for_instance(storage.as_ref(), instance)
+                        .await?;
                 let input = match crate::handlers::param_resolve::resolve_templates_in_params(
                     storage.as_ref(),
                     instance,
-                    &instance.context,
+                    parent_context.as_ref(),
                     &ss_def.input,
                     outputs,
                 )
@@ -442,8 +535,24 @@ pub(super) async fn dispatch_block(
                     }
                 };
 
+                if ss_def.version.is_some()
+                    && crate::input_schema::validate(child_seq.input_schema.as_ref(), &input)
+                        .is_err()
+                {
+                    return Err(EngineError::StepFailed {
+                        instance_id: instance.id,
+                        block_id: ss_def.id.clone(),
+                        message: format!(
+                            "pinned child '{}' input violates its declared schema",
+                            child_seq.name
+                        ),
+                        retryable: false,
+                        details: None,
+                    });
+                }
                 let now = clock.now();
-                let child_context = child_context_from(&instance.context, input);
+                let mut child_context = child_context_from(parent_context.as_ref(), input);
+                orch8_storage::externalizing::escape_literals(&mut child_context.data);
 
                 let child = orch8_types::instance::TaskInstance {
                     claimed_at: None,
@@ -496,6 +605,49 @@ mod tests {
     };
     use orch8_types::context::ExecutionContext;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn a_retry_activation_does_not_reuse_the_legacy_child_lookup_fallback() {
+        use orch8_storage::{
+            InstanceStore, SequenceStore,
+            sqlite::SqliteStorage,
+            testing::fixtures::{InstanceBuilder, SequenceBuilder},
+        };
+
+        let store = SqliteStorage::in_memory().await.unwrap();
+        let sequence = SequenceBuilder::new("tenant").step("work", "noop").build();
+        store.create_sequence(&sequence).await.unwrap();
+        let parent = InstanceBuilder::for_sequence(&sequence).build();
+        let mut legacy = InstanceBuilder::for_sequence(&sequence).build();
+        legacy.parent_instance_id = Some(parent.id);
+        legacy.metadata = json!({"_parent_block_id":"child"});
+        store.create_instance(&parent).await.unwrap();
+        store.create_instance(&legacy).await.unwrap();
+
+        let initial =
+            super::find_child_for_activation(&store, parent.id, "child", "node:before-retry")
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(initial.id, legacy.id);
+        let retry = "node:before-retry/@orch8-retry:aggregate:1";
+        assert!(
+            super::find_child_for_activation(&store, parent.id, "child", retry)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let mut fresh = InstanceBuilder::for_sequence(&sequence).build();
+        fresh.parent_instance_id = Some(parent.id);
+        fresh.metadata = json!({"_parent_block_id":"child", "_parent_activation":retry});
+        store.create_instance(&fresh).await.unwrap();
+        let exact = super::find_child_for_activation(&store, parent.id, "child", retry)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(exact.id, fresh.id);
+    }
 
     #[test]
     fn child_inherits_dry_run_from_parent() {

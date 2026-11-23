@@ -747,6 +747,7 @@ impl LeaseTransport for GrpcLeaseTransport {
             worker_id: self.config.worker_id.clone(),
             message: message.to_owned(),
             retryable,
+            error_code: None,
             claim_epoch: task.task.claim_epoch,
         };
         if let Some(answer) = self

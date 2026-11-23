@@ -13,6 +13,106 @@ use orch8_types::{
 };
 use serde_json::json;
 
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn rolling_upgrade_fences_legacy_reaping_without_retiring_the_original_worker() {
+    use orch8_storage::testing::backends::{BackendKind, TestBackend};
+    use orch8_types::continuity::{
+        ContinuityExecution, ContinuityId, EffectId, EffectKind, EffectReceipt, EffectState,
+        ExecutionEpoch, OwnershipState, RuntimeId,
+    };
+
+    let Some(backend) = TestBackend::open(BackendKind::Postgres).await else {
+        return;
+    };
+    let storage = backend.storage.as_ref();
+    let (claimed, _) = fixture(storage).await;
+    let (pending, _) = fixture(storage).await;
+    let (pure, _) = fixture(storage).await;
+    let now = Utc::now();
+    for task in [&claimed, &pending] {
+        let owner = ContinuityExecution {
+            continuity_id: ContinuityId::new(),
+            tenant_id: TenantId::unchecked("worker-invocations"),
+            current_instance_id: task.instance_id,
+            owner_runtime_id: RuntimeId::new(),
+            epoch: ExecutionEpoch::initial(),
+            state: OwnershipState::Owned,
+            updated_at: now,
+        };
+        storage.create_continuity_execution(&owner).await.unwrap();
+        storage
+            .create_effect_receipt(&EffectReceipt {
+                id: EffectId::new(),
+                tenant_id: owner.tenant_id,
+                continuity_id: owner.continuity_id,
+                epoch: owner.epoch,
+                instance_id: task.instance_id,
+                block_id: task.block_id.clone(),
+                kind: EffectKind::Worker,
+                state: EffectState::Dispatched,
+                destination_fingerprint: "legacy-fixture".into(),
+                idempotency_key: None,
+                request_sha256: "a".repeat(64),
+                provider_receipt_id: None,
+                attempt: 0,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .unwrap();
+    }
+    let pool = backend.pg_pool();
+    let mut upgrade = pool.begin().await.unwrap();
+    sqlx::raw_sql(include_str!(
+        "../../migrations/down/158_legacy_worker_effect_fence.sql"
+    ))
+    .execute(&mut *upgrade)
+    .await
+    .unwrap();
+    for (task, state, worker) in [
+        (&claimed, "claimed", Some("prior-worker")),
+        (&pending, "pending", None),
+        (&pure, "pending", None),
+    ] {
+        sqlx::query("INSERT INTO worker_tasks(id,instance_id,block_id,handler_name,params,context,attempt,state,worker_id,claimed_at,heartbeat_at,created_at) VALUES($1,$2,'work','remote','{}','{}',0,$3,$4,$5,$5,$5)")
+            .bind(task.id).bind(task.instance_id.into_uuid()).bind(state).bind(worker)
+            .bind(now).execute(&mut *upgrade).await.unwrap();
+    }
+    sqlx::raw_sql(include_str!(
+        "../../migrations/158_legacy_worker_effect_fence.sql"
+    ))
+    .execute(&mut *upgrade)
+    .await
+    .unwrap();
+    upgrade.commit().await.unwrap();
+
+    let reaped = sqlx::query("UPDATE worker_tasks SET state='pending', worker_id=NULL, claimed_at=NULL, heartbeat_at=NULL WHERE id=$1 AND state='claimed'")
+        .bind(claimed.id).execute(pool).await.unwrap();
+    assert_eq!(reaped.rows_affected(), 0);
+    let original = storage.get_worker_task(claimed.id).await.unwrap().unwrap();
+    assert_eq!(original.worker_id.as_deref(), Some("prior-worker"));
+    let quarantined: bool =
+        sqlx::query_scalar("SELECT awaiting_dispatch FROM worker_tasks WHERE id=$1")
+            .bind(pending.id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert!(quarantined);
+
+    let offered = storage
+        .claim_worker_tasks("remote", "candidate", 1)
+        .await
+        .unwrap();
+    assert_eq!(offered[0].id, pure.id);
+    let unchecked = sqlx::query("UPDATE worker_tasks SET state='claimed', worker_id='candidate', claim_epoch=claim_epoch+1 WHERE id=$1")
+        .bind(pending.id).execute(pool).await.unwrap();
+    assert_eq!(unchecked.rows_affected(), 0);
+    let completed = sqlx::query("UPDATE worker_tasks SET state='completed', output='{}', completed_at=NOW() WHERE id=$1 AND worker_id='prior-worker' AND state='claimed'")
+        .bind(claimed.id).execute(pool).await.unwrap();
+    assert_eq!(completed.rows_affected(), 1);
+}
+
 async fn fixture(storage: &dyn StorageBackend) -> (WorkerTask, ExecutionNodeId) {
     let sequence = SequenceBuilder::new("worker-invocations")
         .name(&format!("worker-invocations-{}", uuid::Uuid::new_v4()))
@@ -452,6 +552,7 @@ fn retry_resolution(
         holder_worker_id: None,
         event: WorkerAttemptEventKind::TimedOut,
         effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
+        error_code: None,
         reason: "retry binding regression".into(),
         retryable: true,
         action: WorkerTaskResolutionAction::Retry {
@@ -781,3 +882,250 @@ orch8_storage::backend_test!(async fn stranded_unscoped_source_is_not_recertifie
     assert!(!b.storage.finalize_stranded_worker_dispatch(task.id,task.attempt,None,None).await.unwrap(),"absence of a current owner erased retained namespace history");
     assert!(b.storage.claim_worker_tasks("noop","must-wait",1).await.unwrap().is_empty());
 });
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One predecessor-to-candidate scenario on the same task.
+async fn postgres_adopts_only_a_current_expired_legacy_checkpoint_and_fences_the_old_writer() {
+    use orch8_storage::{
+        testing::backends::TestBackend, worker_resolution::WorkerResolutionEvidence,
+    };
+    use orch8_types::{
+        continuity::{
+            ContinuityExecution, ContinuityId, EffectId, EffectKind, EffectReceipt, EffectState,
+            ExecutionEpoch, OwnershipState, RuntimeId,
+        },
+        worker::{
+            WorkerAttemptEventKind, WorkerClaim, WorkerTaskEffectResolution, WorkerTaskResolution,
+            WorkerTaskResolutionAction, WorkerTaskState,
+        },
+    };
+    use sha2::{Digest, Sha256};
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    let Some(backend) = TestBackend::postgres().await else {
+        return;
+    };
+    let storage = backend.storage.as_ref();
+    let pool = backend.pg_pool();
+    let tenant = TenantId::unchecked("worker-invocations");
+    let sequence = SequenceBuilder::new(tenant.as_str())
+        .name("legacy checkpoint")
+        .step("work", "legacy_resume")
+        .build();
+    storage.create_sequence(&sequence).await.unwrap();
+    let now = Utc::now();
+    let mut parent = InstanceBuilder::for_sequence(&sequence)
+        .state(InstanceState::Waiting)
+        .build();
+    let run_id = Uuid::new_v4().to_string();
+    let step_started = now - chrono::Duration::minutes(5);
+    parent.context.runtime.run_id = Some(run_id.clone());
+    parent.context.runtime.current_step = Some(BlockId::new("work"));
+    parent.context.runtime.current_step_started_at = Some(step_started);
+    storage.create_instance(&parent).await.unwrap();
+    let owner = ContinuityExecution {
+        continuity_id: ContinuityId::new(),
+        tenant_id: tenant.clone(),
+        current_instance_id: parent.id,
+        owner_runtime_id: RuntimeId::new(),
+        epoch: ExecutionEpoch::initial(),
+        state: OwnershipState::Owned,
+        updated_at: now,
+    };
+    storage.create_continuity_execution(&owner).await.unwrap();
+    let effect_at = now - chrono::Duration::minutes(4);
+    let request_hash = orch8_types::ai::sha256_hex(br#"{"handler":"legacy_resume","params":{}}"#);
+    let mut receipt = EffectReceipt {
+        id: EffectId::new(),
+        tenant_id: tenant.clone(),
+        continuity_id: owner.continuity_id,
+        epoch: owner.epoch,
+        instance_id: parent.id,
+        block_id: BlockId::new("work"),
+        kind: EffectKind::Worker,
+        state: EffectState::Dispatched,
+        destination_fingerprint: "legacy-fixture".into(),
+        idempotency_key: None,
+        request_sha256: request_hash,
+        provider_receipt_id: None,
+        attempt: 0,
+        created_at: effect_at,
+        updated_at: effect_at,
+    };
+    // The legacy ID was derived from the continuity, block and attempt.
+    let pre_epoch_id: Uuid = {
+        let mut hash = Sha256::new();
+        hash.update(b"orch8-effect-v1\0");
+        hash.update(owner.continuity_id.as_uuid().as_bytes());
+        hash.update(owner.epoch.get().to_be_bytes());
+        hash.update(parent.id.into_uuid().as_bytes());
+        hash.update(b"work");
+        hash.update(0_u32.to_be_bytes());
+        let mut bytes = [0_u8; 16];
+        bytes.copy_from_slice(&hash.finalize()[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Uuid::from_bytes(bytes)
+    };
+    receipt.id = EffectId::from_uuid(pre_epoch_id);
+    let task_id = Uuid::new_v4();
+    let dispatch_at = now - chrono::Duration::minutes(3);
+    let observed_at = now - chrono::Duration::minutes(2);
+    let checkpoint = json!({"cursor": 17});
+    sqlx::query(
+        "INSERT INTO worker_tasks(id,instance_id,tenant_id,block_id,handler_name,params,context,attempt,state,worker_id,claimed_at,heartbeat_at,created_at,resume_checkpoint,checkpoint_seq)
+         VALUES($1,$2,$3,'work','legacy_resume','{}',$4,0,'claimed','same-worker',$5,$5,$6,$7,1)",
+    )
+    .bind(task_id)
+    .bind(parent.id.into_uuid())
+    .bind(tenant.as_str())
+    .bind(json!({"runtime":{"instance_id":parent.id,"run_id":run_id}}))
+    .bind(observed_at)
+    .bind(dispatch_at)
+    .bind(&checkpoint)
+    .execute(pool)
+    .await
+    .unwrap();
+    storage.create_effect_receipt(&receipt).await.unwrap();
+    let resolution = WorkerTaskResolution {
+        task_id,
+        instance_id: parent.id,
+        expected_state: WorkerTaskState::Claimed,
+        expected_claim_epoch: 0,
+        expected_worker_id: None,
+        holder_worker_id: None,
+        event: WorkerAttemptEventKind::Reclaimed,
+        effect_resolution: WorkerTaskEffectResolution::Unknown,
+        reason: "worker lease expired".into(),
+        error_code: None,
+        retryable: true,
+        action: WorkerTaskResolutionAction::Requeue,
+    };
+    let lease = Duration::from_secs(30);
+    let before = storage.get_worker_task(task_id).await.unwrap().unwrap();
+    let stale_observation = WorkerResolutionEvidence::expired_lease(&resolution, &before, lease);
+    sqlx::query("UPDATE worker_tasks SET heartbeat_at=NOW() WHERE id=$1")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .resolve_worker_task_with_evidence(&resolution, &stale_observation)
+            .await
+            .unwrap()
+    );
+    let renewed = storage.get_worker_task(task_id).await.unwrap().unwrap();
+    assert!(
+        !storage
+            .resolve_worker_task_with_evidence(
+                &resolution,
+                &WorkerResolutionEvidence::expired_lease(&resolution, &renewed, lease),
+            )
+            .await
+            .unwrap(),
+        "a current observation must still be expired"
+    );
+
+    sqlx::query("UPDATE worker_tasks SET heartbeat_at=$2,checkpoint_seq=2 WHERE id=$1")
+        .bind(task_id)
+        .bind(observed_at)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .resolve_worker_task_with_evidence(&resolution, &stale_observation)
+            .await
+            .unwrap()
+    );
+    let current = storage.get_worker_task(task_id).await.unwrap().unwrap();
+    let evidence = WorkerResolutionEvidence::expired_lease(&resolution, &current, lease);
+    assert!(!storage.resolve_worker_task(&resolution).await.unwrap());
+    sqlx::query("UPDATE worker_tasks SET context=jsonb_set(context,'{runtime,run_id}','\"wrong-run\"') WHERE id=$1")
+        .bind(task_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .resolve_worker_task_with_evidence(&resolution, &evidence)
+            .await
+            .unwrap()
+    );
+    sqlx::query("UPDATE worker_tasks SET context=$2 WHERE id=$1")
+        .bind(task_id)
+        .bind(&current.context)
+        .execute(pool)
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .get_worker_invocation(&tenant, task_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        storage
+            .resolve_worker_task_with_evidence(&resolution, &evidence)
+            .await
+            .unwrap()
+    );
+    let claim = storage
+        .claim_worker_tasks("legacy_resume", "same-worker", 1)
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    assert_eq!(claim.id, task_id);
+    assert_eq!(claim.claim_epoch, 1);
+    assert_eq!(claim.checkpoint_seq, 2);
+    assert_eq!(claim.resume_checkpoint, Some(checkpoint));
+    assert_eq!(claim.effect_id, Some(receipt.id));
+
+    let mut old = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL orch8.worker_claim_protocol='pre_epoch'")
+        .execute(&mut *old)
+        .await
+        .unwrap();
+    let changed = sqlx::query("UPDATE worker_tasks SET state='completed', output='{}' WHERE id=$1 AND state='claimed' AND worker_id='same-worker'")
+        .bind(task_id).execute(&mut *old).await.unwrap().rows_affected();
+    assert_eq!(changed, 0);
+    let changed = sqlx::query("UPDATE effect_receipts SET state='committed' WHERE id=$1")
+        .bind(receipt.id.into_uuid())
+        .execute(&mut *old)
+        .await
+        .unwrap()
+        .rows_affected();
+    assert_eq!(changed, 0);
+    old.rollback().await.unwrap();
+
+    assert!(
+        !storage
+            .complete_worker_task(task_id, &WorkerClaim::new("same-worker", 0), &json!({}))
+            .await
+            .unwrap()
+    );
+    assert!(
+        storage
+            .complete_worker_task(
+                task_id,
+                &WorkerClaim::new("same-worker", 1),
+                &json!({"resumed":true})
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        storage
+            .get_effect_receipt(&tenant, receipt.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        EffectState::Committed
+    );
+}

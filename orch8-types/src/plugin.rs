@@ -4,6 +4,55 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+pub const WASM_ARTIFACT_SOURCE_PREFIX: &str = "wasm-artifact:sha256:";
+pub const MAX_SHARED_WASM_BYTES: usize = 16 * 1024 * 1024;
+
+/// Full SHA-256 address for a shared WebAssembly module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmArtifactDigest(String);
+
+impl WasmArtifactDigest {
+    #[must_use]
+    pub fn for_bytes(bytes: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+        Self::from_sha256(Sha256::digest(bytes).into())
+    }
+
+    #[must_use]
+    pub fn from_sha256(digest: [u8; 32]) -> Self {
+        use std::fmt::Write as _;
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            write!(&mut hex, "{byte:02x}").expect("writing to a string cannot fail");
+        }
+        Self(hex)
+    }
+
+    pub fn parse(value: &str) -> Result<Self, &'static str> {
+        if value.len() == 64
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            Ok(Self(value.to_owned()))
+        } else {
+            Err("WASM artifact digest must be 64 lowercase hexadecimal digits")
+        }
+    }
+
+    pub fn from_source(source: &str) -> Result<Option<Self>, &'static str> {
+        source
+            .strip_prefix(WASM_ARTIFACT_SOURCE_PREFIX)
+            .map(Self::parse)
+            .transpose()
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The kind of external plugin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +91,7 @@ pub struct PluginDef {
     pub plugin_type: PluginType,
     /// Path or URL to the plugin binary/endpoint.
     /// - WASM: file path to `.wasm` module
+    /// - shared WASM: `wasm-artifact:sha256:<digest>`
     /// - gRPC: `host:port/Service.Method`
     pub source: String,
     /// Tenant that owns this plugin (empty = global).
@@ -63,6 +113,27 @@ pub struct PluginDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_wasm_source_requires_a_full_lowercase_digest() {
+        let digest = "a1".repeat(32);
+        let source = format!("{WASM_ARTIFACT_SOURCE_PREFIX}{digest}");
+        assert_eq!(
+            WasmArtifactDigest::from_source(&source)
+                .unwrap()
+                .unwrap()
+                .as_str(),
+            digest
+        );
+        assert!(
+            WasmArtifactDigest::from_source("/plugins/example.wasm")
+                .unwrap()
+                .is_none()
+        );
+        for invalid in ["ABC", "../module", &"A".repeat(64), &"0".repeat(63)] {
+            assert!(WasmArtifactDigest::parse(invalid).is_err());
+        }
+    }
 
     #[test]
     fn plugin_type_display() {

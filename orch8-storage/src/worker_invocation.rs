@@ -388,14 +388,22 @@ impl WorkerInvocation {
         &self,
         output: Option<&orch8_types::output::BlockOutput>,
     ) -> Result<(), orch8_types::error::StorageError> {
+        self.validate_resolution_output(output, "__retry__")
+    }
+
+    pub(crate) fn validate_resolution_output(
+        &self,
+        output: Option<&orch8_types::output::BlockOutput>,
+        reference: &str,
+    ) -> Result<(), orch8_types::error::StorageError> {
         if output.is_some_and(|output| {
             output.instance_id != self.instance_id
                 || output.block_id != self.block_id
                 || output.attempt != self.attempt
-                || output.output_ref.as_deref() != Some("__retry__")
+                || output.output_ref.as_deref() != Some(reference)
         }) {
             return Err(orch8_types::error::StorageError::Constraint(
-                "retry output does not match original invocation".into(),
+                "resolution output does not match original invocation".into(),
             ));
         }
         Ok(())

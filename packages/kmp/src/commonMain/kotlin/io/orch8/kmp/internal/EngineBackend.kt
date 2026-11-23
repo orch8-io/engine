@@ -12,7 +12,9 @@ import io.orch8.kmp.EngineEvent
 import io.orch8.kmp.FlushResult
 import io.orch8.kmp.InstanceSnapshot
 import io.orch8.kmp.InstanceSummary
+import io.orch8.kmp.ContinuityExportResult
 import io.orch8.kmp.NodeCapabilities
+import io.orch8.kmp.Orch8CapsuleSigner
 import io.orch8.kmp.NodeConnectivity
 import io.orch8.kmp.NodeRegistration
 import io.orch8.kmp.Orch8TokenSource
@@ -94,6 +96,14 @@ internal interface EngineBackend {
         destinationRuntimeId: String,
         destinationInstanceId: String,
     )
+
+    fun exportContinuityCapsule(
+        instanceId: String,
+        destinationRuntimeId: String,
+        payloadKeyBase64: String,
+        expiresInSeconds: Int,
+        signer: Orch8CapsuleSigner,
+    ): ContinuityExportResult
 
     // Runtime node / worker (engine release after 0.7.1).
 

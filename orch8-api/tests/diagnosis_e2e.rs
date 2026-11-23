@@ -200,6 +200,8 @@ fn mk_task(instance_id: &str, block: &str, handler: &str, state: WorkerTaskState
         created_at: Utc::now() - Duration::seconds(5),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,

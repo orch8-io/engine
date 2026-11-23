@@ -299,7 +299,7 @@ pub(super) async fn import_on(
     Ok(())
 }
 
-async fn freeze_guard(
+pub(super) async fn freeze_guard(
     conn: &mut sqlx::PgConnection,
     owner: &ContinuityExecution,
     guard: &WorkflowInvariant,

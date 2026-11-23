@@ -67,6 +67,25 @@ pub async fn execute_for_each(
     tree: &[ExecutionNode],
     outputs: &OutputsSnapshot,
 ) -> Result<bool, EngineError> {
+    execute_for_each_with_retry(storage, instance, node, fe_def, tree, outputs, None, false).await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) async fn execute_for_each_with_retry(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    fe_def: &ForEachDef,
+    tree: &[ExecutionNode],
+    outputs: &OutputsSnapshot,
+    boundary: Option<&super::composite_retry::Boundary<'_>>,
+    preserve_attempts: bool,
+) -> Result<bool, EngineError> {
+    if let Some(boundary) = boundary
+        && boundary.resume(true).await?
+    {
+        return Ok(true);
+    }
     // Empty body: nothing to run.
     if fe_def.body.is_empty() {
         warn!(
@@ -126,9 +145,11 @@ pub async fn execute_for_each(
     } else {
         // First visit — resolve live, externalize the snapshot once, and
         // persist a lightweight marker that only holds the ref key.
+        let context =
+            crate::externalized::resolved_context_for_instance(storage.backend(), instance).await?;
         let Some(mut items) = resolve_collection(
             &fe_def.collection,
-            &instance.context,
+            context.as_ref(),
             storage,
             instance,
             outputs,
@@ -159,7 +180,7 @@ pub async fn execute_for_each(
         // so completion restores it instead of deleting it (T1-GAP-071).
         // Saved before the first bind, so a crash-and-retry of this first
         // visit still sees the user's original value.
-        let shadowed = instance.context.data.get(&fe_def.item_var);
+        let shadowed = context.data.get(&fe_def.item_var);
         storage
             .save_externalized_state(
                 instance.id,
@@ -236,12 +257,13 @@ pub async fn execute_for_each(
         .and_then(serde_json::Value::as_bool)
         == Some(true)
     {
-        evaluator::reset_subtree_to_pending(
+        evaluator::reset_iteration(
             storage,
             tree,
             &instance.tenant_id,
             instance.id,
             node.id,
+            preserve_attempts,
         )
         .await?;
         storage.save_block_output(&marker_for(index, false)).await?;
@@ -284,6 +306,12 @@ pub async fn execute_for_each(
     match evaluator::advance_sequence(storage, &children).await? {
         SeqProgress::Advanced | SeqProgress::Blocked => return Ok(true),
         SeqProgress::Failed | SeqProgress::Cancelled => {
+            if let Some(boundary) = boundary {
+                evaluator::settle_live_descendants(storage, instance.id, tree, node.id).await?;
+                if boundary.failure().await? {
+                    return Ok(true);
+                }
+            }
             // Drop the last iteration's item binding before failing so it
             // does not leak into on_failure handlers and later context
             // readers — the same cleanup the completion path performs.
@@ -311,12 +339,13 @@ pub async fn execute_for_each(
         storage
             .save_block_output(&marker_for(next_index, true))
             .await?;
-        evaluator::reset_subtree_to_pending(
+        evaluator::reset_iteration(
             storage,
             tree,
             &instance.tenant_id,
             instance.id,
             node.id,
+            preserve_attempts,
         )
         .await?;
     }
@@ -898,6 +927,7 @@ mod tests {
     /// silently drops the next iteration's INSERT, so external workers never
     /// see iteration 1+ dispatches.
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Exercise task removal and successful redispatch together.
     async fn fe_reset_subtree_purges_descendant_worker_tasks() {
         use orch8_types::worker::{WorkerTask, WorkerTaskState};
         use uuid::Uuid;
@@ -936,6 +966,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,
@@ -988,6 +1020,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,

@@ -1,7 +1,9 @@
 pub mod alerts;
 pub mod ap_poll;
 mod backend_identity;
+mod calendar_delay;
 pub mod capsule;
+pub mod child_contracts;
 pub mod circuit_breaker;
 pub mod cloud_observability;
 pub mod compensation;
@@ -11,6 +13,7 @@ pub mod control;
 pub mod credentials;
 pub mod cron;
 pub mod dataflow;
+mod dataflow_analysis;
 pub mod delegation;
 pub mod receipt_bundle;
 /// Virtual time for scheduling decisions — re-exported from `orch8-types` so
@@ -42,6 +45,7 @@ pub mod metrics;
 pub mod model_pricing;
 pub mod optimizer;
 pub mod outbound;
+mod output_schema;
 pub mod ownership;
 pub mod placement;
 pub mod preflight;
@@ -64,6 +68,7 @@ pub mod step_placement;
 pub mod stream_bus;
 pub mod stream_windows;
 pub mod template;
+mod template_filters;
 pub mod template_trace;
 pub mod tenant_budgets;
 // Test harness (scheduler-faithful driver, in-process engine); test-only.
@@ -101,6 +106,7 @@ pub struct Engine {
     node_id: Uuid,
     /// Human-readable node name.
     node_name: String,
+    wasm_prewarm_revisions: Vec<orch8_types::ids::SequenceId>,
     /// Tick heartbeat read by the health probes (I-H11).
     liveness: Arc<liveness::EngineLiveness>,
 }
@@ -134,6 +140,7 @@ impl Engine {
             cancel,
             node_id,
             node_name,
+            wasm_prewarm_revisions: Vec::new(),
             liveness,
         }
     }
@@ -143,6 +150,16 @@ impl Engine {
     #[must_use]
     pub fn with_liveness(mut self, liveness: Arc<liveness::EngineLiveness>) -> Self {
         self.liveness = liveness;
+        self
+    }
+
+    /// Revisions this executor should prepare and advertise ahead of a rollout.
+    #[must_use]
+    pub fn with_wasm_prewarm_revisions(
+        mut self,
+        revisions: Vec<orch8_types::ids::SequenceId>,
+    ) -> Self {
+        self.wasm_prewarm_revisions = revisions;
         self
     }
 
@@ -264,6 +281,21 @@ impl Engine {
         // backoff and counted in `orch8_background_loop_restarts_total{loop}`
         // instead of silently disappearing until the next process restart.
         let cancel = &self.cancel;
+
+        if !self.wasm_prewarm_revisions.is_empty() {
+            let storage = self.storage.clone();
+            let node_id = self.node_id;
+            let revisions = self.wasm_prewarm_revisions.clone();
+            let token = cancel.clone();
+            set.spawn(supervise("wasm_prewarm", cancel.clone(), move || {
+                handlers::wasm_plugin::run_prewarm_loop(
+                    storage.clone(),
+                    node_id,
+                    revisions.clone(),
+                    token.clone(),
+                )
+            }));
+        }
 
         // Cluster heartbeat + drain check (every 10 seconds).
         let hb_storage = Arc::clone(&self.storage);

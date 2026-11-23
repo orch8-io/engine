@@ -87,7 +87,7 @@ fn schema_cache_key(schema: &serde_json::Value) -> Option<[u8; 32]> {
 /// compilation; two threads may compile the same schema concurrently in a
 /// rare race, which is harmless (both results are equivalent, last insert
 /// wins). Falls back to an uncached compile if canonicalization fails.
-fn compiled_schema_validator(
+pub(crate) fn compiled_schema_validator(
     schema: &serde_json::Value,
 ) -> Result<Arc<jsonschema::Validator>, jsonschema::ValidationError<'static>> {
     let Some(key) = schema_cache_key(schema) else {
@@ -127,30 +127,16 @@ fn validate_output_schema(
             });
         }
     };
-    let errors: Vec<String> = validator
-        .iter_errors(output)
-        .map(|e| {
-            let path = e.instance_path().to_string();
-            if path.is_empty() {
-                e.to_string()
-            } else {
-                format!("at {path}: {e}")
-            }
-        })
-        .collect();
-    if errors.is_empty() {
-        Ok(())
-    } else {
+    if let Some(message) = crate::output_schema::violation(&validator, output) {
         Err(EngineError::StepFailed {
             instance_id,
             block_id: block_id.clone(),
-            message: format!(
-                "output failed output_schema validation: {}",
-                errors.join("; ")
-            ),
+            message,
             retryable: false,
             details: None,
         })
+    } else {
+        Ok(())
     }
 }
 
@@ -682,6 +668,118 @@ pub fn calculate_backoff_with_jitter(
     crate::scheduling::delay::apply_percentage_jitter(base, max_backoff, 80, 120)
 }
 
+pub(crate) fn schedule_retry(
+    policy: &orch8_types::sequence::RetryPolicy,
+    attempt: u32,
+    details: Option<&serde_json::Value>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Duration, chrono::DateTime<chrono::Utc>) {
+    use orch8_types::sequence::RetryJitter;
+    use rand::RngExt as _;
+
+    let base = calculate_backoff(
+        attempt,
+        policy.initial_backoff,
+        policy.max_backoff,
+        policy.backoff_multiplier,
+    );
+    let backoff = match policy.jitter {
+        RetryJitter::Legacy => {
+            crate::scheduling::delay::apply_percentage_jitter(base, policy.max_backoff, 80, 120)
+        }
+        RetryJitter::None => base,
+        RetryJitter::Full => {
+            let micros = u64::try_from(base.as_micros()).unwrap_or(u64::MAX);
+            Duration::from_micros(rand::rng().random_range(0..=micros))
+        }
+    };
+    let backoff = honor_retry_after(backoff, details);
+    (backoff, crate::scheduler::clamped_fire_at(now, backoff))
+}
+
+pub(crate) fn workflow_error_name(details: Option<&serde_json::Value>) -> &str {
+    details
+        .into_iter()
+        .flat_map(|details| {
+            ["error_code", "code", "Error", "error"]
+                .into_iter()
+                .filter_map(|key| details.get(key))
+        })
+        .filter_map(serde_json::Value::as_str)
+        .find(|value| !value.is_empty() && value.len() <= 256)
+        .unwrap_or("States.TaskFailed")
+}
+
+pub(crate) type RetryCounts = std::collections::BTreeMap<usize, u32>;
+
+pub(crate) async fn read_retry_counts(
+    storage: &dyn orch8_storage::StorageBackend,
+    instance: orch8_types::ids::InstanceId,
+    block: &orch8_types::ids::BlockId,
+    policy: Option<&orch8_types::sequence::RetryPolicy>,
+) -> Result<RetryCounts, EngineError> {
+    if policy.is_none_or(|policy| policy.rules.is_empty()) {
+        return Ok(RetryCounts::new());
+    }
+    let mut previous = storage.get_block_output(instance, block).await?;
+    let counts = previous
+        .as_mut()
+        .filter(|row| {
+            matches!(
+                row.output_ref.as_deref(),
+                Some("__retry__" | "__in_progress__")
+            )
+        })
+        .and_then(|row| row.output.as_object_mut()?.remove("_retry_counts"));
+    counts.map_or_else(
+        || Ok(RetryCounts::new()),
+        |counts| {
+            serde_json::from_value(counts).map_err(|error| {
+                orch8_types::error::StorageError::Query(format!(
+                    "invalid persisted retry counts: {error}"
+                ))
+                .into()
+            })
+        },
+    )
+}
+
+pub(crate) fn choose_retry(
+    policy: &orch8_types::sequence::RetryPolicy,
+    attempt: u32,
+    message: &str,
+    details: Option<&serde_json::Value>,
+    context: &orch8_types::context::ExecutionContext,
+    now: chrono::DateTime<chrono::Utc>,
+    counts: &mut RetryCounts,
+) -> Option<(Duration, chrono::DateTime<chrono::Utc>)> {
+    let (selected, rule, retries) = if policy.rules.is_empty() {
+        (policy, None, attempt)
+    } else {
+        let (index, selected) = policy.matching_rule(workflow_error_name(details))?;
+        (
+            selected,
+            Some(index),
+            counts.get(&index).copied().unwrap_or(0),
+        )
+    };
+    if retries >= selected.max_attempts
+        || !should_retry(
+            selected,
+            message,
+            details,
+            context,
+            &serde_json::Value::Null,
+        )
+    {
+        return None;
+    }
+    if let Some(index) = rule {
+        counts.insert(index, retries + 1);
+    }
+    Some(schedule_retry(selected, retries, details, now))
+}
+
 /// Floor a retry back-off at the `Retry-After` hint a handler put into its
 /// error details ([`crate::outbound::RETRY_AFTER_MS_KEY`], already capped at
 /// [`crate::outbound::MAX_RETRY_AFTER`]), so a rate-limited step does not
@@ -694,6 +792,72 @@ pub fn honor_retry_after(backoff: Duration, details: Option<&serde_json::Value>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordered_retry_budgets_are_independent_and_first_match_is_final() {
+        use orch8_types::sequence::{NamedRetryRule, RetryJitter};
+        let rule = |errors: &[&str], max_attempts, seconds| {
+            let mut retry = base_retry();
+            retry.max_attempts = max_attempts;
+            retry.initial_backoff = Duration::from_secs(seconds);
+            retry.max_backoff = Duration::from_secs(30);
+            retry.backoff_multiplier = 2.0;
+            retry.jitter = RetryJitter::None;
+            NamedRetryRule {
+                error_equals: errors.iter().map(|error| (*error).into()).collect(),
+                retry,
+            }
+        };
+        let mut policy = base_retry();
+        policy.rules = vec![
+            rule(&["A"], 1, 1),
+            rule(&["B", "A"], 2, 4),
+            rule(&["States.ALL"], 5, 9),
+        ];
+        let mut counts = RetryCounts::new();
+        let now = chrono::Utc::now();
+        let context = orch8_types::context::ExecutionContext::default();
+        let mut retry = |code| {
+            choose_retry(
+                &policy,
+                20,
+                "failed",
+                Some(&serde_json::json!({"error_code":code})),
+                &context,
+                now,
+                &mut counts,
+            )
+            .map(|(delay, _)| delay.as_secs())
+        };
+        assert_eq!(retry("A"), Some(1));
+        assert_eq!(retry("B"), Some(4));
+        assert_eq!(retry("B"), Some(8));
+        assert_eq!(retry("A"), None);
+        assert_eq!(retry("B"), None);
+        assert_eq!(retry("C"), Some(9));
+        assert_eq!(retry("States.Runtime"), None);
+        assert_eq!(counts.into_values().collect::<Vec<_>>(), [1, 2, 1]);
+    }
+
+    #[test]
+    fn full_retry_jitter_samples_within_the_exponential_cap() {
+        use orch8_types::sequence::RetryJitter;
+        let mut retry = base_retry();
+        retry.initial_backoff = Duration::from_secs(2);
+        retry.max_backoff = Duration::from_secs(3);
+        retry.jitter = RetryJitter::Full;
+        let now = chrono::Utc::now();
+        for _ in 0..100 {
+            let (delay, deadline) = schedule_retry(&retry, 2, None, now);
+            assert!(delay <= Duration::from_secs(3));
+            assert_eq!(deadline, now + chrono::Duration::from_std(delay).unwrap());
+        }
+        retry.jitter = RetryJitter::None;
+        assert_eq!(
+            schedule_retry(&retry, 2, None, now).0,
+            Duration::from_secs(3)
+        );
+    }
 
     #[tokio::test]
     async fn externalized_output_history_preserves_each_execution_payload() {
@@ -1169,6 +1333,8 @@ mod tests {
     fn base_retry() -> orch8_types::sequence::RetryPolicy {
         orch8_types::sequence::RetryPolicy {
             max_attempts: 5,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(10),
             backoff_multiplier: 2.0,

@@ -52,6 +52,7 @@ fn resolution(task: &WorkerTask, action: WorkerTaskResolutionAction) -> WorkerTa
         holder_worker_id: None,
         event: WorkerAttemptEventKind::TimedOut,
         effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
+        error_code: None,
         reason: "identity regression".into(),
         retryable: true,
         action,
@@ -85,7 +86,7 @@ orch8_storage::backend_test!(async fn resolution_rejects_foreign_retry_without_d
 orch8_storage::backend_test!(async fn resolution_rejects_foreign_node_and_accepts_own_node(b) {
     let (task,node) = fixture(b.storage.as_ref()).await;
     let (_,foreign) = fixture(b.storage.as_ref()).await;
-    let action=|id| WorkerTaskResolutionAction::FailNode {node_id:Some(id),fire_at:Utc::now()};
+    let action=|id| WorkerTaskResolutionAction::FailNode { failure_output: None, node_id:Some(id),fire_at:Utc::now()};
     assert!(!b.storage.resolve_worker_task(&resolution(&task,action(foreign.id))).await.unwrap());
     assert_eq!(b.storage.get_execution_tree(foreign.instance_id).await.unwrap()[0].state,NodeState::Running);
     let mut other_block=node.clone(); other_block.id=ExecutionNodeId::new(); other_block.block_id=BlockId::new("other");

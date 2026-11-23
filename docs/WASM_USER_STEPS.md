@@ -50,11 +50,9 @@ sequence step  { "handler": "wasm://<name>" }  ──▶ engine loads, validates
    must then resolve inside that directory after symlinks and `..` are
    resolved, so a registration can't point at `/etc/passwd` or at another
    tenant's directory.
-4. **Register with a namespaced name.** Plugin names are unique across the
-   **whole engine**, not per tenant (the `plugins.name` primary key). Use a name
-   like `t-<tenant>-u-<user>-<slug>`. Creating a name another tenant already
-   uses fails with a conflict. Lookup at run time is tenant-scoped: an
-   instance only resolves plugins registered to its own tenant.
+4. **Register an alias.** Each tenant owns its own alias namespace. An
+   instance resolves an enabled alias in its tenant, then falls back to an
+   alias shared across tenants when the tenant has no registration of its own.
 
    ```bash
    curl -s -X POST "$ORCH8_URL/api/v1/plugins" \
@@ -65,10 +63,32 @@ sequence step  { "handler": "wasm://<name>" }  ──▶ engine loads, validates
 
 5. **Reference it** from a step as `"handler": "wasm://t-acme-u-42-score"`. To
    replace a module, write a new content-addressed file and `PATCH` the
-   plugin's `source`. The engine's module cache is keyed by canonical path and
-   file size/mtime, so the next invocation compiles the new file.
+   plugin's `source`. The engine tracks canonical paths and file size/mtime,
+   then looks up compiled code by content digest. Concurrent loads of
+   identical files share one compilation, and later loads reuse the result
+   while it is cached.
 6. **Disable or delete** a module with `PATCH {"enabled": false}` or `DELETE`.
    Steps that reference a disabled or missing plugin fail.
+
+## Shared artifact storage
+
+Configure the same artifact backend on the API server and all executors.
+Upload binary WASM with an authenticated tenant header and its lowercase
+SHA-256 address.
+
+```bash
+digest="$(sha256sum score.wasm | cut -d ' ' -f 1)"
+curl --fail -X PUT "$ORCH8_URL/api/v1/plugins/modules/$digest" \
+  -H "x-api-key: $OPERATOR_KEY" -H "x-tenant-id: acme" \
+  -H "content-type: application/wasm" --data-binary @score.wasm
+```
+
+Use the returned `wasm-artifact:sha256:<digest>` as the alias's `source`.
+Executors fetch from the alias owner's artifact namespace and verify size
+and digest before compilation. A new executor does not need a local plugin
+directory. The artifact upload limit is 16 MiB. A smaller executor module
+limit still applies. Configure encryption on the artifact backend for
+bytecode stored in that backend.
 
 ## Limits and defaults
 
@@ -86,6 +106,17 @@ default with a warning, so a typo can never switch a limit off.
 | `ORCH8_WASM_MAX_MODULE_BYTES` | `33554432` (32 MiB) | Module file size, checked before the file is read or compiled                                                                                                                      | Permanent `failed to load module` (no path or contents are echoed)                                                                              |
 | `ORCH8_WASM_MAX_OUTPUT_BYTES` | `4194304` (4 MiB)   | Size of the returned output, checked before it is parsed                                                                                                                           | Permanent `output of N bytes exceeds the limit`                                                                                                 |
 | `ORCH8_WASM_PLUGIN_DIR`       | unset               | Directory that every module `source` must resolve inside                                                                                                                           | Permanent `failed to load module`                                                                                                               |
+| `ORCH8_WASM_COMPILE_CONCURRENCY` | `2`              | Concurrent cold compilations, from 1 to 32 | New modules wait for a compiler slot |
+| `ORCH8_WASM_COMPILE_QUEUE` | `16`                    | Waiting cold compilations, from 0 to 128 | Retryable `compilation queue is busy` |
+| `ORCH8_WASM_COMPILE_QUEUE_MS` | `250`                | Maximum compiler queue wait in milliseconds, from 1 to 5000 | Retryable `compilation queue is busy` |
+
+Set `ORCH8_WASM_TENANT_LIMITS_JSON` to a JSON object keyed by tenant ID to
+apply tighter fuel, memory, or output ceilings. For example,
+`{"north":{"fuel":2000000,"max_memory_bytes":16777216,"max_output_bytes":262144}}`.
+Each provided value must be a positive integer. The executor takes the lower
+of the tenant and process ceiling for each invocation. Unconfigured tenants
+use the process ceilings. Malformed policy configuration rejects plugin
+execution until the executor restarts with valid configuration.
 
 Host access is not a knob. The linker is empty, and a module that declares
 **any** import is refused before instantiation, so a start function never runs.
@@ -176,14 +207,18 @@ They do not have an Orch8 API key.
   separate process or machine.
 - **Compilation cost DoS.** Modules are compiled with Cranelift on **first
   use** inside the executor, and compilation isn't metered by fuel or the
-  wall-clock limit. A module crafted to be expensive to compile can use
+  wall-clock limit. Cold modules share a separate bounded compiler queue. A
+  cached module uses no compiler slot. A module that takes a long time to compile can use
   seconds of CPU and hundreds of MiB of RAM per compile. Mitigations: a small
   `ORCH8_WASM_MAX_MODULE_BYTES`, compiling at upload time on a separate box
   (`validate_module_bytes` compiles), and rate-limiting uploads per user.
-- **Cache thrash.** The compiled-module cache holds up to 256 modules and is
-  cleared when full. A tenant who invokes many distinct modules forces
-  recompilation for everyone on that node. Limit modules per tenant in your
-  backend.
+- **Cache churn.** The compiled-module cache retains up to 256 modules after
+  maintenance and evicts individual least-recently-used entries. Set
+  `ORCH8_WASM_TENANT_CACHE_SLOTS_JSON` on each executor to reserve entries for
+  particular tenants, for example `{"north":32,"south":16}`. Each reservation
+  retains only that tenant's least-recently-used working set. The reservations
+  and the shared cache fit within 256 entries, with at least one slot left
+  shared. Tenants without a reservation use the shared cache.
 - **Concurrency exhaustion.** Each invocation occupies a Tokio blocking thread
   for up to `ORCH8_WASM_TIMEOUT_MS`. Many concurrent hostile invocations can
   crowd out other blocking work on the node. Bound it with the engine's
@@ -243,3 +278,49 @@ wasm_plugin`):
 | `module_file_beyond_size_cap_is_not_loaded`                                                    | The module size cap is enforced at load and in the validator                |
 | `validator_accepts_abi_conformant_module_and_rejects_shape_errors`                             | Upload validation of the ABI and memory shape                               |
 | `limits_from_env_use_defaults_and_reject_zero_or_garbage`                                      | Configuration can't disable a limit by accident                             |
+# Plugin alias scope
+
+A plugin alias belongs to one tenant. Two tenants may register the same name
+with different sources. A tenant's alias takes precedence over a shared alias
+with the same name. Deleting or updating an alias affects only its owner.
+
+Upgrade all processes that read the plugin registry before creating duplicate
+aliases on a shared PostgreSQL database. Rolling back the database migration
+requires resolving duplicate names first.
+
+
+## Module pins at publication
+
+When publishing a sequence, the server resolves enabled artifact-backed
+WASM aliases to their verified SHA-256 addresses. The revision stores the
+address as `wasm://wasm-artifact:sha256:<digest>` and uses the publishing
+tenant's artifact namespace. Publishing after an alias update selects the
+new digest, while existing revisions continue reading their original
+module. Node-local path registrations still resolve on the executor.
+## Release prewarming
+
+On each designated native executor, set `ORCH8_WASM_PREWARM_REVISIONS`
+to the comma-separated UUIDs of the candidate sequence revisions. The
+executor resolves and verifies their pinned artifacts, checks the module
+ABI and tenant memory limit, and compiles the modules into its local cache.
+It renews candidate readiness for a short window while these checks pass.
+
+Send `ready_executor_ids` with the canary or promotion request to require
+current acknowledgements from those cluster nodes. The API returns a conflict
+until every named node has prepared the exact candidate revision. A draining node,
+expired acknowledgement, or acknowledgement for a different revision
+fails the check. Local schedulers also check pins before advancing a run.
+
+## Shared artifact collection
+
+Post to `/api/v1/plugins/modules/gc` for a tenant to list unreferenced
+shared module digests. The default grace period is one day. Set
+`grace_seconds` and `limit` to adjust the age threshold and batch size,
+or set `apply: true` to record when an unreferenced module was first observed
+and remove modules that have remained unreferenced through the grace period.
+
+The collector preserves modules referenced by installed revisions,
+plugin aliases and retained runs with injected blocks. This keeps old
+digests available while their revisions remain installed. A short
+database write fence prevents new references from racing retirement.
+Re-upload the same digest before reintroducing a retired reference.

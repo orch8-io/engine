@@ -13,6 +13,7 @@ mod effect_attempt;
 pub mod effect_resolution;
 pub mod local_migration;
 pub mod worker_admission;
+pub mod worker_callback;
 pub mod worker_claim;
 pub mod worker_inventory;
 pub mod worker_invocation;
@@ -102,7 +103,10 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 147;
+pub const STORAGE_SCHEMA_VERSION: u32 = 159;
+
+/// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
+const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
 
 /// Most `OAuth2` credentials one refresh pass lists (healthy, least-failed
 /// first), so a backlog of dead credentials cannot starve the rest.
@@ -506,6 +510,28 @@ pub trait InstanceStore: Send + Sync + 'static {
         snapshot: &crate::restore::InstanceSnapshot,
     ) -> Result<bool, StorageError>;
 
+    /// Restore an instance, checkpoint history, signal inbox, and KV state in one transaction.
+    async fn restore_instance_snapshot_with_history(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+        history: &crate::restore::InstanceHistory,
+    ) -> Result<bool, StorageError> {
+        if history.is_empty() {
+            return self.restore_instance_snapshot(snapshot).await;
+        }
+        Err(StorageError::Unsupported(
+            "atomic instance history restore".into(),
+        ))
+    }
+
+    /// Identity of the migration that imported this instance as read-only history.
+    async fn read_only_history_migration(
+        &self,
+        _instance: InstanceId,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Ok(None)
+    }
+
     /// Atomically enforce a tenant active-instance ceiling and insert one row.
     /// Production backends override this with a transaction/tenant lock.
     async fn create_instance_admitted(
@@ -587,6 +613,7 @@ pub trait InstanceStore: Send + Sync + 'static {
         threshold_bytes: u32,
     ) -> Result<(), StorageError> {
         let mut inst_clone = instance.clone();
+        crate::externalizing::escape_literals(&mut inst_clone.context.data);
         let refs = crate::externalizing::externalize_fields(
             &mut inst_clone.context.data,
             &instance.id.into_uuid().to_string(),
@@ -613,6 +640,7 @@ pub trait InstanceStore: Send + Sync + 'static {
         let mut clones: Vec<TaskInstance> = Vec::with_capacity(instances.len());
         for inst in instances {
             let mut c = inst.clone();
+            crate::externalizing::escape_literals(&mut c.context.data);
             let refs = crate::externalizing::externalize_fields(
                 &mut c.context.data,
                 &inst.id.into_uuid().to_string(),
@@ -624,6 +652,57 @@ pub trait InstanceStore: Send + Sync + 'static {
             clones.push(c);
         }
         self.create_instances_batch(&clones).await
+    }
+
+    /// Atomically insert instances and their already-encoded payloads.
+    async fn create_prepared_instances(
+        &self,
+        instances: &[crate::externalizing::PreparedInstance],
+    ) -> Result<u64, StorageError> {
+        let _ = instances;
+        Err(StorageError::Unsupported(
+            "atomic prepared instance writes".into(),
+        ))
+    }
+
+    /// Atomically replace a context and write its already-encoded payloads.
+    async fn update_prepared_context(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        payloads: &[(String, serde_json::Value)],
+    ) -> Result<(), StorageError> {
+        if payloads.is_empty() {
+            return self.update_instance_context(id, context).await;
+        }
+        Err(StorageError::Unsupported(
+            "atomic prepared context writes".into(),
+        ))
+    }
+
+    /// Publish a prepared context and its new payloads only if the context
+    /// revision still matches, and optionally only while a scheduler claim is held.
+    async fn update_prepared_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        payloads: &[crate::externalizing::ExternalizedRef],
+        expected_updated_at: DateTime<Utc>,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        if !payloads.is_empty() {
+            return Err(StorageError::Unsupported(
+                "atomic prepared context writes".into(),
+            ));
+        }
+        if let Some(token) = claim_token {
+            return Ok(self
+                .update_instance_context_cas_claimed(id, context, expected_updated_at, token)
+                .await?
+                .unwrap_or(false));
+        }
+        self.update_instance_context_cas(id, context, expected_updated_at)
+            .await
     }
 
     /// Read a target only when a durable caller in `tenant` may coordinate
@@ -1368,6 +1447,19 @@ pub trait ExecutionTreeStore: Send + Sync + 'static {
         instance_id: InstanceId,
     ) -> Result<Vec<ExecutionNode>, StorageError>;
 
+    /// Enumerate a bounded page of execution nodes in immutable ID order.
+    async fn get_execution_tree_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<ExecutionNodeId>,
+        limit: u32,
+    ) -> Result<Vec<ExecutionNode>, StorageError> {
+        let _ = (instance_id, after, limit);
+        Err(StorageError::Unsupported(
+            "execution tree pagination".into(),
+        ))
+    }
+
     async fn update_node_state(
         &self,
         node_id: ExecutionNodeId,
@@ -1452,6 +1544,20 @@ pub trait OutputStore: Send + Sync + 'static {
         instance_id: InstanceId,
         block_id: &BlockId,
     ) -> Result<Option<BlockOutput>, StorageError>;
+
+    /// Latest substantive output for one attempt in the supplied tenant.
+    /// Missing instances, foreign owners, and missing attempts return `None`.
+    async fn get_scoped_block_output_attempt(
+        &self,
+        _tenant: &TenantId,
+        _instance_id: InstanceId,
+        _block_id: &BlockId,
+        _attempt: u16,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        Err(StorageError::Unsupported(
+            "tenant-scoped exact output lookup".into(),
+        ))
+    }
 
     /// Batch-fetch the most recent `BlockOutput` for multiple
     /// `(instance_id, block_id)` pairs.
@@ -1812,6 +1918,16 @@ pub struct EventMatch {
 
 #[async_trait]
 pub trait SignalStore: Send + Sync + 'static {
+    /// Page all signals, including consumed signals, by stable signal ID.
+    async fn list_signal_history_page(
+        &self,
+        _instance: InstanceId,
+        _after: Option<Uuid>,
+        _limit: u32,
+    ) -> Result<Vec<Signal>, StorageError> {
+        Err(StorageError::Unsupported("signal inbox history".into()))
+    }
+
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError>;
 
     /// Atomically enqueue a signal, but only if the target instance exists and
@@ -2080,6 +2196,16 @@ pub trait WorkerStore: Send + Sync + 'static {
         claim: &WorkerClaim,
     ) -> Result<Option<worker_claim::WorkerIssuedClaim>, StorageError>;
 
+    /// Resolve a live callback token, scoped to the caller's authenticated tenant.
+    async fn get_worker_callback(
+        &self,
+        tenant: Option<&TenantId>,
+        token: &str,
+    ) -> Result<Option<worker_callback::WorkerCallbackBinding>, StorageError> {
+        let _ = (tenant, token);
+        Err(StorageError::Unsupported("worker callbacks".into()))
+    }
+
     async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
 
     /// Capture a consistent source claim, owner and activation before asynchronous
@@ -2121,6 +2247,20 @@ pub trait WorkerStore: Send + Sync + 'static {
     }
 
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
+
+    /// Page logical-backup records from a consistent storage snapshot.
+    /// Includes stored payloads and dispatch evidence, without issued claims.
+    async fn list_worker_task_archive_page(
+        &self,
+        instance: &TaskInstance,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<crate::restore::WorkerTaskArchive>, StorageError> {
+        let _ = (instance, after, limit);
+        Err(StorageError::Unsupported(
+            "logical worker task backup".into(),
+        ))
+    }
 
     /// Immutable dispatch identity, independently scoped and retained after hot GC.
     async fn get_worker_dispatch_admission(
@@ -2822,6 +2962,18 @@ pub trait SchedulingStore: Send + Sync + 'static {
 
     async fn create_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
 
+    /// Publish the destination schedule and ownership epoch in one transaction.
+    async fn import_cron_migration(
+        &self,
+        snapshot: &orch8_types::cron::CronMigrationSnapshot,
+        schedule: &CronSchedule,
+        epoch: i64,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (snapshot, schedule, epoch, digest);
+        Err(StorageError::Unsupported("cron migration imports".into()))
+    }
+
     async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError>;
 
     async fn list_cron_schedules(
@@ -2982,13 +3134,9 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn create_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
 
-    /// Fetch a plugin by name, scoped to `tenant_id`. `name` is a globally
-    /// unique primary key, but callers must not be able to fetch another
-    /// tenant's plugin by guessing/knowing its name -- passing `Some` here
-    /// means a forgotten ownership check at the API layer fails closed
-    /// (`None`) instead of leaking cross-tenant. `tenant_id: None` is an
-    /// intentionally unscoped lookup for system contexts not acting on
-    /// behalf of any one tenant -- new callers should reach for `Some`.
+    /// Fetch a tenant's plugin alias, with the shared (empty-tenant) alias
+    /// as fallback. For system callers, `None` selects a shared alias or a
+    /// sole private match and rejects an ambiguous private alias.
     async fn get_plugin(
         &self,
         tenant_id: Option<&TenantId>,
@@ -3003,6 +3151,14 @@ pub trait AdminStore: Send + Sync + 'static {
     async fn update_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
 
     async fn delete_plugin(&self, name: &str) -> Result<(), StorageError>;
+
+    /// Delete one exact tenant alias. An empty owner means the shared alias.
+    async fn delete_plugin_exact(&self, tenant_id: &str, name: &str) -> Result<(), StorageError> {
+        let _ = (tenant_id, name);
+        Err(StorageError::Unsupported(
+            "tenant-qualified plugin deletion".into(),
+        ))
+    }
 
     // === Triggers ===
 
@@ -3342,6 +3498,25 @@ pub trait AdminStore: Send + Sync + 'static {
     /// Update heartbeat timestamp for a node.
     async fn heartbeat_node(&self, node_id: Uuid) -> Result<(), StorageError>;
 
+    /// Publish short-lived readiness for an exact compiled workflow revision.
+    async fn record_wasm_revision_ready(
+        &self,
+        _node: Uuid,
+        _revision: orch8_types::ids::SequenceId,
+        _ready_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Unsupported("WASM revision readiness".into()))
+    }
+
+    /// Return active executor nodes with unexpired readiness for the revision.
+    async fn list_wasm_ready_nodes(
+        &self,
+        _revision: orch8_types::ids::SequenceId,
+        _now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Uuid>, StorageError> {
+        Err(StorageError::Unsupported("WASM revision readiness".into()))
+    }
+
     /// Set the drain flag on a node, triggering coordinated shutdown.
     async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError>;
 
@@ -3598,6 +3773,29 @@ pub trait ResourceStore: Send + Sync + 'static {
     // ticks. Used by `set_state` / `get_state` / `delete_state` built-in
     // handlers and the `state.*` template root variable.
 
+    /// Read persisted instance keys in stable order, including their expiration metadata.
+    async fn list_instance_kv_page(
+        &self,
+        _instance: InstanceId,
+        _after: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<crate::restore::InstanceKvEntry>, StorageError> {
+        Err(StorageError::Unsupported("instance KV history".into()))
+    }
+
+    /// Administrative KV write with an absolute expiration time.
+    async fn set_instance_kv_expiring(
+        &self,
+        _instance: InstanceId,
+        _key: &str,
+        _value: &serde_json::Value,
+        _expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Unsupported(
+            "expiring instance KV state".into(),
+        ))
+    }
+
     async fn set_instance_kv(
         &self,
         instance_id: InstanceId,
@@ -3763,6 +3961,41 @@ pub trait ResourceStore: Send + Sync + 'static {
     async fn get_artifact(&self, _key: &str) -> Result<Option<Vec<u8>>, StorageError> {
         Err(StorageError::Unsupported(
             "artifact storage is not configured".into(),
+        ))
+    }
+
+    async fn put_shared_wasm_module(
+        &self,
+        _tenant: &str,
+        _digest: &orch8_types::plugin::WasmArtifactDigest,
+        _bytes: bytes::Bytes,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::Unsupported(
+            "shared WASM artifact storage".into(),
+        ))
+    }
+
+    async fn get_shared_wasm_module(
+        &self,
+        _tenant: &str,
+        _digest: &orch8_types::plugin::WasmArtifactDigest,
+        _limit: u64,
+    ) -> Result<Option<bytes::Bytes>, StorageError> {
+        Err(StorageError::Unsupported(
+            "shared WASM artifact storage".into(),
+        ))
+    }
+
+    /// List or retire aged shared modules that have no durable reference.
+    async fn collect_unused_wasm_modules(
+        &self,
+        _tenant: &TenantId,
+        _before: chrono::DateTime<chrono::Utc>,
+        _limit: u32,
+        _apply: bool,
+    ) -> Result<Vec<String>, StorageError> {
+        Err(StorageError::Unsupported(
+            "shared WASM module collection".into(),
         ))
     }
 
@@ -4072,6 +4305,18 @@ pub trait ResourceStore: Send + Sync + 'static {
         checkpoint: &orch8_types::checkpoint::Checkpoint,
     ) -> Result<(), StorageError>;
 
+    /// Apply an external checkpoint write only at the instance's current ownership epoch.
+    async fn save_checkpoint_at_epoch(
+        &self,
+        _tenant: &TenantId,
+        _expected_epoch: u64,
+        _checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported(
+            "checkpoint ownership fencing".into(),
+        ))
+    }
+
     /// Get the latest checkpoint for an instance.
     async fn get_latest_checkpoint(
         &self,
@@ -4085,12 +4330,38 @@ pub trait ResourceStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError>;
 
+    /// Page all checkpoints by immutable checkpoint ID for snapshot export.
+    async fn list_checkpoint_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
+        let _ = (instance_id, after, limit);
+        Err(StorageError::Unsupported(
+            "checkpoint history pagination".into(),
+        ))
+    }
+
     /// Delete old checkpoints, keeping only the latest N.
     async fn prune_checkpoints(
         &self,
         instance_id: InstanceId,
         keep: u32,
     ) -> Result<u64, StorageError>;
+
+    /// Returns `None` when the requested epoch has lost write authority.
+    async fn prune_checkpoints_at_epoch(
+        &self,
+        _tenant: &TenantId,
+        _instance_id: InstanceId,
+        _expected_epoch: u64,
+        _keep: u32,
+    ) -> Result<Option<u64>, StorageError> {
+        Err(StorageError::Unsupported(
+            "checkpoint ownership fencing".into(),
+        ))
+    }
 }
 
 // ============================================================================
@@ -4432,6 +4703,30 @@ pub trait ContinuityStore: Send + Sync + 'static {
         next: &ContinuityExecution,
     ) -> Result<bool, StorageError>;
 
+    /// Release a staged migration owner and insert its durable state in one transaction.
+    async fn release_migrated_instance(
+        &self,
+        staged: &ContinuityExecution,
+        state: &orch8_types::migration::MigratedInstanceState,
+    ) -> Result<bool, StorageError> {
+        if !state.is_empty() {
+            return Err(StorageError::Unsupported("migration state import".into()));
+        }
+        let next = ContinuityExecution {
+            state: orch8_types::continuity::OwnershipState::Owned,
+            updated_at: chrono::Utc::now(),
+            ..staged.clone()
+        };
+        self.cas_continuity_owner(
+            &staged.tenant_id,
+            staged.continuity_id,
+            staged.epoch,
+            staged.owner_runtime_id,
+            &next,
+        )
+        .await
+    }
+
     async fn create_handoff(&self, handoff: &ExecutionHandoff) -> Result<(), StorageError>;
 
     async fn get_handoff(
@@ -4707,6 +5002,21 @@ pub trait ContinuityStore: Send + Sync + 'static {
         let _ = (tenant_id, instance_id, block_ids, claim_token);
         Err(StorageError::Unsupported(
             "claimed effect invocation retirement".into(),
+        ))
+    }
+
+    /// Retire active child invocations for a new composite attempt while
+    /// preserving effect history. An unresolved receipt refuses retirement.
+    async fn retire_composite_retry_effects(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[BlockId],
+        claim_token: DateTime<Utc>,
+    ) -> Result<ClaimedRead<Option<EffectReceipt>>, StorageError> {
+        let _ = (tenant_id, instance_id, block_ids, claim_token);
+        Err(StorageError::Unsupported(
+            "effect-preserving composite retry".into(),
         ))
     }
 
@@ -5222,6 +5532,42 @@ pub trait ContinuityStore: Send + Sync + 'static {
         epoch: ExecutionEpoch,
         after_sequence: u64,
     ) -> Result<u64, StorageError>;
+
+    /// Stage immutable, bounded migration bytes until the target verifies the batch.
+    async fn stage_migration_chunk(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+        index: u32,
+        payload: &[u8],
+    ) -> Result<bool, StorageError> {
+        let _ = (tenant, digest, index, payload);
+        Err(StorageError::Unsupported(
+            "chunked migration imports".into(),
+        ))
+    }
+    async fn read_migration_chunk(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+        index: u32,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let _ = (tenant, digest, index);
+        Err(StorageError::Unsupported(
+            "chunked migration imports".into(),
+        ))
+    }
+
+    async fn clear_migration_chunks(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (tenant, digest);
+        Err(StorageError::Unsupported(
+            "chunked migration imports".into(),
+        ))
+    }
 
     async fn save_live_migration(
         &self,

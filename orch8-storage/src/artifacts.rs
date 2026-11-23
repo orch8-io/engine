@@ -23,6 +23,27 @@ use uuid::Uuid;
 
 use orch8_types::artifact::{ArtifactMeta, ArtifactRef};
 use orch8_types::error::StorageError;
+use orch8_types::plugin::{MAX_SHARED_WASM_BYTES, WasmArtifactDigest};
+
+fn module_prefix(tenant: &str) -> Path {
+    Path::from(format!(
+        "_orch8_modules/{}",
+        WasmArtifactDigest::for_bytes(tenant.as_bytes()).as_str(),
+    ))
+}
+
+fn module_key(tenant: &str, digest: &WasmArtifactDigest) -> Path {
+    module_prefix(tenant).join(digest.as_str())
+}
+
+fn verify_module_bytes(bytes: &[u8], digest: &WasmArtifactDigest) -> Result<(), StorageError> {
+    if !bytes.starts_with(b"\0asm") || WasmArtifactDigest::for_bytes(bytes) != *digest {
+        return Err(StorageError::Constraint(
+            "WASM artifact content does not match its address".into(),
+        ));
+    }
+    Ok(())
+}
 
 /// Resolve an optional artifact store, or fail with the canonical permanent
 /// "not configured" error. Shared by the storage backends so the message and
@@ -278,6 +299,119 @@ impl ObjectArtifactStore {
         }
     }
 
+    /// Publish a tenant-owned module at its full digest. Concurrent identical
+    /// uploads converge on the same object.
+    pub async fn put_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &WasmArtifactDigest,
+        bytes: Bytes,
+    ) -> Result<(), StorageError> {
+        if bytes.len() > MAX_SHARED_WASM_BYTES {
+            return Err(StorageError::Constraint(
+                "WASM artifact exceeds the storage size limit".into(),
+            ));
+        }
+        verify_module_bytes(&bytes, digest)?;
+        let result = self
+            .store
+            .put_opts(
+                &module_key(tenant, digest),
+                PutPayload::from_bytes(bytes),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await;
+        match result {
+            Ok(_) => Ok(()),
+            Err(object_store::Error::AlreadyExists { .. }) => {
+                self.get_wasm_module(tenant, digest, MAX_SHARED_WASM_BYTES as u64)
+                    .await?
+                    .ok_or_else(|| {
+                        StorageError::Conflict("WASM artifact disappeared during upload".into())
+                    })?;
+                Ok(())
+            }
+            Err(error) => Err(map_err(error)),
+        }
+    }
+
+    /// Validate size, binary magic and digest on every shared load.
+    pub async fn get_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &WasmArtifactDigest,
+        limit: u64,
+    ) -> Result<Option<Bytes>, StorageError> {
+        let limit = limit.min(MAX_SHARED_WASM_BYTES as u64);
+        let result = match self.store.get(&module_key(tenant, digest)).await {
+            Ok(result) => result,
+            Err(object_store::Error::NotFound { .. }) => return Ok(None),
+            Err(error) => return Err(map_err(error)),
+        };
+        if result.meta.size > limit {
+            return Err(StorageError::Constraint(
+                "WASM artifact exceeds the module size limit".into(),
+            ));
+        }
+        let bytes = result.bytes().await.map_err(map_err)?;
+        if bytes.len() as u64 > limit {
+            return Err(StorageError::Constraint(
+                "WASM artifact exceeds the module size limit".into(),
+            ));
+        }
+        verify_module_bytes(&bytes, digest)?;
+        Ok(Some(bytes))
+    }
+
+    pub(crate) async fn old_wasm_modules(
+        &self,
+        tenant: &str,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<WasmArtifactDigest>, StorageError> {
+        let prefix = module_prefix(tenant);
+        let mut objects = self.store.list(Some(&prefix));
+        let mut digests = Vec::new();
+        while let Some(object) = objects.next().await {
+            let object = object.map_err(map_err)?;
+            if object.last_modified <= before
+                && let Some(name) = object.location.filename()
+                && let Ok(digest) = WasmArtifactDigest::parse(name)
+                && module_key(tenant, &digest) == object.location
+            {
+                digests.push(digest);
+            }
+        }
+        digests.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        Ok(digests)
+    }
+
+    pub(crate) async fn delete_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &WasmArtifactDigest,
+    ) -> Result<(), StorageError> {
+        match self.store.delete(&module_key(tenant, digest)).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(error) => Err(map_err(error)),
+        }
+    }
+
+    pub(crate) async fn wasm_module_is_old(
+        &self,
+        tenant: &str,
+        digest: &WasmArtifactDigest,
+        before: chrono::DateTime<chrono::Utc>,
+    ) -> Result<bool, StorageError> {
+        match self.store.head(&module_key(tenant, digest)).await {
+            Ok(meta) => Ok(meta.last_modified <= before),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(map_err(error)),
+        }
+    }
+
     /// Delete an artifact by key. Missing keys are treated as success.
     ///
     /// # Errors
@@ -311,6 +445,79 @@ impl ObjectArtifactStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn wasm_collection_inventory_is_tenant_scoped_and_checks_age() {
+        let store = ObjectArtifactStore::memory();
+        let first = Bytes::from_static(b"\0asm\x01\x00\x00\x00");
+        let second = Bytes::from_static(b"\0asm\x01\x00\x00\x00\x00\x01\x00");
+        let owned = WasmArtifactDigest::for_bytes(&first);
+        let other = WasmArtifactDigest::for_bytes(&second);
+        store.put_wasm_module("owner", &owned, first).await.unwrap();
+        store
+            .put_wasm_module("other", &other, second)
+            .await
+            .unwrap();
+        let now = chrono::Utc::now();
+        assert!(
+            store
+                .old_wasm_modules("owner", now - chrono::Duration::hours(1))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .old_wasm_modules("owner", now + chrono::Duration::hours(1))
+                .await
+                .unwrap(),
+            vec![owned]
+        );
+    }
+
+    #[tokio::test]
+    async fn module_addresses_are_tenant_scoped_and_reject_corruption() {
+        let store = ObjectArtifactStore::memory();
+        let module = Bytes::from_static(b"\0asm\x01\x00\x00\x00");
+        let digest = WasmArtifactDigest::for_bytes(&module);
+        store
+            .put_wasm_module("tenant-a", &digest, module.clone())
+            .await
+            .unwrap();
+        store
+            .put_wasm_module("tenant-a", &digest, module.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_wasm_module("tenant-a", &digest, 64)
+                .await
+                .unwrap(),
+            Some(module)
+        );
+        assert!(
+            store
+                .get_wasm_module("tenant-b", &digest, 64)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.get_wasm_module("tenant-a", &digest, 4).await.is_err());
+        store
+            .store
+            .put(
+                &module_key("tenant-a", &digest),
+                PutPayload::from_bytes(Bytes::from_static(b"\0asm\x00\x00\x00\x00")),
+            )
+            .await
+            .unwrap();
+        assert!(
+            store
+                .get_wasm_module("tenant-a", &digest, 64)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn backend_error_mapping_preserves_retryability() {

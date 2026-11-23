@@ -21,6 +21,13 @@ use uuid::Uuid;
 
 use crate::StorageBackend;
 
+mod atomic_restore;
+mod effect_ledger;
+mod worker_lease;
+pub use atomic_restore::{ATOMIC_RESTORE_OUTPUT_FAULT, run_atomic_restore_conformance};
+pub use effect_ledger::run_effect_ledger_conformance;
+pub use worker_lease::run_worker_lease_conformance;
+
 /// Successful core conformance evidence and the durable rows it created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ConformanceReport {

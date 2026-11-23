@@ -392,6 +392,21 @@ val window = engine.runWorkerWindow(25.seconds)
 engine.unregisterNode() // advertise draining
 ```
 
+## Signing continuity capsules
+
+Call `engine.exportContinuityCapsule` with a paused or waiting run, the
+destination runtime ID, a base64-encoded 32-byte transfer key, an expiration
+in seconds, and your application's `Orch8CapsuleSigner`. The signer exposes a
+key ID and the raw Ed25519 public key as base64. Its callback signs the ASCII
+hexadecimal digest and returns a base64 Ed25519 signature. Keep the private key
+in the application's signing implementation.
+
+Configure the receiving engine's `rootPublicKey` with the signer's public key.
+Pass the result's `capsuleJson` and `payloadBase64` plus the transfer key to
+`importContinuityCapsule`. Use `activateContinuityCapsule` to release the
+verified import after ownership has transferred. Export from an iOS JSON
+bridge requires the optional capsule-signing interface.
+
 ## Delegating from a phone-local workflow (engine release after 0.7.1)
 
 A step of a workflow running on the device's own engine whose `$runtime`

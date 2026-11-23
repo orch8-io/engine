@@ -323,3 +323,29 @@ Minimum viable:
 - [Configuration](CONFIGURATION.md) — every env var and TOML field
 - [Architecture](ARCHITECTURE.md) — why `SKIP LOCKED` makes multi-replica safe
 - [Webhooks](WEBHOOKS.md) — terminal-state event wiring
+
+## PostgreSQL release qualification
+
+The release workflow tests the candidate binaries against the previous stable
+release on a disposable PostgreSQL database. It upgrades the schema while
+the previous server is live, checks cross-version reads, and requires the
+candidate to finish an outstanding worker task under a fresh lease. The
+superseded lease must fail completion. The fixture also restarts the
+previous server against the upgraded schema. A failing qualification blocks
+image publication.
+
+Before a rolling schema upgrade, roll the previous fleet's connections onto
+a PostgreSQL URL with `statement-cache-capacity=0`, keeping its existing URL
+settings. This lets the previous SQLx pool prepare fresh statements as table
+row shapes change. The release fixture applies this setting to the previous
+server and verifies that a worker can complete an effect under the lease it
+still owns after migration.
+
+Legacy tasks can have an effect receipt without a task-to-receipt binding.
+The migration preserves the original claim while its dispatched or unknown
+effect remains unresolved. After the lease expires, the current coordinator
+can resume a flat workflow step if the stored checkpoint, workflow run, and
+original receipt all match. The replacement receives the original checkpoint
+under a new claim epoch. Either server rejects a stale completion, including
+when the worker ID is reused. A legacy task already reset to pending or
+missing that evidence requires reconciliation before it can be dispatched.

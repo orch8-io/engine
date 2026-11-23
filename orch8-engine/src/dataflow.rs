@@ -10,40 +10,18 @@ use orch8_types::sequence::SequenceDefinition;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use thiserror::Error;
 use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum DataflowSeverity {
-    Warning,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct DataflowFinding {
-    pub code: String,
-    pub severity: DataflowSeverity,
-    pub consumer: String,
-    pub reference: String,
-    pub summary: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct DataflowReport {
-    pub findings: Vec<DataflowFinding>,
-    pub references_checked: usize,
-}
+pub use crate::dataflow_analysis::{
+    DataflowFinding, DataflowGenerationError, DataflowReport, DataflowSeverity, DataflowSource,
+    compile,
+};
+pub(crate) use crate::dataflow_analysis::{
+    MISSING_PRODUCER, PRODUCER_RUNS_LATER, SCHEMA_PATH_MISSING,
+};
+use crate::dataflow_analysis::{RenderBudget, block_children, expand_local_refs, is_block_object};
 
 pub const GENERATOR_VERSION: &str = "orch8-dataflow-v2";
-const MAX_SCHEMA_DEPTH: usize = 32;
-const MAX_SCHEMA_NODES: usize = 4_096;
-
-/// Finding codes emitted by this compiler that must force a live-migration
-/// plan into the `Incompatible` disposition.
-pub(crate) const MISSING_PRODUCER: &str = "MISSING_PRODUCER";
-pub(crate) const SCHEMA_PATH_MISSING: &str = "SCHEMA_PATH_MISSING";
-
 /// Single source of truth for the fail-closed classification consumed by
 /// `continuity_advanced::compile_migration_plan`: renaming a code here keeps
 /// the migration gate in sync. `INCOMPATIBLE_COERCION` and the
@@ -52,7 +30,7 @@ pub(crate) const SCHEMA_PATH_MISSING: &str = "SCHEMA_PATH_MISSING";
 pub(crate) fn is_incompatible_code(code: &str) -> bool {
     matches!(
         code,
-        MISSING_PRODUCER | SCHEMA_PATH_MISSING | "INCOMPATIBLE_COERCION"
+        MISSING_PRODUCER | SCHEMA_PATH_MISSING | PRODUCER_RUNS_LATER | "INCOMPATIBLE_COERCION"
     ) || code.starts_with("INCOMPATIBLE:")
 }
 
@@ -68,88 +46,6 @@ pub struct GeneratedDataflowTypes {
     pub swift: String,
     #[serde(default)]
     pub kotlin: String,
-}
-
-#[derive(Debug, Error, Clone, PartialEq, Eq)]
-pub enum DataflowGenerationError {
-    #[error("sequence cannot be serialized for dataflow generation: {0}")]
-    Serialization(String),
-    #[error("schema exceeds the dataflow generation depth limit")]
-    DepthLimit,
-    #[error("schema exceeds the dataflow generation node limit")]
-    NodeLimit,
-}
-
-impl DataflowReport {
-    #[must_use]
-    pub fn is_compatible(&self) -> bool {
-        !self
-            .findings
-            .iter()
-            .any(|finding| finding.severity == DataflowSeverity::Error)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Root {
-    Data,
-    Output(String),
-    State,
-    Config,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct Reference {
-    root: Root,
-    path: Vec<String>,
-    display: String,
-    has_fallback: bool,
-}
-
-/// Compile template and expression references against declared schemas.
-#[must_use]
-pub fn compile(sequence: &SequenceDefinition) -> DataflowReport {
-    let Ok(serialized) = serde_json::to_value(sequence) else {
-        return DataflowReport {
-            findings: vec![DataflowFinding {
-                code: "SEQUENCE_SERIALIZATION_FAILED".into(),
-                severity: DataflowSeverity::Error,
-                consumer: "sequence".into(),
-                reference: String::new(),
-                summary: "sequence could not be normalized for dataflow analysis".into(),
-            }],
-            references_checked: 0,
-        };
-    };
-
-    let mut schemas = BTreeMap::new();
-    let mut consumers = Vec::new();
-    if let Some(blocks) = serialized.get("blocks") {
-        collect_blocks(blocks, &mut schemas, &mut consumers);
-    }
-
-    let mut report = DataflowReport::default();
-    for (consumer, value) in consumers {
-        let references = collect_references(&value);
-        report.references_checked += references.len();
-        for reference in references {
-            validate_reference(
-                &consumer,
-                &reference,
-                sequence.input_schema.as_ref(),
-                &schemas,
-                &mut report.findings,
-            );
-        }
-    }
-    report.findings.sort_by(|left, right| {
-        (&left.consumer, &left.code, &left.reference).cmp(&(
-            &right.consumer,
-            &right.code,
-            &right.reference,
-        ))
-    });
-    report
 }
 
 /// Generate matching TypeScript and Python bindings from one canonical model.
@@ -177,15 +73,31 @@ pub fn generate_types(
         "input": input_schema,
         "outputs": output_schemas,
     });
+    render_bindings(schema, sequence_sha256)
+}
 
+fn render_bindings(
+    schema: Value,
+    sequence_sha256: String,
+) -> Result<GeneratedDataflowTypes, DataflowGenerationError> {
+    let mut budget = RenderBudget::default();
+    let mut resolved = serde_json::json!({
+        "input": expand_local_refs(&schema["input"], &mut budget)?,
+        "outputs": {},
+    });
+    if let Some(outputs) = schema["outputs"].as_object() {
+        for (id, output) in outputs {
+            resolved["outputs"][id] = expand_local_refs(output, &mut budget)?;
+        }
+    }
     let mut ts_budget = RenderBudget::default();
-    let input_ts = render_typescript(&schema["input"], 0, &mut ts_budget)?;
+    let input_ts = render_typescript(&resolved["input"], 0, &mut ts_budget)?;
     let mut typescript = format!(
         "// Generated by {GENERATOR_VERSION}; sequence sha256: {sequence_sha256}. Do not edit.\n\n\
          export type SequenceInput = {input_ts};\n\n\
          export interface StepOutputs {{\n"
     );
-    if let Some(outputs) = schema["outputs"].as_object() {
+    if let Some(outputs) = resolved["outputs"].as_object() {
         let sorted: BTreeMap<_, _> = outputs.iter().collect();
         for (block_id, block_schema) in sorted {
             let rendered = render_typescript(block_schema, 0, &mut ts_budget)?;
@@ -200,9 +112,9 @@ pub fn generate_types(
     typescript.push_str("}\n");
 
     let mut python_context = PythonContext::default();
-    let input_python = render_python(&schema["input"], "SequenceInput", 0, &mut python_context)?;
+    let input_python = render_python(&resolved["input"], "SequenceInput", 0, &mut python_context)?;
     let mut output_fields = BTreeMap::new();
-    if let Some(outputs) = schema["outputs"].as_object() {
+    if let Some(outputs) = resolved["outputs"].as_object() {
         let sorted: BTreeMap<_, _> = outputs.iter().collect();
         for (block_id, block_schema) in sorted {
             let name = format!("{}Output", pascal_case(block_id));
@@ -227,8 +139,8 @@ pub fn generate_types(
     }
     python.push('\n');
 
-    let swift = render_swift_bindings(&schema, &sequence_sha256)?;
-    let kotlin = render_kotlin_bindings(&schema, &sequence_sha256)?;
+    let swift = render_swift_bindings(&resolved, &sequence_sha256)?;
+    let kotlin = render_kotlin_bindings(&resolved, &sequence_sha256)?;
 
     Ok(GeneratedDataflowTypes {
         generator_version: GENERATOR_VERSION.into(),
@@ -254,7 +166,7 @@ fn collect_output_schemas(value: &Value, output: &mut BTreeMap<String, Value>) {
                         .unwrap_or(Value::Bool(true)),
                 );
             }
-            for child in block_children(map) {
+            for (_, child) in block_children(map) {
                 collect_output_schemas(child, output);
             }
         }
@@ -264,24 +176,6 @@ fn collect_output_schemas(value: &Value, output: &mut BTreeMap<String, Value>) {
             }
         }
         _ => {}
-    }
-}
-
-#[derive(Default)]
-struct RenderBudget {
-    nodes: usize,
-}
-
-impl RenderBudget {
-    fn enter(&mut self, depth: usize) -> Result<(), DataflowGenerationError> {
-        if depth > MAX_SCHEMA_DEPTH {
-            return Err(DataflowGenerationError::DepthLimit);
-        }
-        self.nodes = self.nodes.saturating_add(1);
-        if self.nodes > MAX_SCHEMA_NODES {
-            return Err(DataflowGenerationError::NodeLimit);
-        }
-        Ok(())
     }
 }
 
@@ -1167,356 +1061,14 @@ pub(crate) fn hex_sha256(value: &[u8]) -> String {
     output
 }
 
-fn collect_blocks(
-    value: &Value,
-    schemas: &mut BTreeMap<String, Option<Value>>,
-    consumers: &mut Vec<(String, Value)>,
-) {
-    match value {
-        Value::Object(map) => {
-            if is_block_object(map)
-                && let Some(id) = map.get("id").and_then(Value::as_str)
-            {
-                schemas.insert(id.to_owned(), map.get("output_schema").cloned());
-                let mut inspected = serde_json::Map::new();
-                for key in [
-                    "params",
-                    "input",
-                    "when",
-                    "condition",
-                    "collection",
-                    "break_on",
-                ] {
-                    if let Some(candidate) = map.get(key) {
-                        inspected.insert(key.to_owned(), candidate.clone());
-                    }
-                }
-                if let Some(routes) = map.get("routes").and_then(Value::as_array) {
-                    for (index, route) in routes.iter().enumerate() {
-                        if let Some(condition) = route.get("condition") {
-                            inspected.insert(format!("route_condition_{index}"), condition.clone());
-                        }
-                    }
-                }
-                if !inspected.is_empty() {
-                    consumers.push((id.to_owned(), Value::Object(inspected)));
-                }
-            }
-            for child in block_children(map) {
-                collect_blocks(child, schemas, consumers);
-            }
-        }
-        Value::Array(items) => {
-            for child in items {
-                collect_blocks(child, schemas, consumers);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn is_block_object(map: &serde_json::Map<String, Value>) -> bool {
-    matches!(
-        map.get("type").and_then(Value::as_str),
-        Some(
-            "step"
-                | "parallel"
-                | "race"
-                | "loop"
-                | "for_each"
-                | "router"
-                | "try_catch"
-                | "sub_sequence"
-                | "ab_split"
-                // Legacy spelling emitted before v0.7.1.
-                | "a_b_split"
-                | "cancellation_scope"
-                | "saga"
-        )
-    )
-}
-
-fn block_children(map: &serde_json::Map<String, Value>) -> impl Iterator<Item = &Value> {
-    const CHILD_KEYS: &[&str] = &[
-        "branches",
-        "try_block",
-        "catch_block",
-        "finally_block",
-        "body",
-        "routes",
-        "default",
-        "variants",
-        "blocks",
-        "steps",
-        "action",
-        "compensation",
-    ];
-    CHILD_KEYS.iter().filter_map(|key| map.get(*key))
-}
-
-fn collect_references(value: &Value) -> BTreeSet<Reference> {
-    fn walk(value: &Value, output: &mut BTreeSet<Reference>) {
-        match value {
-            Value::String(text) => parse_references(text, output),
-            Value::Array(items) => {
-                for item in items {
-                    walk(item, output);
-                }
-            }
-            Value::Object(map) => {
-                for item in map.values() {
-                    walk(item, output);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut references = BTreeSet::new();
-    walk(value, &mut references);
-    references
-}
-
-fn parse_references(text: &str, output: &mut BTreeSet<Reference>) {
-    for needle in ["outputs.", "data.", "state.", "config."] {
-        let mut remaining = text;
-        while let Some(position) = remaining.find(needle) {
-            // Require a word boundary: a needle glued onto a larger
-            // identifier ("metadata.user", "window.outputs.log") is prose,
-            // not a typed reference.
-            let absolute = text.len() - remaining.len() + position;
-            let glued_to_identifier =
-                text[..absolute]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|character| {
-                        character.is_ascii_alphanumeric() || matches!(character, '_' | '.')
-                    });
-            if glued_to_identifier {
-                remaining = &remaining[position + needle.len()..];
-                continue;
-            }
-            let tail = &remaining[position + needle.len()..];
-            let token: String = tail
-                .chars()
-                .take_while(|character| {
-                    character.is_ascii_alphanumeric()
-                        || matches!(character, '_' | '-' | '.' | '[' | ']')
-                })
-                .collect();
-            let segments: Vec<String> = token
-                .split(|character| ['.', '[', ']'].contains(&character))
-                .filter(|segment| !segment.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
-            if needle == "outputs." {
-                if let Some((producer, path)) = segments.split_first() {
-                    output.insert(Reference {
-                        root: Root::Output(producer.clone()),
-                        path: path.to_vec(),
-                        display: format!("outputs.{token}"),
-                        has_fallback: template_tail_has_fallback(
-                            tail.get(token.len()..).unwrap_or_default(),
-                        ),
-                    });
-                }
-            } else if !segments.is_empty() {
-                let root = match needle {
-                    "data." => Root::Data,
-                    "state." => Root::State,
-                    "config." => Root::Config,
-                    _ => unreachable!("reference needles are exhaustive"),
-                };
-                output.insert(Reference {
-                    root,
-                    path: segments,
-                    display: format!("{needle}{token}"),
-                    has_fallback: template_tail_has_fallback(
-                        tail.get(token.len()..).unwrap_or_default(),
-                    ),
-                });
-            }
-            remaining = tail.get(token.len()..).unwrap_or_default();
-        }
-    }
-}
-
-fn template_tail_has_fallback(tail: &str) -> bool {
-    let expression_tail = tail.split("}}").next().unwrap_or(tail);
-    let bytes = expression_tail.as_bytes();
-    bytes.iter().enumerate().any(|(index, byte)| {
-        *byte == b'|'
-            && bytes.get(index.wrapping_sub(1)) != Some(&b'|')
-            && bytes.get(index + 1) != Some(&b'|')
-    })
-}
-
-fn validate_reference(
-    consumer: &str,
-    reference: &Reference,
-    input_schema: Option<&Value>,
-    output_schemas: &BTreeMap<String, Option<Value>>,
-    findings: &mut Vec<DataflowFinding>,
-) {
-    let schema = match &reference.root {
-        Root::Data => input_schema,
-        Root::State | Root::Config => None,
-        Root::Output(producer) => match output_schemas.get(producer) {
-            None => {
-                findings.push(finding(
-                    MISSING_PRODUCER,
-                    DataflowSeverity::Error,
-                    consumer,
-                    reference,
-                    format!("referenced producer '{producer}' does not exist"),
-                ));
-                return;
-            }
-            Some(schema) => schema.as_ref(),
-        },
-    };
-
-    let Some(schema) = schema else {
-        findings.push(finding(
-            "TYPE_UNKNOWN",
-            DataflowSeverity::Warning,
-            consumer,
-            reference,
-            "reference cannot be proven because its producer has no schema".into(),
-        ));
-        return;
-    };
-
-    match schema_path_status(schema, &reference.path) {
-        SchemaPathStatus::Present | SchemaPathStatus::Optional | SchemaPathStatus::Nullable
-            if reference.has_fallback => {}
-        SchemaPathStatus::Missing => findings.push(finding(
-            SCHEMA_PATH_MISSING,
-            DataflowSeverity::Error,
-            consumer,
-            reference,
-            "declared schema cannot produce the referenced path".into(),
-        )),
-        SchemaPathStatus::Dynamic => findings.push(finding(
-            "TYPE_UNKNOWN",
-            DataflowSeverity::Warning,
-            consumer,
-            reference,
-            "reference traverses a dynamically typed schema path".into(),
-        )),
-        SchemaPathStatus::Optional => findings.push(finding(
-            "VALUE_MAY_BE_ABSENT",
-            DataflowSeverity::Error,
-            consumer,
-            reference,
-            "referenced path is optional and has no explicit fallback".into(),
-        )),
-        SchemaPathStatus::Nullable => findings.push(finding(
-            "VALUE_MAY_BE_NULL",
-            DataflowSeverity::Error,
-            consumer,
-            reference,
-            "referenced path is nullable and has no explicit fallback".into(),
-        )),
-        SchemaPathStatus::Present => {}
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SchemaPathStatus {
-    Present,
-    Missing,
-    Dynamic,
-    Optional,
-    Nullable,
-}
-
-fn schema_path_status(schema: &Value, path: &[String]) -> SchemaPathStatus {
-    let mut current = schema;
-    let mut optional = false;
-    for segment in path {
-        // A segment that names a real property is a property, never an array
-        // index — numeric property names are legal in JSON Schema.
-        let is_property = current
-            .get("properties")
-            .and_then(Value::as_object)
-            .is_some_and(|properties| properties.contains_key(segment));
-        if !is_property && let Ok(index) = segment.parse::<usize>() {
-            let Some(items) = current.get("items") else {
-                return SchemaPathStatus::Missing;
-            };
-            let index = u64::try_from(index).unwrap_or(u64::MAX);
-            optional |= current
-                .get("minItems")
-                .and_then(Value::as_u64)
-                .is_none_or(|minimum| minimum <= index);
-            current = items;
-            continue;
-        }
-        let Some(properties) = current.get("properties").and_then(Value::as_object) else {
-            return if current.get("additionalProperties") == Some(&Value::Bool(false)) {
-                SchemaPathStatus::Missing
-            } else {
-                SchemaPathStatus::Dynamic
-            };
-        };
-        let Some(next) = properties.get(segment) else {
-            return if current.get("additionalProperties") == Some(&Value::Bool(false)) {
-                SchemaPathStatus::Missing
-            } else {
-                SchemaPathStatus::Dynamic
-            };
-        };
-        let required = current
-            .get("required")
-            .and_then(Value::as_array)
-            .is_some_and(|required| required.iter().any(|value| value.as_str() == Some(segment)));
-        optional |= !required;
-        current = next;
-    }
-    if optional {
-        SchemaPathStatus::Optional
-    } else if schema_is_nullable(current) {
-        SchemaPathStatus::Nullable
-    } else {
-        SchemaPathStatus::Present
-    }
-}
-
-fn schema_is_nullable(schema: &Value) -> bool {
-    schema.get("type").is_some_and(|kind| match kind {
-        Value::String(kind) => kind == "null",
-        Value::Array(kinds) => kinds.iter().any(|kind| kind.as_str() == Some("null")),
-        _ => false,
-    }) || ["anyOf", "oneOf"].iter().any(|key| {
-        schema
-            .get(*key)
-            .and_then(Value::as_array)
-            .is_some_and(|variants| variants.iter().any(schema_is_nullable))
-    })
-}
-
-fn finding(
-    code: &str,
-    severity: DataflowSeverity,
-    consumer: &str,
-    reference: &Reference,
-    summary: String,
-) -> DataflowFinding {
-    DataflowFinding {
-        code: code.to_owned(),
-        severity,
-        consumer: consumer.to_owned(),
-        reference: reference.display.clone(),
-        summary,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::dataflow_analysis::{
+        MAX_SCHEMA_DEPTH, MAX_SCHEMA_NODES, SchemaPathStatus, schema_path,
+    };
 
     /// T4 #7: `order-id` and `order_id` both sanitize to `order_id`; the
     /// generated type must not declare the same member twice.
@@ -1591,6 +1143,94 @@ mod tests {
     }
 
     #[test]
+    fn local_schema_refs_are_shared_by_path_analysis_and_binding_emitters() {
+        let schema = json!({
+            "type":"object",
+            "properties":{
+                "billing":{"$ref":"#/$defs/address~1record"},
+                "shipping":{"$ref":"#/$defs/address~1record"}
+            },
+            "required":["billing","shipping"],
+            "additionalProperties":false,
+            "$defs":{
+                "address/record":{
+                    "type":"object",
+                    "properties":{"postal_code":{"$ref":"#/$defs/postal"}},
+                    "required":["postal_code"],
+                    "additionalProperties":false
+                },
+                "postal":{"type":"string"}
+            }
+        });
+        let sequence = sequence(
+            &json!([
+                {"type":"step","id":"billing","handler":"noop","params":{"code":"{{ data.billing.postal_code }}"}},
+                {"type":"step","id":"shipping","handler":"noop","params":{"code":"{{ data.shipping.postal_code }}"}},
+                {"type":"step","id":"bad","handler":"noop","params":{"code":"{{ data.shipping.postalcode }}"}}
+            ]),
+            Some(schema.clone()),
+        );
+        let report = compile(&sequence);
+        assert_eq!(report.references_checked, 3);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, SCHEMA_PATH_MISSING);
+        assert_eq!(report.findings[0].consumer, "bad");
+
+        let generated = generate_types(&sequence).unwrap();
+        assert_eq!(generated.schema["input"], schema);
+        assert_eq!(
+            generated
+                .typescript
+                .matches(r#""postal_code": string"#)
+                .count(),
+            2
+        );
+        assert_eq!(generated.python.matches("Required[str]").count(), 2);
+        assert_eq!(
+            generated
+                .swift
+                .matches("public let postal_code: String")
+                .count(),
+            2
+        );
+        assert_eq!(
+            generated.kotlin.matches("val postal_code: String").count(),
+            2
+        );
+    }
+
+    #[test]
+    fn direct_and_recursive_local_schema_references_are_bounded() {
+        let schema = json!({
+            "$ref": "#/$defs/node",
+            "$defs": {
+                "node": {
+                    "type":"object",
+                    "properties":{"next":{"$ref":"#/$defs/node"},"value":{"type":"string"}},
+                    "required":["next","value"],
+                    "additionalProperties":false
+                },
+                "unused":{"$ref":"#/$defs/unused"}
+            }
+        });
+        let resolved = expand_local_refs(&schema, &mut RenderBudget::default()).unwrap();
+        assert_eq!(resolved["properties"]["next"], Value::Bool(true));
+        assert_eq!(
+            schema_path(&resolved, &["value".into()]).0,
+            SchemaPathStatus::Present
+        );
+        assert_eq!(
+            schema_path(&resolved, &["next".into(), "0".into()]).0,
+            SchemaPathStatus::Dynamic
+        );
+        let direct = json!({"$ref":"#/$defs/self","$defs":{"self":{"$ref":"#/$defs/self"}}});
+        assert_eq!(
+            expand_local_refs(&direct, &mut RenderBudget::default()).unwrap(),
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
     fn incompatible_code_classification_is_shared_with_migration_gate() {
         assert!(is_incompatible_code(MISSING_PRODUCER));
         assert!(is_incompatible_code(SCHEMA_PATH_MISSING));
@@ -1618,6 +1258,40 @@ mod tests {
     }
 
     #[test]
+    fn nullable_intermediate_requires_fallback_for_required_descendant() {
+        let report = compile(&sequence(
+            &json!([
+                {"type":"step","id":"use","handler":"noop","params":{
+                    "raw":"{{ data.address.city }}",
+                    "safe":"{{ data.address.city | default('unknown') }}"
+                }}
+            ]),
+            Some(json!({
+                "type":"object","required":["address"],
+                "properties":{"address":{
+                    "type":["object","null"],"required":["city"],
+                    "properties":{"city":{"type":"string"}}
+                }}
+            })),
+        ));
+        assert_eq!(report.references_checked, 2);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, "VALUE_MAY_BE_NULL");
+    }
+
+    #[test]
+    fn tuple_paths_distinguish_required_optional_and_prohibited_items() {
+        let tuple = json!({
+            "type":"array", "minItems":1,
+            "prefixItems":[{"type":"string"},{"type":"number"}], "items":false,
+        });
+        let status = |index: &str| schema_path(&tuple, &[index.to_owned()]).0;
+        assert_eq!(status("0"), SchemaPathStatus::Present);
+        assert_eq!(status("1"), SchemaPathStatus::Optional);
+        assert_eq!(status("2"), SchemaPathStatus::Missing);
+    }
+
+    #[test]
     fn numeric_property_names_are_properties_not_indices() {
         let report = compile(&sequence(
             &json!([
@@ -1629,6 +1303,47 @@ mod tests {
             None,
         ));
         assert!(report.is_compatible(), "{:?}", report.findings);
+    }
+
+    #[test]
+    fn typed_map_values_keep_key_presence_and_operand_type_separate() {
+        let schema = json!({
+            "type":"object", "required":["labels","weights","records"],
+            "properties":{
+                "labels":{"type":"object","additionalProperties":{"type":"string"}},
+                "weights":{"type":"object","additionalProperties":{"type":"number"},"required":["priority"]},
+                "records":{"type":"object","additionalProperties":{
+                    "type":"object","properties":{"city":{"type":"string"}},
+                    "required":["city"],"additionalProperties":false
+                }}
+            }
+        });
+        let report = compile(&sequence(
+            &json!([
+                {"type":"step","id":"bad","handler":"noop","when":"context.data.labels.invoice * 2 > 7"},
+                {"type":"step","id":"numeric","handler":"noop","when":"data.weights.priority * 2 > 7"},
+                {"type":"step","id":"concat","handler":"noop","when":"data.labels.invoice + ' items' == '4 items'"},
+                {"type":"step","id":"nested","handler":"noop","params":{"city":"{{ data.records.42.city | default(\"unknown\") }}"}},
+                {"type":"step","id":"misspelled","handler":"noop","params":{"city":"{{ data.records.42.cty | default(\"unknown\") }}"}}
+            ]),
+            Some(schema),
+        ));
+        let codes = |consumer| {
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.consumer == consumer)
+                .map(|finding| finding.code.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            codes("bad"),
+            ["NUMERIC_OPERAND_TYPE", "VALUE_MAY_BE_ABSENT"]
+        );
+        assert_eq!(codes("concat"), ["VALUE_MAY_BE_ABSENT"]);
+        assert_eq!(codes("misspelled"), [SCHEMA_PATH_MISSING]);
+        assert!(codes("numeric").is_empty());
+        assert!(codes("nested").is_empty());
     }
 
     #[test]

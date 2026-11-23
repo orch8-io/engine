@@ -1,0 +1,92 @@
+{{- $policy := .Values.networkPolicy }}
+{{- if $policy.enabled }}
+{{- $root := . }}
+{{- $labels := include "orch8.selectorLabels" . | fromYaml }}
+{{- $split := eq .Values.mode "split" }}
+{{- $hybrid := eq .Values.mode "executor" }}
+{{- $roles := list "all-in-one" }}
+{{- if $split }}
+  {{- $roles = list "control" "executor" }}
+{{- else if $hybrid }}
+  {{- $roles = list "executor" }}
+{{- end }}
+{{- if .Values.gateway.enabled }}
+  {{- $roles = append $roles "gateway" }}
+{{- end }}
+{{- if .Values.sqlite.snapshot.enabled }}
+  {{- $roles = append $roles "sqlite-snapshot" }}
+{{- end }}
+{{- $postgres := and (not $hybrid) (eq .Values.storage.backend "postgres") }}
+{{- $databasePeers := $policy.database.peers }}
+{{- if and $postgres .Values.postgresql.enabled }}
+  {{- $databasePeers = list (dict "podSelector" (dict "matchLabels" (dict "app.kubernetes.io/name" "postgresql" "app.kubernetes.io/instance" .Release.Name))) }}
+{{- end }}
+{{- if and $postgres (not $databasePeers) }}
+  {{- fail "networkPolicy.database.peers is required for an external PostgreSQL database." }}
+{{- end }}
+{{- if and $postgres (eq .Values.migrations.mode "job") }}
+  {{- $roles = append $roles "migrate" }}
+{{- end }}
+{{- $http := dict "port" 8080 "protocol" "TCP" }}
+{{- $grpc := dict "port" .Values.service.grpcPort "protocol" "TCP" }}
+{{- range $role := $roles }}
+{{- $custom := get $policy.roles $role | default dict }}
+{{- if and $hybrid (not $custom.extraEgress) }}
+  {{- fail "networkPolicy.roles.executor.extraEgress must allow the hybrid executor's cloud endpoint." }}
+{{- end }}
+{{- if and (eq $role "sqlite-snapshot") (not $custom.extraEgress) }}
+  {{- fail "networkPolicy.roles.sqlite-snapshot.extraEgress must allow the Kubernetes API." }}
+{{- end }}
+{{- $selection := merge (dict "app.kubernetes.io/component" $role) $labels }}
+{{- $ingress := list }}
+{{- $egress := list }}
+{{- if $policy.dns.peers }}
+  {{- $egress = append $egress (dict "to" $policy.dns.peers "ports" (list (dict "port" 53 "protocol" "UDP") (dict "port" 53 "protocol" "TCP"))) }}
+{{- end }}
+{{- if $postgres }}
+  {{- $egress = append $egress (dict "to" $databasePeers "ports" (list (dict "port" $policy.database.port "protocol" "TCP"))) }}
+{{- end }}
+{{- if and $split (has $role (list "control" "executor")) }}
+  {{- $other := ternary "executor" "control" (eq $role "control") }}
+  {{- $peer := dict "podSelector" (dict "matchLabels" (merge (dict "app.kubernetes.io/component" $other) $labels)) }}
+  {{- $incoming := ternary (list $http $grpc) (list $grpc) (eq $role "control") }}
+  {{- $outgoing := ternary (list $grpc) (list $http $grpc) (eq $role "control") }}
+  {{- $ingress = append $ingress (dict "from" (list $peer) "ports" $incoming) }}
+  {{- $egress = append $egress (dict "to" (list $peer) "ports" $outgoing) }}
+{{- end }}
+{{- if $root.Values.gateway.enabled }}
+  {{- if eq $role "gateway" }}
+    {{- $peers := list }}
+    {{- range $engine := $roles }}
+      {{- if has $engine (list "all-in-one" "control" "executor") }}
+        {{- $peers = append $peers (dict "podSelector" (dict "matchLabels" (merge (dict "app.kubernetes.io/component" $engine) $labels))) }}
+      {{- end }}
+    {{- end }}
+    {{- $ingress = append $ingress (dict "from" $peers "ports" (list $grpc)) }}
+  {{- else if has $role (list "all-in-one" "control" "executor") }}
+    {{- $peer := dict "podSelector" (dict "matchLabels" (merge (dict "app.kubernetes.io/component" "gateway") $labels)) }}
+    {{- $egress = append $egress (dict "to" (list $peer) "ports" (list $grpc)) }}
+  {{- end }}
+{{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ printf "%s-net-%s" (include "orch8.fullname" $root | trunc 43 | trimSuffix "-") $role }}
+  labels:
+    {{- include "orch8.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: {{ $role }}
+  {{- if eq $role "migrate" }}
+  annotations:
+    helm.sh/hook: {{ ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" $root.Values.postgresql.enabled }}
+    helm.sh/hook-weight: "-20"
+    helm.sh/hook-delete-policy: before-hook-creation
+  {{- end }}
+spec:
+  podSelector:
+    matchLabels: {{- toYaml $selection | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: {{- toYaml (concat $ingress ($custom.extraIngress | default (list))) | nindent 4 }}
+  egress: {{- toYaml (concat $egress ($custom.extraEgress | default (list))) | nindent 4 }}
+{{- end }}
+{{- end }}

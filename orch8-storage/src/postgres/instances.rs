@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
+use orch8_types::context::ExecutionContext;
 use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
@@ -910,12 +911,21 @@ pub(super) async fn update_context_externalized(
         &id.to_string(),
         threshold_bytes,
     );
-    let ctx_json = super::json_encoding::encode_context(&ctx_clone)?;
+    update_prepared(store, id, &ctx_clone, &refs).await
+}
+
+pub(super) async fn update_prepared(
+    store: &PostgresStorage,
+    id: InstanceId,
+    context: &orch8_types::context::ExecutionContext,
+    payloads: &[(String, serde_json::Value)],
+) -> Result<(), StorageError> {
+    let ctx_json = super::json_encoding::encode_context(context)?;
 
     let mut tx = store.pool.begin().await?;
 
     // Step 1: persist each externalized payload inside the transaction.
-    for (ref_key, payload) in &refs {
+    for (ref_key, payload) in payloads {
         insert_externalized_row(&mut tx, id, ref_key, payload).await?;
     }
 
@@ -930,6 +940,33 @@ pub(super) async fn update_context_externalized(
     Ok(())
 }
 
+pub(super) async fn update_prepared_cas(
+    storage: &PostgresStorage,
+    id: InstanceId,
+    context: &ExecutionContext,
+    payloads: &[crate::externalizing::ExternalizedRef],
+    expected_updated_at: DateTime<Utc>,
+    claim_token: Option<DateTime<Utc>>,
+) -> Result<bool, StorageError> {
+    let mut tx = if let Some(token) = claim_token {
+        let Some(tx) = super::claimed_writes::begin(storage, id, token).await? else {
+            return Ok(false);
+        };
+        tx
+    } else {
+        storage.pool.begin().await?
+    };
+    if !update_context_cas_on(&mut tx, id, context, expected_updated_at).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    for (key, payload) in payloads {
+        insert_externalized_row(&mut tx, id, key, payload).await?;
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
 /// Transactional single-instance create with externalization.
 ///
 /// Any `context.data` field that meets `threshold_bytes` is replaced with
@@ -941,6 +978,7 @@ pub(super) async fn create_externalized(
     threshold_bytes: u32,
 ) -> Result<(), StorageError> {
     let mut inst_clone = instance.clone();
+    crate::externalizing::escape_literals(&mut inst_clone.context.data);
     let refs = crate::externalizing::externalize_fields(
         &mut inst_clone.context.data,
         &instance.id.into_uuid().to_string(),
@@ -981,21 +1019,44 @@ pub(super) async fn create_batch_externalized(
 
     // Materialise the marker-swapped clones + per-instance refs up front so
     // the transaction body is linear and allocation-free mid-flight.
-    let mut prepared: Vec<(TaskInstance, Vec<(String, serde_json::Value)>)> =
-        Vec::with_capacity(instances.len());
-    let mut serialized_contexts: Vec<serde_json::Value> = Vec::with_capacity(instances.len());
-    let mut serialized_budgets: Vec<Option<serde_json::Value>> =
-        Vec::with_capacity(instances.len());
-    for inst in instances {
-        let mut c = inst.clone();
-        let refs = crate::externalizing::externalize_fields(
-            &mut c.context.data,
-            &inst.id.into_uuid().to_string(),
-            threshold_bytes,
+    let prepared: Vec<_> = instances
+        .iter()
+        .cloned()
+        .map(|mut instance| {
+            crate::externalizing::escape_literals(&mut instance.context.data);
+            let payloads = crate::externalizing::externalize_fields(
+                &mut instance.context.data,
+                &instance.id.to_string(),
+                threshold_bytes,
+            );
+            crate::externalizing::PreparedInstance { instance, payloads }
+        })
+        .collect();
+    create_prepared(store, &prepared).await
+}
+
+pub(super) async fn create_prepared(
+    store: &PostgresStorage,
+    prepared: &[crate::externalizing::PreparedInstance],
+) -> Result<u64, StorageError> {
+    if prepared.is_empty() {
+        return Ok(0);
+    }
+
+    let mut serialized_contexts = Vec::with_capacity(prepared.len());
+    let mut serialized_budgets = Vec::with_capacity(prepared.len());
+    for entry in prepared {
+        serialized_contexts.push(super::json_encoding::encode_context(
+            &entry.instance.context,
+        )?);
+        serialized_budgets.push(
+            entry
+                .instance
+                .budget
+                .as_ref()
+                .map(serde_json::to_value)
+                .transpose()?,
         );
-        serialized_contexts.push(super::json_encoding::encode_context(&c.context)?);
-        serialized_budgets.push(c.budget.as_ref().map(serde_json::to_value).transpose()?);
-        prepared.push((c, refs));
     }
 
     let mut tx = store.pool.begin().await?;
@@ -1017,7 +1078,8 @@ pub(super) async fn create_batch_externalized(
                  created_at, updated_at, sub_tenant, claimed_at) ",
         );
         let mut idx = 0usize;
-        qb.push_values(chunk, |mut b, (inst, _)| {
+        qb.push_values(chunk, |mut b, entry| {
+            let inst = &entry.instance;
             let context = &ctx_chunk[idx];
             let budget = &budget_chunk[idx];
             idx += 1;
@@ -1053,9 +1115,9 @@ pub(super) async fn create_batch_externalized(
     }
 
     // Step 2: persist every externalized payload across every instance.
-    for (inst, refs) in &prepared {
-        for (ref_key, payload) in refs {
-            insert_externalized_row(&mut tx, inst.id, ref_key, payload).await?;
+    for entry in prepared {
+        for (ref_key, payload) in &entry.payloads {
+            insert_externalized_row(&mut tx, entry.instance.id, ref_key, payload).await?;
         }
     }
 
@@ -1161,11 +1223,13 @@ pub(super) async fn merge_context_data_on(
     if !context.data.is_object() {
         context.data = serde_json::json!({});
     }
+    let mut value = value.clone();
+    crate::externalizing::escape_literals(&mut value);
     context
         .data
         .as_object_mut()
         .expect("object initialized")
-        .insert(key.to_owned(), value.clone());
+        .insert(key.to_owned(), value);
     sqlx::query("UPDATE task_instances SET context=$2,updated_at=NOW() WHERE id=$1")
         .bind(id.into_uuid())
         .bind(super::json_encoding::encode_context(&context)?)

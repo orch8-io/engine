@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.getAndUpdate
 
 import io.orch8.kmp.BackgroundRunResult
+import io.orch8.kmp.ContinuityExportResult
 import io.orch8.kmp.ContinuityImportResult
 import io.orch8.kmp.DelegateRequest
 import io.orch8.kmp.DelegationOptions
@@ -21,6 +22,7 @@ import io.orch8.kmp.InstanceSummary
 import io.orch8.kmp.NodeCapabilities
 import io.orch8.kmp.NodeConnectivity
 import io.orch8.kmp.NodeRegistration
+import io.orch8.kmp.Orch8CapsuleSigner
 import io.orch8.kmp.Orch8ErrorKind
 import io.orch8.kmp.Orch8Exception
 import io.orch8.kmp.Orch8HandlerException
@@ -34,6 +36,8 @@ import io.orch8.kmp.WorkerStats
 import io.orch8.kmp.WorkerWindowResult
 import io.orch8.kmp.bridge.ORCH8_BRIDGE_PROTOCOL
 import io.orch8.kmp.bridge.Orch8BridgeCallbacks
+import io.orch8.kmp.bridge.Orch8BridgeCapsuleSignature
+import io.orch8.kmp.bridge.Orch8CapsuleSigningBridge
 import io.orch8.kmp.bridge.Orch8JsonBridge
 import io.orch8.kmp.lenientJson
 import kotlinx.serialization.json.JsonArray
@@ -292,6 +296,17 @@ internal object BridgeCodec {
             state = it.str(m, "state"),
         )
     }
+
+    fun continuityExport(v: JsonElement): ContinuityExportResult = v.obj("exportContinuityCapsule").let {
+        val m = "exportContinuityCapsule"
+        ContinuityExportResult(
+            capsuleId = it.str(m, "capsuleId"),
+            continuityId = it.str(m, "continuityId"),
+            sourceEpoch = it.long(m, "sourceEpoch"),
+            capsuleJson = it.str(m, "capsuleJson"),
+            payloadBase64 = it.str(m, "payloadBase64"),
+        )
+    }
 }
 
 /**
@@ -523,6 +538,36 @@ internal class JsonBridgeBackend private constructor(
             put("destinationRuntimeId", destinationRuntimeId)
             put("destinationInstanceId", destinationInstanceId)
         }
+    }
+
+    override fun exportContinuityCapsule(
+        instanceId: String,
+        destinationRuntimeId: String,
+        payloadKeyBase64: String,
+        expiresInSeconds: Int,
+        signer: Orch8CapsuleSigner,
+    ): ContinuityExportResult {
+        if (tokenSources.value.closed) throw Orch8Exception(Orch8ErrorKind.SHUTDOWN, "engine closed")
+        val signingBridge = bridge as? Orch8CapsuleSigningBridge
+            ?: throw Orch8Exception(Orch8ErrorKind.ENGINE, "installed bridge does not support capsule export")
+        val args = buildJsonObject {
+            put("instanceId", instanceId)
+            put("destinationRuntimeId", destinationRuntimeId)
+            put("payloadKeyBase64", payloadKeyBase64)
+            put("expiresInSeconds", expiresInSeconds)
+            put("keyId", signer.keyId)
+            put("publicKeyBase64", signer.publicKeyBase64)
+        }
+        val signature = object : Orch8BridgeCapsuleSignature {
+            override fun sign(digest: String): String = try {
+                BridgeCodec.ok(JsonPrimitive(signer.signManifestSha256(digest)))
+            } catch (_: Exception) {
+                BridgeCodec.error("invalid_input", "capsule signature failed")
+            }
+        }
+        return BridgeCodec.continuityExport(
+            BridgeCodec.unwrap("exportContinuityCapsule", signingBridge.exportCapsule(args.toString(), signature)),
+        )
     }
 
     override fun nodeRuntimeId(): String =

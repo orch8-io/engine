@@ -74,6 +74,32 @@ existing install.
 | `postgresql.enabled=true`                               | Bitnami `postgresql` subchart; URL assembled from its generated password. For evaluation only; Bitnami has changed image distribution terms, so check that the images it references are pullable in your environment. |
 | `storage.backend=sqlite`                                | Single all-in-one replica on a PVC (`sqlite.persistence`). Rendering fails for `mode=split`, more than one replica, autoscaling, or a gateway. No PDB is created for the single pod.                                  |
 
+### SQLite volume snapshots
+
+Enable `sqlite.snapshot.enabled` on the running release and set
+`sqlite.snapshot.name`, `volumeSnapshotClassName`, and `image`. The image
+needs a cluster-compatible `kubectl`, a POSIX shell, and basic shell utilities.
+Give each snapshot a new name. Use the release's dedicated SQLite claim.
+
+The Job sets the Deployment to zero replicas and waits for the controller to
+observe the change and for all pods using the claim to terminate. It creates
+the CSI snapshot, waits for `readyToUse`, then restores one replica. Keep other
+deployment controllers from reconciling the release during the operation.
+With chart network policies enabled, allow Kubernetes API egress through
+`networkPolicy.roles.sqlite-snapshot.extraEgress`.
+
+If the Job is interrupted, recreate it with the same snapshot name to resume.
+If CSI reports an error, the Job leaves the deployment fenced. Resolve or
+remove the failed snapshot before retrying that Job. The deployment
+annotations record the snapshot name, fence generation, and source claim UID.
+A replacement claim with the same name requires operator recovery before the
+deployment can safely resume.
+
+To restore, install a separate SQLite release in the snapshot's namespace
+with `sqlite.persistence.restoreFromSnapshot` set to its name. The chart
+creates a fresh claim using the configured CSI storage class. Supply the
+original encryption key so the recovered engine can read existing data.
+
 ## Migrations (Postgres)
 
 The server does not migrate Postgres by default (`run_migrations` defaults to
@@ -167,3 +193,81 @@ Runs `helm lint --strict` and `helm template` for every `ci/*-values.yaml`
 combinations (SQLite with two replicas, unknown mode, malformed encryption
 key, gateway without TLS, wildcard CORS, ...) are rejected by the template
 guards or `values.schema.json`.
+
+## Gateway API HTTP routing
+
+With the Gateway API CRDs installed, enable `httpRoute` and set
+`httpRoute.parent.name` to an existing Gateway. Set `parent.namespace` for
+a Gateway in another namespace and `parent.sectionName` to select a named
+listener. The listener must allow routes from the release namespace. Use
+`hostnames` to restrict the route to your application's domains. The route
+targets the HTTP Service for the all-in-one or control Deployment.
+[Gateway API HTTPRoute reference](https://gateway-api.sigs.k8s.io/reference/api-types/httproute/)
+
+## Pod placement
+
+Set `control.topologySpreadConstraints` and
+`executor.topologySpreadConstraints` independently. Each constraint takes
+`topologyKey`, `maxSkew`, and `whenUnsatisfiable`. The chart uses the
+Deployment's release and component labels to select the pods counted by
+each constraint. Nodes must carry the requested topology labels. For
+`DoNotSchedule`, set `minDomains` when you need the scheduler to account
+for missing eligible domains. Kubernetes 1.30 and later support this field.
+[Kubernetes topology spread constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/)
+
+## Role network policies
+
+Set `networkPolicy.enabled=true` to isolate each enabled workload. The chart
+allows DNS, the applicable PostgreSQL connection, and traffic between
+workloads in the configured topology. Use the role's `extraIngress` and
+`extraEgress` to allow other clients or dependencies, including ingress or
+Gateway API controllers, Prometheus, outbound workflow endpoints, and cloud
+worker connections. The values take standard Kubernetes network policy rules.
+
+Set `networkPolicy.database.peers` for external PostgreSQL. Kubernetes network
+policies accept IP blocks and namespace/pod selectors for these peers. The
+bundled PostgreSQL selection uses release labels. Override
+`networkPolicy.dns.peers` when DNS uses different labels or NodeLocal DNSCache.
+
+When migrations run as a Helm hook, the migration policy runs first and
+remains available for pre-upgrade use. Helm replaces it on the next migration
+hook. Its selector covers only migration pods from that release.
+
+The networking CI fixture runs a split deployment on a disposable Kind
+cluster with Calico, namespace-wide default deny, and two labeled zones. It
+checks both role placements and tests the same client before and after it
+matches the ingress allowlist. It also queues a workflow with no executors
+running and verifies that the workflow completes when they return.
+## Offline installation bundle
+
+The bundle installs a single Orch8 engine backed by SQLite on a persistent
+volume. It includes the packaged chart, its locked dependencies, the exact
+platform image, checksums, and values that disable registry pulls. Build the
+bundle on a connected host with Helm, Docker, `jq`, and `sha256sum`.
+
+```sh
+bash scripts/build-helm-airgap.sh "ghcr.io/orch8-io/engine@${ENGINE_DIGEST}" \
+  linux/amd64 orch8-airgap.tar.gz
+```
+
+Set `ENGINE_DIGEST` to the published `sha256:…` digest before building.
+
+Transfer the bundle to the offline administration host and unpack it into
+an empty directory. The inventory records the locked chart dependency,
+source manifest digest, verified image configuration ID, local image name,
+and platform. The local image name includes the target platform so amd64 and
+arm64 bundles built from a shared manifest digest use distinct names.
+Verify the checksums and load `image.tar`
+on every eligible node. For a Kind cluster named `offline`, run the following
+from the extracted directory.
+
+```sh
+sha256sum -c SHA256SUMS
+kind load image-archive image.tar --name offline
+helm upgrade --install orch8 ./chart.tgz -f values.json --namespace orch8 \
+  --create-namespace --wait
+```
+
+The included values select SQLite and require a usable Kubernetes storage class.
+The PostgreSQL subchart is included as a locked chart dependency. Its runtime
+images are outside the SQLite offline profile.

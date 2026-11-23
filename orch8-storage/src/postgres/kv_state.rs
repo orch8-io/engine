@@ -1,5 +1,8 @@
+use crate::restore::InstanceKvEntry;
+use chrono::{DateTime, Utc};
 use orch8_types::error::StorageError;
 use orch8_types::ids::InstanceId;
+use sqlx::Row;
 
 use super::PostgresStorage;
 
@@ -104,6 +107,7 @@ impl PostgresStorage {
         let row: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
             "SELECT kv.value FROM task_instances LEFT JOIN instance_kv_state kv
              ON kv.instance_id = task_instances.id AND kv.key = $3
+             AND (kv.expires_at IS NULL OR kv.expires_at > now())
              WHERE task_instances.id = $1 AND task_instances.tenant_id = $2
              AND task_instances.state = 'running' AND task_instances.claimed_at = $4",
         )
@@ -125,7 +129,8 @@ impl PostgresStorage {
         key: &str,
     ) -> Result<Option<serde_json::Value>, StorageError> {
         let row: Option<(serde_json::Value,)> = sqlx::query_as(
-            "SELECT value FROM instance_kv_state WHERE instance_id = $1 AND key = $2",
+            "SELECT value FROM instance_kv_state WHERE instance_id = $1 AND key = $2
+             AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(instance_id.into_uuid())
         .bind(key)
@@ -139,12 +144,14 @@ impl PostgresStorage {
         &self,
         instance_id: InstanceId,
     ) -> Result<std::collections::HashMap<String, serde_json::Value>, StorageError> {
-        let rows: Vec<(String, serde_json::Value)> =
-            sqlx::query_as("SELECT key, value FROM instance_kv_state WHERE instance_id = $1")
-                .bind(instance_id.into_uuid())
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| StorageError::Query(e.to_string()))?;
+        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT key, value FROM instance_kv_state WHERE instance_id = $1
+                               AND (expires_at IS NULL OR expires_at > now())",
+        )
+        .bind(instance_id.into_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| StorageError::Query(e.to_string()))?;
         Ok(rows.into_iter().collect())
     }
 
@@ -204,20 +211,85 @@ impl PostgresStorage {
     }
 }
 
+pub(super) async fn list_history_page(
+    store: &PostgresStorage,
+    instance: InstanceId,
+    after: Option<&str>,
+    limit: u32,
+) -> Result<Vec<InstanceKvEntry>, StorageError> {
+    // A PostgreSQL backup can read a pre-expiry schema in its snapshot.
+    let rows = sqlx::query(
+        "SELECT * FROM instance_kv_state
+         WHERE instance_id = $1 AND key >= COALESCE($2, '') AND key IS DISTINCT FROM $2
+         ORDER BY key LIMIT $3",
+    )
+    .bind(instance.into_uuid())
+    .bind(after)
+    .bind(i64::from(limit))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.iter()
+        .map(|row| {
+            let expires_at = match row.try_get("expires_at") {
+                Ok(value) => value,
+                Err(sqlx::Error::ColumnNotFound(_)) => None,
+                Err(error) => return Err(error.into()),
+            };
+            Ok(InstanceKvEntry {
+                instance_id: instance,
+                key: row.try_get("key")?,
+                value: row.try_get("value")?,
+                updated_at: row.try_get("updated_at")?,
+                expires_at,
+            })
+        })
+        .collect()
+}
+
+pub(super) async fn restore_on(
+    conn: &mut sqlx::PgConnection,
+    entry: &InstanceKvEntry,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(entry.instance_id.into_uuid())
+    .bind(&entry.key)
+    .bind(&entry.value)
+    .bind(entry.updated_at)
+    .bind(entry.expires_at)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 pub(super) async fn set_instance_kv_on(
     conn: &mut sqlx::PgConnection,
     instance_id: InstanceId,
     key: &str,
     value: &serde_json::Value,
 ) -> Result<(), StorageError> {
+    write_instance_kv_on(conn, instance_id, key, value, None).await
+}
+
+pub(super) async fn write_instance_kv_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    key: &str,
+    value: &serde_json::Value,
+    expires_at: Option<DateTime<Utc>>,
+) -> Result<(), StorageError> {
     sqlx::query(
-        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at)
-             VALUES ($1, $2, $3, NOW())
-             ON CONFLICT (instance_id, key) DO UPDATE SET value = $3, updated_at = NOW()",
+        "INSERT INTO instance_kv_state (instance_id, key, value, updated_at, expires_at)
+             VALUES ($1, $2, $3, NOW(), $4)
+             ON CONFLICT (instance_id, key) DO UPDATE
+             SET value = excluded.value, updated_at = excluded.updated_at, expires_at = excluded.expires_at",
     )
     .bind(instance_id.into_uuid())
     .bind(key)
     .bind(value)
+    .bind(expires_at)
     .execute(&mut *conn)
     .await
     .map_err(|e| StorageError::Query(e.to_string()))?;

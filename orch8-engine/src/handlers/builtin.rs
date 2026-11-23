@@ -355,6 +355,7 @@ pub fn register_builtins(registry: &mut HandlerRegistry) {
     registry.register("noop", handle_noop);
     registry.register("log", handle_log);
     registry.register("sleep", handle_sleep);
+    registry.register("asl_wait", handle_noop);
     registry.register("fail", handle_fail);
     registry.register("http_request", handle_http_request);
     registry.register("llm_call", super::llm::handle_llm_call);

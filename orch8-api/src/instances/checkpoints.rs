@@ -18,12 +18,18 @@ use crate::error::ApiError;
 #[derive(Deserialize, ToSchema)]
 pub struct SaveCheckpointRequest {
     pub(crate) checkpoint_data: serde_json::Value,
+    /// Ownership epoch observed by the caller. Defaults to zero for local executions.
+    #[serde(default)]
+    pub(crate) expected_epoch: u64,
 }
 
 #[derive(Deserialize, ToSchema)]
 pub struct PruneCheckpointsRequest {
     /// Number of most recent checkpoints to keep.
     pub(crate) keep: u32,
+    /// Ownership epoch observed by the caller. Defaults to zero for local executions.
+    #[serde(default)]
+    pub(crate) expected_epoch: u64,
 }
 
 #[utoipa::path(post, path = "/instances/{id}/checkpoints", tag = "instances",
@@ -32,6 +38,7 @@ pub struct PruneCheckpointsRequest {
     responses(
         (status = 201, description = "Checkpoint saved", body = serde_json::Value),
         (status = 404, description = "Instance not found"),
+        (status = 409, description = "Checkpoint write lost ownership authority"),
     )
 )]
 pub async fn save_checkpoint(
@@ -62,11 +69,16 @@ pub async fn save_checkpoint(
         created_at: Utc::now(),
     };
 
-    state
+    if !state
         .storage
-        .save_checkpoint(&checkpoint)
+        .save_checkpoint_at_epoch(&instance.tenant_id, req.expected_epoch, &checkpoint)
         .await
-        .map_err(|e| ApiError::from_storage(e, "checkpoint"))?;
+        .map_err(|e| ApiError::from_storage(e, "checkpoint"))?
+    {
+        return Err(ApiError::Conflict(
+            "checkpoint write ownership changed".into(),
+        ));
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -143,7 +155,10 @@ pub async fn get_latest_checkpoint(
 #[utoipa::path(post, path = "/instances/{id}/checkpoints/prune", tag = "instances",
     params(("id" = Uuid, Path, description = "Instance ID")),
     request_body = PruneCheckpointsRequest,
-    responses((status = 200, description = "Pruned checkpoints", body = CountResponse))
+    responses(
+        (status = 200, description = "Pruned checkpoints", body = CountResponse),
+        (status = 409, description = "Checkpoint write lost ownership authority"),
+    )
 )]
 pub async fn prune_checkpoints(
     State(state): State<AppState>,
@@ -166,9 +181,15 @@ pub async fn prune_checkpoints(
 
     let count = state
         .storage
-        .prune_checkpoints(InstanceId::from_uuid(id), req.keep)
+        .prune_checkpoints_at_epoch(
+            &instance.tenant_id,
+            InstanceId::from_uuid(id),
+            req.expected_epoch,
+            req.keep,
+        )
         .await
-        .map_err(|e| ApiError::from_storage(e, "checkpoints"))?;
+        .map_err(|e| ApiError::from_storage(e, "checkpoints"))?
+        .ok_or_else(|| ApiError::Conflict("checkpoint write ownership changed".into()))?;
 
     Ok(Json(CountResponse { count }))
 }

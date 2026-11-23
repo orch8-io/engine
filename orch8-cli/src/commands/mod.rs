@@ -37,6 +37,7 @@ pub mod release;
 pub mod sequence;
 pub mod share;
 pub mod signal;
+pub mod sqlite_schema;
 pub mod support_bundle;
 pub mod templates;
 pub mod test_cmd;

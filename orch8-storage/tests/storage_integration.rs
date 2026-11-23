@@ -46,6 +46,79 @@ async fn store() -> SqliteStorage {
 }
 
 #[tokio::test]
+async fn legacy_plugin_table_upgrades_to_tenant_aliases() {
+    use sqlx::Connection as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("legacy-plugins.db");
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true);
+    let mut legacy = sqlx::SqliteConnection::connect_with(&options)
+        .await
+        .unwrap();
+    sqlx::raw_sql(r"
+        CREATE TABLE plugins (name TEXT PRIMARY KEY, plugin_type TEXT NOT NULL DEFAULT 'wasm',
+            source TEXT NOT NULL, tenant_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+            config TEXT NOT NULL DEFAULT '{}', description TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        INSERT INTO plugins (name, source, tenant_id, description, created_at, updated_at)
+            VALUES ('score', '/old.wasm', 'north', 'kept', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    ").execute(&mut legacy).await.unwrap();
+    legacy.close().await.unwrap();
+
+    let target = path.to_str().unwrap();
+    let storage = SqliteStorage::file_path(target).await.unwrap();
+    let north = TenantId::new("north").unwrap();
+    let south = TenantId::new("south").unwrap();
+    let original = storage
+        .get_plugin(Some(&north), "score")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(original.description.as_deref(), Some("kept"));
+    let mut second = original.clone();
+    second.tenant_id = south.as_str().into();
+    second.source = "/south.wasm".into();
+    storage.create_plugin(&second).await.unwrap();
+    assert!(matches!(
+        storage.get_plugin(None, "score").await,
+        Err(StorageError::Conflict(_))
+    ));
+    let mut shared = original;
+    shared.tenant_id.clear();
+    shared.source = "/shared.wasm".into();
+    storage.create_plugin(&shared).await.unwrap();
+    let listed = storage.list_plugins(Some(&north)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].source, "/old.wasm");
+    storage
+        .delete_plugin_exact(north.as_str(), "score")
+        .await
+        .unwrap();
+    storage.close().await;
+
+    let reopened = SqliteStorage::file_path(target).await.unwrap();
+    assert_eq!(
+        reopened
+            .get_plugin(Some(&north), "score")
+            .await
+            .unwrap()
+            .unwrap()
+            .source,
+        "/shared.wasm"
+    );
+    assert_eq!(
+        reopened
+            .get_plugin(Some(&south), "score")
+            .await
+            .unwrap()
+            .unwrap()
+            .source,
+        "/south.wasm"
+    );
+}
+
+#[tokio::test]
 async fn queue_dispatch_preserve_secret_uses_current_row_atomically() {
     let s = store().await;
     let created_at = Utc::now() - Duration::seconds(10);
@@ -170,6 +243,8 @@ fn distributed_task(
         created_at,
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -499,6 +574,8 @@ async fn worker_task_full_lifecycle() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -600,6 +677,8 @@ async fn constrained_worker_task_is_claimed_only_by_matching_runtime() {
         created_at: now,
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -890,6 +969,8 @@ async fn worker_activity_checkpoint_survives_lease_recovery() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -990,6 +1071,8 @@ async fn worker_task_fail_and_cancel() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1041,6 +1124,8 @@ async fn worker_task_fail_and_cancel() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1103,6 +1188,8 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1153,6 +1240,8 @@ async fn cancel_worker_tasks_for_block_deletes_completed_rows() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1202,6 +1291,8 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1251,6 +1342,8 @@ async fn cancel_worker_tasks_for_block_deletes_failed_rows() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -1310,6 +1403,8 @@ async fn worker_task_queue_routing() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -3136,6 +3231,8 @@ async fn worker_task_list_and_stats() {
             created_at: Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,
@@ -3335,6 +3432,8 @@ async fn perf_concurrent_worker_claims() {
             created_at: Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,
@@ -4514,6 +4613,8 @@ async fn retry_worker_task_atomically_replaces_task() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,
@@ -4545,6 +4646,8 @@ async fn retry_worker_task_atomically_replaces_task() {
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,

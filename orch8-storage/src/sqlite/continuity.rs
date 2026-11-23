@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Serialize, de::DeserializeOwned};
 use sqlx::Row;
 
+use super::helpers::ts;
 use orch8_types::continuity::{
     CapsuleId, CapsuleManifest, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
     ContinuityExecution, ContinuityId, ContinuityLocation, ContinuityStream, EffectDispatchOutcome,
@@ -50,10 +51,104 @@ const OWNER_CAS_SQL: &str = "UPDATE continuity_executions
  SET epoch = ?, owner_runtime_id = ?, state = ?, record = ?, updated_at = ?
  WHERE tenant_id = ? AND continuity_id = ? AND epoch = ? AND owner_runtime_id = ?
  AND state <> 'compensating'
+ AND (?11 IS NULL OR (state=?11 AND json_extract(record, '$.current_instance_id')=?10))
  AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=?10)
  AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=?10 AND cut.state IN ('captured','sealed'))
  AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.tenant_id=continuity_executions.tenant_id
    AND cut.continuity_id=continuity_executions.continuity_id AND cut.state IN ('captured','sealed') AND cut.state='captured')";
+
+impl SqliteStorage {
+    /// Fence the current execution and record the cloud migration ID atomically.
+    pub async fn fence_for_cloud_migration(
+        &self,
+        owner: &ContinuityExecution,
+        migration_id: &str,
+    ) -> Result<Option<ContinuityExecution>, StorageError> {
+        use orch8_types::continuity::OwnershipState;
+        let id = owner.current_instance_id.to_string();
+        let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
+        let next = ContinuityExecution {
+            state: OwnershipState::Transferring,
+            updated_at: Utc::now(),
+            ..owner.clone()
+        };
+        let result = sqlx::query(OWNER_CAS_SQL)
+            .bind(to_i64(owner.epoch.get(), "cloud migration epoch")?)
+            .bind(owner.owner_runtime_id.to_string())
+            .bind(state_name(next.state)?)
+            .bind(encode(&next)?)
+            .bind(next.updated_at.to_rfc3339())
+            .bind(owner.tenant_id.as_str())
+            .bind(owner.continuity_id.to_string())
+            .bind(to_i64(owner.epoch.get(), "cloud migration epoch")?)
+            .bind(owner.owner_runtime_id.to_string())
+            .bind(&id)
+            .bind(state_name(owner.state)?)
+            .execute(&mut *transaction)
+            .await?;
+        if result.rows_affected() != 1 {
+            return Ok(None);
+        }
+        let marker =
+            serde_json::json!({"id": migration_id, "phase": "fenced", "at": next.updated_at});
+        let result = sqlx::query(
+            "UPDATE task_instances SET metadata = json_set(
+                 CASE WHEN json_type(metadata) = 'object' THEN metadata ELSE '{}' END,
+                 '$.orch8_migration', json(?1)
+             ) WHERE id = ?2 AND tenant_id = ?3 AND state IN ('scheduled','waiting','paused')",
+        )
+        .bind(marker.to_string())
+        .bind(&id)
+        .bind(owner.tenant_id.as_str())
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Ok(None);
+        }
+        transaction.commit().await?;
+        Ok(Some(next))
+    }
+    /// Close the source intake under the same writer reservation as signal
+    /// enqueue. Subsequent export reads can no longer miss a new signal.
+    pub async fn close_cloud_migration_signal_window(
+        &self,
+        owner: &ContinuityExecution,
+        migration_id: &str,
+        target: &str,
+    ) -> Result<(), StorageError> {
+        let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
+        let updated = sqlx::query(
+            "INSERT INTO cloud_migration_signal_cuts (instance_id,migration_id,target_base)
+             SELECT id, ?3, ?4 FROM task_instances
+             WHERE id=?1 AND tenant_id=?2 AND json_extract(metadata,'$.orch8_migration.id')=?3
+               AND json_extract(metadata,'$.orch8_migration.phase')='fenced'
+               AND EXISTS (
+                 SELECT 1 FROM continuity_executions
+                 WHERE tenant_id=?2 AND continuity_id=?5 AND epoch=?6 AND owner_runtime_id=?7
+                   AND state='transferring' AND json_extract(record,'$.current_instance_id')=?1
+               )
+             ON CONFLICT(instance_id) DO UPDATE SET target_base=excluded.target_base
+             WHERE cloud_migration_signal_cuts.migration_id=excluded.migration_id
+               AND cloud_migration_signal_cuts.target_base=excluded.target_base",
+        )
+        .bind(owner.current_instance_id.to_string())
+        .bind(owner.tenant_id.as_str())
+        .bind(migration_id)
+        .bind(target)
+        .bind(owner.continuity_id.to_string())
+        .bind(to_i64(owner.epoch.get(), "migration epoch")?)
+        .bind(owner.owner_runtime_id.to_string())
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StorageError::Conflict(
+                "migration lost the source signal fence".into(),
+            ));
+        }
+        transaction.commit().await?;
+        Ok(())
+    }
+}
 
 // Both lookup paths must agree on scope and indexed progress before returning
 // a durable outcome, including when recovering a lost creation response.
@@ -95,6 +190,77 @@ pub(super) async fn delete_receipts_for_blocks_on(
     sep.push_unseparated(")");
     let result = qb.build().execute(&mut *conn).await?;
     Ok(result.rows_affected())
+}
+
+pub(super) async fn create_execution_on(
+    conn: &mut sqlx::SqliteConnection,
+    execution: &ContinuityExecution,
+) -> Result<(), StorageError> {
+    let location = ContinuityLocation {
+        continuity_id: execution.continuity_id,
+        tenant_id: execution.tenant_id.clone(),
+        epoch: execution.epoch,
+        runtime_id: execution.owner_runtime_id,
+        instance_id: execution.current_instance_id,
+        handoff_id: None,
+        entered_at: execution.updated_at,
+    };
+    super::portable_effects::check_namespace_on(conn, execution).await?;
+    sqlx::query(
+        "INSERT INTO continuity_executions
+         (continuity_id, tenant_id, epoch, owner_runtime_id, state, record, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(execution.continuity_id.to_string())
+    .bind(execution.tenant_id.as_str())
+    .bind(to_i64(execution.epoch.get(), "epoch")?)
+    .bind(execution.owner_runtime_id.to_string())
+    .bind(state_name(execution.state)?)
+    .bind(encode(execution)?)
+    .bind(execution.updated_at.to_rfc3339())
+    .execute(&mut *conn)
+    .await
+    .map_err(|error| StorageError::Query(error.to_string()))?;
+    sqlx::query(
+        "INSERT INTO continuity_locations
+         (tenant_id, continuity_id, epoch, runtime_id, instance_id, handoff_id, record, entered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(execution.tenant_id.as_str())
+    .bind(execution.continuity_id.to_string())
+    .bind(to_i64(execution.epoch.get(), "location epoch")?)
+    .bind(execution.owner_runtime_id.to_string())
+    .bind(execution.current_instance_id.to_string())
+    .bind(Option::<String>::None)
+    .bind(encode(&location)?)
+    .bind(execution.updated_at.to_rfc3339())
+    .execute(&mut *conn)
+    .await
+    .map_err(|error| StorageError::Query(error.to_string()))?;
+    Ok(())
+}
+
+pub(super) async fn insert_receipt_on<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    receipt: &EffectReceipt,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "INSERT INTO effect_receipts
+         (id, continuity_id, tenant_id, instance_id, state, record, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(receipt.id.to_string())
+    .bind(receipt.continuity_id.to_string())
+    .bind(receipt.tenant_id.as_str())
+    .bind(receipt.instance_id.to_string())
+    .bind(state_name(receipt.state)?)
+    .bind(encode(receipt)?)
+    .bind(receipt.created_at.to_rfc3339())
+    .bind(receipt.updated_at.to_rfc3339())
+    .execute(executor)
+    .await
+    .map_err(|error| StorageError::Query(error.to_string()))?;
+    Ok(())
 }
 
 #[async_trait]
@@ -156,48 +322,8 @@ impl crate::ContinuityStore for SqliteStorage {
         &self,
         execution: &ContinuityExecution,
     ) -> Result<(), StorageError> {
-        let location = ContinuityLocation {
-            continuity_id: execution.continuity_id,
-            tenant_id: execution.tenant_id.clone(),
-            epoch: execution.epoch,
-            runtime_id: execution.owner_runtime_id,
-            instance_id: execution.current_instance_id,
-            handoff_id: None,
-            entered_at: execution.updated_at,
-        };
         let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
-        super::portable_effects::check_namespace_on(&mut transaction, execution).await?;
-        sqlx::query(
-            "INSERT INTO continuity_executions
-             (continuity_id, tenant_id, epoch, owner_runtime_id, state, record, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(execution.continuity_id.to_string())
-        .bind(execution.tenant_id.as_str())
-        .bind(to_i64(execution.epoch.get(), "epoch")?)
-        .bind(execution.owner_runtime_id.to_string())
-        .bind(state_name(execution.state)?)
-        .bind(encode(execution)?)
-        .bind(execution.updated_at.to_rfc3339())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
-        sqlx::query(
-            "INSERT INTO continuity_locations
-             (tenant_id, continuity_id, epoch, runtime_id, instance_id, handoff_id, record, entered_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(execution.tenant_id.as_str())
-        .bind(execution.continuity_id.to_string())
-        .bind(to_i64(execution.epoch.get(), "location epoch")?)
-        .bind(execution.owner_runtime_id.to_string())
-        .bind(execution.current_instance_id.to_string())
-        .bind(Option::<String>::None)
-        .bind(encode(&location)?)
-        .bind(execution.updated_at.to_rfc3339())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
+        create_execution_on(&mut transaction, execution).await?;
         transaction
             .commit()
             .await
@@ -324,6 +450,7 @@ impl crate::ContinuityStore for SqliteStorage {
             .bind(to_i64(expected_epoch.get(), "expected epoch")?)
             .bind(expected_owner.to_string())
             .bind(next.current_instance_id.to_string())
+            .bind(Option::<&str>::None)
             .execute(&mut *transaction)
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
@@ -365,6 +492,51 @@ impl crate::ContinuityStore for SqliteStorage {
             .commit()
             .await
             .map_err(|error| StorageError::Query(error.to_string()))?;
+        Ok(true)
+    }
+
+    async fn release_migrated_instance(
+        &self,
+        staged: &ContinuityExecution,
+        state: &orch8_types::migration::MigratedInstanceState,
+    ) -> Result<bool, StorageError> {
+        use orch8_types::continuity::OwnershipState;
+        let id = staged.current_instance_id;
+        if staged.state != OwnershipState::Transferring || !state.belongs_to(id) {
+            return Err(StorageError::Constraint(
+                "invalid migration state or owner".into(),
+            ));
+        }
+        let mut transaction = super::helpers::begin_immediate(&self.pool).await?;
+        let owner = ContinuityExecution {
+            state: OwnershipState::Owned,
+            updated_at: Utc::now(),
+            ..staged.clone()
+        };
+        let result = sqlx::query(OWNER_CAS_SQL)
+            .bind(to_i64(owner.epoch.get(), "migration epoch")?)
+            .bind(owner.owner_runtime_id.to_string())
+            .bind(state_name(owner.state)?)
+            .bind(encode(&owner)?)
+            .bind(owner.updated_at.to_rfc3339())
+            .bind(owner.tenant_id.as_str())
+            .bind(owner.continuity_id.to_string())
+            .bind(to_i64(staged.epoch.get(), "staged epoch")?)
+            .bind(staged.owner_runtime_id.to_string())
+            .bind(id.to_string())
+            .bind("transferring")
+            .execute(&mut *transaction)
+            .await?;
+        if result.rows_affected() != 1 {
+            return Ok(false);
+        }
+        for key in &state.instance_kv {
+            super::kv_state::restore_on(&mut transaction, key).await?;
+        }
+        for checkpoint in &state.checkpoints {
+            super::checkpoints::save_on(&mut transaction, checkpoint).await?;
+        }
+        transaction.commit().await?;
         Ok(true)
     }
 
@@ -1107,23 +1279,7 @@ impl crate::ContinuityStore for SqliteStorage {
     }
 
     async fn create_effect_receipt(&self, receipt: &EffectReceipt) -> Result<(), StorageError> {
-        sqlx::query(
-            "INSERT INTO effect_receipts
-             (id, continuity_id, tenant_id, instance_id, state, record, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(receipt.id.to_string())
-        .bind(receipt.continuity_id.to_string())
-        .bind(receipt.tenant_id.as_str())
-        .bind(receipt.instance_id.to_string())
-        .bind(state_name(receipt.state)?)
-        .bind(encode(receipt)?)
-        .bind(receipt.created_at.to_rfc3339())
-        .bind(receipt.updated_at.to_rfc3339())
-        .execute(&self.pool)
-        .await
-        .map_err(|error| StorageError::Query(error.to_string()))?;
-        Ok(())
+        insert_receipt_on(&self.pool, receipt).await
     }
 
     async fn ensure_effect_receipt(
@@ -1196,7 +1352,8 @@ impl crate::ContinuityStore for SqliteStorage {
     ) -> Result<u64, StorageError> {
         let mut tx = super::helpers::begin_immediate(&self.pool).await?;
         let count =
-            super::effect_attempt::retire_on(&mut tx, tenant_id, instance_id, block_ids).await?;
+            super::effect_attempt::retire_on(&mut tx, tenant_id, instance_id, block_ids, false)
+                .await?;
         tx.commit().await?;
         Ok(count)
     }
@@ -1213,6 +1370,23 @@ impl crate::ContinuityStore for SqliteStorage {
             instance_id,
             block_ids,
             claim_token,
+        )
+        .await
+    }
+
+    async fn retire_composite_retry_effects(
+        &self,
+        tenant_id: &TenantId,
+        instance_id: InstanceId,
+        block_ids: &[orch8_types::ids::BlockId],
+        token: DateTime<Utc>,
+    ) -> Result<crate::ClaimedRead<Option<EffectReceipt>>, StorageError> {
+        super::claimed_writes::retire_composite_retry_effects(
+            self,
+            tenant_id,
+            instance_id,
+            block_ids,
+            token,
         )
         .await
     }
@@ -2042,6 +2216,74 @@ impl crate::ContinuityStore for SqliteStorage {
         Ok(result.rows_affected())
     }
 
+    async fn stage_migration_chunk(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+        index: u32,
+        payload: &[u8],
+    ) -> Result<bool, StorageError> {
+        let mut tx = super::helpers::begin_immediate(&self.pool).await?;
+        let now = chrono::Utc::now();
+        sqlx::query("DELETE FROM migration_import_chunks WHERE tenant_id=?1 AND expires_at <= ?2")
+            .bind(tenant.as_str())
+            .bind(ts(now))
+            .execute(&mut *tx)
+            .await?;
+        let index = i64::from(index);
+        let (used, exists): (i64, i32) = sqlx::query_as(
+            "SELECT COALESCE(SUM(length(payload)),0), COALESCE(MAX(CASE WHEN digest=?2 AND chunk_index=?3 THEN 1 ELSE 0 END),0)
+             FROM migration_import_chunks WHERE tenant_id=?1",
+        ).bind(tenant.as_str()).bind(digest).bind(index).fetch_one(&mut *tx).await?;
+        if exists != 0 {
+            tx.commit().await?;
+            return Ok(false);
+        }
+        if used.saturating_add(i64::try_from(payload.len()).unwrap_or(i64::MAX))
+            > crate::MAX_MIGRATION_STAGING_BYTES
+        {
+            return Err(StorageError::QuotaExceeded(
+                "migration staging limit reached".into(),
+            ));
+        }
+        let result = sqlx::query(
+            "INSERT INTO migration_import_chunks (tenant_id,digest,chunk_index,payload,expires_at)
+             VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+        )
+        .bind(tenant.as_str())
+        .bind(digest)
+        .bind(index)
+        .bind(payload)
+        .bind(ts(now + chrono::Duration::hours(24)))
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected() == 1)
+    }
+    async fn read_migration_chunk(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+        index: u32,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        sqlx::query_scalar(
+            "SELECT payload FROM migration_import_chunks WHERE tenant_id=?1 AND digest=?2 AND chunk_index=?3 AND expires_at > ?4",
+        ).bind(tenant.as_str()).bind(digest).bind(i64::from(index)).bind(ts(chrono::Utc::now()))
+            .fetch_optional(&self.pool).await.map_err(Into::into)
+    }
+
+    async fn clear_migration_chunks(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM migration_import_chunks WHERE tenant_id=?1 AND digest=?2")
+            .bind(tenant.as_str())
+            .bind(digest)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
     async fn save_live_migration(&self, record: &LiveMigrationRecord) -> Result<(), StorageError> {
         let created_at = record.plan.created_at.to_rfc3339();
         sqlx::query(
@@ -2460,6 +2702,7 @@ mod captured_query_plan_tests {
         .bind(0_i64)
         .bind("runtime")
         .bind("physical")
+        .bind(Option::<&str>::None)
         .fetch_all(storage.pool())
         .await
         .unwrap();

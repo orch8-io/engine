@@ -3,13 +3,10 @@
 //!
 //! Without this hook, each step handler that touches an externalized field
 //! triggers a separate `get_externalized_state` call — an N+1 per tick.
-//! The preload collects every top-level marker across every claimed
+//! The preload collects every context marker across every claimed
 //! instance, issues one `batch_get_externalized_state`, and hydrates the
 //! markers in place so downstream resolution (`handlers::step_block::
 //! resolve_markers`) observes already-inflated values and becomes a no-op.
-//!
-//! Only top-level `context.data` keys can be externalized (see
-//! `docs/CONTEXT_MANAGEMENT.md` §8.5), so the scan is shallow by design.
 //!
 //! Contract:
 //! - Instances with no markers contribute nothing to the batched fetch.
@@ -24,10 +21,12 @@ use orch8_storage::StorageBackend;
 use orch8_types::ids::InstanceId;
 use orch8_types::instance::TaskInstance;
 
-use crate::externalized::extract_ref_key;
+use orch8_storage::externalizing::{replace_context_refs, visit_context_refs};
+
+use crate::externalized::prepare_fetched_context_payload;
 use crate::metrics;
 
-/// Hydrate every top-level externalized marker present in the given
+/// Hydrate every externalized marker present in the given
 /// instances' `context.data`, via a single [`StorageBackend::
 /// batch_get_externalized_state`] call.
 ///
@@ -44,24 +43,12 @@ pub async fn preload_externalized_markers(
     storage: &dyn StorageBackend,
     instances: &mut [TaskInstance],
 ) {
-    // Phase 1: scan every claimed instance for top-level marker ref_keys.
-    // Dedup globally so the same payload referenced by multiple instances
-    // (fan-in pattern) is fetched once.
-    // Upper-bound capacity: every instance could have every top-level field as a
-    // ref key. In practice ref keys are sparse, so this is a generous reserve.
-    //
-    // Each ref is requested together with the instance whose context holds
-    // it; storage only resolves refs that instance owns, so a forged marker
-    // pointing at another instance's payload stays un-hydrated.
+    // Scope each batched key to the instance whose context holds it.
     let mut ref_keys: Vec<(InstanceId, String)> = Vec::with_capacity(instances.len() * 4);
-    for inst in instances.iter() {
-        if let Some(obj) = inst.context.data.as_object() {
-            for value in obj.values() {
-                if let Some(k) = extract_ref_key(value) {
-                    ref_keys.push((inst.id, k.to_string()));
-                }
-            }
-        }
+    for instance in instances.iter() {
+        visit_context_refs(&instance.context.data, |key, _| {
+            ref_keys.push((instance.id, key.to_owned()));
+        });
     }
 
     if ref_keys.is_empty() {
@@ -98,35 +85,14 @@ pub async fn preload_externalized_markers(
         return;
     }
 
-    // Phase 3: hydrate in place. Walks the same top-level keys the scan
-    // visited; markers whose ref_key is absent from `resolved` stay intact.
-    //
-    // Two distinct metrics:
-    //   - REFS_HYDRATED: unique refs resolved (comparable against REFS_SCANNED
-    //     for a hit-rate ratio).
-    //   - SLOTS_HYDRATED: total marker slots mutated (fan-in patterns inflate
-    //     this relative to REFS_HYDRATED; useful for measuring work done).
     let mut slots_hydrated: u64 = 0;
-    for inst in instances.iter_mut() {
-        let inst_id = inst.id;
-        let Some(obj) = inst.context.data.as_object_mut() else {
-            continue;
-        };
-        for value in obj.values_mut() {
-            // Resolve the payload first — `extract_ref_key` returns `&str`
-            // borrowed from `value`, so the whole lookup must complete
-            // (and the borrow must end) before `*value = ...` can execute.
-            // Cloning into an `Option<Value>` severs the borrow explicitly
-            // so the mutation below cannot accidentally grow a dependency
-            // on `extract_ref_key`'s return lifetime.
-            let payload = extract_ref_key(value)
-                .and_then(|k| resolved.get(&(inst_id, k.to_string())))
-                .cloned();
-            if let Some(payload) = payload {
-                *value = payload;
-                slots_hydrated += 1;
-            }
-        }
+    for instance in instances.iter_mut() {
+        let owner = instance.id;
+        replace_context_refs(&mut instance.context.data, |key, versioned| {
+            let value = resolved.get(&(owner, key.to_owned()))?.clone();
+            slots_hydrated += 1;
+            Some(prepare_fetched_context_payload(value, versioned))
+        });
     }
     metrics::inc_by(metrics::PRELOAD_REFS_HYDRATED, resolved.len() as u64);
     metrics::inc_by(metrics::PRELOAD_SLOTS_HYDRATED, slots_hydrated);

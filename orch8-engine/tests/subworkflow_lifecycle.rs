@@ -33,6 +33,71 @@ fn sub_sequence(id: &str, target: &SequenceDefinition) -> BlockDefinition {
 }
 
 #[tokio::test]
+async fn pinned_child_validates_dynamic_input_and_output_before_the_parent_advances() {
+    use orch8_storage::testing::fixtures::InstanceBuilder;
+
+    let engine = TestEngine::builder()
+        .register("produce_bill", |_| async {
+            Ok(json!({"total": "invalid"}))
+        })
+        .build()
+        .await;
+    let mut child = SequenceBuilder::new("t")
+        .block(BlockDefinition::Step(Box::new(step(
+            "compute",
+            "produce_bill",
+        ))))
+        .build();
+    child.input_schema = Some(json!({
+        "type": "object", "required": ["amount"],
+        "properties": {"amount": {"type": "integer"}},
+        "x-orch8-child-result-schema": {
+            "type": "array", "minItems": 1,
+            "items": {"type": "object", "required": ["output"], "properties": {
+                "output": {"type": "object", "required": ["total"], "properties": {
+                    "total": {"type": "number"}
+                }}
+            }}
+        }
+    }));
+    engine.storage.create_sequence(&child).await.unwrap();
+    let BlockDefinition::SubSequence(mut call) = sub_sequence("bill", &child) else {
+        unreachable!()
+    };
+    call.version = Some(child.version);
+    call.input = json!({"amount": "{{ context.data.raw }}"});
+    let parent = SequenceBuilder::new("t")
+        .block(BlockDefinition::SubSequence(call))
+        .block(BlockDefinition::Step(Box::new(step("after", "noop"))))
+        .build();
+    engine.storage.create_sequence(&parent).await.unwrap();
+    for (amount, accepted_by_child) in [(json!("12"), false), (json!(12), true)] {
+        let mut run = InstanceBuilder::for_sequence(&parent)
+            .due_at(engine.now())
+            .build();
+        run.context.data = json!({"raw": amount});
+        let id = engine.create(&run).await;
+        assert_eq!(
+            run_to_terminal(&engine, id).await.state,
+            InstanceState::Failed
+        );
+        let children = engine.storage.get_child_instances(id).await.unwrap();
+        assert_eq!(children.len(), usize::from(accepted_by_child));
+        if let Some(child) = children.first() {
+            assert_eq!(child.state, InstanceState::Completed);
+        }
+        assert!(
+            engine
+                .storage
+                .get_block_output(id, &BlockId::new("after"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[tokio::test]
 async fn child_result_references_bound_nested_output_materialization() {
     const DEPTH: usize = 4;
     let payload = json!({"body": "field inspection evidence\n".repeat(512)});

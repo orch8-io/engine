@@ -24,3 +24,16 @@ CREATE TRIGGER IF NOT EXISTS worker_dispatch_spec_update BEFORE UPDATE ON worker
 CREATE TRIGGER IF NOT EXISTS worker_dispatch_spec_insert BEFORE INSERT ON worker_tasks
  WHEN EXISTS(SELECT 1 FROM worker_task_admissions a WHERE a.task_id=NEW.id)
  BEGIN SELECT RAISE(ABORT,'admitted worker task cannot be recreated'); END;
+
+CREATE TRIGGER IF NOT EXISTS worker_heartbeat_timeout_update
+ BEFORE UPDATE OF heartbeat_timeout_secs ON worker_tasks
+ WHEN NEW.heartbeat_timeout_secs IS NOT OLD.heartbeat_timeout_secs
+ AND EXISTS(SELECT 1 FROM worker_task_admissions WHERE task_id=OLD.id)
+ BEGIN SELECT RAISE(ABORT,'admitted worker heartbeat timeout is immutable'); END;
+
+
+CREATE TRIGGER IF NOT EXISTS worker_callback_mode_update
+ BEFORE UPDATE OF wait_for_callback ON worker_tasks
+ WHEN NEW.wait_for_callback IS NOT OLD.wait_for_callback
+ AND EXISTS(SELECT 1 FROM worker_task_admissions WHERE task_id=OLD.id)
+ BEGIN SELECT RAISE(ABORT,'admitted callback mode is immutable'); END;

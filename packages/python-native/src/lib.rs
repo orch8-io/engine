@@ -63,10 +63,23 @@ use host_runtime::HostRuntime;
 use std::sync::Arc;
 use std::time::Duration;
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTimeoutError};
 
 fn to_py(error: String) -> PyErr {
     PyRuntimeError::new_err(error)
+}
+
+fn duration_from_secs(secs: Option<f64>, name: &str) -> PyResult<Option<Duration>> {
+    secs.map(|secs| {
+        if !secs.is_finite() || secs < 0.0 {
+            return Err(PyValueError::new_err(format!(
+                "{name} must be finite and nonnegative"
+            )));
+        }
+        Duration::try_from_secs_f64(secs)
+            .map_err(|error| PyValueError::new_err(format!("invalid {name}: {error}")))
+    })
+    .transpose()
 }
 
 /// Low-level durable engine; use `orch8_engine.Engine` instead.
@@ -170,27 +183,73 @@ impl DurableEngine {
         })
     }
 
-    #[pyo3(signature = (id, timeout_secs=None))]
-    fn run(&self, py: Python<'_>, id: String, timeout_secs: Option<f64>) -> PyResult<String> {
-        let timeout = timeout_secs
-            .map(|secs| {
-                if !secs.is_finite() || secs < 0.0 {
-                    return Err(PyValueError::new_err(
-                        "timeout must be finite and nonnegative",
-                    ));
-                }
-                Duration::try_from_secs_f64(secs)
-                    .map_err(|error| PyValueError::new_err(format!("invalid timeout: {error}")))
-            })
-            .transpose()?;
+    fn start_batch(&self, py: Python<'_>, items_json: String) -> PyResult<String> {
         self.block_on(py, move |inner| {
-            Box::pin(async move { inner.run(&id, timeout).await })
+            Box::pin(async move { inner.start_batch(&items_json).await })
+        })
+    }
+
+    #[pyo3(signature = (id, timeout_secs=None, observer_timeout_secs=None))]
+    fn run(
+        &self,
+        py: Python<'_>,
+        id: String,
+        timeout_secs: Option<f64>,
+        observer_timeout_secs: Option<f64>,
+    ) -> PyResult<String> {
+        let timeout = duration_from_secs(timeout_secs, "timeout")?;
+        let observer_timeout = duration_from_secs(observer_timeout_secs, "observer_timeout")?;
+        let inner = self.inner.clone();
+        let runtime = self.runtime.clone();
+        py.detach(move || {
+            runtime.block_on(inner.run_with_observer_deadline(&id, timeout, observer_timeout))
+        })
+        .map_err(|error| match error {
+            durable::RunError::ObserverTimeout => {
+                PyTimeoutError::new_err(durable::OBSERVER_TIMEOUT_MESSAGE)
+            }
+            durable::RunError::Engine(message) => to_py(message),
         })
     }
 
     fn get(&self, py: Python<'_>, id: String) -> PyResult<String> {
         self.block_on(py, move |inner| {
             Box::pin(async move { inner.get(&id).await })
+        })
+    }
+
+    fn get_output(
+        &self,
+        py: Python<'_>,
+        id: String,
+        block: String,
+        attempt: u16,
+    ) -> PyResult<String> {
+        self.block_on(py, move |inner| {
+            Box::pin(async move { inner.get_output(&id, &block, attempt).await })
+        })
+    }
+
+    #[pyo3(signature = (state, sequence_id, before, page_size))]
+    fn list_instance_page(
+        &self,
+        py: Python<'_>,
+        state: Option<String>,
+        sequence_id: Option<String>,
+        before: Option<String>,
+        page_size: u32,
+    ) -> PyResult<String> {
+        self.block_on(py, move |inner| {
+            Box::pin(async move {
+                inner
+                    .list_instance_page(
+                        state.as_deref(),
+                        sequence_id.as_deref(),
+                        before.as_deref(),
+                        page_size,
+                    )
+                    .await
+            })
         })
     }
 
@@ -211,6 +270,15 @@ impl DurableEngine {
         self.block_on(py, move |inner| {
             Box::pin(async move {
                 inner.close().await;
+                Ok(())
+            })
+        })
+    }
+
+    fn close_draining(&self, py: Python<'_>) -> PyResult<()> {
+        self.block_on(py, move |inner| {
+            Box::pin(async move {
+                inner.close_with_drain(true).await;
                 Ok(())
             })
         })

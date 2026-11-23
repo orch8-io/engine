@@ -107,6 +107,14 @@ internal class FakeBackend : EngineBackend {
 
     override fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) = Unit
 
+    override fun exportContinuityCapsule(
+        instanceId: String,
+        destinationRuntimeId: String,
+        payloadKeyBase64: String,
+        expiresInSeconds: Int,
+        signer: Orch8CapsuleSigner,
+    ) = ContinuityExportResult("capsule", "continuity", 1, "{}", "payload")
+
     var registered: NodeCapabilities? = null
     var workerOptions: WorkerOptions? = null
     var windowBudgetMs: Long? = null

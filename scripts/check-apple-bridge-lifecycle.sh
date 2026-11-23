@@ -15,6 +15,11 @@ for platform in react-native flutter; do
   "$build/$platform-tests"
 done
 
+swiftc -warnings-as-errors -swift-version 5 -module-cache-path "$build/module-cache" \
+  "$root/packages/react-native/ios/MediaFileRange.swift" "$root/tests/react-native-media-file/main.swift" \
+  -o "$build/react-native-media-file-tests"
+"$build/react-native-media-file-tests"
+
 if [[ "$#" == 2 ]]; then
   ffi_headers="$1"
   native_dir="$2"

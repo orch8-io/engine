@@ -473,14 +473,74 @@ fn export_scoped_sdk_fixture_for_wrappers() {
     }
     checkpoint_and_close(&reopened);
     let bundled_catalog = export_bundled_catalog_fixture(&destination);
+    let capsule = export_capsule_signing_fixture(&destination);
     std::fs::write(
         metadata,
         serde_json::to_vec_pretty(
-            &serde_json::json!({"cases":cases,"bundledCatalog":bundled_catalog}),
+            &serde_json::json!({"cases":cases,"bundledCatalog":bundled_catalog,"capsule":capsule}),
         )
         .unwrap(),
     )
     .unwrap();
+}
+
+fn export_capsule_signing_fixture(destination: &std::path::Path) -> serde_json::Value {
+    use orch8_storage::testing::fixtures::{InstanceBuilder, SequenceBuilder};
+    use orch8_storage::{
+        ContinuityStore as _, InstanceStore as _, ResourceStore as _, SequenceStore as _,
+    };
+    use orch8_types::continuity::{
+        ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId,
+    };
+    use orch8_types::instance::InstanceState;
+
+    let path = destination.join("capsule-source.db");
+    assert!(!path.exists(), "fixture output must be fresh");
+    let engine = MobileEngine::new(
+        path.to_str().unwrap().to_owned(),
+        MobileEngineConfig {
+            telemetry_enabled: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let sequence = SequenceBuilder::new("mobile")
+        .step("finish", "noop")
+        .build();
+    let mut instance = InstanceBuilder::for_sequence(&sequence)
+        .state(InstanceState::Paused)
+        .build();
+    instance.context.data = serde_json::json!({"payload":"from-source"});
+    let continuity_id = ContinuityId::new();
+    engine.runtime.block_on(async {
+        engine.sqlite.create_sequence(&sequence).await.unwrap();
+        engine.sqlite.create_instance(&instance).await.unwrap();
+        engine
+            .sqlite
+            .save_checkpoint(&orch8_types::checkpoint::Checkpoint {
+                id: uuid::Uuid::now_v7(),
+                instance_id: instance.id,
+                checkpoint_data: serde_json::json!({"safe_boundary":"offline"}),
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        engine
+            .sqlite
+            .create_continuity_execution(&ContinuityExecution {
+                continuity_id,
+                tenant_id: instance.tenant_id.clone(),
+                current_instance_id: instance.id,
+                owner_runtime_id: RuntimeId::new(),
+                epoch: ExecutionEpoch::initial(),
+                state: OwnershipState::Owned,
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+    });
+    checkpoint_and_close(&engine);
+    serde_json::json!({"sourceInstance":instance.id,"continuityId":continuity_id,"sequence":sequence})
 }
 
 fn export_bundled_catalog_fixture(destination: &std::path::Path) -> serde_json::Value {

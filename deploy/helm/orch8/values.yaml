@@ -94,6 +94,7 @@ control:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  topologySpreadConstraints: []
   podAnnotations: {}
   extraEnv: []
 
@@ -114,6 +115,7 @@ executor:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+  topologySpreadConstraints: []
   podAnnotations: {}
   extraEnv: []
 
@@ -192,6 +194,17 @@ sqlite:
     accessModes: [ReadWriteOnce]
     # Use an existing PVC instead of creating one.
     existingClaim: ""
+    # Populate a new claim from a ready CSI VolumeSnapshot in this namespace.
+    restoreFromSnapshot: ""
+  snapshot:
+    # An explicitly requested, one-shot snapshot of the SQLite PVC.
+    enabled: false
+    # Unique VolumeSnapshot name within the namespace.
+    name: ""
+    volumeSnapshotClassName: ""
+    # Image with kubectl and a POSIX shell, compatible with the cluster version.
+    image: ""
+    timeoutSeconds: 600
 
 # -- API key and encryption key.
 # Both are mandatory: the server refuses to start without them.
@@ -238,6 +251,15 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+# -- Kubernetes Gateway API HTTPRoute targeting the chart's HTTP Service.
+httpRoute:
+  enabled: false
+  parent:
+    name: ""
+    namespace: ""
+    sectionName: ""
+  hostnames: []
 
 # -- Prometheus integration.
 # /metrics is served only by all_in_one and control pods and REQUIRES the
@@ -301,3 +323,37 @@ probes:
     periodSeconds: 10
     timeoutSeconds: 3
     failureThreshold: 6
+
+# Kubernetes ingress and egress rules for each enabled workload.
+networkPolicy:
+  enabled: false
+  dns:
+    # Replace these peers for a cluster with a different DNS deployment.
+    peers:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        podSelector:
+          matchLabels:
+            k8s-app: kube-dns
+  database:
+    # For external PostgreSQL, use the database's pod/namespace or IP peers.
+    # The bundled PostgreSQL chart supplies its own pod selector.
+    peers: []
+    port: 5432
+  roles:
+    all-in-one:
+      extraIngress: []
+      extraEgress: []
+    control:
+      extraIngress: []
+      extraEgress: []
+    executor:
+      extraIngress: []
+      extraEgress: []
+    gateway:
+      extraIngress: []
+      extraEgress: []
+    migrate:
+      extraIngress: []
+      extraEgress: []

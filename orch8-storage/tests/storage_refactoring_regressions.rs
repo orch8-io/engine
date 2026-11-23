@@ -100,6 +100,8 @@ fn make_worker_task(instance_id: InstanceId, timeout_ms: Option<i64>) -> WorkerT
         created_at: Utc::now(),
         effect_id: None,
         continuity_epoch: None,
+        heartbeat_timeout_secs: None,
+        wait_for_callback: false,
         lease_secs: None,
         carries_credentials: false,
         claimed_runtime_kind: None,

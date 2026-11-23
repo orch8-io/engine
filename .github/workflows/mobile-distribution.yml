@@ -255,7 +255,7 @@ jobs:
           exit 1
 
   published-consumer:
-    name: Verify fresh installs from public registries
+    name: Verify published installs and Android upgrades
     needs: [swift-package, maven]
     if: |
       !cancelled() && (

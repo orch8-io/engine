@@ -49,6 +49,8 @@ use orch8_types::sequence::{
 const fn mk_retry(max_attempts: u32) -> RetryPolicy {
     RetryPolicy {
         max_attempts,
+        jitter: orch8_types::sequence::RetryJitter::Legacy,
+        rules: Vec::new(),
         initial_backoff: StdDuration::from_millis(50),
         max_backoff: StdDuration::from_secs(5),
         backoff_multiplier: 2.0,

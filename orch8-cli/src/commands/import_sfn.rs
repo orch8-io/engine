@@ -6,8 +6,8 @@
 //! * `Task` → a step (Lambda / activity → external-worker handler, HTTP
 //!   task → `http_request`, nested `states:startExecution.sync` →
 //!   `sub_sequence`, any other service integration → a worker stub).
-//!   `Retry[0]` → `retry`, `TimeoutSeconds` → `timeout`, `Catch[0]` →
-//!   `try_catch`.
+//!   `Retry` → `retry`, `TimeoutSeconds` → `timeout`, `Catch` →
+//!   `try_catch`. Worker-backed tasks retain their renewable heartbeat interval.
 //! * `Choice` → `router`; the branches are converted up to their join
 //!   state (the nearest state every branch must reach), which then follows
 //!   the router. A missing `Default` becomes a `fail` step
@@ -27,6 +27,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use anyhow::{Context, Result, bail};
+use orch8_types::asl_intrinsic;
 use serde_json::{Map, Value, json};
 
 use super::{
@@ -64,8 +65,14 @@ impl Root {
 #[derive(Debug, Clone, PartialEq)]
 struct Env {
     overlays: Vec<(String, Root)>,
-    /// Inside a `Map` iterator: what `$$.Map.Item.Value` refers to.
-    item: Option<String>,
+    item: Option<MapItem>,
+    callback_token: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MapItem {
+    value: String,
+    index: String,
 }
 
 impl Env {
@@ -73,13 +80,15 @@ impl Env {
         Self {
             overlays: vec![(String::new(), Root::at("data"))],
             item: None,
+            callback_token: false,
         }
     }
 
-    fn single(root: Root, item: Option<String>) -> Self {
+    fn single(root: Root, item: Option<MapItem>) -> Self {
         Self {
             overlays: vec![(String::new(), root)],
             item,
+            callback_token: false,
         }
     }
 
@@ -88,11 +97,11 @@ impl Env {
         let path = path.trim();
         if let Some(rest) = path.strip_prefix("$$.") {
             if let Some(tail) = rest.strip_prefix("Map.Item.Value") {
-                let item = self.item.clone()?;
+                let item = &self.item.as_ref()?.value;
                 return Some(format!("{item}{}", json_path_suffix(tail)?));
             }
             if rest == "Map.Item.Index" {
-                return None;
+                return self.item.as_ref().map(|item| item.index.clone());
             }
             if let Some(tail) = rest.strip_prefix("Execution.Input") {
                 return Some(format!("data{}", json_path_suffix(tail)?));
@@ -166,6 +175,42 @@ impl Env {
             Some(_) => Self::single(Root::opaque(), self.item.clone()),
         }
     }
+}
+
+fn result_path_expression(
+    input: &Env,
+    path: &str,
+    result: &Root,
+) -> Option<asl_intrinsic::Intrinsic> {
+    use asl_intrinsic::Intrinsic;
+
+    let mut overlays: Vec<_> = input.overlays.iter().collect();
+    overlays.sort_unstable_by_key(|(suffix, _)| suffix.len());
+    let ((suffix, root), tail) = overlays.split_first()?;
+    if !suffix.is_empty() || root.lambda_payload {
+        return None;
+    }
+    let mut expression = Intrinsic::Path(root.path.clone()?);
+    let path = json_path_suffix(path.trim().strip_prefix('$')?)?;
+    for (suffix, value) in tail
+        .iter()
+        .map(|(suffix, root)| (suffix, root))
+        .chain([(&path, result)])
+    {
+        if value.lambda_payload {
+            return None;
+        }
+        expression = Intrinsic::PutResult {
+            input: Box::new(expression),
+            result: Box::new(Intrinsic::Path(value.path.clone()?)),
+            path: suffix
+                .strip_prefix('.')?
+                .split('.')
+                .map(str::to_owned)
+                .collect(),
+        };
+    }
+    Some(expression)
 }
 
 /// One (sub-)state machine.
@@ -422,14 +467,36 @@ impl Sfn<'_> {
     /// Translate a `Parameters` / `Payload` / `Result` object: `"key.$"`
     /// entries become `{{path}}` templates.
     fn params(&self, b: &mut Builder, state: &str, value: &Value, env: &Env) -> Value {
+        self.payload(b, state, value, env, None)
+    }
+
+    fn payload(
+        &self,
+        b: &mut Builder,
+        state: &str,
+        value: &Value,
+        env: &Env,
+        selector: Option<&str>,
+    ) -> Value {
         match value {
             Value::Object(map) => {
                 let mut out = Map::new();
                 for (k, v) in map {
                     if let Some(key) = k.strip_suffix(".$") {
-                        out.insert(key.to_string(), self.path_value(b, state, v, env));
+                        let selected = selector.and_then(|selector| {
+                            v.as_str()
+                                .and_then(|path| env.resolve(path))
+                                .map(|path| (selector, asl_intrinsic::Intrinsic::Path(path)))
+                        });
+                        let parameter = match selected {
+                            Some((selector, path)) => {
+                                self.selector_template(b, state, selector, &path, v)
+                            }
+                            None => self.path_value(b, state, v, env),
+                        };
+                        out.insert(key.to_string(), parameter);
                     } else {
-                        out.insert(k.clone(), self.params(b, state, v, env));
+                        out.insert(k.clone(), self.payload(b, state, v, env, selector));
                     }
                 }
                 Value::Object(out)
@@ -437,8 +504,15 @@ impl Sfn<'_> {
             Value::Array(items) => Value::Array(
                 items
                     .iter()
-                    .map(|v| self.params(b, state, v, env))
+                    .map(|v| self.payload(b, state, v, env, selector))
                     .collect(),
+            ),
+            Value::String(s) if selector.is_some() && s.contains("{{") => self.selector_template(
+                b,
+                state,
+                selector.unwrap_or_default(),
+                &asl_intrinsic::Intrinsic::Literal(value.clone()),
+                value,
             ),
             Value::String(s) if s.trim_start().starts_with("{%") => {
                 self.unmapped(
@@ -453,20 +527,66 @@ impl Sfn<'_> {
         }
     }
 
+    fn selector_template(
+        &self,
+        b: &mut Builder,
+        state: &str,
+        selector: &str,
+        expression: &asl_intrinsic::Intrinsic,
+        source: &Value,
+    ) -> Value {
+        match expression.to_template() {
+            Ok(template) => Value::String(template),
+            Err(error) => {
+                self.unmapped(b, state, selector, &error.to_string());
+                source.clone()
+            }
+        }
+    }
+
     /// A `"key.$"` value: a path or an intrinsic function.
     fn path_value(&self, b: &mut Builder, state: &str, v: &Value, env: &Env) -> Value {
         let Some(path) = v.as_str() else {
             return v.clone();
         };
+        if path.trim() == asl_intrinsic::CALLBACK_TOKEN_PATH && env.callback_token {
+            return json!({(orch8_types::worker::ASL_CALLBACK_TOKEN): true});
+        }
         if let Some(resolved) = env.resolve(path) {
             return json!(format!("{{{{{resolved}}}}}"));
         }
-        let reason = if path.trim_start().starts_with("States.") {
-            "intrinsic function kept as literal text — rewrite with template filters or a \
-             `transform` step"
-        } else if path.contains("$$.Task.Token") {
-            "task tokens do not exist in Orch8: the external worker task id plays that role \
-             (complete it via POST /workers/tasks/{id}/complete)"
+        if path.trim_start().starts_with("States.") {
+            let mut needs_callback = false;
+            let template = asl_intrinsic::parse(path, |reference| {
+                if reference == asl_intrinsic::CALLBACK_TOKEN_PATH && env.callback_token {
+                    needs_callback = true;
+                    Some(reference.to_owned())
+                } else {
+                    env.resolve(reference)
+                }
+            })
+            .and_then(|expression| {
+                if needs_callback {
+                    expression.to_callback_template()
+                } else {
+                    expression.to_template()
+                }
+            });
+            return match template {
+                Ok(template) => json!(template),
+                Err(error) => {
+                    self.unmapped(
+                        b,
+                        state,
+                        path,
+                        &format!("{error}; intrinsic kept as literal text"),
+                    );
+                    v.clone()
+                }
+            };
+        }
+        let reason = if path.contains("$$.Task.Token") {
+            "task tokens require a worker-backed .waitForTaskToken Task"
         } else {
             "path does not resolve to addressable data (e.g. a Parallel/Map result array or \
              a context-object field); kept as literal text"
@@ -599,8 +719,9 @@ impl Sfn<'_> {
         match kind {
             "Task" => {
                 let (block, result) = self.task(b, name, state, &input)?;
-                let after = self.after_result(b, name, state, &input, result);
-                self.with_catch(b, m, name, state, block, after, stop, env, blocks, path)
+                let mut success = vec![block];
+                let after = self.after_result(b, name, state, env, result, &mut success);
+                self.with_catch(b, m, name, state, success, after, stop, env, blocks, path)
             }
             "Pass" => {
                 let has_payload =
@@ -621,7 +742,7 @@ impl Sfn<'_> {
                         json!({"type": "step", "id": id, "handler": "transform", "params": params}),
                     );
                     let result = Root::at(format!("outputs.{id}"));
-                    *env = self.after_result(b, name, state, &input, result);
+                    *env = self.after_result(b, name, state, env, result, blocks);
                 } else {
                     b.mapped(name, "Pass", "-", "pass-through (no block)");
                     *env = input.narrowed(state.get("OutputPath"));
@@ -646,20 +767,29 @@ impl Sfn<'_> {
                 if let Some(delay) = delay {
                     b.mapped(name, "Wait", &id, "noop + delay");
                     blocks.push(json!({"type": "step", "id": id, "handler": "noop", "params": {}, "delay": delay}));
+                } else if let Some((parameter, path)) =
+                    match (state.get("SecondsPath"), state.get("TimestampPath")) {
+                        (Some(path), None) if path.is_string() => Some(("seconds", path)),
+                        (None, Some(path)) if path.is_string() => Some(("timestamp", path)),
+                        _ => None,
+                    }
+                {
+                    let dynamic = self.path_value(b, name, path, &input);
+                    b.mapped(name, "Wait", &id, "durable runtime deadline");
+                    blocks.push(json!({"type":"step","id":id,"handler":"asl_wait","params":{(parameter):dynamic}}));
                 } else {
                     b.used_ids.remove(&id);
                     let stub = b.todo_stub(
                         name,
                         "Wait",
                         state,
-                        "dynamic wait (SecondsPath/TimestampPath) — Orch8 delays are static; \
-                         compute the wait in a worker and use a `delay` / `fire_at_local`",
+                        "wait requires a supported duration or timestamp",
                     );
                     self.unmapped(
                         b,
                         name,
                         &format!("{name}.SecondsPath/TimestampPath"),
-                        "dynamic wait replaced by a TODO stub",
+                        "invalid wait arguments replaced by a TODO stub",
                     );
                     blocks.push(stub);
                 }
@@ -733,10 +863,11 @@ impl Sfn<'_> {
                     branches.push(Value::Array(non_empty(bl, b, &format!("{id}_branch_{i}"))));
                 }
                 b.mapped(name, "Parallel", &id, "parallel");
-                self.retry_notes(b, name, state);
+                self.composite_retry(b, name, state, &id);
                 let block = json!({"type": "parallel", "id": id, "branches": branches});
-                let after = self.after_result(b, name, state, &input, Root::opaque());
-                self.with_catch(b, m, name, state, block, after, stop, env, blocks, path)
+                let mut success = vec![block];
+                let after = self.after_result(b, name, state, env, Root::opaque(), &mut success);
+                self.with_catch(b, m, name, state, success, after, stop, env, blocks, path)
             }
             "Map" => {
                 let id = b.unique_id(name);
@@ -748,11 +879,10 @@ impl Sfn<'_> {
                     .get("ItemProcessor")
                     .or_else(|| state.get("Iterator"))
                     .context("Map state without `ItemProcessor` / `Iterator`")?;
-                if let Some(mode) = processor
+                let processor_mode = processor
                     .pointer("/ProcessorConfig/Mode")
-                    .and_then(Value::as_str)
-                    && mode != "INLINE"
-                {
+                    .and_then(Value::as_str);
+                if let Some(mode) = processor_mode.filter(|mode| *mode != "INLINE") {
                     self.unmapped(b, name, &format!("{name}.ProcessorConfig.Mode={mode}"), "distributed Map runs as an inline `for_each`; child-execution fan-out, ItemReader and ResultWriter are not translated");
                 }
                 for key in [
@@ -781,34 +911,8 @@ impl Sfn<'_> {
                         if concurrency == 0 { "unbounded".to_string() } else { concurrency.to_string() }
                     ));
                 }
-                let item_var = "item".to_string();
-                let mut inner = Env::single(Root::at(item_var.clone()), Some(item_var.clone()));
-                if let Some(selector) = state
-                    .get("ItemSelector")
-                    .or_else(|| state.get("Parameters"))
-                {
-                    let scoped = Env {
-                        overlays: input.overlays.clone(),
-                        item: Some(item_var.clone()),
-                    };
-                    inner = Env::single(Root::opaque(), Some(item_var.clone()));
-                    if let Some(map) = selector.as_object() {
-                        for (k, v) in map {
-                            let root = match (k.strip_suffix(".$"), v.as_str()) {
-                                (Some(key), Some(p)) => (
-                                    key.to_string(),
-                                    Root {
-                                        path: scoped.resolve(p),
-                                        lambda_payload: false,
-                                    },
-                                ),
-                                _ => (k.clone(), Root::opaque()),
-                            };
-                            inner.overlays.push((format!(".{}", root.0), root.1));
-                        }
-                    }
-                    self.unmapped(b, name, &format!("{name}.ItemSelector"), "the per-item input object is not materialized; paths into it were rewritten to the selected sources and literal selector fields are unavailable");
-                }
+                let item_var = format!("{id}_item");
+                let (inner, selector) = self.item_selector(b, name, state, &input, &id, &item_var);
                 let collection = match input.resolve(items_path) {
                     Some(p) => format!("{{{{{p}}}}}"),
                     None => {
@@ -830,16 +934,72 @@ impl Sfn<'_> {
                     .and_then(Value::as_str)
                     .with_context(|| format!("Map `{name}` processor has no `StartAt`"))?;
                 let sub = Machine { states: sub_states };
-                let (body, _) = self.chain(b, &sub, sub_start, None, inner, &mut Vec::new())?;
+                let (mut body, _) = self.chain(b, &sub, sub_start, None, inner, &mut Vec::new())?;
+                if let Some(selector) = selector {
+                    body.insert(0, selector);
+                }
                 let body = non_empty(body, b, &format!("{id}_body"));
                 b.mapped(name, "Map", &id, "for_each");
-                self.retry_notes(b, name, state);
+                if processor_mode.is_none_or(|mode| mode == "INLINE") {
+                    self.composite_retry(b, name, state, &id);
+                } else {
+                    self.retry_notes(b, name, state);
+                }
                 let block = json!({"type": "for_each", "id": id, "collection": collection, "item_var": item_var, "max_iterations": 10000, "body": body});
-                let after = self.after_result(b, name, state, &input, Root::opaque());
-                self.with_catch(b, m, name, state, block, after, stop, env, blocks, path)
+                let mut success = vec![block];
+                let after = self.after_result(b, name, state, env, Root::opaque(), &mut success);
+                self.with_catch(b, m, name, state, success, after, stop, env, blocks, path)
             }
             other => bail!("state `{name}` has unsupported Type `{other}`"),
         }
+    }
+
+    fn item_selector(
+        &self,
+        b: &mut Builder,
+        name: &str,
+        state: &Value,
+        input: &Env,
+        id: &str,
+        item_var: &str,
+    ) -> (Env, Option<Value>) {
+        let item = MapItem {
+            value: format!("data.{item_var}"),
+            index: format!("outputs.{id}._index"),
+        };
+        if let Some(selector) = state
+            .get("ItemSelector")
+            .or_else(|| state.get("Parameters"))
+        {
+            if selector.is_object() {
+                let scoped = Env {
+                    overlays: input.overlays.clone(),
+                    item: Some(item.clone()),
+                    callback_token: false,
+                };
+                let params = self.payload(b, name, selector, &scoped, Some("ItemSelector"));
+                let selector_id = b.unique_id(&format!("{name}_item_selector"));
+                b.mapped(
+                    name,
+                    "ItemSelector",
+                    &selector_id,
+                    "transform each item input",
+                );
+                return (
+                    Env::single(Root::at(format!("outputs.{selector_id}")), Some(item)),
+                    Some(
+                        json!({"type":"step","id":selector_id,"handler":"transform","params":params}),
+                    ),
+                );
+            }
+            self.unmapped(
+                b,
+                name,
+                &format!("{name}.ItemSelector"),
+                "the selector must be an object",
+            );
+        }
+        (Env::single(Root::at(item.value.clone()), Some(item)), None)
     }
 
     /// The env a Parallel branch sees (`Parameters` reshape the input).
@@ -870,27 +1030,87 @@ impl Sfn<'_> {
         b: &mut Builder,
         name: &str,
         state: &Value,
-        input: &Env,
-        result: Root,
+        raw_input: &Env,
+        mut result: Root,
+        blocks: &mut Vec<Value>,
     ) -> Env {
+        let mut projected = false;
         if let Some(selector) = state.get("ResultSelector") {
-            let trivial = selector.as_object().is_some_and(|m| {
-                m.len() == 1 && m.get("Payload.$").and_then(Value::as_str) == Some("$.Payload")
-            });
-            if !trivial {
-                self.unmapped(b, name, &format!("{name}.ResultSelector"), "result reshaping is not translated; later paths address the raw handler output");
+            if result.path.is_some() && (selector.is_object() || selector.is_array()) {
+                let id = b.unique_id(&format!("{name}_result_selector"));
+                let mut selector_input = Env::single(result.clone(), raw_input.item.clone());
+                if result.lambda_payload {
+                    // The local Lambda handler supplies the payload. Service
+                    // metadata and the complete AWS envelope are unavailable.
+                    selector_input = Env::single(Root::opaque(), raw_input.item.clone());
+                    selector_input.overlays.push((
+                        ".Payload".to_owned(),
+                        Root {
+                            lambda_payload: false,
+                            ..result
+                        },
+                    ));
+                }
+                let params =
+                    self.payload(b, name, selector, &selector_input, Some("ResultSelector"));
+                blocks.push(
+                    json!({"type": "step", "id": id, "handler": "transform", "params": params}),
+                );
+                b.mapped(name, "ResultSelector", &id, "transform");
+                result = Root::at(format!("outputs.{id}"));
+                projected = true;
+            } else {
+                self.unmapped(
+                    b,
+                    name,
+                    &format!("{name}.ResultSelector"),
+                    "result projection needs an addressable result and an object or array selector",
+                );
             }
         }
-        // The whole-state input for ResultPath merges is the *raw* input, not
-        // the InputPath-narrowed one — but only the narrowed view is
-        // addressable here, which is what later states usually read.
-        let merged = input.with_result(state.get("ResultPath"), result);
+        let result_path = state.get("ResultPath");
+        let mut materialized = None;
+        if projected
+            && let Some(path) = result_path.and_then(Value::as_str)
+            && path.trim() != "$"
+        {
+            materialized = result_path_expression(raw_input, path, &result)
+                .and_then(|expression| expression.to_template().ok())
+                .map(|params| {
+                    let id = b.unique_id(&format!("{name}_result_path"));
+                    blocks.push(
+                        json!({"type":"step", "id":id, "handler":"transform", "params":params}),
+                    );
+                    b.mapped(name, "ResultPath", &id, "transform");
+                    Env::single(Root::at(format!("outputs.{id}")), raw_input.item.clone())
+                });
+            if materialized.is_none() {
+                self.unmapped(
+                    b,
+                    name,
+                    &format!("{name}.ResultPath"),
+                    "result merge needs addressable input and a single supported reference path",
+                );
+            }
+        }
+        let merged = materialized.unwrap_or_else(|| raw_input.with_result(result_path, result));
         merged.narrowed(state.get("OutputPath"))
     }
 
     fn retry_notes(&self, b: &mut Builder, name: &str, state: &Value) {
         if state.get("Retry").is_some() {
-            self.unmapped(b, name, &format!("{name}.Retry"), "Orch8 retries individual steps, not composite blocks: add `retry` to the steps inside");
+            self.unmapped(
+                b,
+                name,
+                &format!("{name}.Retry"),
+                "Retry is unsupported for this state form",
+            );
+        }
+    }
+
+    fn composite_retry(&self, b: &mut Builder, name: &str, state: &Value, id: &str) {
+        if let Some(retry) = self.retry(b, name, state) {
+            b.composite_retries.insert(id.to_owned(), retry);
         }
     }
 
@@ -912,6 +1132,10 @@ impl Sfn<'_> {
             _ => (resource, None),
         };
         let base = base.strip_suffix(".sync").unwrap_or(base);
+        let mut task_input = input.clone();
+        task_input.callback_token =
+            suffix == Some("waitForTaskToken") && base != "arn:aws:states:::http:invoke";
+        let input = &task_input;
         let params_src = state.get("Parameters");
         let id = b.unique_id(name);
         let mut lambda_payload = false;
@@ -1023,7 +1247,12 @@ impl Sfn<'_> {
             self.worker(b, name, &id, &format!("Task ({resource})"), &handler, payload, &format!("service integration `{resource}` — implement it in worker handler `{handler}` (AWS SDK call) or replace it with an http_request step"))
         };
         match suffix {
-            Some("waitForTaskToken") => self.unmapped(b, name, resource, "callback pattern: the worker keeps the Orch8 task claimed (heartbeating) and completes it when the external callback arrives — the worker task id replaces the task token"),
+            Some("waitForTaskToken") if task_input.callback_token => {
+                let params = block["params"].take();
+                block["params"] = json!({(orch8_types::worker::ASL_CALLBACK_PARAM): {"params":params}});
+                b.mapped(name, ".waitForTaskToken", &id, "expiring worker callback token");
+            }
+            Some("waitForTaskToken") => self.unmapped(b, name, resource, "callback tokens require an external worker task"),
             Some("sync") if block["type"] != "sub_sequence" => self.unmapped(b, name, resource, "`.sync` job: the worker must wait for the job to finish before completing the task"),
             _ => {}
         }
@@ -1031,15 +1260,13 @@ impl Sfn<'_> {
             if let Some(ms) = state.get("TimeoutSeconds").and_then(millis) {
                 block["timeout"] = json!(ms);
             }
-            for key in [
-                "TimeoutSecondsPath",
-                "HeartbeatSeconds",
-                "HeartbeatSecondsPath",
-                "Credentials",
-            ] {
-                if state.get(key).is_some() {
-                    self.unmapped(b, name, &format!("{name}.{key}"), "not translated (worker task heartbeats / credentials are configured on the worker)");
-                }
+            if state.get("Credentials").is_some() {
+                self.unmapped(
+                    b,
+                    name,
+                    &format!("{name}.Credentials"),
+                    "task credentials must be configured on the worker",
+                );
             }
             if let Some(retry) = self.retry(b, name, state) {
                 block["retry"] = retry;
@@ -1047,6 +1274,8 @@ impl Sfn<'_> {
         } else {
             self.retry_notes(b, name, state);
         }
+        self.worker_heartbeat(b, name, state, input, &mut block, base)?;
+        self.worker_timeout_path(b, name, state, input, &mut block, base)?;
         Ok((
             block,
             Root {
@@ -1054,6 +1283,122 @@ impl Sfn<'_> {
                 lambda_payload,
             },
         ))
+    }
+
+    fn worker_timeout_path(
+        &self,
+        b: &mut Builder,
+        name: &str,
+        state: &Value,
+        input: &Env,
+        block: &mut Value,
+        resource: &str,
+    ) -> Result<()> {
+        let Some(path) = state.get("TimeoutSecondsPath") else {
+            return Ok(());
+        };
+        anyhow::ensure!(
+            state.get("TimeoutSeconds").is_none(),
+            "Task `{name}` specifies both TimeoutSeconds and TimeoutSecondsPath"
+        );
+        let field = format!("{name}.TimeoutSecondsPath");
+        if block["type"] != "step" || resource == "arn:aws:states:::http:invoke" {
+            self.unmapped(
+                b,
+                name,
+                &field,
+                "dynamic timeouts require an external worker task",
+            );
+            return Ok(());
+        }
+        let Some(resolved) = path.as_str().and_then(|path| input.resolve(path)) else {
+            self.unmapped(
+                b,
+                name,
+                &field,
+                "timeout reference path does not resolve to addressable state input",
+            );
+            return Ok(());
+        };
+        let params = block["params"].take();
+        block["params"] = json!({(orch8_types::worker::ASL_TIMEOUT_PARAM): {
+            "seconds": format!("{{{{{resolved}}}}}"), "params": params
+        }});
+        b.mapped(
+            name,
+            "TimeoutSecondsPath",
+            block["id"].as_str().unwrap_or(name),
+            "absolute worker deadline resolved from state input",
+        );
+        Ok(())
+    }
+
+    fn worker_heartbeat(
+        &self,
+        b: &mut Builder,
+        name: &str,
+        state: &Value,
+        input: &Env,
+        block: &mut Value,
+        resource: &str,
+    ) -> Result<()> {
+        let (field, seconds) = match (
+            state.get("HeartbeatSeconds"),
+            state.get("HeartbeatSecondsPath"),
+        ) {
+            (None, None) => return Ok(()),
+            (Some(_), Some(_)) => {
+                bail!("Task `{name}` specifies both HeartbeatSeconds and HeartbeatSecondsPath")
+            }
+            (Some(seconds), None) => {
+                anyhow::ensure!(
+                    seconds
+                        .as_u64()
+                        .and_then(|n| u32::try_from(n).ok())
+                        .is_some_and(|n| n > 0),
+                    "Task `{name}` HeartbeatSeconds must be a positive integer within the supported range"
+                );
+                ("HeartbeatSeconds", seconds.clone())
+            }
+            (None, Some(path)) => {
+                let Some(resolved) = path.as_str().and_then(|path| input.resolve(path)) else {
+                    self.unmapped(
+                        b,
+                        name,
+                        &format!("{name}.HeartbeatSecondsPath"),
+                        "heartbeat reference path does not resolve to addressable state input",
+                    );
+                    return Ok(());
+                };
+                ("HeartbeatSecondsPath", json!(format!("{{{{{resolved}}}}}")))
+            }
+        };
+        if block["type"] != "step" || resource == "arn:aws:states:::http:invoke" {
+            self.unmapped(
+                b,
+                name,
+                &format!("{name}.{field}"),
+                "renewable heartbeats require an external worker task",
+            );
+            return Ok(());
+        }
+        if let (Some(seconds), Some(timeout)) = (seconds.as_u64(), block["timeout"].as_u64()) {
+            anyhow::ensure!(
+                seconds * 1000 < timeout,
+                "Task `{name}` HeartbeatSeconds must be less than TimeoutSeconds"
+            );
+        }
+        let params = block["params"].take();
+        block["params"] = json!({
+            (orch8_types::worker::ASL_HEARTBEAT_PARAM): {"seconds": seconds, "params": params}
+        });
+        b.mapped(
+            name,
+            field,
+            block["id"].as_str().unwrap_or(name),
+            "renewable worker deadline",
+        );
+        Ok(())
     }
 
     fn worker(
@@ -1079,49 +1424,67 @@ impl Sfn<'_> {
         json!({"type": "step", "id": id, "handler": handler, "params": params})
     }
 
-    /// `Retry[0]` → `retry`; further retriers and error filters are reported.
+    /// Retain error matches and attempt budgets in source order.
     fn retry(&self, b: &mut Builder, name: &str, state: &Value) -> Option<Value> {
         let retriers = state.get("Retry")?.as_array()?;
-        let first = retriers.first()?;
-        for (i, extra) in retriers.iter().enumerate().skip(1) {
+        let rules: Vec<_> = retriers
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rule)| self.retry_rule(b, name, index, rule))
+            .collect();
+        let mut policy = rules.first()?.clone();
+        if rules
+            .iter()
+            .all(|rule| rule["max_attempts"].as_u64() == Some(0))
+        {
+            return None;
+        }
+        let outer = policy.as_object_mut()?;
+        outer.remove("error_equals");
+        if outer["max_attempts"].as_u64() == Some(0) {
+            outer.insert("max_attempts".into(), json!(1));
+        }
+        outer.insert("rules".into(), json!(rules));
+        Some(policy)
+    }
+
+    fn retry_rule(&self, b: &mut Builder, name: &str, index: usize, rule: &Value) -> Option<Value> {
+        let Some(errors) = rule
+            .get("ErrorEquals")
+            .and_then(Value::as_array)
+            .filter(|errors| !errors.is_empty() && errors.iter().all(Value::is_string))
+        else {
             self.unmapped(
                 b,
                 name,
-                &format!(
-                    "{name}.Retry[{i}] {}",
-                    extra.get("ErrorEquals").unwrap_or(&Value::Null)
-                ),
-                "only the first retrier is translated; Orch8 has one retry policy per step",
+                &format!("{name}.Retry[{index}].ErrorEquals"),
+                "expected a list of error names",
             );
-        }
-        let errors = first
-            .get("ErrorEquals")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        if errors != json!(["States.ALL"]) {
-            self.unmapped(b, name, &format!("{name}.Retry[0].ErrorEquals {errors}"), "Orch8 retries every retryable error; make non-matching errors permanent in the worker (StepError::Permanent) or use `non_retryable_codes`");
-        }
-        if first.get("JitterStrategy").and_then(Value::as_str) == Some("FULL") {
-            b.report.warnings.push(format!(
-                "Task `{name}`: JitterStrategy FULL is not translated"
-            ));
-        }
-        let retries = first
-            .get("MaxAttempts")
-            .and_then(Value::as_u64)
-            .unwrap_or(3);
-        if retries == 0 {
             return None;
-        }
-        let interval = first
+        };
+        let jitter = match rule.get("JitterStrategy").and_then(Value::as_str) {
+            Some("FULL") => "full",
+            None | Some("NONE") => "none",
+            Some(other) => {
+                self.unmapped(
+                    b,
+                    name,
+                    &format!("{name}.Retry[{index}].JitterStrategy"),
+                    &format!("unsupported retry jitter {other}"),
+                );
+                "none"
+            }
+        };
+        let retries = rule.get("MaxAttempts").and_then(Value::as_u64).unwrap_or(3);
+        let interval = rule
             .get("IntervalSeconds")
             .and_then(Value::as_f64)
             .unwrap_or(1.0);
-        let rate = first
+        let rate = rule
             .get("BackoffRate")
             .and_then(Value::as_f64)
             .unwrap_or(2.0);
-        let max_delay = first
+        let max_delay = rule
             .get("MaxDelaySeconds")
             .and_then(Value::as_f64)
             .unwrap_or_else(|| {
@@ -1133,10 +1496,12 @@ impl Sfn<'_> {
             });
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Some(json!({
-            "max_attempts": retries.saturating_add(1).min(u64::from(u32::MAX)),
-            "initial_backoff": (interval * 1000.0).round() as u64,
-            "max_backoff": (max_delay.max(interval) * 1000.0).round() as u64,
+            "error_equals": errors,
+            "max_attempts": retries.min(u64::from(u32::MAX)),
+            "initial_backoff": (interval.min(max_delay) * 1000.0).round() as u64,
+            "max_backoff": (max_delay * 1000.0).round() as u64,
             "backoff_multiplier": rate,
+            "jitter": jitter,
         }))
     }
 
@@ -1148,7 +1513,7 @@ impl Sfn<'_> {
         m: &Machine<'_>,
         name: &str,
         state: &Value,
-        block: Value,
+        success: Vec<Value>,
         after: Env,
         stop: Option<&str>,
         env: &mut Env,
@@ -1165,42 +1530,74 @@ impl Sfn<'_> {
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        let Some(catcher) = catchers.first() else {
-            blocks.push(block);
+        if catchers.is_empty() {
+            blocks.extend(success);
             *env = after;
             return Ok(normal_next);
-        };
-        for (i, extra) in catchers.iter().enumerate().skip(1) {
-            self.unmapped(b, name, &format!("{name}.Catch[{i}] {}", extra.get("ErrorEquals").unwrap_or(&Value::Null)), "only the first catcher is translated: every error now takes the Catch[0] path — add a router on the error inside the catch block");
         }
-        let errors = catcher
-            .get("ErrorEquals")
-            .cloned()
-            .unwrap_or_else(|| json!([]));
-        if errors != json!(["States.ALL"]) {
-            self.unmapped(
-                b,
-                name,
-                &format!("{name}.Catch[0].ErrorEquals {errors}"),
-                "Orch8 `try_catch` catches every error; errors outside this list are caught too",
-            );
-        }
-        let catch_next = next_of(catcher)
-            .context("Catch without `Next`")?
-            .to_string();
+        let catch_targets: Vec<_> = catchers
+            .iter()
+            .map(|catcher| next_of(catcher).context("Catch without `Next`"))
+            .collect::<Result<_>>()?;
         let tc_id = b.unique_id(&format!("{name}_try"));
-        let join = m.join(&[normal_next.as_deref(), Some(catch_next.as_str())], stop);
-        let catch_env = match catcher.get("ResultPath") {
-            Some(Value::Null) => env.clone(),
-            rp => env.with_result(rp, Root::opaque()),
-        };
+        let targets: Vec<_> = std::iter::once(normal_next.as_deref())
+            .chain(catch_targets.iter().copied().map(Some))
+            .collect();
+        let join = m.join(&targets, stop);
+        let router = b.unique_id(&format!("{name}_catch_routes"));
+        let mut routes = Vec::new();
+        for (index, (catcher, target)) in catchers.iter().zip(catch_targets).enumerate() {
+            let errors = catcher["ErrorEquals"]
+                .as_array()
+                .filter(|errors| !errors.is_empty())
+                .context("Catch requires ErrorEquals")?;
+            let conditions: Vec<_> = errors.iter().map(|error| {
+                let error = error.as_str().context("Catch ErrorEquals entries must be strings")?;
+                Ok(match error {
+                    "States.ALL" => r#"(data._error.code != "States.Runtime" && data._error.code != "States.DataLimitExceeded")"#.to_owned(),
+                    "States.TaskFailed" => r#"(data._error.code != "States.Timeout" && data._error.code != "States.Runtime" && data._error.code != "States.DataLimitExceeded")"#.to_owned(),
+                    other => format!("data._error.code == {}", json!(other)),
+                })
+            }).collect::<Result<_>>()?;
+            let mut branch = Vec::new();
+            let catch_env = if catcher.get("ResultPath").is_some_and(Value::is_null) {
+                env.clone()
+            } else {
+                let captured = b.unique_id(&format!("{name}_error_{index}"));
+                branch.push(json!({"type":"step","id":captured,"handler":"transform",
+                    "params":{"Error":"{{ data._error.code }}","Cause":"{{ data._error.message }}"}}));
+                self.after_result(
+                    b,
+                    name,
+                    catcher,
+                    env,
+                    Root::at(format!("outputs.{captured}")),
+                    &mut branch,
+                )
+            };
+            let (chain, _) = self.chain(b, m, target, join.as_deref(), catch_env, path)?;
+            branch.extend(chain);
+            routes.push(json!({
+                "condition": conditions.join(" || "),
+                "blocks": non_empty(branch, b, &format!("{router}_{index}")),
+            }));
+        }
+        let unmatched = b.unique_id(&format!("{name}_uncaught"));
+        let mut catch_blocks = vec![json!({
+            "type": "router", "id": router, "routes": routes,
+            "default": [{"type": "step", "id": unmatched, "handler": "fail",
+                "params": {"error": "{{ data._error.code }}", "message": "{{ data._error.message }}", "retryable": false}}]
+        })];
         let rejoins_normal = join.is_some() && join == normal_next;
-        let (mut catch_blocks, _) =
-            self.chain(b, m, &catch_next, join.as_deref(), catch_env, path)?;
-        b.mapped(name, "Catch", &tc_id, "try_catch");
+        b.mapped(
+            name,
+            "Catch",
+            &tc_id,
+            "try_catch with an ordered error router",
+        );
         if rejoins_normal || normal_next.is_none() {
             let catch_blocks = non_empty(catch_blocks, b, &format!("{tc_id}_catch"));
-            blocks.push(json!({"type": "try_catch", "id": tc_id, "try_block": [block], "catch_block": catch_blocks}));
+            blocks.push(json!({"type": "try_catch", "id": tc_id, "try_block": success, "catch_block": catch_blocks}));
             *env = after;
             return Ok(if rejoins_normal { normal_next } else { join });
         }
@@ -1212,7 +1609,7 @@ impl Sfn<'_> {
             0,
             json!({"type": "step", "id": marker, "handler": "noop", "params": {}}),
         );
-        blocks.push(json!({"type": "try_catch", "id": tc_id, "try_block": [block], "catch_block": catch_blocks}));
+        blocks.push(json!({"type": "try_catch", "id": tc_id, "try_block": success, "catch_block": catch_blocks}));
         let (ok_blocks, ok_env) = self.chain(
             b,
             m,

@@ -58,6 +58,28 @@ pub(super) async fn get(
     row.as_ref().map(row_to_output).transpose()
 }
 
+pub(super) async fn get_scoped_attempt(
+    store: &SqliteStorage,
+    tenant: &TenantId,
+    instance_id: InstanceId,
+    block_id: &BlockId,
+    attempt: u16,
+) -> Result<Option<BlockOutput>, StorageError> {
+    let row = sqlx::query(
+        "SELECT o.* FROM block_outputs o JOIN task_instances i ON i.id=o.instance_id
+         WHERE i.tenant_id=?1 AND o.instance_id=?2 AND o.block_id=?3 AND o.attempt=?4
+           AND o.output_ref IS NOT '__in_progress__'
+         ORDER BY o.created_at DESC,o.id DESC LIMIT 1",
+    )
+    .bind(tenant.as_str())
+    .bind(instance_id.to_string())
+    .bind(block_id.as_str())
+    .bind(i64::from(attempt))
+    .fetch_optional(&store.pool)
+    .await?;
+    row.as_ref().map(row_to_output).transpose()
+}
+
 pub(super) async fn get_claimed(
     storage: &SqliteStorage,
     instance_id: InstanceId,

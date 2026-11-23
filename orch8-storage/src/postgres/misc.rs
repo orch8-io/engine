@@ -258,7 +258,7 @@ pub(super) async fn claim_worker_tasks_from_queue(
             lease_secs = NULL, claimed_runtime_kind = NULL
         WHERE id IN (
             SELECT id FROM worker_tasks
-            WHERE handler_name = $1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND NOT awaiting_dispatch
+            WHERE handler_name = $1 AND handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=worker_tasks.id) AND state = 'pending' AND claim_epoch>=0 AND claim_epoch<9223372036854775807 AND (NOT wait_for_callback OR (timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM created_at) + timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp()))) AND NOT awaiting_dispatch
               AND queue_name = $5
               AND NOT EXISTS (SELECT 1 FROM task_instances ti WHERE ti.id=worker_tasks.instance_id AND ti.state IN ('completed','failed','cancelled'))
               AND NOT EXISTS (SELECT 1 FROM delegation_proxy_native_history bad_relay WHERE bad_relay.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM physical_instance_retirements retired WHERE retired.instance_id=worker_tasks.instance_id) AND NOT EXISTS (SELECT 1 FROM capsule_source_cuts cut WHERE cut.source_instance_id=worker_tasks.instance_id AND cut.state IN ('captured','sealed'))
@@ -294,9 +294,9 @@ pub(super) async fn claim_worker_tasks_from_queue(
             )
         })
         .collect();
-    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
+    let transport = super::worker_claim::record_with_context_on(&mut tx, &tasks, principal).await?;
     super::workers::insert_attempt_events(&mut tx, &events).await?;
-    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
+    crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
     }.await;
     super::finish_transaction(tx, result).await
 }
@@ -331,7 +331,7 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
             SELECT wt.id FROM worker_tasks wt
             JOIN task_instances ti ON ti.id = wt.instance_id
             WHERE wt.handler_name = $1 AND wt.handler_name<>'orch8.delegation' AND NOT EXISTS(SELECT 1 FROM delegation_publications dp WHERE dp.task_id=wt.id)
-              AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807
+              AND wt.state = 'pending' AND wt.claim_epoch>=0 AND wt.claim_epoch<9223372036854775807 AND (NOT wt.wait_for_callback OR (wt.timeout_ms IS NOT NULL AND EXTRACT(EPOCH FROM wt.created_at) + wt.timeout_ms::numeric / 1000 > EXTRACT(EPOCH FROM clock_timestamp())))
               AND NOT wt.awaiting_dispatch
               AND (wt.requirements = '{}'::jsonb OR (wt.requirements - 'prefer' = '{}'::jsonb AND (wt.requirements->'prefer'->>'worker_id' = $2 OR (wt.requirements->'prefer'->>'until_ms')::bigint <= (EXTRACT(EPOCH FROM NOW()) * 1000)::bigint)))
               AND wt.queue_name = $3
@@ -369,9 +369,9 @@ pub(super) async fn claim_worker_tasks_from_queue_for_tenant(
             )
         })
         .collect();
-    super::worker_claim::record_on(&mut tx, &tasks, principal).await?;
+    let transport = super::worker_claim::record_with_context_on(&mut tx, &tasks, principal).await?;
     super::workers::insert_attempt_events(&mut tx, &events).await?;
-    crate::worker_claim::WorkerClaimBatch::new(tasks, Vec::new())
+    crate::worker_claim::WorkerClaimBatch::new(tasks, transport)
     }.await;
     super::finish_transaction(tx, result).await
 }

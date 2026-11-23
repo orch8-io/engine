@@ -36,6 +36,16 @@ gradle :app:installDebug
 
 Open **Field Inspection**. Run `gradle :app:connectedDebugAndroidTest` to test the database reopen against the published Maven AAR.
 
+The published Android upgrade test uses two consecutive Maven releases and
+preserves the app's data across installation. It queues an offline inspection
+on the predecessor, then withholds the first server acknowledgement after the
+upgrade. The restarted app must recover the same submission and receive the
+same receipt when it retries.
+
+To run the test with a local published engine binary and a disposable
+emulator, set `ORCH8_UPGRADE_ENGINE_BINARY` to that release's
+`orch8-server` executable.
+
 ## Verify offline recovery
 
 1. Launch the app and select **Start inspection**. Wait for **Waiting for the inspection result**.

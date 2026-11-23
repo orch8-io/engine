@@ -29,7 +29,7 @@ impl WorkerEffectPlan {
     }
 }
 
-fn legacy_identity(receipt: &EffectReceipt) -> EffectId {
+pub(crate) fn legacy_identity(receipt: &EffectReceipt) -> EffectId {
     let mut hash = Sha256::new();
     hash.update(b"orch8-effect-v1\0");
     hash.update(receipt.continuity_id.as_uuid().as_bytes());
@@ -288,11 +288,18 @@ fn invalid() -> StorageError {
 }
 
 pub(crate) fn task_spec(task: &WorkerTask) -> String {
-    digest(&json!({
+    let mut spec = json!({
         "handler":task.handler_name,"queue":task.queue_name,"requirements":task.requirements,
         "params":task.params,"context":task.context,"attempt":task.attempt,
         "timeout_ms":task.timeout_ms,"carries_credentials":task.carries_credentials,
-    }))
+    });
+    if let Some(seconds) = task.heartbeat_timeout_secs {
+        spec["heartbeat_timeout_secs"] = json!(seconds);
+    }
+    if task.wait_for_callback {
+        spec["wait_for_callback"] = Value::Bool(true);
+    }
+    digest(&spec)
 }
 
 pub(crate) fn digest(value: &Value) -> String {

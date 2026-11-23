@@ -249,6 +249,16 @@ pub(crate) async fn enqueue_worker_task(
             Ok(split) => split,
             Err(message) => return Ok(Err(RemoteDispatchRejected(message))),
         };
+    let AslWorkerInput {
+        params,
+        timeout_ms,
+        heartbeat_timeout_secs,
+        callback_paths,
+    } = match asl_worker_input(step_def, resolved_params) {
+        Ok(values) => values,
+        Err(rejection) => return Ok(Err(rejection)),
+    };
+    let wait_for_callback = callback_paths.is_some();
     if let Some(message) =
         placement_rejection(storage, instance, &requirements, carries_credentials).await?
     {
@@ -284,6 +294,11 @@ pub(crate) async fn enqueue_worker_task(
         task_id,
     ));
 
+    let mut context = serde_json::to_value(&worker_context)
+        .map_err(orch8_types::error::StorageError::Serialization)?;
+    if let Some(paths) = callback_paths {
+        context[orch8_types::worker::ASL_CALLBACK_PATHS] = serde_json::json!(paths);
+    }
     let task = WorkerTask {
         id: task_id,
         instance_id: instance.id,
@@ -291,16 +306,15 @@ pub(crate) async fn enqueue_worker_task(
         handler_name: step_def.handler.clone(),
         queue_name,
         requirements,
-        params: resolved_params,
+        params,
         // Context already had `context_access` filtering and externalization
         // markers inflated upstream — the remote process can't be trusted to
         // filter on its own.
-        context: serde_json::to_value(&worker_context)
-            .map_err(orch8_types::error::StorageError::Serialization)?,
+        context,
         attempt: attempt_u16,
-        timeout_ms: step_def
-            .timeout
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+        timeout_ms,
+        heartbeat_timeout_secs,
+        wait_for_callback,
         state: WorkerTaskState::Pending,
         worker_id: None,
         claimed_at: None,
@@ -330,6 +344,183 @@ pub(crate) async fn enqueue_worker_task(
     announce_worker_task(storage, instance, &task).await;
 
     Ok(Ok(task))
+}
+
+/// Only importer-owned task metadata can force worker dispatch.
+pub(crate) fn requires_asl_worker(step: &StepDef) -> bool {
+    step.params
+        .get(orch8_types::worker::ASL_TIMEOUT_PARAM)
+        .is_some()
+        || has_asl_heartbeat(step)
+        || asl_callback_params(step).is_some()
+}
+
+fn asl_timeout_payload(step: &StepDef) -> &serde_json::Value {
+    step.params
+        .get(orch8_types::worker::ASL_TIMEOUT_PARAM)
+        .and_then(|timeout| timeout.get("params"))
+        .unwrap_or(&step.params)
+}
+
+fn asl_callback_params(step: &StepDef) -> Option<&serde_json::Value> {
+    use orch8_types::worker::{ASL_CALLBACK_PARAM, ASL_HEARTBEAT_PARAM};
+    let params = asl_timeout_payload(step);
+    params
+        .get(ASL_HEARTBEAT_PARAM)
+        .and_then(|heartbeat| heartbeat.get("params"))
+        .unwrap_or(params)
+        .get(ASL_CALLBACK_PARAM)
+        .and_then(|callback| callback.get("params"))
+}
+
+fn take_asl_callback(
+    step: &StepDef,
+    params: &mut serde_json::Value,
+) -> Result<Option<Vec<orch8_types::worker::CallbackParameter>>, RemoteDispatchRejected> {
+    use orch8_types::worker::{ASL_CALLBACK_PARAM, CallbackParameter};
+    let Some(template) = asl_callback_params(step) else {
+        return Ok(None);
+    };
+    let mut payload = params
+        .get_mut(ASL_CALLBACK_PARAM)
+        .and_then(|callback| callback.get_mut("params"))
+        .map(serde_json::Value::take)
+        .ok_or_else(|| RemoteDispatchRejected("invalid callback parameter template".into()))?;
+    // Collect insertion paths from the static template only. Runtime input
+    // cannot mark additional destinations for the callback credential.
+    let mut paths = Vec::new();
+    collect_callback_paths(template, "", &mut paths);
+    let mut parameters = Vec::with_capacity(paths.len());
+    for (path, intrinsic) in paths {
+        let slot = payload
+            .pointer_mut(&path)
+            .ok_or_else(|| RemoteDispatchRejected("callback parameter path changed".into()))?;
+        let resolved = slot.take();
+        parameters.push(if intrinsic {
+            CallbackParameter::Intrinsic {
+                pointer: path,
+                expression: serde_json::from_value(resolved).map_err(|_| {
+                    RemoteDispatchRejected("invalid resolved callback intrinsic".into())
+                })?,
+            }
+        } else {
+            CallbackParameter::Token(path)
+        });
+    }
+    *params = payload;
+    Ok(Some(parameters))
+}
+
+fn collect_callback_paths(value: &serde_json::Value, path: &str, paths: &mut Vec<(String, bool)>) {
+    use serde_json::Value;
+    match value {
+        Value::Object(object)
+            if object.len() == 1
+                && object.get(orch8_types::worker::ASL_CALLBACK_TOKEN)
+                    == Some(&Value::Bool(true)) =>
+        {
+            paths.push((path.to_owned(), false));
+        }
+        Value::String(template)
+            if orch8_types::asl_intrinsic::Intrinsic::from_callback_template(template)
+                .is_some() =>
+        {
+            paths.push((path.to_owned(), true));
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                let key = key.replace('~', "~0").replace('/', "~1");
+                collect_callback_paths(value, &format!("{path}/{key}"), paths);
+            }
+        }
+        Value::Array(array) => {
+            for (index, value) in array.iter().enumerate() {
+                collect_callback_paths(value, &format!("{path}/{index}"), paths);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn has_asl_heartbeat(step: &StepDef) -> bool {
+    asl_timeout_payload(step)
+        .get(orch8_types::worker::ASL_HEARTBEAT_PARAM)
+        .is_some()
+}
+
+struct AslWorkerInput {
+    params: serde_json::Value,
+    timeout_ms: Option<i64>,
+    heartbeat_timeout_secs: Option<u32>,
+    callback_paths: Option<Vec<orch8_types::worker::CallbackParameter>>,
+}
+
+fn asl_worker_input(
+    step: &StepDef,
+    mut params: serde_json::Value,
+) -> Result<AslWorkerInput, RemoteDispatchRejected> {
+    let key = orch8_types::worker::ASL_TIMEOUT_PARAM;
+    let mut timeout_ms = step
+        .timeout
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    if step.params.get(key).is_some() {
+        let mut config = params
+            .get_mut(key)
+            .map_or(serde_json::Value::Null, serde_json::Value::take);
+        let seconds = config["seconds"]
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|seconds| *seconds != 0)
+            .ok_or_else(|| {
+                RemoteDispatchRejected(
+                    "task timeout must resolve to a positive integer in seconds".into(),
+                )
+            })?;
+        timeout_ms = Some(i64::from(seconds) * 1000);
+        params = config["params"].take();
+    }
+    let (heartbeat_timeout_secs, mut params) = take_asl_heartbeat(step, params)?;
+    let callback_paths = take_asl_callback(step, &mut params)?;
+    let timeout_ms = timeout_ms.or(callback_paths
+        .as_ref()
+        .map(|_| orch8_types::worker::ASL_CALLBACK_DEFAULT_TIMEOUT_MS));
+    if let (Some(heartbeat), Some(timeout_ms)) = (heartbeat_timeout_secs, timeout_ms)
+        && i64::from(heartbeat) * 1000 >= timeout_ms
+    {
+        return Err(RemoteDispatchRejected(
+            "heartbeat deadline must be less than the task timeout".into(),
+        ));
+    }
+    Ok(AslWorkerInput {
+        params,
+        timeout_ms,
+        heartbeat_timeout_secs,
+        callback_paths,
+    })
+}
+
+/// Remove importer metadata after templates are evaluated, preserving the worker input shape.
+fn take_asl_heartbeat(
+    step: &StepDef,
+    mut params: serde_json::Value,
+) -> Result<(Option<u32>, serde_json::Value), RemoteDispatchRejected> {
+    let key = orch8_types::worker::ASL_HEARTBEAT_PARAM;
+    if !has_asl_heartbeat(step) {
+        return Ok((None, params));
+    }
+    let mut config = params
+        .get_mut(key)
+        .map_or(serde_json::Value::Null, serde_json::Value::take);
+    let seconds = config["seconds"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| {
+            RemoteDispatchRejected(
+                "heartbeat deadline must resolve to a positive integer in seconds".into(),
+            )
+        })?;
+    Ok((Some(seconds), config["params"].take()))
 }
 
 /// Announce only the task retained by the successful queue transaction.
@@ -591,6 +782,33 @@ pub(crate) async fn resolve_plugin_source(
     name: &str,
     expected_type: PluginType,
 ) -> Option<String> {
+    resolve_plugin(storage, tenant_id, name, expected_type)
+        .await
+        .map(|plugin| plugin.source)
+}
+
+pub(crate) async fn resolve_plugin(
+    storage: &dyn StorageBackend,
+    tenant_id: &orch8_types::ids::TenantId,
+    name: &str,
+    expected_type: PluginType,
+) -> Option<orch8_types::plugin::PluginDef> {
+    if expected_type == PluginType::Wasm
+        && name.starts_with(orch8_types::plugin::WASM_ARTIFACT_SOURCE_PREFIX)
+    {
+        orch8_types::plugin::WasmArtifactDigest::from_source(name).ok()??;
+        return Some(orch8_types::plugin::PluginDef {
+            name: name.into(),
+            plugin_type: PluginType::Wasm,
+            source: name.into(),
+            tenant_id: tenant_id.to_string(),
+            enabled: true,
+            config: serde_json::Value::Null,
+            description: None,
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            updated_at: chrono::DateTime::UNIX_EPOCH,
+        });
+    }
     let plugin = match storage.get_plugin(Some(tenant_id), name).await {
         Ok(Some(p)) => p,
         Ok(None) => return None,
@@ -600,7 +818,7 @@ pub(crate) async fn resolve_plugin_source(
         }
     };
     if plugin.enabled && plugin.plugin_type == expected_type {
-        Some(plugin.source)
+        Some(plugin)
     } else {
         None
     }
@@ -638,6 +856,41 @@ mod tests {
     use orch8_types::instance::{InstanceState, Priority, TaskInstance};
     use orch8_types::plugin::PluginType;
     use serde_json::json;
+
+    #[test]
+    fn asl_worker_timeout_rejects_invalid_values_and_caps_heartbeat_deadlines() {
+        let envelope = |seconds| {
+            json!({"$asl_timeout": {"seconds": seconds, "params": {"$asl_heartbeat": {
+                "seconds": 5, "params": {"$asl_callback": {"params": {"token": {"$asl_task_token": true}}}}
+            }}}})
+        };
+        let step: StepDef = serde_json::from_value(json!({
+            "id": "callback", "handler": "worker", "params": envelope(json!("{{data.seconds}}"))
+        }))
+        .unwrap();
+        assert!(requires_asl_worker(&step));
+        for invalid in [
+            json!(null),
+            json!("8"),
+            json!(1.5),
+            json!(0),
+            json!(u64::MAX),
+        ] {
+            assert!(
+                matches!(asl_worker_input(&step, envelope(invalid)), Err(RemoteDispatchRejected(message)) if message.contains("positive integer"))
+            );
+        }
+        assert!(
+            matches!(asl_worker_input(&step, envelope(json!(5))), Err(RemoteDispatchRejected(message)) if message.contains("less than"))
+        );
+        let input = asl_worker_input(&step, envelope(json!(8))).unwrap();
+        assert_eq!(input.params, json!({"token":null}));
+        assert_eq!(input.timeout_ms, Some(8000));
+        assert_eq!(input.heartbeat_timeout_secs, Some(5));
+        assert!(
+            matches!(input.callback_paths.unwrap().as_slice(), [orch8_types::worker::CallbackParameter::Token(path)] if path == "/token")
+        );
+    }
 
     async fn mk_storage() -> SqliteStorage {
         SqliteStorage::in_memory().await.unwrap()

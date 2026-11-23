@@ -215,10 +215,15 @@ pub(crate) async fn execute_loop_with_clock(
     // loop while body steps are still Running. The loop's own outputs are
     // not exposed to its condition expression — it reads instance context.
     let at_iteration_start = children.iter().all(|c| c.state == NodeState::Pending);
+    let context = if at_iteration_start || loop_def.break_on.is_some() {
+        crate::externalized::resolved_context_for_instance(storage.backend(), instance).await?
+    } else {
+        std::borrow::Cow::Borrowed(&instance.context)
+    };
     if at_iteration_start
         && !crate::expression::evaluate_condition(
             &loop_def.condition,
-            &instance.context,
+            context.as_ref(),
             &empty_outputs,
         )
     {
@@ -255,7 +260,7 @@ pub(crate) async fn execute_loop_with_clock(
 
     // break_on: evaluate after body completion; exit loop on match.
     if let Some(ref break_expr) = loop_def.break_on
-        && crate::expression::evaluate_condition(break_expr, &instance.context, &empty_outputs)
+        && crate::expression::evaluate_condition(break_expr, context.as_ref(), &empty_outputs)
     {
         debug!(
             instance_id = %instance.id,
@@ -803,6 +808,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,
@@ -854,6 +861,8 @@ mod tests {
             created_at: chrono::Utc::now(),
             effect_id: None,
             continuity_epoch: None,
+            heartbeat_timeout_secs: None,
+            wait_for_callback: false,
             lease_secs: None,
             carries_credentials: false,
             claimed_runtime_kind: None,

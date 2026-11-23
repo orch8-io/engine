@@ -256,6 +256,7 @@ orch8_storage::backend_test!(async fn fallback_admission_keeps_reservation_scope
         task_id:id,instance_id:task.instance_id,expected_state:held.state,expected_claim_epoch:held.claim_epoch,
         expected_worker_id:held.worker_id.clone(),holder_worker_id:held.worker_id.clone(),event:WorkerAttemptEventKind::Reclaimed,
         effect_resolution: orch8_types::worker::WorkerTaskEffectResolution::Keep,
+        error_code: None,
         reason:"not started".into(),retryable:false,action:WorkerTaskResolutionAction::Requeue,
     }).await.unwrap(),"completion/release rejected the admitted fallback handler");
 });

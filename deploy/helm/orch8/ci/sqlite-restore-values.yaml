@@ -1,0 +1,8 @@
+storage:
+  backend: sqlite
+allInOne:
+  replicas: 1
+sqlite:
+  persistence:
+    storageClass: csi-hostpath-sc
+    restoreFromSnapshot: release-backup

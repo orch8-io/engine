@@ -18,18 +18,11 @@ use crate::handlers::param_resolve::OutputsSnapshot;
 use crate::handlers::step::StepExecParams;
 
 use super::step_dispatch::{
-    dispatch_plugin_with_effect, dispatch_step_to_external_worker, resolve_plugin_source,
+    dispatch_plugin_with_effect, dispatch_step_to_external_worker, resolve_plugin,
+    resolve_plugin_source,
 };
 
-/// Walk `context.data` top-level fields and inflate any externalization
-/// markers found. Does not recurse into nested objects — only top-level
-/// keys can be externalized. See `docs/CONTEXT_MANAGEMENT.md` §8.5.
-///
-/// If the referenced payload is missing, the marker is left in place so
-/// downstream code can detect the broken reference.
-///
-/// Delegates to [`externalized::resolve_context_markers`] so every engine
-/// site (step dispatch, router conditions, …) shares one implementation.
+/// Resolve context references and decode escaped application data.
 async fn resolve_markers(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -49,6 +42,12 @@ pub(crate) async fn context_for_step(
     instance: &TaskInstance,
     step_def: &StepDef,
 ) -> Result<ExecutionContext, EngineError> {
+    if let Some(access) = &step_def.context_access
+        && orch8_storage::externalizing::literal_payload(&instance.context.data).is_some()
+    {
+        let context = resolve_markers(storage, instance.id, instance.context.clone()).await?;
+        return Ok(context.filtered(access));
+    }
     let filtered = match &step_def.context_access {
         Some(access) => instance.context.filtered(access),
         None => instance.context.clone(),
@@ -267,14 +266,19 @@ pub(crate) async fn prepare_step(
 
     // Templates first: an author can write `{{context.data.cred_id}}` that
     // resolves to a `credentials://…` ref the next pass then substitutes.
-    let templates = super::param_resolve::resolve_templates_in_params(
-        storage,
-        instance,
-        &step_context,
-        &step_def.params,
-        outputs,
-    )
-    .await;
+    let templates = if step_def.handler == "asl_wait" {
+        // The scheduler resolves the wait argument only when choosing the durable deadline.
+        Ok(serde_json::json!({}))
+    } else {
+        super::param_resolve::resolve_templates_in_params(
+            storage,
+            instance,
+            &step_context,
+            &step_def.params,
+            outputs,
+        )
+        .await
+    };
     claim
         .verify(storage, &instance.tenant_id)
         .await
@@ -469,7 +473,8 @@ pub(crate) async fn execute_step_node_with_clock(
     // branches progress, then parks the instance at the earliest deadline.
     let control = crate::control::ClaimedControl::new(storage.as_ref(), instance.id, claim_token);
     if let Some(fire_at) =
-        crate::scheduler::step_preamble_deferral(&control, instance, step_def, clock).await?
+        crate::scheduler::step_preamble_deferral(&control, instance, step_def, clock, outputs)
+            .await?
     {
         super::step_deferral::defer_step(
             storage.as_ref(),
@@ -620,6 +625,13 @@ pub(crate) async fn execute_step_node_with_clock(
     // identical across both dispatch sites.
     let attempt =
         super::param_resolve::compute_attempt(storage.as_ref(), instance.id, &step_def.id).await?;
+    let mut retry_counts = super::step::read_retry_counts(
+        storage.as_ref(),
+        instance.id,
+        &step_def.id,
+        step_def.retry.as_ref(),
+    )
+    .await?;
 
     // Resolve context snapshot + templates + credentials + cache key (shared
     // with the fast path). Template/credential failures fail this *node*;
@@ -799,7 +811,7 @@ pub(crate) async fn execute_step_node_with_clock(
         // arbitrary-code-execute surface for anyone who can submit a
         // sequence definition. Fail closed: no registry row → fail the
         // node with a permanent error.
-        let Some(wasm_path) = resolve_plugin_source(
+        let Some(plugin) = resolve_plugin(
             storage.as_ref(),
             &instance.tenant_id,
             plugin_name,
@@ -830,7 +842,9 @@ pub(crate) async fn execute_step_node_with_clock(
             step_context,
             attempt,
             claim_token,
-            move |ctx| async move { super::wasm_plugin::handle_wasm_plugin(ctx, &wasm_path).await },
+            move |ctx| async move {
+                super::wasm_plugin::handle_registered_wasm_plugin(ctx, &plugin).await
+            },
         )
         .await;
     }
@@ -843,6 +857,12 @@ pub(crate) async fn execute_step_node_with_clock(
     // `$runtime` first; hard placement (region, labels, residency) always
     // goes to the worker queue so the claim predicate enforces it.
     let mut resolved_params = resolved_params;
+    let imported_worker = crate::handlers::step_dispatch::requires_asl_worker(step_def);
+    if local_only && imported_worker {
+        return Err(EngineError::InvalidConfig(
+            "imported task requires an external worker".into(),
+        ));
+    }
     if local_only
         && resolved_params
             .get(orch8_types::worker::RUNTIME_REQUIREMENTS_PARAM)
@@ -888,7 +908,8 @@ pub(crate) async fn execute_step_node_with_clock(
     let placed_remotely = hard_placed
         || orch8_types::worker::peek_runtime_requirements(&resolved_params)
             .is_ok_and(|requirements| requirements.is_remote_placement());
-    if !local_only && (placed_remotely || !handlers.contains(&step_def.handler)) {
+    if !local_only && (imported_worker || placed_remotely || !handlers.contains(&step_def.handler))
+    {
         return dispatch_step_to_external_worker(
             storage.as_ref(),
             instance,
@@ -972,12 +993,20 @@ pub(crate) async fn execute_step_node_with_clock(
             }
         }
         Err(EngineError::StepFailed {
-            retryable: true,
+            retryable,
             ref message,
             ref details,
             ..
-        }) => {
-            if breaker_tracked && let Some(cb) = handlers.circuit_breakers() {
+        }) if retryable
+            || step_def
+                .retry
+                .as_ref()
+                .is_some_and(|policy| !policy.rules.is_empty()) =>
+        {
+            if retryable
+                && breaker_tracked
+                && let Some(cb) = handlers.circuit_breakers()
+            {
                 cb.record_failure(
                     &instance.tenant_id,
                     &crate::circuit_breaker::breaker_scope(&step_def.handler, &step_def.params),
@@ -1000,34 +1029,17 @@ pub(crate) async fn execute_step_node_with_clock(
             // next `compute_attempt` call returns `attempt + 1`.
             // A sibling may wake the instance before this retry is due.
             // Persist this step's deadline with its retry evidence.
-            let retry_schedule = step_def
-                .retry
-                .as_ref()
-                .filter(|retry| attempt < retry.max_attempts)
-                .filter(|retry| {
-                    crate::handlers::step::should_retry(
-                        retry,
-                        message,
-                        details.as_ref(),
-                        &instance.context,
-                        &serde_json::Value::Null,
-                    )
-                })
-                .map(|retry| {
-                    let backoff = crate::handlers::step::honor_retry_after(
-                        crate::handlers::step::calculate_backoff_with_jitter(
-                            attempt,
-                            retry.initial_backoff,
-                            retry.max_backoff,
-                            retry.backoff_multiplier,
-                        ),
-                        details.as_ref(),
-                    );
-                    (
-                        backoff,
-                        crate::scheduler::clamped_fire_at(clock.now(), backoff),
-                    )
-                });
+            let retry_schedule = step_def.retry.as_ref().and_then(|policy| {
+                super::step::choose_retry(
+                    policy,
+                    attempt,
+                    message,
+                    details.as_ref(),
+                    &instance.context,
+                    clock.now(),
+                    &mut retry_counts,
+                )
+            });
             let mut marker = orch8_types::output::BlockOutput {
                 id: uuid::Uuid::now_v7(),
                 instance_id: instance.id,
@@ -1035,6 +1047,7 @@ pub(crate) async fn execute_step_node_with_clock(
                 output: serde_json::json!({
                     "_retry_marker": true,
                     "error": message,
+                    "error_code": super::step::workflow_error_name(details.as_ref()),
                 }),
                 output_ref: Some("__retry__".into()),
                 output_size: 0,
@@ -1043,6 +1056,9 @@ pub(crate) async fn execute_step_node_with_clock(
             };
             if let Some((_, fire_at)) = retry_schedule {
                 marker.output["_retry_fire_at"] = serde_json::json!(fire_at);
+            }
+            if !retry_counts.is_empty() {
+                marker.output["_retry_counts"] = serde_json::json!(retry_counts);
             }
             // Marker-save failures are non-fatal — worst case the attempt
             // counter stalls and the handler retries more times than
@@ -1064,7 +1080,7 @@ pub(crate) async fn execute_step_node_with_clock(
             }
 
             if let Some(retry) = &step_def.retry {
-                if attempt >= retry.max_attempts {
+                if retry.rules.is_empty() && attempt >= retry.max_attempts {
                     tracing::warn!(
                         instance_id = %instance.id,
                         block_id = %step_def.id,
@@ -1142,11 +1158,34 @@ pub(crate) async fn execute_step_node_with_clock(
             .await?;
             Ok(false)
         }
-        Err(EngineError::StepFailed {
-            retryable: false, ..
-        }) => {
+        Err(
+            error @ (EngineError::StepFailed {
+                retryable: false, ..
+            }
+            | EngineError::StepTimeout { .. }),
+        ) => {
             // Permanent failure - mark node as failed. Not a breaker
             // failure: the dependency answered; the request was wrong.
+            let (code, message) = match &error {
+                EngineError::StepFailed {
+                    message, details, ..
+                } => (
+                    super::step::workflow_error_name(details.as_ref()),
+                    message.clone(),
+                ),
+                _ => ("States.Timeout", error.to_string()),
+            };
+            let marker = orch8_types::output::BlockOutput {
+                id: uuid::Uuid::now_v7(),
+                instance_id: instance.id,
+                block_id: step_def.id.clone(),
+                output: serde_json::json!({"__error__": true, "error": message, "error_code": code}),
+                output_ref: Some("__error__".into()),
+                output_size: 0,
+                attempt: u16::try_from(attempt).unwrap_or(u16::MAX),
+                created_at: chrono::Utc::now(),
+            };
+            super::step::persist_output(storage.as_ref(), &marker, Some(claim_token)).await?;
             evaluator::persist_node_state(
                 storage.as_ref(),
                 node,

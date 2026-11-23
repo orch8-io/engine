@@ -47,6 +47,25 @@
         "nodeSelector": { "type": "object" },
         "tolerations": { "type": "array" },
         "affinity": { "type": "object" },
+        "topologySpreadConstraints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["maxSkew", "topologyKey", "whenUnsatisfiable"],
+            "additionalProperties": false,
+            "properties": {
+              "maxSkew": { "type": "integer", "minimum": 1 },
+              "minDomains": { "type": "integer", "minimum": 1 },
+              "topologyKey": { "type": "string", "minLength": 1 },
+              "whenUnsatisfiable": { "enum": ["DoNotSchedule", "ScheduleAnyway"] }
+            },
+            "dependencies": {
+              "minDomains": {
+                "properties": { "whenUnsatisfiable": { "const": "DoNotSchedule" } }
+              }
+            }
+          }
+        },
         "podAnnotations": { "type": "object" },
         "extraEnv": { "$ref": "#/definitions/envList" }
       }
@@ -162,7 +181,26 @@
       "type": "object",
       "properties": { "enabled": { "type": "boolean" } }
     },
-    "sqlite": { "type": "object" },
+    "sqlite": {
+      "type": "object",
+      "properties": {
+        "persistence": {
+          "type": "object",
+          "properties": { "restoreFromSnapshot": { "type": "string" } }
+        },
+        "snapshot": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "name": { "type": "string", "maxLength": 63, "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" },
+            "volumeSnapshotClassName": { "type": "string", "pattern": "^$|^[a-z0-9]([-.a-z0-9]*[a-z0-9])?$" },
+            "image": { "type": "string" },
+            "timeoutSeconds": { "type": "integer", "minimum": 60, "maximum": 3600 }
+          }
+        }
+      }
+    },
     "secrets": {
       "type": "object",
       "required": ["apiKeyKey", "encryptionKeyKey"],
@@ -205,6 +243,52 @@
         "className": { "type": "string" },
         "hosts": { "type": "array" },
         "tls": { "type": "array" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "dns": {
+          "type": "object",
+          "properties": {
+            "peers": { "type": "array", "items": { "type": "object" } }
+          }
+        },
+        "database": {
+          "type": "object",
+          "properties": {
+            "peers": { "type": "array", "items": { "type": "object" } },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 }
+          }
+        },
+        "roles": {
+          "type": "object",
+          "propertyNames": { "enum": ["all-in-one", "control", "executor", "gateway", "migrate", "sqlite-snapshot"] },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "extraIngress": { "type": "array", "items": { "type": "object" } },
+              "extraEgress": { "type": "array", "items": { "type": "object" } }
+            }
+          }
+        }
+      }
+    },
+    "httpRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "parent": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": { "type": "string" },
+            "namespace": { "type": "string" },
+            "sectionName": { "type": "string" }
+          }
+        },
+        "hostnames": { "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
     },
     "metrics": {

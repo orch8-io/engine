@@ -1,5 +1,6 @@
 package io.orch8.reactnative
 
+import android.util.Base64
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -60,6 +61,48 @@ class Orch8Module(reactContext: ReactApplicationContext) :
     }
 
     override fun getName(): String = "Orch8Module"
+
+    private val media = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "orch8-rn-media").apply { isDaemon = true }
+    }
+
+    @ReactMethod
+    fun describeMediaFile(path: String, chunkBytes: Double, promise: Promise) = withMediaFile(promise) {
+        val manifest = MediaFileRange.describe(path, chunkBytes)
+        val hashes = Arguments.createArray()
+        manifest.sha256.forEach(hashes::pushString)
+        Arguments.createMap().apply {
+            putInt("version", 1)
+            putDouble("length", manifest.length.toDouble())
+            putString("identity", manifest.identity)
+            putInt("chunkBytes", manifest.chunkBytes)
+            putArray("sha256", hashes)
+            putString("fileSha256", manifest.fileSha256)
+        }
+    }
+
+    @ReactMethod
+    fun readMediaFileRange(
+        path: String, offset: Double, length: Double, identity: String?, sha256: String?, promise: Promise,
+    ) = withMediaFile(promise) {
+        Base64.encodeToString(MediaFileRange.read(path, offset, length, identity, sha256), Base64.NO_WRAP)
+    }
+
+    private fun withMediaFile(promise: Promise, read: () -> Any) {
+        try {
+            media.execute {
+                try {
+                    promise.resolve(read())
+                } catch (_: MediaFileRange.SourceChanged) {
+                    promise.reject("MEDIA_FILE_CHANGED", "Media file no longer matches the queued upload")
+                } catch (_: Exception) {
+                    promise.reject("MEDIA_FILE_READ_FAILED", "Could not read the requested media file")
+                }
+            }
+        } catch (_: java.util.concurrent.RejectedExecutionException) {
+            promise.reject("MEDIA_FILE_READ_FAILED", "React Native bridge was retired")
+        }
+    }
 
     // -- Helpers ------------------------------------------------------------
 
@@ -561,6 +604,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
 
     override fun invalidate() {
         invalidated = true
+        media.shutdown()
         pending.failAll("React Native context invalidated")
         lifecycle.shutdown(true, {}) { scoped.prune() }
         work.shutdown()

@@ -231,3 +231,91 @@ async fn artifact_download_rejects_header_injection_in_content_type() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn media_upload_replays_range_and_checks_final_digest_before_acknowledgement() {
+    let server = spawn_test_server_with_artifacts().await;
+    let client = Client::new();
+    let instance = create_instance(&server, &client, "tenant-a").await;
+    let base = format!(
+        "{}/instances/{instance}/media-uploads/{}",
+        server.v1_url(),
+        Uuid::now_v7()
+    );
+    let manifest = json!({
+        "length": 5,
+        "chunk_bytes": 3,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    });
+    assert_eq!(
+        client
+            .put(&base)
+            .header("X-Tenant-Id", "tenant-a")
+            .json(&manifest)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .put(&base)
+            .header("X-Tenant-Id", "tenant-b")
+            .json(&manifest)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let append = |offset, body: &'static str| {
+        client
+            .put(format!("{base}/ranges/{offset}"))
+            .header("X-Tenant-Id", "tenant-a")
+            .body(body)
+            .send()
+    };
+
+    assert_eq!(
+        append(3, "lo").await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    for _ in 0..2 {
+        let reply = append(0, "hel").await.unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.json::<Value>().await.unwrap()["offset"], 3);
+    }
+    assert_eq!(
+        append(0, "hex").await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        append(3, "xx").await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    let read = |offset| {
+        client
+            .get(format!("{base}/ranges/{offset}"))
+            .header("X-Tenant-Id", "tenant-a")
+            .send()
+    };
+    assert_eq!(read(0).await.unwrap().status(), StatusCode::CONFLICT);
+    for _ in 0..2 {
+        let reply = append(3, "lo").await.unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(reply.json::<Value>().await.unwrap()["offset"], 5);
+    }
+    assert_eq!(
+        append(3, "xx").await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        read(0).await.unwrap().bytes().await.unwrap(),
+        b"hel".as_slice()
+    );
+    assert_eq!(
+        read(3).await.unwrap().bytes().await.unwrap(),
+        b"lo".as_slice()
+    );
+}

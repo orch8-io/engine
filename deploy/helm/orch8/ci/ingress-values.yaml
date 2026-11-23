@@ -1,0 +1,7 @@
+externalDatabase:
+  url: postgres://orch8:test@postgres.example:5432/orch8
+ingress:
+  enabled: true
+cloudObservability:
+  enabled: true
+  existingSecret: orch8-cloud-telemetry

@@ -22,14 +22,14 @@ impl Owner {
             .truncate(false)
             .open(companion)
             .map_err(|_| {
-                StorageError::Connection("cannot open mobile database ownership lock".into())
+                StorageError::Connection("cannot open SQLite database ownership lock".into())
             })?;
         file.try_lock().map_err(|_| {
-            StorageError::Conflict("mobile database is already owned or cannot be locked".into())
+            StorageError::Conflict("SQLite database is already owned or cannot be locked".into())
         })?;
         if super::resolve_sqlite_database_path(path)? != canonical {
             return Err(StorageError::Conflict(
-                "mobile database path changed while acquiring ownership".into(),
+                "SQLite database path changed while acquiring ownership".into(),
             ));
         }
         Ok((canonical, Arc::new(Self { _file: file })))
@@ -41,6 +41,34 @@ mod tests {
     use super::*;
     use crate::sqlite::SqliteStorage;
     use sqlx::Connection;
+
+    #[tokio::test]
+    async fn server_uri_keeps_tuning_and_shares_mobile_file_ownership() {
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("space here.db");
+        let encoded = path.to_str().unwrap().replace(' ', "%20");
+        let url = format!("sqlite://{encoded}?mode=rwc");
+        let storage = SqliteStorage::file_server_owned(&url, 3, Duration::from_millis(75))
+            .await
+            .unwrap();
+        assert_eq!(storage.pool().options().get_max_connections(), 3);
+        let timeout: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+            .fetch_one(storage.pool())
+            .await
+            .unwrap();
+        assert_eq!(timeout, 75);
+        assert!(matches!(
+            SqliteStorage::file_mobile_owned(path.to_str().unwrap()).await,
+            Err(StorageError::Conflict(_))
+        ));
+        storage.close().await;
+        let successor = SqliteStorage::file_mobile_owned(path.to_str().unwrap())
+            .await
+            .unwrap();
+        successor.close().await;
+    }
 
     #[tokio::test]
     async fn detached_native_connection_pins_ownership_until_physical_close() {

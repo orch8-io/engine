@@ -1053,3 +1053,432 @@ async fn migrate_instance_rejects_structurally_incompatible_target() {
         .unwrap();
     assert_eq!(stored.sequence_id.into_uuid(), versions[1].0);
 }
+
+#[tokio::test]
+async fn dataflow_api_rejects_unguarded_nullable_parent() {
+    let srv = spawn_test_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "name":"nullable-parent","tenant_id":"t1","namespace":"default",
+            "id": Uuid::now_v7(), "version": 1, "created_at": chrono::Utc::now(),
+            "input_schema":{
+                "type":"object","required":["address"],
+                "properties":{"address":{
+                    "type":["null","object"],"required":["city"],
+                    "properties":{"city":{"type":"string"}}
+                }}
+            },
+            "blocks":[{"type":"step","id":"use","handler":"noop","params":{
+                "city":"{{ data.address.city }}"
+            }}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["report"]["findings"][0]["code"], "VALUE_MAY_BE_NULL");
+    assert_eq!(
+        body["report"]["findings"][0]["reference"],
+        "data.address.city"
+    );
+}
+
+#[tokio::test]
+async fn dataflow_api_reports_producer_order_and_branch_availability() {
+    let srv = spawn_test_server().await;
+    let sequence: serde_json::Value = serde_json::from_str(include_str!(
+        "../../orch8-engine/tests/fixtures/typed_dataflow_order.json"
+    ))
+    .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&sequence)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let findings = body["report"]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2, "{body}");
+    assert_eq!(findings[0]["consumer"], "post_branch_reader");
+    assert_eq!(findings[0]["code"], "PRODUCER_MAY_NOT_RUN");
+    assert_eq!(findings[0]["severity"], "warning");
+    assert_eq!(findings[1]["consumer"], "premature_reader");
+    assert_eq!(findings[1]["code"], "PRODUCER_RUNS_LATER");
+    assert_eq!(findings[1]["severity"], "error");
+}
+
+#[tokio::test]
+async fn dataflow_api_returns_resolvable_source_locations() {
+    let srv = spawn_test_server().await;
+    let sequence: serde_json::Value = serde_json::from_str(include_str!(
+        "../../orch8-engine/tests/fixtures/typed_dataflow_source.json"
+    ))
+    .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&sequence)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let finding = &body["report"]["findings"][0];
+    assert_eq!(finding["code"], "SCHEMA_PATH_MISSING");
+    let source = &finding["source"];
+    let text = sequence
+        .pointer(source["sequence_pointer"].as_str().unwrap())
+        .unwrap()
+        .as_str()
+        .unwrap();
+    let start = usize::try_from(source["start_byte"].as_u64().unwrap()).unwrap();
+    let end = usize::try_from(source["end_byte"].as_u64().unwrap()).unwrap();
+    assert_eq!(&text[start..end], "context.outputs.create.missing");
+    assert_eq!(
+        sequence
+            .pointer(source["producer_schema_pointer"].as_str().unwrap())
+            .unwrap()["$ref"],
+        "#/$defs/record"
+    );
+}
+
+#[tokio::test]
+async fn dataflow_api_reads_the_item_schema_in_foreach_bodies() {
+    let srv = spawn_test_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "name":"typed-items","tenant_id":"t1","namespace":"default",
+            "id":Uuid::now_v7(),"version":1,"created_at":chrono::Utc::now(),
+            "input_schema":{
+                "type":"object","required":["rows"],"properties":{"rows":{
+                    "type":"array","items":{
+                        "type":"object","required":["number"],"additionalProperties":false,
+                        "properties":{"number":{"type":"integer"}}
+                    }
+                }}
+            },
+            "blocks":[{"type":"for_each","id":"items","collection":"rows","item_var":"row","body":[
+                {"type":"step","id":"read","handler":"transform","params":{
+                    "valid":"{{ data.row.number }}", "invalid":"{{ data.row.rows }}"
+                }}
+            ]}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let findings = body["report"]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{body}");
+    assert_eq!(findings[0]["code"], "SCHEMA_PATH_MISSING");
+    assert_eq!(findings[0]["reference"], "data.row.rows");
+    assert_eq!(findings[0]["consumer"], "read");
+}
+
+#[tokio::test]
+async fn dataflow_api_distinguishes_tuple_elements() {
+    let srv = spawn_test_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "name":"tuple-input","tenant_id":"t1","namespace":"default",
+            "id": Uuid::now_v7(), "version": 1, "created_at": chrono::Utc::now(),
+            "input_schema":{
+                "type":"object","required":["tuple"],
+                "properties":{"tuple":{
+                    "type":"array","minItems":1,"items":false,
+                    "prefixItems":[{"type":"string"},{"type":"number"}]
+                }}
+            },
+            "blocks":[{"type":"step","id":"use","handler":"noop","params":{
+                "required":"{{ data.tuple.0 }}",
+                "optional":"{{ data.tuple.1 }}",
+                "prohibited":"{{ data.tuple.2 }}"
+            }}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let findings = body["report"]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2, "{findings:?}");
+    assert!(
+        findings
+            .iter()
+            .any(|f| { f["reference"] == "data.tuple.1" && f["code"] == "VALUE_MAY_BE_ABSENT" })
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|f| { f["reference"] == "data.tuple.2" && f["code"] == "SCHEMA_PATH_MISSING" })
+    );
+}
+
+#[tokio::test]
+async fn dataflow_api_shares_local_schema_refs_between_preflight_and_generated_types() {
+    let srv = spawn_test_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "name":"definition-references","tenant_id":"t1","namespace":"default",
+            "id": Uuid::now_v7(), "version": 1, "created_at": chrono::Utc::now(),
+            "input_schema":{
+                "type":"object","required":["billing","shipping"],
+                "properties":{
+                    "billing":{"$ref":"#/$defs/address"},
+                    "shipping":{"$ref":"#/$defs/address"}
+                },
+                "$defs":{"address":{
+                    "type":"object","required":["city"],"additionalProperties":false,
+                    "properties":{"city":{"type":"string"}}
+                }}
+            },
+            "blocks":[{"type":"step","id":"use","handler":"noop","params":{
+                "billing":"{{ data.billing.city }}",
+                "shipping":"{{ data.shipping.city }}",
+                "invalid":"{{ data.billing.cty }}"
+            }}]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let findings = body["report"]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    assert_eq!(findings[0]["code"], "SCHEMA_PATH_MISSING");
+    assert_eq!(findings[0]["reference"], "data.billing.cty");
+    assert_eq!(
+        body["generated"]["typescript"]
+            .as_str()
+            .unwrap()
+            .matches(r#""city": string"#)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn dataflow_api_rejects_numeric_use_of_a_string_map_value() {
+    let srv = spawn_test_server().await;
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/dataflow", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "name":"typed-map","tenant_id":"t1","namespace":"default",
+            "id": Uuid::now_v7(), "version":1, "created_at":chrono::Utc::now(),
+            "input_schema":{
+                "type":"object","required":["labels"],
+                "properties":{"labels":{"type":"object","additionalProperties":{"type":"string"}}}
+            },
+            "blocks":[{"type":"step","id":"use","handler":"noop",
+                "when":"data.labels.invoice / 2 > 7"
+            }]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    let findings = body["report"]["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2, "{findings:?}");
+    assert_eq!(findings[0]["code"], "NUMERIC_OPERAND_TYPE");
+    assert_eq!(findings[1]["code"], "VALUE_MAY_BE_ABSENT");
+    assert_eq!(findings[0]["reference"], "data.labels.invoice");
+}
+
+#[tokio::test]
+async fn server_preflight_reports_the_same_schema_path_code_as_the_playground() {
+    let srv = spawn_test_server().await;
+    let sequence: serde_json::Value = serde_json::from_str(include_str!(
+        "../../orch8-engine/tests/fixtures/typed_dataflow_preview.json"
+    ))
+    .unwrap();
+    let response = reqwest::Client::new()
+        .post(format!("{}/sequences/preflight", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&sequence)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let report: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(report["overall"], "fail", "{report}");
+    let check = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "typed_dataflow_compatible")
+        .unwrap();
+    assert_eq!(check["findings"][0]["code"], "SCHEMA_PATH_MISSING");
+    assert!(
+        check["findings"][0]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("data.regon")
+    );
+}
+
+#[tokio::test]
+async fn configuration_schema_rejects_misspelled_references_and_missing_activation_values() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let id = Uuid::now_v7();
+    let mut sequence = json!({
+        "id":id,"name":"configuration-schema","tenant_id":"t1","namespace":"default",
+        "version":1,"created_at":chrono::Utc::now(),
+        "input_schema":{"x-orch8-config-schema":{
+            "type":"object","required":["region"],"additionalProperties":false,
+            "properties":{"region":{"type":"string"}}
+        }},
+        "blocks":[{"type":"step","id":"check","handler":"noop","params":{"region":"{{ config.regoin }}"}}]
+    });
+    let response = client
+        .post(format!("{}/sequences/dataflow", server.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&sequence)
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = response.json().await.unwrap();
+    let findings = body["report"]["findings"].as_array().unwrap();
+    assert!(
+        findings
+            .iter()
+            .any(|item| item["reference"] == "config.regoin"
+                && item["severity"] == "error"
+                && item["source"]["producer_schema_pointer"]
+                    == "/input_schema/x-orch8-config-schema"),
+        "{body}"
+    );
+
+    sequence["blocks"][0]["params"]["region"] = json!("{{ config.region }}");
+    let base = server.v1_url();
+    assert_eq!(
+        client
+            .post(format!("{base}/sequences"))
+            .header("X-Tenant-Id", "t1")
+            .json(&sequence)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CREATED
+    );
+    for (config, expected) in [
+        (json!({}), StatusCode::UNPROCESSABLE_ENTITY),
+        (json!({"region":"us-east-1"}), StatusCode::CREATED),
+    ] {
+        let response = client
+            .post(format!("{base}/instances"))
+            .header("X-Tenant-Id", "t1")
+            .json(
+                &json!({"sequence_id":id, "tenant_id":"t1", "namespace":"default",
+                "context":{"data":{},"config":config}}),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}
+
+#[tokio::test]
+async fn pinned_child_boundaries_preflight_and_publish_use_the_requested_revision() {
+    let server = spawn_test_server().await;
+    let base = server.v1_url();
+    let client = reqwest::Client::new();
+    let send = |path: &str, document: &serde_json::Value| {
+        client
+            .post(format!("{base}/sequences{path}"))
+            .header("X-Tenant-Id", "t1")
+            .json(document)
+            .send()
+    };
+    let child_id = Uuid::now_v7();
+    let mut child = json!({
+        "id":child_id,"name":"child","tenant_id":"t1","namespace":"default","version":1,
+        "created_at":chrono::Utc::now(),
+        "input_schema":{
+            "type":"object","required":["amount"],"properties":{"amount":{"type":"integer"}},
+            "x-orch8-child-result-schema":{
+                "type":"array","minItems":1,
+                "items":{"type":"object","required":["output"],"properties":{
+                    "output":{"type":"object","additionalProperties":false,
+                              "required":["total"],"properties":{"total":{"type":"number"}}}
+                }}
+            }
+        },
+        "blocks":[{"type":"step","id":"child_step","handler":"noop"}]
+    });
+    assert_eq!(
+        send("", &child).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    child["id"] = json!(Uuid::now_v7());
+    child["version"] = json!(2);
+    child["input_schema"]["properties"]["amount"]["type"] = json!("string");
+    assert_eq!(
+        send("", &child).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+    let mut parent = json!({
+        "id":Uuid::now_v7(),"name":"parent","tenant_id":"t1","namespace":"default","version":1,
+        "created_at":chrono::Utc::now(),
+        "blocks":[
+            {"type":"sub_sequence","id":"call","sequence_name":"child","version":1,
+             "input":{"amount":"12"}},
+            {"type":"step","id":"read","handler":"noop",
+             "params":{"result":"{{ outputs.call[0].output.unknown }}"}}
+        ]
+    });
+    let report: serde_json::Value = send("/preflight", &parent)
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let boundaries = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == "pinned_child_contracts")
+        .unwrap();
+    assert_eq!(boundaries["status"], "fail", "{report}");
+    let findings = boundaries["findings"].as_array().unwrap();
+    assert_eq!(findings.len(), 2, "{report}");
+    for finding in findings {
+        assert_eq!(
+            finding["evidence"][0]["data"]["child_sequence_id"],
+            child_id.to_string()
+        );
+    }
+    assert_eq!(
+        findings[0]["evidence"][0]["data"]["parent_pointer"],
+        "/blocks/0/input/amount"
+    );
+    assert_eq!(
+        findings[1]["evidence"][0]["data"]["parent_pointer"],
+        "/blocks/1/params/result"
+    );
+    assert_eq!(
+        send("", &parent).await.unwrap().status(),
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    parent["blocks"][0]["input"]["amount"] = json!(12);
+    parent["blocks"][1]["params"]["result"] = json!("{{ outputs.call[0].output.total }}");
+    assert_eq!(
+        send("", &parent).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+}

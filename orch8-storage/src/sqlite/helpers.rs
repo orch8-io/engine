@@ -314,6 +314,12 @@ pub(super) fn row_to_worker_task(
         context: parse_json(row.get::<&str, _>("context"))?,
         attempt: row.get::<i64, _>("attempt") as u16,
         timeout_ms: row.get::<Option<i64>, _>("timeout_ms"),
+        wait_for_callback: row.get("wait_for_callback"),
+        heartbeat_timeout_secs: row
+            .get::<Option<i64>, _>("heartbeat_timeout_secs")
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| StorageError::Query("invalid worker heartbeat_timeout_secs".into()))?,
         state,
         worker_id: row.get::<Option<String>, _>("worker_id"),
         claimed_at: parse_ts_opt(row.get::<Option<String>, _>("claimed_at"))?,

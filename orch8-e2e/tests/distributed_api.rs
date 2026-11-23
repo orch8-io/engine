@@ -557,6 +557,7 @@ fn grpc_complete_fail_release_settle_effects_like_http() {
             worker_id: "grpc-worker".into(),
             message: "device error".into(),
             retryable: true,
+            error_code: None,
             claim_epoch: task.claim_epoch,
         };
         cloud

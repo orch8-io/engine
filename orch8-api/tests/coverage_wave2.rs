@@ -1,9 +1,10 @@
 //! Second-wave endpoint coverage for plugin, session, and audit contracts.
 
 use orch8_api::test_harness::{
-    TestServer, spawn_test_server, spawn_test_server_with_context_limit,
+    TestServer, spawn_test_server, spawn_test_server_with_artifacts,
+    spawn_test_server_with_context_limit,
 };
-use orch8_storage::AdminStore;
+use orch8_storage::{AdminStore, ResourceStore};
 use orch8_types::audit::AuditLogEntry;
 use orch8_types::ids::{InstanceId, TenantId};
 use reqwest::{Client, StatusCode};
@@ -163,6 +164,109 @@ async fn plugins_are_tenant_isolated() {
         .await
         .unwrap();
     assert!(listed.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tenants_can_manage_matching_plugin_aliases_independently() {
+    let server = spawn_test_server().await;
+    let client = Client::new();
+    let base = server.v1_url();
+    let endpoint = format!("{base}/plugins/score");
+    for (tenant, source) in [("tenant-a", "/score-a.wasm"), ("tenant-b", "/score-b.wasm")] {
+        let created = client
+            .post(format!("{base}/plugins"))
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({"name":"score","plugin_type":"wasm","source":source,"tenant_id":tenant}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+    }
+    let updated = client
+        .patch(&endpoint)
+        .header("X-Tenant-Id", "tenant-a")
+        .json(&json!({"enabled":false}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), StatusCode::OK);
+    let removed = client
+        .delete(&endpoint)
+        .header("X-Tenant-Id", "tenant-a")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    let remaining: Value = client
+        .get(&endpoint)
+        .header("X-Tenant-Id", "tenant-b")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(remaining["source"], "/score-b.wasm");
+    assert_eq!(remaining["enabled"], true);
+}
+
+#[tokio::test]
+async fn shared_wasm_upload_requires_the_digest_and_the_owning_tenant() {
+    use orch8_types::plugin::WasmArtifactDigest;
+
+    let server = spawn_test_server_with_artifacts().await;
+    let client = Client::new();
+    let wasm = b"\0asm\x01\x00\x00\x00";
+    let digest = WasmArtifactDigest::for_bytes(wasm);
+    let hash = digest.as_str();
+    let endpoint = format!("{}/plugins/modules/{hash}", server.base_url);
+    let denied = client
+        .put(&endpoint)
+        .query(&[("tenant_id", "neighbor")])
+        .header("X-Tenant-Id", "publisher")
+        .body(wasm.to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    let invalid = client
+        .put(&endpoint)
+        .header("X-Tenant-Id", "publisher")
+        .body(b"\0asm\x00\x00\x00\x00".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert!(invalid.status().is_client_error());
+    for _ in 0..2 {
+        let uploaded = client
+            .put(&endpoint)
+            .header("X-Tenant-Id", "publisher")
+            .header("Content-Type", "application/wasm")
+            .body(wasm.to_vec())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let result: Value = uploaded.json().await.unwrap();
+        assert_eq!(result["source"], format!("wasm-artifact:sha256:{hash}"));
+    }
+    let stored = server
+        .storage
+        .get_shared_wasm_module("publisher", &digest, 64)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.as_ref(), wasm);
+    assert!(
+        server
+            .storage
+            .get_shared_wasm_module("neighbor", &digest, 64)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

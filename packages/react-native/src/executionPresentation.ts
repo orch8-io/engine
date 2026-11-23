@@ -24,7 +24,7 @@ export interface Orch8ApprovalDecision {
   readonly idempotencyKey: string;
 }
 
-export type Orch8ApprovalDecisionResult = "accepted" | "stale";
+export type Orch8ApprovalDecisionResult = "accepted" | "stale" | "storage_full";
 
 export type Orch8ExecutionStepState = InstanceStateKind | "pending" | "skipped" | "retrying";
 
@@ -109,7 +109,7 @@ export class ApprovalDecisionLedger {
   finish(decision: Orch8ApprovalDecision, result: Orch8ApprovalDecisionResult | "retry"): void {
     const prior = this.submissions.get(decision.approvalId);
     if (prior?.status === "submitting" && prior.revision === decision.expectedRevision && prior.value === decision.value) {
-      this.submissions.set(decision.approvalId, { ...prior, status: result });
+      this.submissions.set(decision.approvalId, { ...prior, status: result === "storage_full" ? "retry" : result });
     }
   }
 }

@@ -1033,7 +1033,7 @@ async fn phase_root_activation(
             node,
             block,
             &ctx.tree,
-            sequence.interceptors.as_ref(),
+            sequence,
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
@@ -1135,7 +1135,7 @@ async fn dispatch_single_step(
         node,
         block,
         &ctx.tree,
-        sequence.interceptors.as_ref(),
+        sequence,
         outputs_snapshot,
         &ctx.clock,
         ctx.claim_token,
@@ -1189,7 +1189,7 @@ async fn dispatch_parallel_steps(
                 left_node,
                 left_block,
                 &ctx.tree,
-                sequence.interceptors.as_ref(),
+                sequence,
                 outputs_snapshot,
                 &ctx.clock,
                 ctx.claim_token,
@@ -1202,7 +1202,7 @@ async fn dispatch_parallel_steps(
                 right_node,
                 right_block,
                 &ctx.tree,
-                sequence.interceptors.as_ref(),
+                sequence,
                 outputs_snapshot,
                 &ctx.clock,
                 ctx.claim_token,
@@ -1341,7 +1341,7 @@ async fn phase_composite_reevaluation(
             node,
             block,
             &ctx.tree,
-            sequence.interceptors.as_ref(),
+            sequence,
             outputs_snapshot,
             &ctx.clock,
             ctx.claim_token,
@@ -1925,24 +1925,10 @@ pub async fn cancel_subtree(
     Ok(())
 }
 
-/// Reset every strict descendant of `root_id` for another composite iteration.
-///
-/// User-visible step outputs remain append-only. Internal composite markers
-/// (iteration counters, router decisions), per-step attempt bookkeeping,
-/// effect receipts, and stale external-worker tasks are removed so a nested
-/// composite cannot inherit execution state from its prior iteration.
-///
-/// Idempotent: re-running it on an already-reset subtree is a no-op apart
-/// from repeating the deletes.
-pub async fn reset_subtree_to_pending(
-    storage: &(impl crate::control::ExecutionControl + ?Sized),
+pub(crate) fn strict_descendants(
     tree: &[ExecutionNode],
-    tenant_id: &orch8_types::ids::TenantId,
-    instance_id: InstanceId,
     root_id: ExecutionNodeId,
-) -> Result<(), EngineError> {
-    // ⚡ Bolt: Build a sorted index of parent -> child to avoid O(N^2)
-    // full tree scans on every popped parent during deep traversals.
+) -> Vec<&ExecutionNode> {
     let mut children_of: Vec<(ExecutionNodeId, &ExecutionNode)> = Vec::with_capacity(tree.len());
     for n in tree {
         if let Some(p) = n.parent_id {
@@ -1963,8 +1949,58 @@ pub async fn reset_subtree_to_pending(
             frontier.push(node.id);
         }
     }
+    descendants
+}
+
+/// Reset every strict descendant of `root_id` for another composite iteration.
+///
+/// User-visible step outputs remain append-only. Internal composite markers
+/// (iteration counters, router decisions), per-step attempt bookkeeping,
+/// effect receipts, and stale external-worker tasks are removed so a nested
+/// composite cannot inherit execution state from its prior iteration.
+///
+/// Idempotent: re-running it on an already-reset subtree is a no-op apart
+/// from repeating the deletes.
+pub async fn reset_subtree_to_pending(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    tree: &[ExecutionNode],
+    tenant_id: &orch8_types::ids::TenantId,
+    instance_id: InstanceId,
+    root_id: ExecutionNodeId,
+) -> Result<(), EngineError> {
+    reset_iteration(storage, tree, tenant_id, instance_id, root_id, false).await
+}
+
+pub(crate) async fn reset_subtree_for_composite_retry(
+    storage: &dyn crate::control::ExecutionControl,
+    tree: &[ExecutionNode],
+    tenant: &orch8_types::ids::TenantId,
+    instance: InstanceId,
+    root: ExecutionNodeId,
+) -> Result<(), EngineError> {
+    reset_iteration(storage, tree, tenant, instance, root, true).await
+}
+
+pub(crate) async fn reset_iteration(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    tree: &[ExecutionNode],
+    tenant_id: &orch8_types::ids::TenantId,
+    instance_id: InstanceId,
+    root_id: ExecutionNodeId,
+    preserve_attempts: bool,
+) -> Result<(), EngineError> {
+    let descendants = strict_descendants(tree, root_id);
     if descendants.is_empty() {
         return Ok(());
+    }
+
+    let step_block_ids: Vec<_> = descendants
+        .iter()
+        .filter(|node| node.block_type == BlockType::Step)
+        .map(|node| node.block_id.clone())
+        .collect();
+    if preserve_attempts && !step_block_ids.is_empty() {
+        retire_composite_retry_effects(storage, tenant_id, instance_id, &step_block_ids).await?;
     }
 
     let node_ids: Vec<_> = descendants.iter().map(|node| node.id).collect();
@@ -1975,7 +2011,7 @@ pub async fn reset_subtree_to_pending(
     // Composite bookkeeping markers: loop/for_each iteration counters and
     // the router's memoized branch decision. Each new iteration must start
     // (and decide) afresh.
-    let composite_block_ids: Vec<_> = descendants
+    let mut composite_block_ids: Vec<_> = descendants
         .iter()
         .filter(|node| {
             matches!(
@@ -1985,24 +2021,27 @@ pub async fn reset_subtree_to_pending(
         })
         .map(|node| node.block_id.clone())
         .collect();
+    composite_block_ids.extend(
+        descendants
+            .iter()
+            .filter(|node| matches!(node.block_type, BlockType::Parallel | BlockType::ForEach))
+            .map(|node| crate::handlers::composite_retry::state_block(node.id)),
+    );
     if !composite_block_ids.is_empty() {
         storage
             .delete_block_outputs_batch(instance_id, &composite_block_ids)
             .await?;
     }
 
-    let step_block_ids: Vec<_> = descendants
-        .iter()
-        .filter(|node| node.block_type == BlockType::Step)
-        .map(|node| node.block_id.clone())
-        .collect();
     if !step_block_ids.is_empty() {
         storage
             .delete_event_waits_for_blocks(instance_id, &step_block_ids)
             .await?;
-        storage
-            .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
-            .await?;
+        if !preserve_attempts {
+            storage
+                .delete_effect_receipts_for_blocks(tenant_id, instance_id, &step_block_ids)
+                .await?;
+        }
 
         // Per-step attempt bookkeeping (`__retry__` markers, crash
         // sentinels) at the head of a step's output history belongs to the
@@ -2017,6 +2056,10 @@ pub async fn reset_subtree_to_pending(
                 }
                 storage.delete_block_output_by_id(latest.id).await?;
             }
+        }
+
+        if preserve_attempts {
+            reset_composite_leaf_attempts(storage, instance_id, &step_block_ids).await?;
         }
 
         // A step `delay` marker is final once written (so early wakes can't
@@ -2047,6 +2090,59 @@ pub async fn reset_subtree_to_pending(
     storage
         .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &all_block_ids)
         .await?;
+    Ok(())
+}
+
+async fn retire_composite_retry_effects(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    tenant_id: &orch8_types::ids::TenantId,
+    instance_id: InstanceId,
+    step_block_ids: &[BlockId],
+) -> Result<(), EngineError> {
+    let claim = storage
+        .execution_claim()
+        .ok_or(EngineError::ClaimLost { instance_id })?;
+    match storage
+        .backend()
+        .retire_composite_retry_effects(tenant_id, instance_id, step_block_ids, claim.token)
+        .await?
+    {
+        orch8_storage::ClaimedRead::Lost => Err(EngineError::ClaimLost { instance_id }),
+        orch8_storage::ClaimedRead::Value(Some(receipt)) => Err(EngineError::EffectBlocked {
+            effect_id: receipt.id,
+            block_id: receipt.block_id,
+            state: receipt.state,
+        }),
+        orch8_storage::ClaimedRead::Value(None) => Ok(()),
+    }
+}
+
+/// Keep terminal diagnostics while giving a failed leaf a fresh attempt zero.
+async fn reset_composite_leaf_attempts(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance_id: InstanceId,
+    step_block_ids: &[BlockId],
+) -> Result<(), EngineError> {
+    for block_id in step_block_ids {
+        if storage
+            .get_block_output(instance_id, block_id)
+            .await?
+            .is_some_and(|output| output.output_ref.as_deref() == Some("__error__"))
+        {
+            storage
+                .save_block_output(&orch8_types::output::BlockOutput {
+                    id: uuid::Uuid::now_v7(),
+                    instance_id,
+                    block_id: block_id.clone(),
+                    output: serde_json::Value::Null,
+                    output_ref: Some(crate::handlers::param_resolve::IN_PROGRESS_SENTINEL.into()),
+                    output_size: 0,
+                    attempt: 0,
+                    created_at: chrono::Utc::now(),
+                })
+                .await?;
+        }
+    }
     Ok(())
 }
 

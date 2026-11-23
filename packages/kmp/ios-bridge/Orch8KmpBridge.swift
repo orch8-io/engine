@@ -33,7 +33,7 @@ private struct BridgeFailure: Error {
     let message: String
 }
 
-public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendable {
+public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, Orch8CapsuleSigningBridge, @unchecked Sendable {
     private let lock = NSLock()
     private var engine: MobileEngine?
     private var callbacks: Orch8BridgeCallbacks?
@@ -68,6 +68,43 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
             return Self.errorEnvelope((error.kind, error.message))
         } catch {
             return Self.errorEnvelope(("Engine", String(describing: error)))
+        }
+    }
+
+    public func exportCapsule(argsJson: String, signature: Orch8BridgeCapsuleSignature) -> String {
+        do {
+            guard let engine = currentEngine() else {
+                throw BridgeFailure(kind: "Shutdown", message: "engine not open")
+            }
+            let args = try Self.parseObject(argsJson)
+            guard let expiry = UInt32(exactly: try args.uint("expiresInSeconds")), expiry > 0 else {
+                throw BridgeFailure(kind: "InvalidInput", message: "invalid capsule expiry")
+            }
+            let signer = CapsuleSignerAdapter(
+                keyId: try args.string("keyId"),
+                publicKeyBase64: try args.string("publicKeyBase64"),
+                signature: signature
+            )
+            let exported = try engine.exportContinuityCapsule(
+                instanceId: try args.string("instanceId"),
+                destinationRuntimeId: try args.string("destinationRuntimeId"),
+                payloadKeyBase64: try args.string("payloadKeyBase64"),
+                expiresInSeconds: expiry,
+                signer: signer
+            )
+            return Self.encode(["ok": [
+                "capsuleId": exported.capsuleId,
+                "continuityId": exported.continuityId,
+                "sourceEpoch": NSNumber(value: exported.sourceEpoch),
+                "capsuleJson": exported.capsuleJson,
+                "payloadBase64": exported.payloadBase64,
+            ]])
+        } catch let error as MobileError {
+            return Self.errorEnvelope(Self.describe(error))
+        } catch let error as BridgeFailure {
+            return Self.errorEnvelope((error.kind, error.message))
+        } catch {
+            return Self.errorEnvelope(("Engine", "capsule export failed"))
         }
     }
 
@@ -486,6 +523,28 @@ public final class Orch8KmpBridge: NSObject, Orch8JsonBridge, @unchecked Sendabl
 }
 
 // MARK: - UniFFI callback adapters
+
+private final class CapsuleSignerAdapter: Orch8Mobile.CapsuleSigner, @unchecked Sendable {
+    private let identifier: String
+    private let publicKey: String
+    private let signature: Orch8BridgeCapsuleSignature
+
+    init(keyId: String, publicKeyBase64: String, signature: Orch8BridgeCapsuleSignature) {
+        self.identifier = keyId
+        self.publicKey = publicKeyBase64
+        self.signature = signature
+    }
+
+    func keyId() -> String { identifier }
+    func publicKeyBase64() -> String { publicKey }
+
+    func signManifestSha256(digest: String) throws -> String {
+        switch Orch8KmpBridge.unwrapCallback(signature.sign(digest: digest)) {
+        case let .success(value): return value
+        case .failure: throw MobileError.InvalidInput(detail: "capsule signature failed")
+        }
+    }
+}
 
 private final class StepHandlerAdapter: StepHandler, @unchecked Sendable {
     private let name: String

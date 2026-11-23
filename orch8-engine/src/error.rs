@@ -124,7 +124,7 @@ impl EngineError {
                 message: format!("step timed out after {timeout:?}"),
                 block_id,
                 retryable: true,
-                details: None,
+                details: Some(serde_json::json!({"error_code":"States.Timeout"})),
             },
             other => other,
         }

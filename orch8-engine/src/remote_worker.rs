@@ -100,6 +100,8 @@ pub struct RemoteTask {
     #[serde(default)]
     pub timeout_ms: Option<i64>,
     #[serde(default)]
+    pub callback_token: Option<String>,
+    #[serde(default)]
     pub claim_epoch: u64,
     #[serde(default)]
     pub effect_id: Option<String>,

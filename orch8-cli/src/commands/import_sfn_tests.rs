@@ -30,6 +30,45 @@ fn unmapped_mentions(conversion: &Conversion, needle: &str) -> bool {
 }
 
 #[test]
+fn composite_retries_are_retained_in_source_order() {
+    let child = json!({"Type":"Task", "Resource":"arn:aws:states:::states:startExecution.sync:2",
+        "Parameters":{"StateMachineArn":"arn:aws:states:us-east-1:111111111111:stateMachine:child-flow"},
+        "End":true});
+    let policy = json!([
+        {"ErrorEquals":["Fixture.Exhausted"],"MaxAttempts":0},
+        {"ErrorEquals":["States.ALL"],"MaxAttempts":2,"IntervalSeconds":2}
+    ]);
+    let conversion = convert_stepfunctions(
+        &json!({
+            "StartAt":"Fan Out",
+            "States":{
+                "Fan Out":{"Type":"Parallel","Branches":[
+                    {"StartAt":"Branch","States":{"Branch":child}}
+                ],"Retry":policy,"Next":"Inline"},
+                "Inline":{"Type":"Map","ItemsPath":"$.items","MaxConcurrency":1,
+                    "ItemProcessor":{"ProcessorConfig":{"Mode":"INLINE"},
+                        "StartAt":"Item","States":{"Item":child}},
+                    "Retry":policy,"End":true}
+            }
+        }),
+        None,
+        &ConvertOptions::default(),
+    )
+    .unwrap();
+    assert_passes_preflight(&conversion);
+    assert!(!unmapped_mentions(&conversion, "Retry"));
+    let policies = &conversion.sequence["input_schema"]["x-orch8-composite-retry"];
+    for id in ["fan_out", "inline"] {
+        let rules = &policies[id]["rules"];
+        assert_eq!(rules[0]["error_equals"], json!(["Fixture.Exhausted"]));
+        assert_eq!(rules[0]["max_attempts"], 0);
+        assert_eq!(rules[1]["error_equals"], json!(["States.ALL"]));
+        assert_eq!(rules[1]["max_attempts"], 2);
+        assert_eq!(rules[1]["initial_backoff"], 2000);
+    }
+}
+
+#[test]
 fn order_pipeline_translates_structure() {
     let conversion = convert("sfn-order-pipeline.asl.json");
     let seq = &conversion.sequence;
@@ -42,17 +81,27 @@ fn order_pipeline_translates_structure() {
     let validate = &blocks[0]["try_block"][0];
     assert_eq!(validate["handler"], "validate_order");
     assert_eq!(validate["timeout"], 30_000);
-    assert_eq!(validate["retry"]["max_attempts"], 4);
+    assert_eq!(validate["retry"]["max_attempts"], 3);
+    assert_eq!(validate["retry"]["jitter"], "none");
     assert_eq!(validate["retry"]["initial_backoff"], 2_000);
     assert_eq!(validate["retry"]["max_backoff"], 20_000);
     assert_eq!(validate["params"]["orderId"], "{{data.order.id}}");
     assert_eq!(validate["params"]["customer"], "{{data.customer}}");
     assert_eq!(validate["params"]["source"], "sfn");
+    assert_eq!(
+        blocks[0]["try_block"][1]["id"],
+        "validate_order_result_selector"
+    );
     let catch = blocks[0]["catch_block"].as_array().unwrap();
     assert_eq!(catch[0]["handler"], "noop", "error marker");
-    assert_eq!(catch[1]["handler"], "aws_sns_publish");
-    assert_eq!(catch[2]["handler"], "fail");
-    assert_eq!(catch[2]["params"]["error"], "OrderFailed");
+    let route = catch[1]["routes"][0]["blocks"].as_array().unwrap();
+    assert!(
+        route
+            .iter()
+            .any(|step| step["handler"] == "aws_sns_publish")
+    );
+    let fail = route.iter().find(|step| step["handler"] == "fail").unwrap();
+    assert_eq!(fail["params"]["error"], "OrderFailed");
 
     assert_eq!(blocks[1]["type"], "router");
     let ok = &blocks[1]["routes"][0];
@@ -67,9 +116,12 @@ fn order_pipeline_translates_structure() {
     assert_eq!(choice["type"], "router");
     assert_eq!(
         choice["routes"][0]["condition"],
-        "(outputs.validate_order.valid == true) && (data.order.shipping == \"express\")"
+        "(outputs.validate_order_result_path.validation.Payload.valid == true) && (outputs.validate_order_result_path.order.shipping == \"express\")"
     );
-    assert_eq!(choice["routes"][1]["condition"], "data.order.total > 1000");
+    assert_eq!(
+        choice["routes"][1]["condition"],
+        "outputs.validate_order_result_path.order.total > 1000"
+    );
     assert_eq!(choice["routes"][0]["blocks"][0]["handler"], "transform");
     assert_eq!(
         choice["routes"][1]["blocks"][0]["delay"]["duration"],
@@ -84,13 +136,20 @@ fn order_pipeline_translates_structure() {
     assert_eq!(parallel["branches"][0][0]["handler"], "reserve_inventory");
     assert_eq!(
         parallel["branches"][0][0]["params"]["items"],
-        "{{data.order.items}}"
+        "{{outputs.validate_order_result_path.order.items}}"
     );
     assert_eq!(parallel["branches"][1][0]["handler"], "charge_card");
     let map = &ok_blocks[2];
     assert_eq!(map["type"], "for_each");
-    assert_eq!(map["collection"], "{{data.order.items}}");
-    assert_eq!(map["body"][0]["params"]["sku"], "{{item.sku}}");
+    assert_eq!(
+        map["collection"],
+        "{{outputs.validate_order_result_path.order.items}}"
+    );
+    let item_var = map["item_var"].as_str().unwrap();
+    assert_eq!(
+        map["body"][0]["params"]["sku"],
+        format!("{{{{data.{item_var}.sku}}}}")
+    );
     assert_eq!(ok_blocks.len(), 3, "Succeed adds no block");
 
     let workers = &conversion.report.worker_handlers;
@@ -106,7 +165,7 @@ fn order_pipeline_translates_structure() {
             "missing worker {h}: {workers:?}"
         );
     }
-    // Nothing silently dropped: the one untranslated construct is reported.
+    // Every construct in this fixture is translated.
     assert!(
         conversion.report.unmapped.is_empty(),
         "{:#?}",
@@ -166,35 +225,40 @@ fn describe_output_reports_every_gap() {
     let map = find_block(seq, "fan_out").unwrap();
     assert_eq!(map["type"], "for_each");
     assert_eq!(map["collection"], "{{data.accounts}}");
-    let child = &map["body"][0];
+    assert_eq!(map["body"][0]["id"], "fan_out_item_selector");
+    let child = &map["body"][1];
     assert_eq!(child["type"], "sub_sequence");
     assert_eq!(child["sequence_name"], "sync-account");
-    assert_eq!(child["input"]["accountId"], "{{item.id}}");
-    assert_eq!(child["input"]["region"], "{{data.region}}");
+    assert_eq!(
+        child["input"]["accountId"],
+        "{{outputs.fan_out_item_selector.accountId}}"
+    );
+    assert_eq!(
+        child["input"]["region"],
+        "{{outputs.fan_out_item_selector.region}}"
+    );
 
     let approve = find_block(seq, "approve").unwrap();
     assert_eq!(approve["handler"], "aws_sqs_sendmessage");
-    assert_eq!(approve["retry"]["max_attempts"], 6);
+    assert_eq!(approve["retry"]["max_attempts"], 5);
+    assert_eq!(approve["params"]["$asl_heartbeat"]["seconds"], 600);
+    assert_eq!(
+        approve["params"]["$asl_heartbeat"]["params"]["$asl_callback"]["params"]["MessageBody"]["token"],
+        json!({"$asl_task_token": true})
+    );
 
     let wait_until = find_block(seq, "wait_until").unwrap();
     assert_eq!(wait_until["delay"]["fire_at_local"], "2026-12-01T09:30:00");
     assert_eq!(wait_until["delay"]["timezone"], "UTC");
     let dynamic = find_block(seq, "dynamic_wait").unwrap();
-    assert_eq!(dynamic["handler"], "log");
+    assert_eq!(dynamic["handler"], "asl_wait");
+    assert!(dynamic["params"]["seconds"].is_string());
 
     for needle in [
         "DISTRIBUTED",
-        "$$.Task.Token",
         "States.Format",
-        "Retry[1]",
-        "Retry[0].ErrorEquals",
-        "Catch[1]",
-        "HeartbeatSeconds",
         "StringMatches",
-        "waitForTaskToken",
-        "SecondsPath",
         "Fan Out.Retry",
-        "ItemSelector",
     ] {
         assert!(
             unmapped_mentions(&conversion, needle),
@@ -245,4 +309,111 @@ fn non_definitions_are_rejected() {
     let dangling = json!({"StartAt": "A", "States": {"A": {"Type": "Pass", "Next": "B"}}});
     let err = convert_stepfunctions(&dangling, None, &ConvertOptions::default()).unwrap_err();
     assert!(err.to_string().contains("`B`"), "{err}");
+}
+
+#[test]
+fn heartbeat_path_uses_narrowed_state_input_and_preserves_payload() {
+    let source = json!({
+        "StartAt": "Work",
+        "States": {
+            "Work": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::lambda:invoke",
+                "InputPath": "$.request",
+                "Parameters": {"FunctionName": "work", "Payload.$": "$.value"},
+                "HeartbeatSecondsPath": "$.options.heartbeat",
+                "TimeoutSeconds": 300,
+                "End": true
+            }
+        }
+    });
+    let conversion = convert_stepfunctions(&source, None, &ConvertOptions::default()).unwrap();
+    assert_passes_preflight(&conversion);
+    let work = find_block(&conversion.sequence, "work").unwrap();
+    assert_eq!(work["timeout"], 300_000);
+    assert_eq!(
+        work["params"]["$asl_heartbeat"],
+        json!({
+            "seconds": "{{data.request.options.heartbeat}}",
+            "params": {"input": "{{data.request.value}}"}
+        })
+    );
+    assert!(!unmapped_mentions(&conversion, "HeartbeatSecondsPath"));
+}
+
+#[test]
+fn malformed_heartbeat_configuration_is_rejected() {
+    let mut source = json!({
+        "StartAt":"Work",
+        "States":{"Work":{
+            "Type":"Task",
+            "Resource":"arn:aws:states:us-east-1:111111111111:activity:work",
+            "HeartbeatSeconds":0,
+            "End":true
+        }}
+    });
+    let error = convert_stepfunctions(&source, None, &ConvertOptions::default())
+        .expect_err("zero heartbeat interval must be rejected");
+    assert!(error.to_string().contains("positive integer"));
+    source["States"]["Work"]["HeartbeatSeconds"] = json!(1);
+    source["States"]["Work"]["HeartbeatSecondsPath"] = json!("$.heartbeat");
+    let error = convert_stepfunctions(&source, None, &ConvertOptions::default())
+        .expect_err("mutually exclusive heartbeat fields must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("both HeartbeatSeconds and HeartbeatSecondsPath")
+    );
+}
+
+#[test]
+fn worker_timeout_path_wraps_callback_parameters_and_rejects_a_second_deadline() {
+    let mut source = json!({
+        "StartAt": "Work",
+        "States": {"Work": {
+            "Type": "Task", "Resource": "arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+            "TimeoutSecondsPath": "$.limits.seconds", "HeartbeatSeconds": 5,
+            "Parameters": {"token.$": "$$.Task.Token"}, "End": true
+        }}
+    });
+    let conversion = convert_stepfunctions(&source, None, &ConvertOptions::default()).unwrap();
+    assert!(!unmapped_mentions(&conversion, "TimeoutSecondsPath"));
+    let params = &conversion.sequence["blocks"][0]["params"];
+    assert_eq!(
+        params,
+        &json!({"$asl_timeout": {
+            "seconds": "{{data.limits.seconds}}", "params": {"$asl_heartbeat": {
+                "seconds": 5, "params": {"$asl_callback": {"params": {"token": {"$asl_task_token": true}}}}
+            }}
+        }})
+    );
+    source["States"]["Work"]["TimeoutSeconds"] = json!(10);
+    assert!(
+        convert_stepfunctions(&source, None, &ConvertOptions::default())
+            .unwrap_err()
+            .to_string()
+            .contains("both TimeoutSeconds and TimeoutSecondsPath")
+    );
+}
+
+#[test]
+fn callback_intrinsics_are_deferred_only_for_token_tasks() {
+    let intrinsic = "States.Format('{}:{}', $.label, $$.Task.Token)";
+    let mut source = json!({"StartAt":"Work", "States":{"Work":{
+        "Type":"Task", "Resource":"arn:aws:states:::sqs:sendMessage.waitForTaskToken",
+        "Parameters":{"message.$":intrinsic}, "End":true
+    }}});
+    let callback = convert_stepfunctions(&source, None, &ConvertOptions::default()).unwrap();
+    assert!(!unmapped_mentions(&callback, "States.Format"));
+    let bound = callback.sequence["blocks"][0]["params"]["$asl_callback"]["params"]["message"]
+        .as_str()
+        .unwrap();
+    assert!(
+        orch8_types::asl_intrinsic::Intrinsic::from_callback_template(bound)
+            .unwrap()
+            .is_ok()
+    );
+    source["States"]["Work"]["Resource"] = json!("arn:aws:states:::sqs:sendMessage");
+    let normal = convert_stepfunctions(&source, None, &ConvertOptions::default()).unwrap();
+    assert!(unmapped_mentions(&normal, "States.Format"));
 }

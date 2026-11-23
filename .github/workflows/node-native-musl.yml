@@ -1,0 +1,39 @@
+name: Node native musl packages
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Release version stamped into each package
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  alpine:
+    name: Build and install on Alpine (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build binary and test the offline npm installation
+        env:
+          ORCH8_NATIVE_VERSION: ${{ inputs.version }}
+        run: bash scripts/check-node-native-musl.sh "$RUNNER_TEMP/node-native-musl" "$ORCH8_NATIVE_VERSION" "${{ matrix.arch }}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-native-musl-${{ matrix.arch }}
+          path: ${{ runner.temp }}/node-native-musl/
+          if-no-files-found: error

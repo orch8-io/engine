@@ -5,6 +5,7 @@ package io.orch8.kmp.internal
 
 import io.orch8.kmp.BackgroundRunResult
 import io.orch8.kmp.DeviceSessionTokens
+import io.orch8.kmp.ContinuityExportResult
 import io.orch8.kmp.ContinuityImportResult
 import io.orch8.kmp.DelegateRequest
 import io.orch8.kmp.DelegationOptions
@@ -21,6 +22,7 @@ import io.orch8.kmp.InstanceSummary
 import io.orch8.kmp.NodeCapabilities
 import io.orch8.kmp.NodeConnectivity
 import io.orch8.kmp.NodeRegistration
+import io.orch8.kmp.Orch8CapsuleSigner
 import io.orch8.kmp.Orch8ErrorKind
 import io.orch8.kmp.Orch8Exception
 import io.orch8.kmp.Orch8HandlerException
@@ -36,6 +38,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import io.orch8.mobile.DelegateRequest as UDelegateRequest
+import io.orch8.mobile.CapsuleSigner as UCapsuleSigner
 import io.orch8.mobile.DelegationOptions as UDelegationOptions
 import io.orch8.mobile.DelegationStatus as UDelegationStatus
 import io.orch8.mobile.DeviceContext as UDeviceContext
@@ -225,6 +228,28 @@ internal class UniffiBackend(private val engine: UMobileEngine) : EngineBackend 
 
     override fun activateContinuityCapsule(capsuleId: String, destinationRuntimeId: String, destinationInstanceId: String) =
         withEngine { engine.activateContinuityCapsule(capsuleId, destinationRuntimeId, destinationInstanceId) }
+
+    override fun exportContinuityCapsule(
+        instanceId: String,
+        destinationRuntimeId: String,
+        payloadKeyBase64: String,
+        expiresInSeconds: Int,
+        signer: Orch8CapsuleSigner,
+    ): ContinuityExportResult = withEngine {
+        val keyId = signer.keyId
+        val publicKey = signer.publicKeyBase64
+        val nativeSigner = object : UCapsuleSigner {
+            override fun keyId() = keyId
+            override fun publicKeyBase64() = publicKey
+            override fun signManifestSha256(digest: String): String = try {
+                signer.signManifestSha256(digest)
+            } catch (_: Exception) {
+                throw UMobileException.InvalidInput("capsule signature failed")
+            }
+        }
+        engine.exportContinuityCapsule(instanceId, destinationRuntimeId, payloadKeyBase64, expiresInSeconds.toUInt(), nativeSigner)
+            .let { ContinuityExportResult(it.capsuleId, it.continuityId, it.sourceEpoch.toLong(), it.capsuleJson, it.payloadBase64) }
+    }
 
     override fun nodeRuntimeId(): String = withEngine { engine.nodeRuntimeId() }
 

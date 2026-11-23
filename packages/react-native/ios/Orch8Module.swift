@@ -32,6 +32,7 @@ class Orch8Module: RCTEventEmitter, MobileScopedCallbacks {
             "orch8:refreshToken",
             "orch8:scopedExecuteStep",
             "orch8:scopedRefreshToken",
+            "orch8:scopedSnapshot",
         ]
     }
 
@@ -65,6 +66,49 @@ class Orch8Module: RCTEventEmitter, MobileScopedCallbacks {
         guard listening else { return false }
         sendEvent(withName: name, body: body)
         return true
+    }
+
+    private let mediaQueue = DispatchQueue(label: "io.orch8.reactnative.media", qos: .utility)
+
+    @objc(describeMediaFile:chunkBytes:resolver:rejecter:)
+    func describeMediaFile(
+        _ path: String,
+        chunkBytes: NSNumber,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        mediaQueue.async {
+            do {
+                resolve(try MediaFileRange.describe(path: path, chunkBytes: chunkBytes.doubleValue))
+            } catch {
+                reject("MEDIA_FILE_READ_FAILED", "Could not prepare the media file for upload", nil)
+            }
+        }
+    }
+
+    @objc(readMediaFileRange:offset:length:identity:sha256:resolver:rejecter:)
+    func readMediaFileRange(
+        _ path: String,
+        offset: NSNumber,
+        length: NSNumber,
+        identity: String?,
+        sha256: String?,
+        resolver resolve: @escaping RCTPromiseResolveBlock,
+        rejecter reject: @escaping RCTPromiseRejectBlock
+    ) {
+        mediaQueue.async {
+            do {
+                let data = try MediaFileRange.read(
+                    path: path, offset: offset.doubleValue, length: length.doubleValue,
+                    expectedIdentity: identity, expectedSha256: sha256
+                )
+                resolve(data.base64EncodedString())
+            } catch MediaFileRange.SourceChanged.changed {
+                reject("MEDIA_FILE_CHANGED", "Media file no longer matches the queued upload", nil)
+            } catch {
+                reject("MEDIA_FILE_READ_FAILED", "Could not read the requested media file range", nil)
+            }
+        }
     }
 
     // MARK: - Helpers

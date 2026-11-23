@@ -81,6 +81,8 @@ impl JobSpec {
             .unwrap_or_else(|| DEFAULT_MAX_BACKOFF_MS.max(initial));
         Some(RetryPolicy {
             max_attempts: retry.max_attempts - 1,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: std::time::Duration::from_millis(initial),
             max_backoff: std::time::Duration::from_millis(max),
             backoff_multiplier: 2.0,

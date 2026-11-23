@@ -95,6 +95,8 @@ pub fn mk_step_with_retry(id: &str, handler: &str, max_attempts: u32) -> BlockDe
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(10),
             backoff_multiplier: 1.0,
@@ -133,6 +135,8 @@ pub fn mk_step_with_retry_backoff(
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(100),
             backoff_multiplier: multiplier,
@@ -172,6 +176,8 @@ pub fn mk_step_with_conditional_retry(
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(10),
             backoff_multiplier: 1.0,

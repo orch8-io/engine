@@ -73,6 +73,13 @@ fn memory_settings(uri: &str) -> (bool, Option<bool>) {
     (memory, shared)
 }
 
+pub(super) fn uses_memory(options: &SqliteConnectOptions, uri: &str) -> bool {
+    let filename = options.get_filename();
+    memory_settings(uri).0
+        || filename == std::path::Path::new(":memory:")
+        || filename == std::path::Path::new("file::memory:")
+}
+
 /// Parse once, then use the same memory name for keeper and pooled connections.
 /// Disk constructors retain their normal pool configuration with no keeper.
 pub(super) async fn connect(
@@ -80,11 +87,10 @@ pub(super) async fn connect(
     mut connection_options: SqliteConnectOptions,
     uri: &str,
 ) -> Result<(SqlitePool, Option<Arc<MemoryDatabase>>), StorageError> {
-    let (memory, shared) = memory_settings(uri);
+    let (_, shared) = memory_settings(uri);
     let filename = connection_options.get_filename();
     let literal_memory = filename == std::path::Path::new(":memory:");
-    let uri_memory = filename == std::path::Path::new("file::memory:");
-    let memory = memory || literal_memory || uri_memory;
+    let memory = uses_memory(&connection_options, uri);
     let unnamed = literal_memory || (memory && filename.as_os_str().is_empty());
     if !memory && filename.as_os_str().is_empty() {
         return Err(StorageError::Unsupported(

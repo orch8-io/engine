@@ -1,14 +1,22 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use orch8_types::cron::CronSchedule;
+use orch8_types::cron::{CronMigrationSnapshot, CronSchedule};
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 
 use super::PostgresStorage;
 use super::rows::CronRow;
 
-pub(super) async fn create(store: &PostgresStorage, s: &CronSchedule) -> Result<(), StorageError> {
+pub(super) async fn create(
+    store: &PostgresStorage,
+    schedule: &CronSchedule,
+) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    create_on(&mut conn, schedule).await
+}
+
+async fn create_on(conn: &mut sqlx::PgConnection, s: &CronSchedule) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO cron_schedules
             (id, tenant_id, namespace, sequence_id, cron_expr, timezone, enabled,
@@ -31,8 +39,39 @@ pub(super) async fn create(store: &PostgresStorage, s: &CronSchedule) -> Result<
     .bind(s.next_fire_at)
     .bind(s.created_at)
     .bind(s.updated_at)
-    .execute(&store.pool)
+    .execute(conn)
     .await?;
+    Ok(())
+}
+
+pub(super) async fn import_migration(
+    store: &PostgresStorage,
+    snapshot: &CronMigrationSnapshot,
+    schedule: &CronSchedule,
+    epoch: i64,
+    digest: &str,
+) -> Result<(), StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let inserted = sqlx::query(
+        "INSERT INTO cron_migration_imports(schedule_id,tenant_id,migration_id,ownership_epoch,last_fire_at,snapshot_sha256) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
+    )
+    .bind(schedule.id).bind(schedule.tenant_id.as_str()).bind(snapshot.migration_id)
+    .bind(epoch).bind(snapshot.last_fire_at).bind(digest)
+    .execute(&mut *tx).await?.rows_affected() == 1;
+    if inserted {
+        create_on(&mut tx, schedule).await?;
+    } else {
+        let same: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM cron_migration_imports ci JOIN cron_schedules cs ON cs.id=ci.schedule_id WHERE ci.schedule_id=$1 AND ci.tenant_id=$2 AND ci.migration_id=$3 AND ci.ownership_epoch=$4 AND ci.snapshot_sha256=$5)",
+        ).bind(schedule.id).bind(schedule.tenant_id.as_str()).bind(snapshot.migration_id)
+          .bind(epoch).bind(digest).fetch_one(&mut *tx).await?;
+        if !same {
+            return Err(StorageError::Conflict(
+                "cron schedule already belongs to another migration".into(),
+            ));
+        }
+    }
+    tx.commit().await?;
     Ok(())
 }
 

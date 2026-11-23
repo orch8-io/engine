@@ -32,34 +32,26 @@ pub(super) async fn get(
     tenant_id: Option<&TenantId>,
     name: &str,
 ) -> Result<Option<PluginDef>, StorageError> {
-    // `tenant_id = ''` is the shared/global-plugin sentinel (see `create`'s
-    // column default and `list`'s equivalent OR clause) -- scoping must
-    // admit those alongside the caller's own tenant, not just an exact match.
-    // `tenant_id: None` is an intentionally unscoped lookup (e.g. system
-    // contexts that aren't acting on behalf of any one tenant) -- callers
-    // that already know the tenant must pass `Some`.
-    let row = match tenant_id {
-        Some(tid) => {
-            sqlx::query_as::<_, PluginRow>(
-                r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
-                  FROM plugins WHERE name = $1 AND (tenant_id = $2 OR tenant_id = '')",
-            )
-            .bind(name)
-            .bind(tid.as_str())
-            .fetch_optional(&store.pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as::<_, PluginRow>(
-                r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
-                  FROM plugins WHERE name = $1",
-            )
-            .bind(name)
-            .fetch_optional(&store.pool)
-            .await?
-        }
-    };
-    row.map(PluginRow::into_plugin).transpose()
+    const AMBIGUOUS: &str = "plugin alias is shared by multiple private tenants; select a tenant";
+    if let Some(tenant) = tenant_id {
+        let row: Option<PluginRow> = sqlx::query_as(
+            r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
+              FROM plugins WHERE name = $1 AND (tenant_id = $2 OR tenant_id = '')
+              ORDER BY (tenant_id = $2) DESC LIMIT 1",
+        ).bind(name).bind(tenant.as_str()).fetch_optional(&store.pool).await?;
+        return row.map(PluginRow::into_plugin).transpose();
+    }
+    let rows: Vec<PluginRow> = sqlx::query_as(
+        r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
+          FROM plugins WHERE name = $1 ORDER BY (tenant_id = '') DESC, tenant_id LIMIT 2",
+    ).bind(name).fetch_all(&store.pool).await?;
+    if rows.len() > 1 && !rows[0].tenant_id.is_empty() {
+        return Err(StorageError::Conflict(AMBIGUOUS.into()));
+    }
+    rows.into_iter()
+        .next()
+        .map(PluginRow::into_plugin)
+        .transpose()
 }
 
 pub(super) async fn list(
@@ -70,7 +62,9 @@ pub(super) async fn list(
         Some(tid) => {
             sqlx::query_as::<_, PluginRow>(
                 r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
-                  FROM plugins WHERE tenant_id = $1 OR tenant_id = '' ORDER BY name",
+                  FROM plugins WHERE tenant_id = $1 OR (tenant_id = '' AND NOT EXISTS (
+                    SELECT 1 FROM plugins tenant_plugin WHERE tenant_plugin.tenant_id = $1 AND tenant_plugin.name = plugins.name
+                  )) ORDER BY name",
             )
             .bind(tid.as_str())
             .fetch_all(&store.pool)
@@ -79,7 +73,7 @@ pub(super) async fn list(
         None => {
             sqlx::query_as::<_, PluginRow>(
                 r"SELECT name, plugin_type, source, tenant_id, enabled, config, description, created_at, updated_at
-                  FROM plugins ORDER BY name",
+                  FROM plugins ORDER BY name, tenant_id",
             )
             .fetch_all(&store.pool)
             .await?
@@ -96,9 +90,9 @@ pub(super) async fn update(
 ) -> Result<(), StorageError> {
     let config_str = plugin.config.to_string();
     sqlx::query(
-        r"UPDATE plugins SET plugin_type=$2, source=$3, tenant_id=$4, enabled=$5,
+        r"UPDATE plugins SET plugin_type=$2, source=$3, enabled=$5,
           config=$6, description=$7, updated_at=NOW()
-          WHERE name=$1",
+          WHERE name=$1 AND tenant_id=$4",
     )
     .bind(&plugin.name)
     .bind(plugin.plugin_type.to_string())
@@ -113,8 +107,20 @@ pub(super) async fn update(
 }
 
 pub(super) async fn delete(store: &PostgresStorage, name: &str) -> Result<(), StorageError> {
-    sqlx::query("DELETE FROM plugins WHERE name = $1")
+    if let Some(plugin) = get(store, None, name).await? {
+        delete_exact(store, &plugin.tenant_id, name).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn delete_exact(
+    store: &PostgresStorage,
+    tenant_id: &str,
+    name: &str,
+) -> Result<(), StorageError> {
+    sqlx::query("DELETE FROM plugins WHERE name = $1 AND tenant_id = $2")
         .bind(name)
+        .bind(tenant_id)
         .execute(&store.pool)
         .await?;
     Ok(())

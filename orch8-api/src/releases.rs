@@ -709,6 +709,9 @@ fn candidate_step_blocks(seq: &SequenceDefinition) -> Vec<String> {
 pub(crate) struct CanaryRequest {
     /// Percentage of new instances routed to the candidate (1–100).
     pub percent: u8,
+    /// Require these native executor nodes to have prepared the candidate.
+    #[serde(default)]
+    pub ready_executor_ids: Vec<Uuid>,
 }
 
 #[utoipa::path(post, path = "/releases/{id}/canary", tag = "releases",
@@ -729,6 +732,7 @@ pub(crate) async fn start_canary(
         return Err(ApiError::InvalidArgument("percent must be 1–100".into()));
     }
     let release = load_release(&state, &tenant_ctx, id).await?;
+    require_candidate_ready_executors(&state, &release, &req.ready_executor_ids).await?;
     let from = match release.state {
         ReleaseState::Ready => ReleaseState::Ready,
         ReleaseState::Paused => ReleaseState::Paused,
@@ -903,6 +907,9 @@ pub(crate) struct PromoteRequest {
     /// Promote even when gates are inconclusive or failing.
     #[serde(default)]
     pub force: bool,
+    /// Require a fresh candidate readiness acknowledgement from each node.
+    #[serde(default)]
+    pub ready_executor_ids: Vec<Uuid>,
 }
 
 #[utoipa::path(post, path = "/releases/{id}/promote", tag = "releases",
@@ -920,6 +927,7 @@ pub(crate) async fn promote_release(
     Json(req): Json<PromoteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
+    require_candidate_ready_executors(&state, &release, &req.ready_executor_ids).await?;
     if !req.force && !release.gates.is_empty() {
         let (baseline, candidate) = observe(&state, &release).await?;
         let gates = evaluate_gates(&release.gates, baseline, candidate);
@@ -945,6 +953,39 @@ pub(crate) async fn promote_release(
     .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
     Ok(Json(fresh))
+}
+
+async fn require_candidate_ready_executors(
+    state: &AppState,
+    release: &WorkflowRelease,
+    requested: &[Uuid],
+) -> Result<(), ApiError> {
+    if requested.is_empty() {
+        return Ok(());
+    }
+    if requested.len() > 64 {
+        return Err(ApiError::InvalidArgument(
+            "at most 64 designated executors are supported".into(),
+        ));
+    }
+    let ready = state
+        .storage
+        .list_wasm_ready_nodes(release.candidate_sequence_id, Utc::now())
+        .await
+        .map_err(|error| ApiError::from_storage(error, "executor readiness"))?;
+    let pending: Vec<_> = requested
+        .iter()
+        .filter(|id| !ready.contains(id))
+        .map(ToString::to_string)
+        .collect();
+    if !pending.is_empty() {
+        return Err(ApiError::Conflict(format!(
+            "candidate revision {} awaits WASM prewarm on executors {}",
+            release.candidate_sequence_id,
+            pending.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 #[utoipa::path(post, path = "/releases/{id}/pause", tag = "releases",

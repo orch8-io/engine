@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import Orch8Kmp
 import Orch8Mobile
 
@@ -25,7 +26,7 @@ private final class TokenInspection: @unchecked Sendable {
 // Forward every operation to the actual production bridge. During an explicit
 // root sync probe, also exercise its installed native callbacks before the real
 // Rust call retires that operation's credential source.
-private final class InspectingBridge: NSObject, Orch8JsonBridge, @unchecked Sendable {
+private final class InspectingBridge: NSObject, Orch8JsonBridge, Orch8CapsuleSigningBridge, @unchecked Sendable {
     private let native = Orch8KmpBridge()
     private let inspection: TokenInspection
     private let lock = NSLock()
@@ -36,6 +37,9 @@ private final class InspectingBridge: NSObject, Orch8JsonBridge, @unchecked Send
         native.setCallbacks(callbacks: callbacks)
     }
     func openAccount(identityJson: String) -> Orch8ScopedReply { native.openAccount(identityJson: identityJson) }
+    func exportCapsule(argsJson: String, signature: Orch8BridgeCapsuleSignature) -> String {
+        native.exportCapsule(argsJson: argsJson, signature: signature)
+    }
     func call(method: String, argsJson: String) -> String {
         if method == "sync", let data = argsJson.data(using: .utf8),
            let args = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -245,13 +249,66 @@ private final class Echo: NSObject, Orch8CatalogStepHandler, @unchecked Sendable
     }
     func delivered() -> [CatalogCallbackContext] { lock.lock(); defer { lock.unlock() }; return contexts }
 }
-private func configuration(environment: String = "staging") -> EngineConfig {
+private func configuration(environment: String = "staging", rootPublicKey: String = "") -> EngineConfig {
     EngineConfig(tickIntervalMs: 500, maxConcurrentSteps: 4, maxStepsPerInstance: 1000,
         maxConcurrentInstances: 10, maxTickDurationMs: 5000, maxInstanceLifetimeSecs: 86400,
         maxStoredSequences: 50, maxSequenceSizeBytes: 1048576, handlerTimeoutMs: 1000,
         operationTimeoutMs: 10000, telemetryEnabled: false, telemetryUrl: "", environment: environment,
-        rootPublicKey: "", sdkVersion: "0.7.1", memoryBudgetBytes: 0, sequencesUrl: "",
+        rootPublicKey: rootPublicKey, sdkVersion: "0.7.1", memoryBudgetBytes: 0, sequencesUrl: "",
         syncUrl: "", deviceId: "kmp-host-scope", syncApiKey: "")
+}
+
+private final class HostCapsuleSigner: NSObject, Orch8CapsuleSigner, @unchecked Sendable {
+    private let privateKey = Curve25519.Signing.PrivateKey()
+    let keyId = "swift-host-fixture"
+    var publicKeyBase64: String { privateKey.publicKey.rawRepresentation.base64EncodedString() }
+
+    func signManifestSha256(digest: String) -> String {
+        (try? privateKey.signature(for: Data(digest.utf8)))?.base64EncodedString() ?? ""
+    }
+}
+
+private func checkCapsuleSigning(
+    fixture: URL, directory: URL, metadata: [String: Any]
+) throws {
+    let info = metadata["capsule"] as! [String: Any]
+    let sourcePath = directory.appendingPathComponent("capsule-source.db")
+    try FileManager.default.copyItem(at: fixture.appendingPathComponent("capsule-source.db"), to: sourcePath)
+    let source = try Orch8Engine.companion.open(dbPath: sourcePath.path, config: configuration())
+    defer { source.close() }
+    let signer = HostCapsuleSigner()
+    let destination = try Orch8Engine.companion.open(
+        dbPath: directory.appendingPathComponent("capsule-destination.db").path,
+        config: configuration(rootPublicKey: signer.publicKeyBase64)
+    )
+    defer { destination.close() }
+    let sequence = String(decoding: try JSONSerialization.data(withJSONObject: info["sequence"]!), as: UTF8.self)
+    try unit { destination.loadSequence(json: sequence, completionHandler: $0) }
+    let runtime = UUID().uuidString
+    let instance = UUID().uuidString.lowercased()
+    let transferKey = Data(repeating: 19, count: 32).base64EncodedString()
+    let result: Orch8Kmp.ContinuityExportResult = try object {
+        source.exportContinuityCapsule(instanceId: info["sourceInstance"] as! String,
+            destinationRuntimeId: runtime, payloadKeyBase64: transferKey,
+            expiresInSeconds: 600, signer: signer, completionHandler: $0)
+    }
+    try check(result.continuityId == info["continuityId"] as? String, "capsule continuity changed")
+    let imported: Orch8Kmp.ContinuityImportResult = try object {
+        destination.importContinuityCapsule(capsuleJson: result.capsuleJson,
+            payloadBase64: result.payloadBase64, payloadKeyBase64: transferKey,
+            destinationRuntimeId: runtime, destinationInstanceId: instance, completionHandler: $0)
+    }
+    try check(imported.instanceId == instance && imported.capsuleId == result.capsuleId,
+        "signed capsule did not reach the receiving engine")
+    try unit {
+        destination.activateContinuityCapsule(capsuleId: imported.capsuleId, destinationRuntimeId: runtime,
+            destinationInstanceId: instance, completionHandler: $0)
+    }
+    let restored: Orch8Kmp.InstanceSnapshot = try object {
+        destination.getInstance(instanceId: instance, completionHandler: $0)
+    }
+    let context = try JSONSerialization.jsonObject(with: Data(restored.contextJson.utf8)) as! [String: Any]
+    try check(context["payload"] as? String == "from-source", "capsule data did not survive activation")
 }
 private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orch8Kmp.InstanceState,
                      pending: Int? = nil) throws -> CatalogRunSnapshot {
@@ -278,6 +335,7 @@ private func advance(_ engine: Orch8Engine, _ run: Orch8CatalogRun, _ state: Orc
         let cases = metadata["cases"] as! [[String: Any]]
         let bridgeFactory = InspectingBridgeFactory()
         Orch8Ios.shared.install(factory: bridgeFactory)
+        try checkCapsuleSigning(fixture: fixture, directory: directory, metadata: metadata)
         let invalid = directory.appendingPathComponent("must-not-open.db")
         try refused { _ = try Orch8Engine.companion.open(dbPath: invalid.path, config: configuration(environment: "test")) }
         try check(!FileManager.default.fileExists(atPath: invalid.path), "invalid config opened a database")

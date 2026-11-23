@@ -1,0 +1,26 @@
+{{- if .Values.httpRoute.enabled }}
+{{- $route := .Values.httpRoute }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "orch8.fullname" . }}
+  labels:
+    {{- include "orch8.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ required "httpRoute.parent.name is required when httpRoute is enabled." $route.parent.name | quote }}
+      {{- with $route.parent.namespace }}
+      namespace: {{ . | quote }}
+      {{- end }}
+      {{- with $route.parent.sectionName }}
+      sectionName: {{ . | quote }}
+      {{- end }}
+  {{- with $route.hostnames }}
+  hostnames:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - backendRefs:
+        - name: {{ include "orch8.apiServiceName" . }}
+          port: {{ .Values.service.httpPort }}
+{{- end }}

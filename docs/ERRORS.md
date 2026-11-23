@@ -28,6 +28,13 @@ Every validation, preflight, and diagnosis finding carries a stable `error_code`
 | [ORCH8-V017](#ORCH8-V017) | `INCOMPATIBLE_COERCION` | Incompatible type coercion |
 | [ORCH8-V018](#ORCH8-V018) | `INCOMPATIBLE:` | Incompatible change |
 | [ORCH8-V019](#ORCH8-V019) | `SEQUENCE_SERIALIZATION_FAILED` | Sequence could not be serialized for analysis |
+| [ORCH8-V020](#ORCH8-V020) | `NUMERIC_OPERAND_TYPE` | Numeric operand is declared as a string |
+| [ORCH8-V021](#ORCH8-V021) | `PRODUCER_RUNS_LATER` | Output producer executes after its consumer |
+| [ORCH8-V022](#ORCH8-V022) | `PRODUCER_MAY_NOT_RUN` | Output producer is conditional |
+| [ORCH8-V023](#ORCH8-V023) | `CHILD_INPUT_CONTRACT_MISMATCH` | Pinned child input is incompatible |
+| [ORCH8-V024](#ORCH8-V024) | `CHILD_OUTPUT_CONTRACT_MISMATCH` | Pinned child output is incompatible |
+| [ORCH8-V025](#ORCH8-V025) | `INVALID_CONFIG_SCHEMA` | Configuration schema is not a valid JSON Schema |
+| [ORCH8-V026](#ORCH8-V026) | `INVALID_STATE_SCHEMA` | State schema is not a valid JSON Schema |
 
 <a id="ORCH8-V001"></a>
 ### ORCH8-V001 — Document is not valid JSON/YAML
@@ -199,6 +206,69 @@ Key: `SEQUENCE_SERIALIZATION_FAILED`
 **Cause.** Internal: the typed-dataflow compiler could not serialize the definition.
 
 **Fix.** Report this with the definition attached; other checks still ran.
+
+<a id="ORCH8-V020"></a>
+### ORCH8-V020 — Numeric operand is declared as a string
+
+Key: `NUMERIC_OPERAND_TYPE`
+
+**Cause.** An arithmetic operator reads a value whose schema declares it as a string.
+
+**Fix.** Provide a numeric value and declare its numeric type in the schema.
+
+<a id="ORCH8-V021"></a>
+### ORCH8-V021 — Output producer executes after its consumer
+
+Key: `PRODUCER_RUNS_LATER`
+
+**Cause.** A mandatory workflow input reads an output before its sequential producer can execute.
+
+**Fix.** Move the producer earlier or supply a fallback for the missing value.
+
+<a id="ORCH8-V022"></a>
+### ORCH8-V022 — Output producer is conditional
+
+Key: `PRODUCER_MAY_NOT_RUN`
+
+**Cause.** A branch, guard, or loop can leave this output absent when another block reads it.
+
+**Fix.** Make the producer unconditional or provide a fallback for paths where it has no output.
+
+<a id="ORCH8-V023"></a>
+### ORCH8-V023 — Pinned child input is incompatible
+
+Key: `CHILD_INPUT_CONTRACT_MISMATCH`
+
+**Cause.** A value supplied by a parent workflow conflicts with the pinned child input schema.
+
+**Fix.** Align the input mapping with the named child revision's input schema.
+
+<a id="ORCH8-V024"></a>
+### ORCH8-V024 — Pinned child output is incompatible
+
+Key: `CHILD_OUTPUT_CONTRACT_MISMATCH`
+
+**Cause.** A parent workflow consumes a value that the pinned child result contract cannot supply.
+
+**Fix.** Align the parent reference with the pinned child's output contract.
+
+<a id="ORCH8-V025"></a>
+### ORCH8-V025 — Configuration schema is not a valid JSON Schema
+
+Key: `INVALID_CONFIG_SCHEMA`
+
+**Cause.** The sequence's configuration schema could not be compiled.
+
+**Fix.** Fix the reported schema error before supplying activation configuration.
+
+<a id="ORCH8-V026"></a>
+### ORCH8-V026 — State schema is not a valid JSON Schema
+
+Key: `INVALID_STATE_SCHEMA`
+
+**Cause.** The sequence's state schema could not be compiled.
+
+**Fix.** Fix the reported schema error before deploying the sequence.
 
 ## Preflight readiness (ORCH8-P)
 

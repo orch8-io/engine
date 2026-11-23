@@ -5,6 +5,8 @@ private final class Host: MobileScopedCallbacks {
     let scopedPending = PendingHandlerCalls()
     private let lock = NSLock()
     private var received: [[String: Any]] = []
+    private var snapshots: [[String: Any]] = []
+    let observed = DispatchSemaphore(value: 0)
     private var holding = false
     private var withheld: [String] = []
     let entered = DispatchSemaphore(value: 0)
@@ -26,8 +28,20 @@ private final class Host: MobileScopedCallbacks {
         defer { lock.unlock() }
         return received
     }
+    var observations: [[String: Any]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return snapshots
+    }
     func emit(scope: NativeEngineScope, _ name: String, _ body: [String: Any]) -> Bool {
         precondition(scope.isCurrent)
+        if name == "orch8:scopedSnapshot" {
+            lock.lock()
+            snapshots.append(body)
+            lock.unlock()
+            observed.signal()
+            return true
+        }
         guard name == "orch8:scopedExecuteStep", let context = body["context"] as? [String: Any],
             let id = body["requestId"] as? String
         else { return false }
@@ -415,10 +429,35 @@ private enum Tests {
         precondition(history["items"] is [Any])
         _ = try call(catalogs[0], "closeView")
         try refuses { _ = try call(runs[0], "snapshot") }
+        let verifyObservations = ProcessInfo.processInfo.environment["ORCH8_SCOPED_OBSERVATION_TEST"] == "1"
+        var observedRun: String?
+        if verifyObservations {
+            let observedDefinition = obj(try call(catalogs[3], "prepareRun", [
+                "workflow": "flow", "inputJson": "{}", "operationKey": "scoped-native-observation"
+            ]))
+            let handle = str(observedDefinition["handle"])
+            observedRun = handle
+            _ = try call(handle, "start")
+            _ = try snapshot(handle, state: "waiting", pending: 2)
+            _ = try call(handle, "subscribeSnapshots", ["observerKey": "retired-observer", "intervalMs": 50])
+            precondition(host.observed.wait(timeout: .now() + 3) == .success)
+            let event = host.observations.last!
+            precondition(str(event["accountId"]) == str(observedDefinition["accountId"]))
+            precondition(str(event["catalogId"]) == str(observedDefinition["catalogId"]))
+            precondition(str(event["sessionEpoch"]) == str(observedDefinition["sessionEpoch"]))
+            let decoded = obj(try JSONSerialization.jsonObject(with: Data(str(event["snapshotJson"]).utf8)))
+            precondition(str(decoded["state"]) == "waiting")
+        }
         _ = try call(accounts[2], "retire")
         try refuses { _ = try call(catalogs[3], "history", ["limit": 1]) }
         let fresh = obj(try call("", "openAccount", cases[2]))
         precondition(str(fresh["sessionEpoch"]) == "2")
+        if let observedRun {
+            try refuses { _ = try call(observedRun, "snapshot") }
+            precondition(host.observed.wait(timeout: .now() + 0.2) == .timedOut)
+            precondition(host.observations.count == 1)
+            print("Native scoped observation retired with its account epoch")
+        }
         // Numeric, fractional and boolean versions must fail before admission.
         for version in [true, 1.5, 2_147_483_648] as [Any] {
             try refuses {

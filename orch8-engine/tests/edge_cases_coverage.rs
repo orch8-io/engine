@@ -812,6 +812,8 @@ async fn retry_with_timeout_per_step() {
         delay: None,
         retry: Some(RetryPolicy {
             max_attempts: 3,
+            jitter: orch8_types::sequence::RetryJitter::Legacy,
+            rules: Vec::new(),
             initial_backoff: Duration::from_millis(1),
             max_backoff: Duration::from_millis(10),
             backoff_multiplier: 1.0,

@@ -43,6 +43,22 @@ pub async fn execute_parallel(
     par_def: &ParallelDef,
     tree: &[ExecutionNode],
 ) -> Result<bool, EngineError> {
+    execute_parallel_with_retry(storage, instance, node, par_def, tree, None).await
+}
+
+pub(crate) async fn execute_parallel_with_retry(
+    storage: &(impl crate::control::ExecutionControl + ?Sized),
+    instance: &TaskInstance,
+    node: &ExecutionNode,
+    par_def: &ParallelDef,
+    tree: &[ExecutionNode],
+    boundary: Option<&super::composite_retry::Boundary<'_>>,
+) -> Result<bool, EngineError> {
+    if let Some(boundary) = boundary
+        && boundary.resume(false).await?
+    {
+        return Ok(true);
+    }
     let children = evaluator::children_of(tree, node.id, None);
 
     if children.is_empty() {
@@ -52,6 +68,20 @@ pub async fn execute_parallel(
 
     // Keep the same branch and source ordering as race execution.
     let branches = evaluator::group_by_branch(&children);
+
+    // An imported Parallel attempt stops scheduling its siblings when
+    // a branch fails. Fence previously dispatched siblings before retrying.
+    if let Some(boundary) = boundary
+        && children
+            .iter()
+            .any(|child| child.state == NodeState::Failed)
+    {
+        evaluator::settle_live_descendants(storage, instance.id, tree, node.id).await?;
+        if !boundary.failure().await? {
+            evaluator::fail_node(storage, node.id).await?;
+        }
+        return Ok(true);
+    }
 
     let mut all_branches_done = true;
     let mut any_branch_failed = false;

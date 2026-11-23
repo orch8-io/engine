@@ -20,6 +20,7 @@ on:
       - "tests/apple-bridge-lifecycle/**"
       - "scripts/check-react-native-scopes.sh"
       - "tests/react-native-scopes/**"
+      - "tests/react-native-media-file/**"
       - "scripts/fixtures/kmp-scoped-host.swift"
       - "scripts/check-android-elf-align.sh"
       - "Cargo.toml"
@@ -44,6 +45,7 @@ on:
       - "tests/apple-bridge-lifecycle/**"
       - "scripts/check-react-native-scopes.sh"
       - "tests/react-native-scopes/**"
+      - "tests/react-native-media-file/**"
       - "scripts/fixtures/kmp-scoped-host.swift"
       - "scripts/check-android-elf-align.sh"
       - "Cargo.toml"
@@ -216,6 +218,7 @@ jobs:
           path: |
             artifacts/scoped-fixture/scoped.db
             artifacts/scoped-fixture/manifest-owned.db
+            artifacts/scoped-fixture/capsule-source.db
             artifacts/scoped-fixture/metadata.json
           if-no-files-found: error
 

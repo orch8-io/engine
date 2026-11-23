@@ -36,6 +36,7 @@ mod federation;
 mod instances;
 mod json_encoding;
 mod kv_state;
+mod legacy_worker_checkpoint;
 mod local_migration;
 mod misc;
 mod mobile_access;
@@ -62,9 +63,11 @@ mod step_logs;
 mod telemetry;
 mod tenancy;
 mod triggers;
+mod wasm_gc;
 mod webhook_deliveries;
 mod webhook_outbox;
 mod worker_admission;
+mod worker_callbacks;
 mod worker_claim;
 mod worker_claim_candidates;
 mod worker_commands;
@@ -267,6 +270,9 @@ impl PostgresStorage {
                         .execute(&mut *conn)
                         .await?;
                     sqlx::query("SET orch8.native_json_protocol = 'json_text_v1'")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("SET orch8.worker_claim_protocol = 'epoch_v1'")
                         .execute(&mut *conn)
                         .await?;
                     if let Some(sp) = search_path_value {
@@ -630,8 +636,28 @@ impl crate::InstanceStore for PostgresStorage {
         &self,
         snapshot: &crate::restore::InstanceSnapshot,
     ) -> Result<bool, StorageError> {
-        restore::restore(self, snapshot).await
+        restore::restore(self, snapshot, &crate::restore::InstanceHistory::default()).await
     }
+    async fn restore_instance_snapshot_with_history(
+        &self,
+        snapshot: &crate::restore::InstanceSnapshot,
+        history: &crate::restore::InstanceHistory,
+    ) -> Result<bool, StorageError> {
+        restore::restore(self, snapshot, history).await
+    }
+
+    async fn read_only_history_migration(
+        &self,
+        instance: InstanceId,
+    ) -> Result<Option<Uuid>, StorageError> {
+        Ok(sqlx::query_scalar(
+            "SELECT migration_id FROM readonly_instance_history WHERE instance_id=$1",
+        )
+        .bind(instance.into_uuid())
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
     async fn create_instance(&self, instance: &TaskInstance) -> Result<(), StorageError> {
         instances::create(self, instance).await
     }
@@ -685,6 +711,41 @@ impl crate::InstanceStore for PostgresStorage {
         limits: &std::collections::HashMap<TenantId, u64>,
     ) -> Result<u64, StorageError> {
         instances::create_batch_admitted(self, instances, limits).await
+    }
+
+    async fn create_prepared_instances(
+        &self,
+        instances: &[crate::externalizing::PreparedInstance],
+    ) -> Result<u64, StorageError> {
+        instances::create_prepared(self, instances).await
+    }
+
+    async fn update_prepared_context(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        payloads: &[(String, serde_json::Value)],
+    ) -> Result<(), StorageError> {
+        instances::update_prepared(self, id, context, payloads).await
+    }
+
+    async fn update_prepared_context_cas(
+        &self,
+        id: InstanceId,
+        context: &orch8_types::context::ExecutionContext,
+        payloads: &[crate::externalizing::ExternalizedRef],
+        expected_updated_at: DateTime<Utc>,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError> {
+        instances::update_prepared_cas(
+            self,
+            id,
+            context,
+            payloads,
+            expected_updated_at,
+            claim_token,
+        )
+        .await
     }
 
     async fn create_instance_externalized(
@@ -1207,6 +1268,15 @@ impl crate::ExecutionTreeStore for PostgresStorage {
         execution_tree::get_tree(self, instance_id).await
     }
 
+    async fn get_execution_tree_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<ExecutionNodeId>,
+        limit: u32,
+    ) -> Result<Vec<ExecutionNode>, StorageError> {
+        execution_tree::get_page(self, instance_id, after, limit).await
+    }
+
     async fn update_node_state(
         &self,
         node_id: ExecutionNodeId,
@@ -1274,6 +1344,16 @@ impl crate::OutputStore for PostgresStorage {
         claim_token: DateTime<Utc>,
     ) -> Result<crate::ClaimedRead<Option<BlockOutput>>, StorageError> {
         outputs::get_claimed(self, instance_id, tenant, block_id, claim_token).await
+    }
+
+    async fn get_scoped_block_output_attempt(
+        &self,
+        tenant: &TenantId,
+        instance_id: InstanceId,
+        block_id: &BlockId,
+        attempt: u16,
+    ) -> Result<Option<BlockOutput>, StorageError> {
+        outputs::get_scoped_attempt(self, tenant, instance_id, block_id, attempt).await
     }
 
     async fn get_block_output(
@@ -1521,6 +1601,15 @@ impl crate::OutputStore for PostgresStorage {
 
 #[async_trait]
 impl crate::SignalStore for PostgresStorage {
+    async fn list_signal_history_page(
+        &self,
+        instance: InstanceId,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<Signal>, StorageError> {
+        signals::list_history_page(self, instance, after, limit).await
+    }
+
     async fn enqueue_signal(&self, signal: &Signal) -> Result<(), StorageError> {
         signals::enqueue(self, signal).await
     }
@@ -1807,6 +1896,14 @@ impl crate::WorkerStore for PostgresStorage {
     > {
         delegation_claim_contexts::get(self, tenant, task_id, claim).await
     }
+    async fn get_worker_callback(
+        &self,
+        tenant: Option<&TenantId>,
+        token: &str,
+    ) -> Result<Option<crate::worker_callback::WorkerCallbackBinding>, StorageError> {
+        worker_callbacks::lookup(self, tenant, token).await
+    }
+
     async fn get_worker_issued_claim(
         &self,
         tenant: Option<&TenantId>,
@@ -1835,6 +1932,15 @@ impl crate::WorkerStore for PostgresStorage {
     ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
         worker_admission::create(self, intent).await
     }
+    async fn list_worker_task_archive_page(
+        &self,
+        instance: &orch8_types::instance::TaskInstance,
+        after: Option<uuid::Uuid>,
+        limit: u32,
+    ) -> Result<Vec<crate::restore::WorkerTaskArchive>, StorageError> {
+        restore::worker_task_archive_page(self, instance, after, limit).await
+    }
+
     async fn get_worker_dispatch_admission(
         &self,
         tenant_id: &TenantId,
@@ -2500,6 +2606,16 @@ impl crate::SchedulingStore for PostgresStorage {
         cron::create(self, schedule).await
     }
 
+    async fn import_cron_migration(
+        &self,
+        snapshot: &orch8_types::cron::CronMigrationSnapshot,
+        schedule: &CronSchedule,
+        epoch: i64,
+        digest: &str,
+    ) -> Result<(), StorageError> {
+        cron::import_migration(self, snapshot, schedule, epoch, digest).await
+    }
+
     async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError> {
         cron::get(self, id).await
     }
@@ -2702,6 +2818,10 @@ impl crate::AdminStore for PostgresStorage {
 
     async fn delete_plugin(&self, name: &str) -> Result<(), StorageError> {
         plugins::delete(self, name).await
+    }
+
+    async fn delete_plugin_exact(&self, tenant_id: &str, name: &str) -> Result<(), StorageError> {
+        plugins::delete_exact(self, tenant_id, name).await
     }
 
     async fn create_trigger(
@@ -3042,6 +3162,23 @@ impl crate::AdminStore for PostgresStorage {
         cluster::heartbeat(self, node_id).await
     }
 
+    async fn record_wasm_revision_ready(
+        &self,
+        node: Uuid,
+        revision: orch8_types::ids::SequenceId,
+        ready_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), StorageError> {
+        cluster::record_wasm_revision_ready(self, node, revision, ready_until).await
+    }
+
+    async fn list_wasm_ready_nodes(
+        &self,
+        revision: orch8_types::ids::SequenceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Uuid>, StorageError> {
+        cluster::list_wasm_ready_nodes(self, revision, now).await
+    }
+
     async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError> {
         cluster::drain(self, node_id).await
     }
@@ -3265,6 +3402,36 @@ impl crate::ResourceStore for PostgresStorage {
             .await
     }
 
+    async fn put_shared_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &orch8_types::plugin::WasmArtifactDigest,
+        bytes: bytes::Bytes,
+    ) -> Result<(), StorageError> {
+        wasm_gc::put(self, tenant, digest, bytes).await
+    }
+
+    async fn collect_unused_wasm_modules(
+        &self,
+        tenant: &TenantId,
+        before: chrono::DateTime<chrono::Utc>,
+        limit: u32,
+        apply: bool,
+    ) -> Result<Vec<String>, StorageError> {
+        wasm_gc::collect(self, tenant, before, limit, apply).await
+    }
+
+    async fn get_shared_wasm_module(
+        &self,
+        tenant: &str,
+        digest: &orch8_types::plugin::WasmArtifactDigest,
+        limit: u64,
+    ) -> Result<Option<bytes::Bytes>, StorageError> {
+        crate::artifacts::require_store(self.artifact_store.as_ref())?
+            .get_wasm_module(tenant, digest, limit)
+            .await
+    }
+
     async fn delete_artifact(&self, key: &str) -> Result<(), StorageError> {
         crate::artifacts::require_store(self.artifact_store.as_ref())?
             .delete(key)
@@ -3310,6 +3477,26 @@ impl crate::ResourceStore for PostgresStorage {
         limit: u32,
     ) -> Result<u64, StorageError> {
         misc::delete_expired_auxiliary(self, retention, limit).await
+    }
+
+    async fn list_instance_kv_page(
+        &self,
+        instance: InstanceId,
+        after: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::restore::InstanceKvEntry>, StorageError> {
+        kv_state::list_history_page(self, instance, after, limit).await
+    }
+
+    async fn set_instance_kv_expiring(
+        &self,
+        instance: InstanceId,
+        key: &str,
+        value: &serde_json::Value,
+        expires_at: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut conn = self.pool.acquire().await?;
+        kv_state::write_instance_kv_on(&mut conn, instance, key, value, Some(expires_at)).await
     }
 
     async fn set_instance_kv(
@@ -3571,6 +3758,28 @@ impl crate::ResourceStore for PostgresStorage {
         checkpoints::save(self, checkpoint).await
     }
 
+    async fn save_checkpoint_at_epoch(
+        &self,
+        tenant: &TenantId,
+        expected_epoch: u64,
+        checkpoint: &orch8_types::checkpoint::Checkpoint,
+    ) -> Result<bool, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        if !checkpoints::owns_epoch_on(
+            &mut transaction,
+            tenant,
+            checkpoint.instance_id,
+            expected_epoch,
+        )
+        .await?
+        {
+            return Ok(false);
+        }
+        checkpoints::save_on(&mut transaction, checkpoint).await?;
+        transaction.commit().await?;
+        Ok(true)
+    }
+
     async fn get_latest_checkpoint(
         &self,
         instance_id: InstanceId,
@@ -3586,12 +3795,39 @@ impl crate::ResourceStore for PostgresStorage {
         checkpoints::list(self, instance_id, limit).await
     }
 
+    async fn list_checkpoint_page(
+        &self,
+        instance_id: InstanceId,
+        after: Option<Uuid>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::checkpoint::Checkpoint>, StorageError> {
+        checkpoints::page(self, instance_id, after, limit).await
+    }
+
     async fn prune_checkpoints(
         &self,
         instance_id: InstanceId,
         keep: u32,
     ) -> Result<u64, StorageError> {
         checkpoints::prune(self, instance_id, keep).await
+    }
+
+    async fn prune_checkpoints_at_epoch(
+        &self,
+        tenant: &TenantId,
+        instance_id: InstanceId,
+        expected_epoch: u64,
+        keep: u32,
+    ) -> Result<Option<u64>, StorageError> {
+        let mut transaction = self.pool.begin().await?;
+        if !checkpoints::owns_epoch_on(&mut transaction, tenant, instance_id, expected_epoch)
+            .await?
+        {
+            return Ok(None);
+        }
+        let count = checkpoints::prune_on(&mut transaction, instance_id, keep).await?;
+        transaction.commit().await?;
+        Ok(Some(count))
     }
 }
 

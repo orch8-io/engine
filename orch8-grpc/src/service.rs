@@ -168,6 +168,7 @@ impl Orch8GrpcService {
         instance.context.runtime.dry_run_auto_approve = false;
         instance.next_fire_at = Some(chrono::Utc::now());
 
+        orch8_storage::externalizing::escape_literals(&mut instance.context.data);
         Ok(())
     }
 }
@@ -1215,6 +1216,7 @@ impl Orch8Service for Orch8GrpcService {
             .create_instance(&instance)
             .await
             .map_err(storage_err)?;
+        orch8_storage::externalizing::unescape_literals(&mut instance.context.data);
         Ok(Response::new(proto::InstanceResponse {
             instance_json: to_json_string(&instance)?,
         }))
@@ -1272,13 +1274,20 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::GetInstanceRequest>,
     ) -> Result<Response<proto::InstanceResponse>, Status> {
         let id = InstanceId::from_uuid(parse_uuid(&req.get_ref().id)?);
-        let inst = self
+        let mut inst = self
             .storage
             .get_instance(id)
             .await
             .map_err(storage_err)?
             .ok_or_else(|| Status::not_found("instance not found"))?;
         enforce_tenant_match(&req, &inst.tenant_id, "instance")?;
+        inst.context = orch8_engine::externalized::resolve_context_markers(
+            self.storage.as_ref(),
+            id,
+            inst.context,
+        )
+        .await
+        .map_err(storage_err)?;
         Ok(Response::new(proto::InstanceResponse {
             instance_json: to_json_string(&inst)?,
         }))
@@ -1407,12 +1416,13 @@ impl Orch8Service for Orch8GrpcService {
             .map_err(storage_err)?
             .ok_or_else(|| Status::not_found("instance not found"))?;
         enforce_tenant_match(&req, &inst.tenant_id, "instance")?;
-        let ctx: orch8_types::context::ExecutionContext =
+        let mut ctx: orch8_types::context::ExecutionContext =
             from_json_str(&req.get_ref().context_json)?;
         // Enforce the semantic context cap (HTTP path does this via
         // `check_size`); from_json_str only bounds raw JSON at 10 MB.
         ctx.check_size(self.max_context_bytes)
             .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        orch8_storage::externalizing::escape_literals(&mut ctx.data);
         self.storage
             .update_instance_context(id, &ctx)
             .await
@@ -2277,6 +2287,11 @@ impl Orch8Service for Orch8GrpcService {
         req: Request<proto::FailTaskRequest>,
     ) -> Result<Response<proto::Empty>, Status> {
         let task_id = parse_uuid(&req.get_ref().task_id)?;
+        if req.get_ref().error_code.as_ref().is_some_and(|code| {
+            code.is_empty() || code.len() > 256 || code.chars().any(char::is_control)
+        }) {
+            return Err(Status::invalid_argument("invalid worker error code"));
+        }
         ensure_recorded_reporter(
             &self.storage,
             &req,
@@ -2311,13 +2326,14 @@ impl Orch8Service for Orch8GrpcService {
         ensure_worker_claim(&self.storage, &pre_task, &claim, "fail").await?;
         // Same fenced single-transaction resolution as HTTP fail, the reaper
         // and timeouts: receipt `unknown`, then retry policy / fail node.
-        let failed = orch8_engine::worker_lease::fail_worker_task(
+        let failed = orch8_engine::worker_lease::fail_worker_task_with_error(
             self.storage.as_ref(),
             &instance,
             &pre_task,
             &claim,
             &inner.message,
             inner.retryable,
+            inner.error_code.as_deref(),
         )
         .await
         .map_err(engine_err)?;

@@ -1,3 +1,4 @@
+pub(crate) mod callback;
 pub(crate) mod definition;
 pub(crate) mod identity;
 pub(crate) mod input;
@@ -43,6 +44,8 @@ pub(crate) struct ClaimedWorkerTask {
     task: orch8_types::worker::WorkerTask,
     #[serde(skip_serializing_if = "Option::is_none")]
     delegation: Option<orch8_types::delegation_definition::claim::DelegationClaimContext>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callback_token: Option<String>,
     /// `$runtime.runtime_id`: the only node allowed to claim (mailbox).
     #[serde(skip_serializing_if = "Option::is_none")]
     target_runtime_id: Option<orch8_types::continuity::RuntimeId>,
@@ -57,12 +60,19 @@ pub(crate) struct ClaimedWorkerTask {
 /// policy applied). The stored row keeps the full context for other kinds.
 fn prepare_claimed_tasks(
     state: &AppState,
-    mut tasks: Vec<orch8_types::worker::WorkerTask>,
-) -> Vec<orch8_types::worker::WorkerTask> {
-    for task in &mut tasks {
-        if task.lease_secs.is_none() {
-            task.lease_secs = Some(u32::try_from(state.worker_lease_secs).unwrap_or(u32::MAX));
-        }
+    mut tasks: Vec<(
+        orch8_types::worker::WorkerTask,
+        Option<orch8_storage::worker_callback::WorkerCallbackBinding>,
+    )>,
+) -> Vec<(
+    orch8_types::worker::WorkerTask,
+    Option<orch8_storage::worker_callback::WorkerCallbackBinding>,
+)> {
+    for (task, _) in &mut tasks {
+        task.lease_secs = task
+            .heartbeat_timeout_secs
+            .or(task.lease_secs)
+            .or_else(|| Some(u32::try_from(state.worker_lease_secs).unwrap_or(u32::MAX)));
         if task.claimed_runtime_kind == Some(orch8_types::continuity::RuntimeKind::Browser) {
             task.context = orch8_types::worker::browser_safe_context(&task.context);
         }
@@ -81,15 +91,18 @@ async fn note_placed_claims(state: &AppState, tasks: &[orch8_types::worker::Work
 fn poll_response(
     state: &AppState,
     batch: orch8_storage::worker_claim::WorkerClaimBatch,
-) -> Response {
-    let (tasks, contexts) = batch.into_parts();
+) -> Result<Response, ApiError> {
+    let orch8_storage::worker_claim::WorkerClaimDelivery { tasks, contexts } = batch
+        .into_delivery()
+        .map_err(|error| ApiError::from_storage(error, "worker claim"))?;
     let mut contexts = contexts
         .into_iter()
         .map(|context| (context.scope.task_id, context))
         .collect::<std::collections::HashMap<_, _>>();
     let tasks: Vec<_> = prepare_claimed_tasks(state, tasks)
         .into_iter()
-        .map(|task| ClaimedWorkerTask {
+        .map(|(task, callback)| ClaimedWorkerTask {
+            callback_token: callback.as_ref().map(|binding| binding.token().to_owned()),
             delegation: contexts.remove(&task.id),
             target_runtime_id: task.requirements.runtime_id,
             runtime_kinds: task.requirements.runtime_kinds.clone(),
@@ -109,7 +122,7 @@ fn poll_response(
             .headers_mut()
             .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
     }
-    response
+    Ok(response)
 }
 
 pub fn routes() -> Router<AppState> {
@@ -128,6 +141,7 @@ pub fn routes() -> Router<AppState> {
         .route("/workers/tasks/poll", post(poll_tasks))
         .route("/workers/tasks/poll/queue", post(poll_tasks_from_queue))
         .route("/workers/tasks/{id}/complete", post(complete_task))
+        .route("/workers/callbacks/complete", post(callback::complete))
         .route(
             "/workers/tasks/{id}/reconcile-completion",
             post(reconciliation::reconcile_completion),
@@ -839,7 +853,7 @@ pub(crate) async fn poll_tasks(
     .await;
     note_placed_claims(&state, tasks.tasks()).await;
 
-    Ok(poll_response(&state, tasks))
+    poll_response(&state, tasks)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -940,7 +954,7 @@ pub(crate) async fn poll_tasks_from_queue(
     .await;
     note_placed_claims(&state, tasks.tasks()).await;
 
-    Ok(poll_response(&state, tasks))
+    poll_response(&state, tasks)
 }
 
 /// Aggregated view of one worker on the fleet, grouped from its
@@ -1495,6 +1509,8 @@ pub(crate) struct FailRequest {
     message: String,
     #[serde(default)]
     retryable: bool,
+    /// Optional workflow error name for ordered retry and catch rules.
+    error_code: Option<String>,
     /// Optional log lines the worker captured while running this task.
     #[serde(default)]
     logs: Vec<orch8_types::step_log::StepLogEntry>,
@@ -1518,6 +1534,13 @@ pub(crate) async fn fail_task(
     Json(req): Json<FailRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::browser_sessions::enforce_bound_worker(&binding, &req.worker_id)?;
+    if req.error_code.as_ref().is_some_and(|code| {
+        code.is_empty() || code.len() > 256 || code.chars().any(char::is_control)
+    }) {
+        return Err(ApiError::InvalidArgument(
+            "invalid worker error code".into(),
+        ));
+    }
     let report_claim = WorkerClaim::new(req.worker_id.clone(), req.claim_epoch);
     enforce_recorded_reporter(&state, &tenant_ctx, &caller, task_id, &report_claim).await?;
     if let Some(report) = state
@@ -1575,13 +1598,14 @@ pub(crate) async fn fail_task(
     // The task fails and the instance advances per
     // the step's retry policy — or only the task fails for a delegation or a
     // terminal/paused instance. A racing lease change applies nothing.
-    let failed = orch8_engine::worker_lease::fail_worker_task(
+    let failed = orch8_engine::worker_lease::fail_worker_task_with_error(
         state.storage.as_ref(),
         &inst,
         &pre_task,
         &claim,
         &req.message,
         req.retryable,
+        req.error_code.as_deref(),
     )
     .await
     .map_err(|error| match error {

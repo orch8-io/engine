@@ -8,6 +8,7 @@ import io.orch8.mobile.MobileCatalogConfiguration
 import io.orch8.mobile.MobileCatalogHistoryCursor
 import io.orch8.mobile.MobileCatalogNativeState
 import io.orch8.mobile.MobileCatalogRun
+import io.orch8.mobile.MobileCatalogRunSnapshot
 import io.orch8.mobile.MobileCatalogRunRequest
 import io.orch8.mobile.MobileCatalogRunSummary
 import io.orch8.mobile.MobileCatalogStepHandler
@@ -21,6 +22,9 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.lang.ref.WeakReference
 import java.util.UUID
+import java.util.concurrent.ScheduledFuture
+import java.util.concurrent.ScheduledThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 internal interface MobileScopedCallbacks {
     val scopedPending: PendingHandlerCalls
@@ -37,6 +41,17 @@ internal class MobileScopedBridge {
         class Cursor(val native: MobileCatalogHistoryCursor, val account: String, val catalog: String, val epoch: Long) : Node { override fun close() = native.close() }
     }
     private data class Entry(val node: Node, val scope: NativeEngineLifecycle.Scope, val parent: String?, val account: String, val catalog: String?, val epoch: String)
+    private class Observation(val handle: String) {
+        var task: ScheduledFuture<*>? = null
+        var previous: MobileCatalogRunSnapshot? = null
+        var emitted = false
+    }
+    private companion object {
+        val observationWorker = ScheduledThreadPoolExecutor(1) { work ->
+            Thread(work, "orch8-scoped-observation").apply { isDaemon = true }
+        }.apply { removeOnCancelPolicy = true }
+    }
+    private val observations = mutableMapOf<String, Observation>()
     private val lock = Any()
     private val entries = mutableMapOf<String, Entry>()
     private var activeScope: NativeEngineLifecycle.Scope? = null
@@ -44,7 +59,7 @@ internal class MobileScopedBridge {
         val retired = synchronized(lock) {
             if (activeScope?.isCurrent() == true) return
             val stale = entries.filterValues { !it.scope.isCurrent() }
-            stale.keys.forEach { entries.remove(it) }
+            stale.keys.forEach { entries.remove(it); stopObservationsLocked(it) }
             stale.values.toList()
         }
         retired.forEach { it.node.close() } // JNI cleanup never holds the table lock.
@@ -84,7 +99,7 @@ internal class MobileScopedBridge {
                 entries.forEach { (id, entry) -> if (entry.parent in keys) keys.add(id) }
             } while (previous != keys.size)
             val removed = entries.filterKeys { it in keys }
-            removed.keys.forEach { entries.remove(it) }
+            removed.keys.forEach { entries.remove(it); stopObservationsLocked(it) }
             removed.values.toList()
         }
         retired.forEach { it.node.close() }
@@ -92,11 +107,66 @@ internal class MobileScopedBridge {
     private fun releaseAccount(account: String, epoch: String) {
         val retired = synchronized(lock) {
             val removed = entries.filterValues { it.account == account && it.epoch == epoch }
-            removed.keys.forEach { entries.remove(it) }
+            removed.keys.forEach { entries.remove(it); stopObservationsLocked(it) }
             removed.values.toList()
         }
         retired.forEach { it.node.close() }
     }
+    private fun stopObservationsLocked(handle: String) {
+        observations.filterValues { it.handle == handle }.keys.forEach {
+            observations.remove(it)?.task?.cancel(false)
+        }
+    }
+    private fun stopObservation(handle: String, key: String) {
+        synchronized(lock) {
+            if (observations[key]?.handle == handle) observations.remove(key)?.task?.cancel(false)
+        }
+    }
+    private fun startObservation(handle: String, key: String, interval: Long, module: MobileScopedCallbacks) {
+        val owner = WeakReference(module)
+        val observation = Observation(handle)
+        synchronized(lock) {
+            if (entries[handle]?.scope?.isCurrent() != true || key in observations ||
+                observations.size >= 128 || observations.values.count { it.handle == handle } >= 8) {
+                throw MobileException.ResourceLimit("scoped observation unavailable or exhausted")
+            }
+            observations[key] = observation
+            observation.task = observationWorker.scheduleWithFixedDelay({
+                val callbacks = owner.get()
+                if (callbacks == null) stopObservation(handle, key)
+                else pollObservation(handle, key, observation, callbacks)
+            }, 0, interval, TimeUnit.MILLISECONDS)
+        }
+    }
+    private fun pollObservation(handle: String, key: String, observation: Observation, module: MobileScopedCallbacks) {
+        try {
+            val entry = lookup(handle)
+            val run = (entry.node as Node.Run).native
+            val snapshot = run.snapshot()
+            if (observation.emitted && observation.previous == snapshot) return
+            if (snapshot != null && (snapshot.accountId != entry.account || snapshot.catalogId != entry.catalog ||
+                    snapshot.sessionEpoch.toString() != entry.epoch || snapshot.instanceId != run.instanceId())) {
+                stopObservation(handle, key)
+                return
+            }
+            if (!synchronized(lock) { observations[key] === observation && entries[handle]?.scope === entry.scope }) return
+            observation.emitted = true
+            observation.previous = snapshot
+            val sent = module.emitScoped(entry.scope, "orch8:scopedSnapshot", mapOf(
+                "observerKey" to key, "accountId" to entry.account, "catalogId" to entry.catalog,
+                "sessionEpoch" to entry.epoch, "instanceId" to run.instanceId(),
+                "snapshotJson" to (snapshot?.let(::snapshotObject)?.toString() ?: "null"),
+            ))
+            if (!sent || snapshot?.state?.let(::state) in listOf("completed", "failed", "cancelled")) stopObservation(handle, key)
+        } catch (_: Exception) {
+            stopObservation(handle, key)
+        }
+    }
+    private fun snapshotObject(value: MobileCatalogRunSnapshot): JSONObject = JSONObject()
+        .put("instanceId", value.instanceId).put("accountId", value.accountId).put("catalogId", value.catalogId)
+        .put("sessionEpoch", value.sessionEpoch.toString()).put("state", state(value.state)).put("dataJson", value.dataJson)
+        .put("pendingSteps", JSONArray(value.pendingSteps)).put("createdAt", value.createdAt).put("updatedAt", value.updatedAt)
+
     private fun lookup(id: String): Entry {
         val entry = synchronized(lock) { entries[id] }
         if (entry == null || !entry.scope.isCurrent()) throw MobileException.Shutdown("scope view disposed or retired")
@@ -113,7 +183,7 @@ internal class MobileScopedBridge {
             parsed
         } catch (_: Exception) { throw MobileException.InvalidInput("scoped arguments must be a JSON object") }
         val result: Any? = if (method == "dispose") {
-            val retired = synchronized(lock) { entries.remove(handle) }
+            val retired = synchronized(lock) { stopObservationsLocked(handle); entries.remove(handle) }
             retired?.node?.close()
             null
         } else if (handle.isEmpty() && method == "openAccount") {
@@ -158,7 +228,14 @@ internal class MobileScopedBridge {
                 is Node.Run -> when (method) {
                     "closeView" -> { node.native.closeView(); releaseTree(handle); null }
                     "start" -> { node.native.start(); null }
-                    "snapshot" -> node.native.snapshot()?.let { JSONObject().put("instanceId", it.instanceId).put("accountId", it.accountId).put("catalogId", it.catalogId).put("sessionEpoch", it.sessionEpoch.toString()).put("state", state(it.state)).put("dataJson", it.dataJson).put("pendingSteps", JSONArray(it.pendingSteps)).put("createdAt", it.createdAt).put("updatedAt", it.updatedAt) }
+                    "snapshot" -> node.native.snapshot()?.let(::snapshotObject)
+                    "subscribeSnapshots" -> {
+                        val interval = args.positive("intervalMs", 60_000)
+                        if (interval < 50) throw MobileException.InvalidInput("observation interval must be at least 50 ms")
+                        startObservation(handle, args.string("observerKey"), interval, module)
+                        null
+                    }
+                    "unsubscribeSnapshots" -> { stopObservation(handle, args.string("observerKey")); null }
                     "cancel" -> node.native.cancel()?.let(::state)
                     "completeStep" -> node.native.completeStep(args.string("expectedUpdatedAt"), args.string("stepName"), args.string("outputJson"))
                     "forgetCancelledRequest" -> node.native.forgetCancelledRequest()

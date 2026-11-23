@@ -73,6 +73,14 @@ aborts install/template with an actionable message.
 */}}
 {{- define "orch8.validate" -}}
 {{- $v := .Values -}}
+{{- if or $v.sqlite.snapshot.enabled $v.sqlite.persistence.restoreFromSnapshot -}}
+  {{- if or (ne $v.storage.backend "sqlite") (ne $v.mode "allInOne") -}}
+    {{- fail "SQLite snapshots require the all-in-one SQLite deployment." -}}
+  {{- end -}}
+  {{- if and $v.sqlite.persistence.existingClaim $v.sqlite.persistence.restoreFromSnapshot -}}
+    {{- fail "sqlite.persistence.restoreFromSnapshot requires a new chart-managed claim." -}}
+  {{- end -}}
+{{- end -}}
 {{- if eq $v.mode "executor" -}}
   {{- if or $v.postgresql.enabled $v.externalDatabase.url $v.externalDatabase.existingSecret -}}
     {{- fail "mode=executor runs without a database (it claims work from Orch8 Cloud over the worker protocol): unset postgresql.enabled and externalDatabase.*." -}}
@@ -109,6 +117,9 @@ aborts install/template with an actionable message.
   {{- end -}}
   {{- if $v.ingress.enabled -}}
     {{- fail "mode=executor serves no HTTP API (health only); disable ingress." -}}
+  {{- end -}}
+  {{- if $v.httpRoute.enabled -}}
+    {{- fail "mode=executor serves no HTTP API; disable httpRoute." -}}
   {{- end -}}
 {{- end -}}
 {{- if and $v.cloudObservability.enabled (not $v.cloudObservability.existingSecret) -}}
@@ -377,6 +388,21 @@ spec:
       {{- with $cfg.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $cfg.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range . }}
+        - maxSkew: {{ .maxSkew }}
+          {{- with .minDomains }}
+          minDomains: {{ . }}
+          {{- end }}
+          topologyKey: {{ .topologyKey | quote }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "orch8.selectorLabels" $root | nindent 14 }}
+              app.kubernetes.io/component: {{ $.component }}
+        {{- end }}
       {{- end }}
 {{- end -}}
 

@@ -122,6 +122,23 @@ This package has its own Cargo workspace and lockfile. The JavaScript wrapper
 loads the addon from this package's directory; building the root Rust workspace
 alone does not produce the Node addon.
 
+### Alpine Linux packages
+
+Release assets include separate x64 and ARM64 musl bundles with their SHA-256
+checksums. Use the matching bundle on an Alpine host. Extract it and install
+both npm tarballs in the consuming project:
+
+```sh
+mkdir orch8-native-dist
+tar -xzf orch8-engine-native-VERSION-linux-ARCH-musl.tar.gz -C orch8-native-dist
+npm install --offline --ignore-scripts ./orch8-native-dist/*.tgz
+```
+
+The installed package detects musl and loads its architecture-specific addon.
+The release smoke test installs both packages in a clean Alpine container
+with networking disabled. Separate Node processes queue the workflow,
+execute it, and verify the result after reopening its SQLite database.
+
 ### Callback failure diagnostics
 
 `PermanentError` fails without retry. An own data property `permanent: true`
@@ -141,6 +158,13 @@ running. Node retains admission until the real promise settles; Python retains
 it through the blocking call, captured-reference release and runtime retirement.
 Host callbacks must represent their real completion.
 
+Each Node handler receives an `AbortSignal` as `input.signal`. When
+`engine.signal(id, "cancel")` cancels the running instance, it aborts the
+active handler's signal. Pass it to cancellable I/O or use
+`signal.addEventListener("abort", ...)` to stop custom work. The callback
+keeps its slot until its promise settles, and the cancellation fences its
+output before the signal is delivered to the handler.
+
 Excess work remains scheduled before durable effect dispatch, preserving its
 attempt and prepared receipt. Run it again after capacity becomes available;
 reopening the engine cannot reset this allowance. An already-admitted call is
@@ -151,3 +175,22 @@ A snapshot retains the current retry diagnostic while its next attempt is
 scheduled. Snapshot and handler views select current rows before decoding
 payloads, so superseded or internal history does not need to be decoded. A damaged
 selected result still fails the read.
+
+`await engine.getOutput(id, block, attempt)` reads just the given block attempt
+and resolves its payload. It returns the latest matching row for a repeated block,
+or `null` when the attempt has no record.
+
+Use `for await` with `engine.iterInstances({ state: 'scheduled', sequenceId, pageSize: 100 })`
+to iterate summaries in descending instance ID order. The optional sequence ID is
+returned by `deploy`. Each iterator reads one page at a time and returns only the
+ID, sequence ID, state, and creation time.
+
+Set `observerTimeoutMs` on `run` to bound how long the caller waits for both
+scheduling and storage reads. Expiration rejects the promise with `run observer
+deadline elapsed`. Admitted work can still finish and be observed by a later
+`get` or `run` call. `timeoutMs` is the separate scheduling budget.
+
+`startBatch([{ name, input, version, idempotencyKey }, ...])` starts up to 1000
+items in one transaction. Each item requires a nonempty key. The returned IDs
+follow input order, including repeated keys. Retry with the same keys to recover
+the original IDs after losing the response.

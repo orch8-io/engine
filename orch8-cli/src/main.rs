@@ -253,11 +253,15 @@ enum Commands {
     /// credentials (and optionally instances) to a versioned, checksummed
     /// .tar.gz, reading the storage database directly.
     Backup(commands::backup::BackupCmd),
+    /// Verify externalized workflow state using a read-only database snapshot.
+    VerifyExternalized(commands::backup::VerifyExternalizedCmd),
     /// Restore an `orch8 backup` archive (idempotent; `--dry-run` to preview).
     Restore(commands::backup::RestoreCmd),
     /// Check a database against this binary's bundled migrations
     /// (`--check`): pending, destructive, and unknown migrations.
     Upgrade(commands::upgrade::UpgradeCmd),
+    /// Reconcile or maintain an existing `SQLite` database file.
+    SqliteSchema(commands::sqlite_schema::SqliteSchemaCmd),
     /// Generate shell completions.
     Completions {
         /// Shell to generate completions for.
@@ -580,24 +584,37 @@ pub(crate) fn external_client() -> Result<Client> {
 /// For non-secret output: a new file gets `0644`, an existing file keeps its
 /// mode. Use [`atomic_write_private`] for credentials.
 pub(crate) fn atomic_write(path: &std::path::Path, contents: &[u8]) -> Result<()> {
-    atomic_write_with_mode(path, contents, false)
+    atomic_write_with_mode(path, false, |file| {
+        std::io::Write::write_all(file, contents).map_err(Into::into)
+    })
 }
 
 /// [`atomic_write`] for files holding secrets: always `0600` on unix.
 pub(crate) fn atomic_write_private(path: &std::path::Path, contents: &[u8]) -> Result<()> {
-    atomic_write_with_mode(path, contents, true)
+    atomic_write_private_with(path, |file| {
+        std::io::Write::write_all(file, contents).map_err(Into::into)
+    })
 }
 
-fn atomic_write_with_mode(path: &std::path::Path, contents: &[u8], private: bool) -> Result<()> {
-    use std::io::Write as _;
+pub(crate) fn atomic_write_private_with(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    atomic_write_with_mode(path, true, write)
+}
 
+fn atomic_write_with_mode(
+    path: &std::path::Path,
+    private: bool,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(std::path::Path::new("."));
     let mut file = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("create temporary file beside {}", path.display()))?;
-    file.write_all(contents)?;
+    write(file.as_file_mut())?;
     // NamedTempFile is created 0600; widen it for ordinary output so
     // scaffolds and exports stay readable like any other generated file.
     #[cfg(unix)]
@@ -683,8 +700,12 @@ async fn main() -> Result<()> {
     // Database-direct commands: no API client or fleet context involved.
     match cli.command {
         Commands::Backup(cmd) => return commands::backup::run_backup(cmd, format).await,
+        Commands::VerifyExternalized(cmd) => {
+            return commands::backup::run_verify_externalized(cmd, format).await;
+        }
         Commands::Restore(cmd) => return commands::backup::run_restore(cmd, format).await,
         Commands::Upgrade(cmd) => return commands::upgrade::run(cmd, format).await,
+        Commands::SqliteSchema(cmd) => return commands::sqlite_schema::run(cmd, format).await,
         _ => {}
     }
 
@@ -813,8 +834,10 @@ async fn main() -> Result<()> {
         | Commands::Import(..)
         | Commands::Learn(..)
         | Commands::Backup(..)
+        | Commands::VerifyExternalized(..)
         | Commands::Restore(..)
         | Commands::Upgrade(..)
+        | Commands::SqliteSchema(..)
         | Commands::Bootstrap(..)
         | Commands::Demo(..)
         | Commands::Drill(..)

@@ -10,11 +10,20 @@
 //! Every export takes and returns JSON strings and never throws: failures
 //! come back as `{"ok": false, "error": "..."}`.
 
+#[path = "../../orch8-engine/src/calendar_delay.rs"]
+mod calendar_delay;
+#[allow(dead_code)]
+#[path = "../../orch8-engine/src/dataflow_analysis.rs"]
+mod dataflow_analysis;
 // The engine's expression evaluator, compiled from the same source file so
 // playground conditions behave exactly like server conditions.
 #[allow(dead_code)]
 #[path = "../../orch8-engine/src/expression.rs"]
 mod expression;
+#[path = "../../orch8-engine/src/output_schema.rs"]
+mod output_schema;
+#[path = "../../orch8-engine/src/template_filters.rs"]
+mod template_filters;
 
 pub mod decode;
 pub mod interp;
@@ -77,7 +86,8 @@ pub fn run_dry(sequence_json: &str, input_json: &str, max_ticks: u32) -> String 
 
 /// Dry-run with full options:
 /// `{"input", "config", "mocks": {"<block_id>": {"output", "error",
-/// "retryable", "duration_ms", "fail_attempts"}}, "max_ticks", "instance_id"}`.
+/// "retryable", "duration_ms", "fail_attempts"}}, "max_ticks", "instance_id",
+/// "start_at", "timezone", "seed", "cancel_before", "signals"}`.
 #[wasm_bindgen]
 pub fn run_dry_with_options(sequence_json: &str, options_json: &str) -> String {
     let options: interp::RunOptions = if options_json.trim().is_empty() {

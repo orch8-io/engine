@@ -88,10 +88,13 @@ pub(crate) async fn handle_query_instance(ctx: StepContext) -> Result<Value, Ste
         .map_err(|e| map_storage_err(&e))?;
     let current_node = derive_current_node(&tree);
 
+    let context = crate::externalized::resolved_context_for_instance(storage, &target)
+        .await
+        .map_err(|error| map_storage_err(&error))?;
     Ok(json!({
         "found": true,
         "state": target.state,
-        "context": target.context,
+        "context": context.as_ref(),
         "started_at": target.created_at,
         "completed_at": completed_at,
         "current_node": current_node,

@@ -212,6 +212,9 @@ fn rewrite_markers(
     value: &mut Value,
     references: &HashMap<String, String>,
 ) -> Result<(), CapsuleServiceError> {
+    if orch8_storage::externalizing::literal_payload(value).is_some() {
+        return Ok(());
+    }
     if let Some(key) = crate::externalized::extract_ref_key(value) {
         let key = references
             .get(key)
