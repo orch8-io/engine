@@ -257,7 +257,17 @@ jobs:
               "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$version/$folder.$suffix" \
               --output "$tool_dir/$folder.$suffix"
           done
-          (cd "$tool_dir" && sha256sum -c "$folder.tar.gz.sha256sum" && tar -xzf "$folder.tar.gz")
+          (
+            cd "$tool_dir"
+            # The upstream checksum names a path in its release build directory.
+            read -r checksum _ < "$folder.tar.gz.sha256sum"
+            if [[ ! "$checksum" =~ ^[[:xdigit:]]{64}$ ]]; then
+              echo "Invalid wasm-bindgen release checksum" >&2
+              exit 1
+            fi
+            printf '%s  %s\n' "$checksum" "$folder.tar.gz" | sha256sum -c -
+            tar -xzf "$folder.tar.gz"
+          )
           "$tool_dir/$folder/wasm-bindgen" --target nodejs --out-dir "$RUNNER_TEMP/orch8-wasm" \
             target/wasm32-unknown-unknown/debug/orch8_wasm.wasm
           node --test scripts/check-preview-differential.test.cjs
