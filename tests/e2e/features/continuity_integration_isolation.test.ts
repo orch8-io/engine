@@ -3918,20 +3918,16 @@ describe("Continuity — Lifecycle Integration & Tenant Isolation", () => {
 
     it("planning a migration AFTER a prior compensation round has already completed is permanently Pinned, even with explicit approval — dispatched effect history is never eligible for automatic migration", async () => {
       const setup = await committedCompensableExecution("int-comp-then-migrate");
-      await completeCompensationRun(setup.execution.continuity_id, setup.tenantId);
-      // plan_live_migration requires both a paused/durably-waiting instance
-      // AND at least one persisted checkpoint (get_latest_checkpoint). The
-      // compensable-execution fixture drives the instance through its worker
-      // dispatch but never itself saves a checkpoint, so one must be saved
-      // here first — matching the same precondition pausedContinuityFixture
-      // establishes for every other migration test in this file.
-      // Compensation parks the source durably; finishing rollback never resumes it.
-      await client.waitForState(setup.instance.id, "paused");
-      assert.equal((await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId)).state, "compensating");
+      // Save the migration's durable checkpoint while the source still owns
+      // checkpoint writes. Compensation parks the source and fences writes.
+      await client.waitForState(setup.instance.id, "waiting");
       await client.saveCheckpoint(setup.instance.id, {
-        safe_boundary: "post-compensation",
+        safe_boundary: "pre-compensation",
         context_snapshot: {},
       });
+      await completeCompensationRun(setup.execution.continuity_id, setup.tenantId);
+      await client.waitForState(setup.instance.id, "paused");
+      assert.equal((await client.getContinuityExecution(setup.execution.continuity_id, setup.tenantId)).state, "compensating");
       const target = sameShapeTarget(setup.createdSequence);
       const createdTarget = await client.createSequence(target);
       const plan = await client.planContinuityMigration({

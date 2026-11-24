@@ -1,3 +1,4 @@
+-- Rollback of 151: Remove the read-only dispatch fence only if no archived instances remain.
 DO $$ BEGIN
     IF EXISTS (SELECT 1 FROM readonly_instance_history) THEN
         RAISE EXCEPTION 'cannot remove the dispatch fence for archived instance history';

@@ -38,11 +38,11 @@
     "embed": {
       "oneOf": [
         {
-          "type": "null"
-        },
-        {
           "$ref": "#/$defs/SequenceEmbed",
           "description": "Embedding opt-ins (which step outputs embedded viewers may see)."
+        },
+        {
+          "type": "null"
         }
       ]
     },
@@ -55,11 +55,11 @@
     "interceptors": {
       "oneOf": [
         {
-          "type": "null"
-        },
-        {
           "$ref": "#/$defs/InterceptorDef",
           "description": "Lifecycle interceptors (before/after step, on-signal, on-complete, on-failure)."
+        },
+        {
+          "type": "null"
         }
       ]
     },
@@ -92,11 +92,11 @@
     "placement": {
       "oneOf": [
         {
-          "type": "null"
-        },
-        {
           "$ref": "#/$defs/Placement",
           "description": "Sequence-level placement default (region, labels, residency,\naffinity, priority lane) applied to every worker-dispatched step;\nsee `docs/PLACEMENT.md`."
+        },
+        {
+          "type": "null"
         }
       ]
     },
@@ -108,11 +108,11 @@
     "sla": {
       "oneOf": [
         {
-          "type": "null"
-        },
-        {
           "$ref": "#/$defs/SlaPolicy",
           "description": "Alert-only SLA policy. When set, an instance exceeding `max_runtime`\n(or a step exceeding `max_step_runtime`) emits an `instance.sla_breached`\nwebhook and increments `orch8_sla_breached_total` — the instance is NOT\nfailed or paused."
+        },
+        {
+          "type": "null"
         }
       ]
     },
@@ -667,11 +667,11 @@
         "auto_decide": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/AutoDecideDef",
               "description": "Confidence-gated automation: ask the Jev decision model to answer the\ngate first. At or above `threshold` confidence the gate is accepted\nwithout a human (the decision, confidence and probabilities are kept\non the gate's output as evidence); below it — or when the model is\nunavailable — the step parks for a human exactly as without this\nsetting.\nBoxed: most gates don't set it, and `HumanInputDef` rides inside\nevery `StepDef` (and so inside large async state machines)."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -737,55 +737,55 @@
         "after_step": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/InterceptorAction",
               "description": "Called after each step completes (success or failure)."
+            },
+            {
+              "type": "null"
             }
           ]
         },
         "before_step": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/InterceptorAction",
               "description": "Called before each step executes. Can modify context or skip the step."
+            },
+            {
+              "type": "null"
             }
           ]
         },
         "on_complete": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/InterceptorAction",
               "description": "Called when the instance completes."
+            },
+            {
+              "type": "null"
             }
           ]
         },
         "on_failure": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/InterceptorAction",
               "description": "Called when the instance fails."
+            },
+            {
+              "type": "null"
             }
           ]
         },
         "on_signal": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/InterceptorAction",
               "description": "Called when a signal is received."
+            },
+            {
+              "type": "null"
             }
           ]
         }
@@ -845,6 +845,27 @@
         }
       }
     },
+    "NamedRetryRule": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RetryPolicy"
+        },
+        {
+          "type": "object",
+          "required": [
+            "error_equals"
+          ],
+          "properties": {
+            "error_equals": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ]
+    },
     "Namespace": {
       "type": "string"
     },
@@ -876,11 +897,11 @@
         "affinity": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/Affinity",
               "description": "`instance`: prefer the runtime that ran the previous worker step."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -906,11 +927,11 @@
         "priority_lane": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/PriorityLane",
               "description": "Priority lane. Sequence-level (sets the instance priority at\ncreation); rejected on steps because priority is per instance."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -970,6 +991,14 @@
         "first_to_succeed"
       ]
     },
+    "RetryJitter": {
+      "type": "string",
+      "enum": [
+        "legacy",
+        "none",
+        "full"
+      ]
+    },
     "RetryPolicy": {
       "type": "object",
       "required": [
@@ -984,6 +1013,10 @@
           "type": "integer",
           "format": "int64",
           "minimum": 0
+        },
+        "jitter": {
+          "$ref": "#/$defs/RetryJitter",
+          "description": "Distribution applied to the capped exponential delay."
         },
         "max_attempts": {
           "type": "integer",
@@ -1009,6 +1042,13 @@
             "string",
             "null"
           ]
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NamedRetryRule"
+          },
+          "description": "Ordered error-specific policies. The first matching rule owns the\nresult even when its budget is exhausted."
         }
       }
     },
@@ -1090,11 +1130,11 @@
         "compensation": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/BlockDefinition",
               "description": "Compensating action run (in reverse order across all completed\nsteps) if a later step's action fails. `None` means this step has\nno compensation — it is skipped during rollback."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -1245,22 +1285,22 @@
         "compensation": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/StepCompensation",
               "description": "Receipt-backed recovery action for this externally visible step."
+            },
+            {
+              "type": "null"
             }
           ]
         },
         "context_access": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/ContextAccess",
               "description": "Restrict which context sections this step can access. If omitted, all sections visible."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -1276,10 +1316,10 @@
         "delay": {
           "oneOf": [
             {
-              "type": "null"
+              "$ref": "#/$defs/DelaySpec"
             },
             {
-              "$ref": "#/$defs/DelaySpec"
+              "type": "null"
             }
           ]
         },
@@ -1299,11 +1339,11 @@
         "on_deadline_breach": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/EscalationDef",
               "description": "Handler to invoke when the SLA deadline is breached.\nIf omitted but deadline is set, the step simply fails on breach."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -1314,11 +1354,11 @@
         "placement": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/Placement",
               "description": "Step placement (region, labels, residency, affinity). Hard facts\nroute the step to the worker queue; see `docs/PLACEMENT.md`."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -1346,21 +1386,21 @@
         "retry": {
           "oneOf": [
             {
-              "type": "null"
+              "$ref": "#/$defs/RetryPolicy"
             },
             {
-              "$ref": "#/$defs/RetryPolicy"
+              "type": "null"
             }
           ]
         },
         "send_window": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/SendWindow",
               "description": "If set, only execute during the specified time window (per instance timezone)."
+            },
+            {
+              "type": "null"
             }
           ]
         },
@@ -1375,11 +1415,11 @@
         "wait_for_input": {
           "oneOf": [
             {
-              "type": "null"
-            },
-            {
               "$ref": "#/$defs/HumanInputDef",
               "description": "If set, this step pauses execution and waits for human input via a signal.\nThe signal name is `human_input:{block_id}`. Contains optional timeout."
+            },
+            {
+              "type": "null"
             }
           ]
         },

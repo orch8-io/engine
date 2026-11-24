@@ -74,9 +74,7 @@ describe("fail Handler", () => {
     const namespace = "default";
     const customMessage = `forced error ${uuid().slice(0, 6)}`;
 
-    // Sequence: try { fail } catch { log "caught" }
-    // try_catch recovers from the failure, so the instance should
-    // reach `completed` and the catch-step output should be present.
+    // Recover from the failure and log the error message supplied to catch.
     const seq = testSequence(
       "fail-in-try",
       [
@@ -84,7 +82,9 @@ describe("fail Handler", () => {
           type: "try_catch",
           id: "tc",
           try_block: [step("boom", "fail", { message: customMessage })],
-          catch_block: [step("catcher", "log", { message: "caught" })],
+          catch_block: [
+            step("catcher", "log", { message: "{{ data._error.message }}" }),
+          ],
         },
       ],
       { tenantId, namespace },
@@ -107,22 +107,17 @@ describe("fail Handler", () => {
     );
 
     const outputs = await client.getOutputs(id);
-    // The catch branch ran — proves the try branch raised an error and the
-    // scheduler routed it through the catch path, not skipped it. If fail
-    // had mistakenly succeeded, `try_catch` would have marked catch_block
-    // children as Skipped (see `handlers/try_catch.rs` phase 2) and no
-    // output for `catcher` would exist.
     const caught = outputs.find((o) => o.block_id === "catcher");
     assert.ok(caught, "expected catch branch to execute");
-    assert.deepEqual(caught.output, { message: "caught" });
+    assert.deepEqual(caught.output, { message: customMessage });
 
-    // The failing step itself should NOT have a completed output — it was
-    // terminated before any `save_block_output` call.
-    const boomOut = outputs.find((o) => o.block_id === "boom");
-    assert.equal(
-      boomOut,
-      undefined,
-      "fail step must not emit a successful block output",
-    );
+    const failedOutputs = outputs.filter((o) => o.block_id === "boom");
+    assert.equal(failedOutputs.length, 1);
+    assert.equal(failedOutputs[0]?.output_ref, "__error__");
+    assert.deepEqual(failedOutputs[0]?.output, {
+      __error__: true,
+      error: customMessage,
+      error_code: "States.TaskFailed",
+    });
   });
 });

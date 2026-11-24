@@ -868,6 +868,9 @@ impl Modify for EmbedSecurity {
         orch8_types::sequence::ContextAccess,
         orch8_types::sequence::HumanInputDef,
         orch8_types::sequence::RetryPolicy,
+        // RetryPolicy and NamedRetryRule refer to each other. Their
+        // no_recursion fields leave component registration to ApiDoc.
+        orch8_types::sequence::NamedRetryRule,
         orch8_types::sequence::ParallelDef,
         orch8_types::sequence::RaceDef,
         orch8_types::sequence::RaceSemantics,

@@ -1,3 +1,4 @@
+-- Rollback of 159: Remove checkpoint adoption fences only when no adopted tasks remain.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM legacy_worker_checkpoint_adoptions) THEN

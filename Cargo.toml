@@ -101,7 +101,7 @@ base64 = "0.23"
 
 # HTTP client
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "multipart", "form", "query"] }
-url = "2"
+url = "2.5.9"
 # Outbound email (`email` builtin, SMTP transport). rustls only — no native-tls.
 lettre = { version = "0.11.24", default-features = false, features = ["builder", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 
@@ -136,11 +136,10 @@ rskafka = { version = "0.6", default-features = false, features = ["transport-tl
 redis = { version = "1", default-features = false, features = ["tokio-comp", "streams", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 notify = { version = "8", features = ["serde"] }
-# 50.0.1 fixes the typed-function, cross-engine type-confusion and borrowed-resource advisories.
 # Preserve Wasmtime's runtime/compiler defaults except its unused disk cache.
 # wasm_plugin builds Config::new() with cache=None and keeps its own bounded
 # module cache. Wasmtime's optional disk-cache feature pulls vulnerable zstd 0.13.
-wasmtime = { version = "50.0.1", default-features = false, features = [
+wasmtime = { version = "50.0.3", default-features = false, features = [
     "anyhow", "async", "backtrace", "gc", "gc-copying", "gc-drc", "gc-null",
     "wat", "profiling", "parallel-compilation", "cranelift", "pooling-allocator",
     "demangle", "addr2line", "coredump", "debug-builtins", "runtime",

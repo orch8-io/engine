@@ -3991,6 +3991,9 @@
           },
           "404": {
             "description": "Instance not found"
+          },
+          "409": {
+            "description": "Checkpoint write lost ownership authority"
           }
         }
       }
@@ -4068,6 +4071,9 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "Checkpoint write lost ownership authority"
           }
         }
       }
@@ -5465,7 +5471,79 @@
         }
       }
     },
-    "/migrations/import": {
+    "/migrations/capabilities": {
+      "get": {
+        "tags": [
+          "migrations"
+        ],
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "description": "Supported migration state formats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MigrationCapabilities"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/migrations/cron/v1": {
+      "post": {
+        "tags": [
+          "migrations"
+        ],
+        "operationId": "import_cron_schedule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Recurring schedule ownership imported",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/migrations/history/v1": {
+      "post": {
+        "tags": [
+          "migrations"
+        ],
+        "operationId": "import_terminal_history",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Read-only terminal instances imported",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/migrations/import/v1": {
       "post": {
         "tags": [
           "migrations"
@@ -5662,6 +5740,89 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/plugins/modules/gc": {
+      "post": {
+        "tags": [
+          "plugins"
+        ],
+        "operationId": "collect_unused_modules",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WasmCollectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Unreferenced modules selected",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/plugins/modules/{digest}": {
+      "put": {
+        "tags": [
+          "plugins"
+        ],
+        "operationId": "upload_module",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "description": "Lowercase SHA-256 of the WASM binary",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/wasm": {
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "integer",
+                  "format": "int32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Verified source address",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "413": {
+            "description": "Module is too large"
           }
         }
       }
@@ -9014,6 +9175,35 @@
         }
       }
     },
+    "/workers/callbacks/complete": {
+      "post": {
+        "tags": [
+          "workers"
+        ],
+        "operationId": "complete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteCallbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Callback output accepted or already recorded"
+          },
+          "404": {
+            "description": "Callback token not found, expired, or outside the caller's tenant"
+          },
+          "409": {
+            "description": "Callback task claim has changed"
+          }
+        }
+      }
+    },
     "/workers/commands": {
       "post": {
         "tags": [
@@ -11683,6 +11873,14 @@
             "format": "int32",
             "description": "Percentage of new instances routed to the candidate (1–100).",
             "minimum": 0
+          },
+          "ready_executor_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Require these native executor nodes to have prepared the candidate."
           }
         }
       },
@@ -12106,6 +12304,12 @@
           {
             "type": "object",
             "properties": {
+              "callback_token": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "delegation": {
                 "oneOf": [
                   {
@@ -12480,6 +12684,20 @@
           },
           "source_sha256": {
             "type": "string"
+          }
+        }
+      },
+      "CompleteCallbackRequest": {
+        "type": "object",
+        "required": [
+          "token",
+          "output"
+        ],
+        "properties": {
+          "output": {},
+          "token": {
+            "type": "string",
+            "description": "Opaque token delivered with the original claimed task."
           }
         }
       },
@@ -13563,6 +13781,16 @@
           "severity": {
             "$ref": "#/components/schemas/DataflowSeverity"
           },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DataflowSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "summary": {
             "type": "string"
           }
@@ -13608,6 +13836,36 @@
           "warning",
           "error"
         ]
+      },
+      "DataflowSource": {
+        "type": "object",
+        "required": [
+          "sequence_pointer",
+          "start_byte",
+          "end_byte"
+        ],
+        "properties": {
+          "end_byte": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "producer_schema_pointer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "JSON Pointer to the producer's declared schema, when one exists."
+          },
+          "sequence_pointer": {
+            "type": "string",
+            "description": "JSON Pointer to the string containing the reference in the sequence."
+          },
+          "start_byte": {
+            "type": "integer",
+            "description": "UTF-8 byte range of the reference within that decoded string.",
+            "minimum": 0
+          }
+        }
       },
       "DebugTemplateRequest": {
         "type": "object",
@@ -15513,6 +15771,13 @@
             "format": "int64",
             "minimum": 0
           },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional workflow error name for ordered retry and catch rules."
+          },
           "logs": {
             "type": "array",
             "items": {
@@ -17251,6 +17516,36 @@
           }
         }
       },
+      "MigrationCapabilities": {
+        "type": "object",
+        "description": "Capabilities declared before a source changes ownership.",
+        "required": [
+          "manifest_version",
+          "domains"
+        ],
+        "properties": {
+          "domains": {
+            "type": "object",
+            "description": "Each domain lists the wire formats the target can import.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "manifest_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "MockDef": {
         "allOf": [
           {
@@ -17413,6 +17708,27 @@
         ],
         "description": "What a mocked handler does when called."
       },
+      "NamedRetryRule": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RetryPolicy"
+          },
+          {
+            "type": "object",
+            "required": [
+              "error_equals"
+            ],
+            "properties": {
+              "error_equals": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ]
+      },
       "Namespace": {
         "type": "string"
       },
@@ -17470,13 +17786,18 @@
       },
       "PatchContextDataRequest": {
         "type": "object",
-        "required": [
-          "patch"
-        ],
         "properties": {
           "patch": {
             "type": "object",
             "description": "Shallow merge into context.data; omitted keys and all other sections remain unchanged.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "pointer_patch": {
+            "type": "object",
+            "description": "Replace existing values by JSON Pointer relative to context.data.",
             "additionalProperties": {},
             "propertyNames": {
               "type": "string"
@@ -18311,6 +18632,14 @@
           "force": {
             "type": "boolean",
             "description": "Promote even when gates are inconclusive or failing."
+          },
+          "ready_executor_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Require a fresh candidate readiness acknowledgement from each node."
           }
         }
       },
@@ -18617,6 +18946,12 @@
           "keep"
         ],
         "properties": {
+          "expected_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ownership epoch observed by the caller. Defaults to zero for local executions.",
+            "minimum": 0
+          },
           "keep": {
             "type": "integer",
             "format": "int32",
@@ -19657,6 +19992,14 @@
         },
         "additionalProperties": false
       },
+      "RetryJitter": {
+        "type": "string",
+        "enum": [
+          "legacy",
+          "none",
+          "full"
+        ]
+      },
       "RetryPolicy": {
         "type": "object",
         "required": [
@@ -19671,6 +20014,10 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "jitter": {
+            "$ref": "#/components/schemas/RetryJitter",
+            "description": "Distribution applied to the capped exponential delay."
           },
           "max_attempts": {
             "type": "integer",
@@ -19696,6 +20043,13 @@
               "string",
               "null"
             ]
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamedRetryRule"
+            },
+            "description": "Ordered error-specific policies. The first matching rule owns the\nresult even when its budget is exhausted."
           }
         }
       },
@@ -20171,7 +20525,13 @@
           "checkpoint_data"
         ],
         "properties": {
-          "checkpoint_data": {}
+          "checkpoint_data": {},
+          "expected_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ownership epoch observed by the caller. Defaults to zero for local executions.",
+            "minimum": 0
+          }
         }
       },
       "SemanticDiff": {
@@ -22301,6 +22661,27 @@
           "cancelled"
         ]
       },
+      "WasmCollectionRequest": {
+        "type": "object",
+        "properties": {
+          "apply": {
+            "type": "boolean",
+            "description": "Delete the selected modules. The default only produces a plan."
+          },
+          "grace_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Age in seconds before an unreferenced module can be collected.",
+            "minimum": 0
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Maximum number of modules to collect in this batch.",
+            "minimum": 0
+          }
+        }
+      },
       "WebhookDeliveryAttempt": {
         "type": "object",
         "description": "One delivery attempt (bounded, redacted metadata only — never the\npayload or response body).",
@@ -22945,6 +23326,15 @@
             ],
             "format": "date-time"
           },
+          "heartbeat_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Workflow heartbeat interval, measured from the claim or latest successful renewal.",
+            "minimum": 0
+          },
           "id": {
             "type": "string",
             "format": "uuid"
@@ -22986,6 +23376,10 @@
               "null"
             ],
             "format": "int64"
+          },
+          "wait_for_callback": {
+            "type": "boolean",
+            "description": "Success is accepted only through the exact issued callback token."
           },
           "worker_id": {
             "type": [

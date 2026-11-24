@@ -20,10 +20,11 @@ describe("Approval Workflow", () => {
     await stopServer(server);
   });
 
-  it("list approvals empty initially", async () => {
-    const approvals = await client.listApprovals();
-    assert.ok(Array.isArray((approvals as any).items), "should have items array");
-    assert.equal((approvals as any).total, 0, "should be empty initially");
+  it("lists no approvals for a tenant with no instances", async () => {
+    const tenantId = `app-empty-${uuid()}`;
+    const approvals = await client.listApprovals({ tenant_id: tenantId });
+    assert.deepEqual(approvals.items, []);
+    assert.equal(approvals.total, 0);
   });
 
   it("approval for wait_for_input instance appears in list", async () => {

@@ -4,7 +4,7 @@ import type { ServerHandle } from "../harness.ts";
 import {
   caseAggregateReferencesAcrossRoots,
   caseCompositeOnlyRootsCompile,
-  caseConsumerBeforeProducerRootOrder,
+  caseConsumerBeforeProducerIsRejected,
   caseEmptyBlocksCompile,
   caseThreeRootProducersResolve,
   caseTwelveRootFanOutDeterministic,
@@ -25,8 +25,8 @@ describe("Plan semantics: multi-root sequences", () => {
     await caseThreeRootProducersResolve("plansem-roots-001");
   });
 
-  it("consumers may precede producers in root order", async () => {
-    await caseConsumerBeforeProducerRootOrder("plansem-roots-002");
+  it("rejects a mandatory read from a later root producer", async () => {
+    await caseConsumerBeforeProducerIsRejected("plansem-roots-002");
   });
 
   it("reference checks aggregate across roots, conditions, and bodies", async () => {

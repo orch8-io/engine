@@ -231,6 +231,29 @@ export function singleFinding(plan: CompiledPlan): DataflowFinding {
   return finding;
 }
 
+function assertConditionalProducerWarnings(
+  plan: CompiledPlan,
+  referencesChecked: number,
+  consumer: string,
+  references: string[],
+): void {
+  assert.equal(plan.report.references_checked, referencesChecked);
+  assert.deepEqual(
+    plan.report.findings.map(({ code, severity, consumer, reference }) => ({
+      code,
+      severity,
+      consumer,
+      reference,
+    })),
+    references.map((reference) => ({
+      code: "PRODUCER_MAY_NOT_RUN",
+      severity: "warning",
+      consumer,
+      reference,
+    })),
+  );
+}
+
 /** Deep copy with every object's key insertion order reversed. */
 export function reversedKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(reversedKeys);
@@ -296,7 +319,9 @@ export async function caseRaceBranchProducerResolves(caseName: string): Promise<
     ),
     step("use", "noop", { x: "{{ outputs.r_fast.result }}" }),
   ]);
-  assertClean(await compileDraftTwice(seq), 1);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 1, "use", [
+    "outputs.r_fast.result",
+  ]);
 }
 
 /** loop: body producer resolves and the loop condition reference is checked. */
@@ -308,7 +333,9 @@ export async function caseLoopBodyProducerAndConditionChecked(
     step("use", "noop", { x: "{{ outputs.lp_src.tick }}" }),
   ]);
   seq.input_schema = inputSchema({ keep_going: "boolean" });
-  assertClean(await compileDraftTwice(seq), 2);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 2, "use", [
+    "outputs.lp_src.tick",
+  ]);
 }
 
 /** loop: a condition over undeclared input fails closed on the loop block. */
@@ -342,7 +369,9 @@ export async function caseForEachCollectionDeclared(caseName: string): Promise<v
     step("use", "noop", { x: "{{ outputs.fe_src.ok }}" }),
   ]);
   seq.input_schema = inputSchema({ items: "array" });
-  assertClean(await compileDraftTwice(seq), 2);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 2, "use", [
+    "outputs.fe_src.ok",
+  ]);
 }
 
 /** for_each: a collection over undeclared input fails closed on the block. */
@@ -401,7 +430,10 @@ export async function caseRouterRouteAndDefaultProducersResolve(
       b: "{{ outputs.d_src.w }}",
     }),
   ]);
-  assertClean(await compileDraftTwice(seq), 2);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 2, "use", [
+    "outputs.d_src.w",
+    "outputs.r_src.v",
+  ]);
 }
 
 /** try_catch: producers in try, catch, and finally all resolve. */
@@ -421,7 +453,10 @@ export async function caseTryCatchFinallyProducersResolve(
       c: "{{ outputs.f_src.c }}",
     }),
   ]);
-  assertClean(await compileDraftTwice(seq), 3);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 3, "use", [
+    "outputs.c_src.b",
+    "outputs.t_src.a",
+  ]);
 }
 
 /** try_catch: a catch-region consumer with a wrong path fails closed. */
@@ -478,7 +513,10 @@ export async function caseAbSplitVariantProducersResolve(
       b: "{{ outputs.v_treatment.w }}",
     }),
   ]);
-  assertClean(await compileDraftTwice(seq), 2);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 2, "use", [
+    "outputs.v_control.v",
+    "outputs.v_treatment.w",
+  ]);
 }
 
 /** cancellation_scope: a producer inside the scope resolves downstream. */
@@ -544,7 +582,9 @@ export async function caseDeepParallelTryLoopProducer(caseName: string): Promise
     ]),
     step("use", "noop", { x: "{{ outputs.deep_src.v }}" }),
   ]);
-  assertClean(await compileDraftTwice(seq), 1);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 1, "use", [
+    "outputs.deep_src.v",
+  ]);
 }
 
 /** router route → for_each body: nested producer resolves across edge kinds. */
@@ -563,7 +603,9 @@ export async function caseRouterForEachNestedProducer(caseName: string): Promise
     step("use", "noop", { x: "{{ outputs.fe_deep.row_id }}" }),
   ]);
   seq.input_schema = inputSchema({ items: "array" });
-  assertClean(await compileDraftTwice(seq), 2);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 2, "use", [
+    "outputs.fe_deep.row_id",
+  ]);
 }
 
 /** parallel → cancellation_scope → saga action: producer resolves at depth 3. */
@@ -1128,16 +1170,24 @@ export async function caseThreeRootProducersResolve(caseName: string): Promise<v
       c: "{{ outputs.tc_src.c }}",
     }),
   ]);
-  assertClean(await compileDraftTwice(seq), 3);
+  assertConditionalProducerWarnings(await compileDraftTwice(seq), 3, "use", [
+    "outputs.tc_src.c",
+  ]);
 }
 
-/** Compilation is root-order independent: consumers may precede producers. */
-export async function caseConsumerBeforeProducerRootOrder(caseName: string): Promise<void> {
+/** A mandatory read from a later sequential root is rejected. */
+export async function caseConsumerBeforeProducerIsRejected(caseName: string): Promise<void> {
   const seq = testSequence(caseName, [
     step("early_use", "noop", { x: "{{ outputs.late_src.token }}" }),
     producerStep("late_src", { token: "string" }),
   ]);
-  assertClean(await compileDraftTwice(seq), 1);
+  const plan = await compileDraftTwice(seq);
+  assert.equal(plan.report.references_checked, 1);
+  const finding = singleFinding(plan);
+  assert.equal(finding.code, "PRODUCER_RUNS_LATER");
+  assert.equal(finding.severity, "error");
+  assert.equal(finding.consumer, "early_use");
+  assert.equal(finding.reference, "outputs.late_src.token");
 }
 
 /** Reference checks aggregate across roots, conditions, and bodies. */

@@ -336,9 +336,7 @@ describe("Typed Dataflow — deep coverage", () => {
       assert.deepEqual(r.report.findings, []);
     });
 
-    it("finds forward references to a producer declared later in the block list", async () => {
-      // The compiler indexes all producers before validating references, so
-      // declaration order must not matter.
+    it("reports an error for a mandatory read from a later producer", async () => {
       const seq = testSequence("df-out-forward-ref", [
         step("consumer", "noop", { v: "{{ outputs.source.id }}" }),
         step("source", "noop", {}, {
@@ -351,7 +349,11 @@ describe("Typed Dataflow — deep coverage", () => {
         }),
       ]);
       const r = await client.compileSequenceDataflow(seq);
-      assert.deepEqual(r.report.findings, []);
+      assert.equal(r.report.references_checked, 1);
+      assert.deepEqual(findingCodes(r), ["PRODUCER_RUNS_LATER"]);
+      const finding = findingByRef(r, "outputs.source.id");
+      assert.equal(finding.severity, "error");
+      assert.equal(finding.consumer, "consumer");
     });
   });
 
