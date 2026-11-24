@@ -38,14 +38,16 @@ describe("cancellation_scope Handler", () => {
     const tenantId = `cs-${uuid().slice(0, 8)}`;
     const namespace = "default";
 
-    // A short sleep (so the test stays fast) wrapped in a cancellation_scope.
-    // A cancel signal fires while the child is still running. Per the engine
-    // contract, the child should still produce its output.
     const seq = testSequence(
       "cs-shield",
       [
         cancellationScope("cs1", [
-          step("inner", "sleep", { duration_ms: 800 }),
+          step("inner", "human_review", {}, {
+            wait_for_input: {
+              prompt: "Release the protected step?",
+              choices: [{ label: "Continue", value: "continue" }],
+            },
+          }),
         ]) as Block,
       ],
       { tenantId, namespace },
@@ -58,9 +60,31 @@ describe("cancellation_scope Handler", () => {
       namespace,
     });
 
-    // Let the scope's inner sleep start.
-    await new Promise((r) => setTimeout(r, 200));
+    // The only wait in the workflow is inside the scope.
+    await client.waitForState(id, "waiting", { timeoutMs: 10_000 });
     await client.sendSignal(id, "cancel");
+
+    // Signals are processed in order. The marker acknowledges that the
+    // scheduler handled cancel before we release the protected child.
+    await client.sendSignal(id, "update_context", {
+      data: { cancel_processed: true },
+      config: {},
+      audit: [],
+      runtime: {},
+    });
+    const deadline = Date.now() + 10_000;
+    const cancelProcessed = async () => {
+      const { context } = await client.getInstance(id);
+      const data = context?.data as { cancel_processed?: boolean } | undefined;
+      return data?.cancel_processed === true;
+    };
+    while (!(await cancelProcessed())) {
+      assert.ok(Date.now() < deadline, "cancel was not processed while the scope was waiting");
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const tree = await client.getInstanceTree(id);
+    assert.equal(tree.find((node) => node.block_id === "inner")?.state, "waiting");
+    await client.sendCustomSignal(id, "human_input:inner", { value: "continue" });
 
     // Scope children must complete regardless of the cancel signal. Once the
     // scope finishes, the instance reaches a terminal state (completed if
