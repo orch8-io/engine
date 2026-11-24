@@ -1578,6 +1578,9 @@ async fn streamed_backup_integrity_archives_many_large_outputs() {
                 env!("CARGO_BIN_EXE_orch8"),
             ])
             .env("TOKIO_WORKER_THREADS", "2")
+            // glibc can reserve a large address range for each thread arena.
+            // Keep the limit focused on backup's memory use.
+            .env("MALLOC_ARENA_MAX", "1")
             .args(arguments)
             .output()
             .unwrap();
