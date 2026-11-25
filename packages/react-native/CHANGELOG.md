@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2
 
 - Default database location moves to a non-backed-up directory (iOS
   Application Support with `isExcludedFromBackup`, Android `noBackupFilesDir`);

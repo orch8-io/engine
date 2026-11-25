@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2
 
 - Device sessions: `Orch8RuntimeNode.setTokenProvider { … }` takes an async
   closure that returns a short-lived `dst_` token from your backend (awaited

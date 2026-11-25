@@ -18,7 +18,7 @@ resolver = "2"
 exclude = ["packages/node-native", "packages/python-native", "vendor/sqlx-sqlite"]
 
 [workspace.package]
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 rust-version = "1.97"
 license = "BUSL-1.1"

@@ -6,7 +6,7 @@ description: >-
   autoscaling, disruption budgets, and Prometheus integration.
 type: application
 version: 0.1.0
-appVersion: "0.7.1"
+appVersion: "0.7.2"
 kubeVersion: ">=1.25.0-0"
 home: https://orch8.io
 icon: https://orch8.io/favicon.svg
@@ -44,7 +44,7 @@ annotations:
       url: https://github.com/orch8-io/engine/blob/main/LICENSE
   artifacthub.io/images: |
     - name: engine
-      image: ghcr.io/orch8-io/engine:0.7.1
+      image: ghcr.io/orch8-io/engine:0.7.2
       whitelisted: false
   artifacthub.io/maintainers: |
     - name: Orch8

@@ -9,7 +9,7 @@
 #                            If your shared KMP module depends on io.orch8:orch8-kmp
 #                            and exports it, pass that module's framework baseName
 #                            (e.g. Shared).
-#   version                  engine/SDK version (default: 0.7.1). Must match the
+#   version                  engine/SDK version (default: 0.7.2). Must match the
 #                            io.orch8:orch8-kmp and Orch8Mobile versions you use.
 #
 # The file is downloaded from the engine GitHub release for that version and
@@ -25,7 +25,7 @@ set -euo pipefail
 
 dest="${1:?usage: install-bridge.sh <destination-dir> [shared-framework-module] [version]}"
 module="${2:-Orch8Kmp}"
-version="${3:-0.7.1}"
+version="${3:-0.7.2}"
 version="${version#v}"
 tag="v${version}"
 

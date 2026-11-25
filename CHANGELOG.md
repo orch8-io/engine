@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-11-24
+
+### Workflow and operator reliability
+
+- Persist cancellation while protected steps finish, including across server
+  restarts, and write lifecycle audit events in the state-transition transaction.
+- Bound workflow output retention and page workbench history and execution nodes.
+- Bind dashboard credentials to their engine origin, apply polling backoff,
+  and support keyboard navigation in the execution list.
+- Validate the paginated instance response against a live API, surface
+  independent CI checks, and upgrade the email classifier's worker protocol.
+
 ### Mobile binding contract validation
 
 - Synchronize committed Swift/Kotlin bindings and native headers with current
@@ -1958,7 +1970,9 @@ First public pre-release.
 
 ---
 
-[Unreleased]: https://github.com/orch8-io/engine/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/orch8-io/engine/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/orch8-io/engine/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/orch8-io/engine/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/orch8-io/engine/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/orch8-io/engine/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/orch8-io/engine/compare/v0.4.0...v0.5.0

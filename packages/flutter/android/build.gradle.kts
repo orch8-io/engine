@@ -34,5 +34,5 @@ repositories {
 dependencies {
     testImplementation(kotlin("test-junit"))
     testImplementation("junit:junit:4.13.2")
-    implementation("io.orch8:orch8-mobile:0.7.1")
+    implementation("io.orch8:orch8-mobile:0.7.2")
 }

@@ -243,7 +243,7 @@ class Orch8Module(reactContext: ReactApplicationContext) :
             telemetryUrl = config.str("telemetryUrl") ?: "",
             environment = config.str("environment") ?: "production",
             rootPublicKey = config.str("rootPublicKey") ?: "",
-            sdkVersion = config.str("sdkVersion") ?: "0.7.1",
+            sdkVersion = config.str("sdkVersion") ?: "0.7.2",
             memoryBudgetBytes = config.ulong("memoryBudgetBytes", 0uL),
             sequencesUrl = config.str("sequencesUrl") ?: "",
             syncUrl = config.str("syncUrl") ?: "",

@@ -461,7 +461,7 @@ class Orch8FlutterPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Event
             telemetryUrl = args.str("telemetryUrl") ?: "",
             environment = args.str("environment") ?: "production",
             rootPublicKey = args.str("rootPublicKey") ?: "",
-            sdkVersion = args["sdkVersion"] as? String ?: "0.7.1",
+            sdkVersion = args["sdkVersion"] as? String ?: "0.7.2",
             memoryBudgetBytes = ulong("memoryBudgetBytes", 0uL),
             sequencesUrl = args.str("sequencesUrl") ?: "",
             syncUrl = args.str("syncUrl") ?: "",

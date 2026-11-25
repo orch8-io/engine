@@ -1,6 +1,6 @@
 {
   "name": "@orch8/cli",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Verified zero-install shim for the Orch8 CLI",
   "license": "BUSL-1.1",
   "type": "module",

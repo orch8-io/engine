@@ -13,7 +13,7 @@ let package = Package(
         .package(name: "FlutterFramework", path: "../FlutterFramework"),
         .package(
             url: "https://github.com/orch8-io/orch8-mobile-swift",
-            exact: "0.7.1"
+            exact: "0.7.2"
         ),
     ],
     targets: [

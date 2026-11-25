@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "orch8"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "bytes",
@@ -3148,7 +3148,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-api"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3188,7 +3188,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-cli"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-e2e"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "axum",
  "chrono",
@@ -3255,7 +3255,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-engine"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-nats",
  "async-trait",
@@ -3311,7 +3311,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-grpc"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3336,7 +3336,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-mobile"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -3365,7 +3365,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-publisher"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -3389,7 +3389,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-push"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -3412,7 +3412,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-server"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -3454,7 +3454,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",
@@ -3512,7 +3512,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-wasm"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "base64 0.23.1",
  "chrono",

@@ -58,7 +58,7 @@ class Orch8Config {
     this.telemetryEnabled = true,
     this.environment = 'production',
     this.rootPublicKey = '',
-    this.sdkVersion = '0.7.1',
+    this.sdkVersion = '0.7.2',
     this.telemetryUrl = '',
     this.memoryBudgetBytes = 0,
     this.sequencesUrl = '',

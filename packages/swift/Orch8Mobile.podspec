@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name                = 'Orch8Mobile'
-  s.version             = '0.7.1'
+  s.version             = '0.7.2'
   s.summary             = 'Embedded durable workflow runtime for iOS'
   s.homepage            = 'https://github.com/orch8-io/orch8-mobile-swift'
   s.license             = { :type => 'Business Source License 1.1', :file => 'LICENSE' }

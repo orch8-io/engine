@@ -9,6 +9,8 @@ if ProcessInfo.processInfo.environment["ORCH8_MOBILE_LOCAL_XCFRAMEWORK"] == "1" 
         path: "Orch8Mobile.xcframework"
     )
 } else {
+    // The remote fallback stays on its verified release until the new archive
+    // and checksum are published. The distribution workflow stamps that pair.
     ffiTarget = .binaryTarget(
         name: "Orch8MobileFFI",
         url: "https://github.com/orch8-io/engine/releases/download/v0.7.1/Orch8Mobile-v0.7.1.xcframework.zip",

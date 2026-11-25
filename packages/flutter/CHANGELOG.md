@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2
 
 - Shut the engine down when the plugin detaches from the Flutter engine
   (Android and iOS); re-`initialize` shuts the previous engine down first.

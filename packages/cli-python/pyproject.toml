@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "orch8-cli"
-version = "0.7.1"
+version = "0.7.2"
 description = "Verified pipx shim for the native Orch8 CLI"
 requires-python = ">=3.10"
 license = { text = "BUSL-1.1" }

@@ -1612,7 +1612,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "orch8-engine"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1659,7 +1659,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-publisher"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1681,7 +1681,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-push"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-storage"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1724,7 +1724,7 @@ dependencies = [
 
 [[package]]
 name = "orch8-types"
-version = "0.7.1"
+version = "0.7.2"
 dependencies = [
  "aes-gcm",
  "base64 0.23.1",

@@ -215,7 +215,7 @@ class Orch8Module: RCTEventEmitter, MobileScopedCallbacks {
             telemetryUrl: config["telemetryUrl"] as? String ?? "",
             environment: config["environment"] as? String ?? "production",
             rootPublicKey: config["rootPublicKey"] as? String ?? "",
-            sdkVersion: config["sdkVersion"] as? String ?? "0.7.1",
+            sdkVersion: config["sdkVersion"] as? String ?? "0.7.2",
             memoryBudgetBytes: Self.u64(config, "memoryBudgetBytes", 0),
             sequencesUrl: config["sequencesUrl"] as? String ?? "",
             syncUrl: config["syncUrl"] as? String ?? "",

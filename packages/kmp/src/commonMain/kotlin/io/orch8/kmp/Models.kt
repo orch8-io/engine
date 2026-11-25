@@ -125,7 +125,7 @@ data class ContinuityExportResult(
 }
 
 /** Version of the Orch8 engine the KMP wrapper was released against. */
-const val ORCH8_KMP_VERSION: String = "0.7.1"
+const val ORCH8_KMP_VERSION: String = "0.7.2"
 
 internal val lenientJson: Json = Json {
     ignoreUnknownKeys = true

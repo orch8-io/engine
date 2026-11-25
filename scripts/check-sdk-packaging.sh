@@ -49,9 +49,18 @@ for gradle_file in \
     grep -Fq 'implementation("io.orch8:orch8-mobile:$orch8NativeVersion")' "$gradle_file"
 done
 
-grep -Fq "url: \"https://github.com/orch8-io/engine/releases/download/v${sdk_version}/Orch8Mobile-v${sdk_version}.xcframework.zip\"" packages/swift/Package.swift
-# The checksum is produced by the release pipeline; only assert it is a SHA-256.
-grep -Eq 'checksum: "[0-9a-f]{64}"' packages/swift/Package.swift
+swift_manifest=packages/swift/Package.swift
+swift_asset="$(sed -nE 's|.*url: "(https://github.com/orch8-io/engine/releases/download/v[^"]+)".*|\1|p' "$swift_manifest")"
+swift_checksum="$(sed -nE 's/.*checksum: "([a-f0-9]{64})".*/\1/p' "$swift_manifest")"
+swift_binary_version="$(sed -nE 's|.*/releases/download/v([0-9]+\.[0-9]+\.[0-9]+)/Orch8Mobile-v[^/]+\.xcframework\.zip$|\1|p' <<<"$swift_asset")"
+test -n "$swift_binary_version" && test -n "$swift_checksum"
+test "$swift_asset" = "https://github.com/orch8-io/engine/releases/download/v${swift_binary_version}/Orch8Mobile-v${swift_binary_version}.xcframework.zip"
+if [[ "$swift_binary_version" != "$sdk_version" ]]; then
+  # Temporary bootstrap pin. The release workflow stamps the published Swift
+  # package with the candidate archive's actual checksum after building it.
+  test "$swift_binary_version/$swift_checksum" = \
+    '0.7.1/0a83ce860c5b41bb7d5dcd9401e4466eb48fc0513658194293a4ca691b3f61d5'
+fi
 grep -Fq "\"Orch8Mobile\", \"${sdk_version}\"" packages/react-native/react-native-orch8.podspec ||
   grep -Fq 's.dependency     "Orch8Mobile", orch8_native_version' packages/react-native/react-native-orch8.podspec
 grep -Fq "'Orch8Mobile', '${sdk_version}'" packages/flutter/ios/orch8_flutter.podspec

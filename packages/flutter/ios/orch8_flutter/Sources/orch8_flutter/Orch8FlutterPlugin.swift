@@ -325,7 +325,7 @@ public class Orch8FlutterPlugin: NSObject, FlutterPlugin, MobileScopedCallbacks 
             telemetryUrl: args["telemetryUrl"] as? String ?? "",
             environment: args["environment"] as? String ?? "production",
             rootPublicKey: args["rootPublicKey"] as? String ?? "",
-            sdkVersion: args["sdkVersion"] as? String ?? "0.7.1",
+            sdkVersion: args["sdkVersion"] as? String ?? "0.7.2",
             memoryBudgetBytes: u64("memoryBudgetBytes", 0),
             sequencesUrl: args["sequencesUrl"] as? String ?? "",
             syncUrl: args["syncUrl"] as? String ?? "",
