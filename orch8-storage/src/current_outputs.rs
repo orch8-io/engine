@@ -227,7 +227,7 @@ mod tests {
     use uuid::Uuid;
 
     #[cfg(feature = "postgres")]
-    fn visits(plan: &Value) -> (f64, bool) {
+    fn visits(plan: &Value, index_condition: &str) -> (f64, bool) {
         let mut rows = if plan["Relation Name"]
             .as_str()
             .is_some_and(|name| name.starts_with("block_outputs"))
@@ -238,12 +238,14 @@ mod tests {
         } else {
             0.0
         };
-        let mut indexed = plan["Index Name"].is_string()
+        let mut indexed = plan["Index Name"]
+            .as_str()
+            .is_some_and(|name| name.contains("block_outputs"))
             && plan["Index Cond"]
                 .as_str()
-                .is_some_and(|condition| condition.contains("block_id"));
+                .is_some_and(|condition| condition.contains(index_condition));
         for child in plan["Plans"].as_array().into_iter().flatten() {
-            let (child_rows, child_indexed) = visits(child);
+            let (child_rows, child_indexed) = visits(child, index_condition);
             rows += child_rows;
             indexed |= child_indexed;
         }
@@ -315,7 +317,9 @@ mod tests {
         let instance = InstanceBuilder::for_sequence(&sequence).build();
         b.storage.create_instance(&instance).await.unwrap();
         let at = Utc::now();
-        for n in 1..=320u32 {
+        let history_len = 320_u32;
+        let cursor_offset = 260_u32;
+        for n in 1..=history_len {
             b.storage.save_block_output(&BlockOutput {
                 id: Uuid::from_u128(u128::from(n)), instance_id: instance.id,
                 block_id: BlockId::new("loop/task"),
@@ -325,7 +329,9 @@ mod tests {
             }).await.unwrap();
         }
         let cursor = crate::workbench::EventKey {
-            timestamp: at + Duration::seconds(260), rank: 2, id: Uuid::from_u128(260),
+            timestamp: at + Duration::seconds(i64::from(cursor_offset)),
+            rank: 2,
+            id: Uuid::from_u128(u128::from(cursor_offset)),
         };
         let page = crate::workbench::event_page(
             b.storage.as_ref(), instance.id, &instance.tenant_id, Some(cursor), 11,
@@ -349,8 +355,14 @@ mod tests {
                     .bind(instance.id.into_uuid()).bind(cursor.timestamp).bind(cursor.rank)
                     .bind(cursor.id).bind(11_i64).bind(instance.tenant_id.as_str())
                     .fetch_one(pool).await.unwrap();
-                let (rows, _) = visits(&plan[0]["Plan"]);
-                assert!(rows <= 20.0, "cursor page must seek output history: {plan}");
+                let (rows, seeks_by_time) = visits(&plan[0]["Plan"], "created_at >=");
+                // PostgreSQL may choose a bitmap scan and sort the indexed suffix.
+                // At most the suffix and the cursor row should reach the heap.
+                let suffix_with_cursor = f64::from(history_len - cursor_offset + 1);
+                assert!(
+                    seeks_by_time && rows <= suffix_with_cursor,
+                    "cursor page must seek past output history: {plan}"
+                );
             }
         }
     });
@@ -407,7 +419,7 @@ mod tests {
                 for query in [POSTGRES_QUERY, POSTGRES_DIAGNOSTIC_QUERY] {
                 let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}")))
                     .bind(instance.id.into_uuid()).fetch_one(pool).await.unwrap();
-                let (rows, indexed) = visits(&plan[0]["Plan"]);
+                let (rows, indexed) = visits(&plan[0]["Plan"], "block_id");
                 assert!(indexed, "projection must seek a block index");
                 assert!(rows <= 20.0, "two current blocks must not visit 512 history rows; visited {rows}");
                 }
