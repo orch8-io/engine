@@ -328,6 +328,13 @@ mount a config file for those settings.
 | `ORCH8_ACTIVEPIECES_URL`             | `http://127.0.0.1:50052/execute` | Activepieces sidecar action endpoint used by `ap://` handlers and polling triggers.                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `ORCH8_ALLOW_INTERNAL_URLS`          | `false`                          | Allows built-in outbound HTTP/tool handlers to target loopback or private addresses. Dangerous SSRF opt-out; use only for isolated local testing.                                                                                                                                                                                                                                                                                                                                                      |
 
+Model prices are USD per million text tokens. Usage estimates and tenant spend
+budgets use standard uncached rates, generally for short-context requests.
+Hosted models use a reference provider's published price. Rates can differ by
+region, endpoint, and service tier. Use `ORCH8_MODEL_PRICING` to set the rates
+for your deployment. The estimate covers token charges. Search and other
+per-request fees are billed separately by providers.
+
 ### Portable Continuity
 
 | Variable                                     | Default | Description                                                                                                                                                                                                                                                    |

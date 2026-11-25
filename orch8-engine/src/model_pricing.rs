@@ -1,11 +1,11 @@
 //! Static LLM model pricing table used to estimate USD cost from token usage.
 //!
-//! Prices are **estimates** (USD per 1M tokens, based on list prices checked
-//! on 2026-08-23 unless a newer date is noted below)
-//! and exist so `GET /usage` can attach a ballpark `cost_usd` to each
-//! aggregate — and so tenant spend budgets ([`crate::tenant_budgets`]) can be
-//! enforced — without calling out to any provider. Deployments can correct or
-//! extend the table at process start via the `ORCH8_MODEL_PRICING` env var
+//! Prices are **estimates** in USD per 1M text tokens. The 2026-11-25
+//! refresh uses uncached standard rates in effect at the time, with the
+//! short-context tier where applicable. Older estimates remain available
+//! for historical model IDs. The table powers `GET /usage` cost estimates and
+//! [tenant spend budgets](crate::tenant_budgets) without calling providers.
+//! Deployments can extend the table at process start via `ORCH8_MODEL_PRICING`
 //! (a JSON object merged over the defaults, see [`price_for_model`]).
 
 use std::collections::HashMap;
@@ -27,8 +27,14 @@ pub struct ModelPrice {
 /// names like `gpt-4o-2024-08-06` or `claude-sonnet-4-6` resolve to their
 /// family entry.
 const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
-    // OpenAI GPT-5.6 standard short-context rates checked 2026-11-24.
-    // https://developers.openai.com/api/docs/models/gpt-5.6-sol
+    // OpenAI: https://developers.openai.com/api/docs/pricing
+    ("gpt-6.2-astra", price(8.00, 40.00)),
+    ("gpt-6.2-sol", price(2.00, 10.00)),
+    ("gpt-6.1-sol", price(2.00, 10.00)),
+    ("gpt-6.1-terra", price(1.00, 5.00)),
+    ("gpt-6-astra", price(10.00, 50.00)),
+    ("gpt-6-sol", price(2.00, 10.00)),
+    ("gpt-6-luna", price(0.10, 0.50)),
     // Sol's promotional rate is listed through 2026-11-30.
     ("gpt-5.6", price(4.00, 20.00)),
     ("gpt-5.6-sol", price(4.00, 20.00)),
@@ -41,7 +47,11 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("gpt-5.4-nano", price(0.20, 1.25)),
     ("gpt-5.4-pro", price(30.00, 180.00)),
     ("gpt-5.3-codex", price(1.75, 14.00)),
+    ("gpt-5.2", price(1.75, 14.00)),
+    ("gpt-5.2-pro", price(21.00, 168.00)),
+    ("gpt-5.1", price(1.25, 10.00)),
     ("gpt-5", price(1.25, 10.00)),
+    ("gpt-5-pro", price(15.00, 120.00)),
     ("gpt-5-mini", price(0.25, 2.00)),
     ("gpt-5-nano", price(0.05, 0.40)),
     ("gpt-4o", price(2.50, 10.00)),
@@ -53,30 +63,43 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("gpt-3.5-turbo", price(0.50, 1.50)),
     ("o1", price(15.00, 60.00)),
     ("o3", price(2.00, 8.00)),
+    ("o3-pro", price(20.00, 80.00)),
     ("o3-mini", price(1.10, 4.40)),
     ("o4-mini", price(1.10, 4.40)),
-    // Anthropic
+    // Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+    ("claude-fable-5-2", price(8.00, 40.00)),
+    ("claude-fable-5-1", price(10.00, 50.00)),
     ("claude-fable-5", price(10.00, 50.00)),
+    ("claude-mythos-5-2", price(8.00, 40.00)),
+    ("claude-mythos-5-1", price(10.00, 50.00)),
     ("claude-mythos-5", price(10.00, 50.00)),
     ("claude-opus-5-5", price(4.00, 20.00)),
     ("claude-opus-5", price(5.00, 25.00)),
+    ("claude-sonnet-5-5", price(2.00, 10.00)),
     ("claude-sonnet-5", price(2.00, 10.00)),
     ("claude-opus-4-8", price(5.00, 25.00)),
     ("claude-opus-4-7", price(5.00, 25.00)),
     ("claude-opus-4-6", price(5.00, 25.00)),
     ("claude-opus-4-5", price(5.00, 25.00)),
+    ("claude-opus-4-1", price(15.00, 75.00)),
     ("claude-sonnet-4-6", price(3.00, 15.00)),
     ("claude-sonnet-4-5", price(3.00, 15.00)),
     ("claude-opus-4", price(15.00, 75.00)),
     ("claude-sonnet-4", price(3.00, 15.00)),
     ("claude-haiku", price(1.00, 5.00)),
+    ("claude-haiku-5-5", price(0.10, 0.50)),
     ("claude-haiku-4-5", price(1.00, 5.00)),
     ("claude-3-5-sonnet", price(3.00, 15.00)),
     ("claude-3-5-haiku", price(0.80, 4.00)),
     ("claude-3-7-sonnet", price(3.00, 15.00)),
     ("claude-3-opus", price(15.00, 75.00)),
-    // Google
-    // Promotional standard pricing through 2026-12-31.
+    // Google: https://aistudio.google.com/docs/pricing
+    // Carbon and Argon rise to $4 / $20 on 2026-12-01.
+    ("gemini-4-carbon", price(2.00, 10.00)),
+    ("gemini-4-argon", price(2.00, 10.00)),
+    ("gemini-4-neon", price(3.00, 15.00)),
+    ("gemini-4-hydrogen", price(1.50, 7.50)),
+    // Promotional Flash rates are listed through 2026-12-31.
     ("gemini-3.8-flash", price(0.75, 3.75)),
     ("gemini-3.7-flash", price(0.75, 3.75)),
     ("gemini-3.6-flash", price(0.75, 3.75)),
@@ -84,13 +107,14 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("gemini-3.5-flash-lite", price(0.30, 2.50)),
     ("gemini-3.1-pro", price(2.00, 12.00)),
     ("gemini-3.1-flash-lite", price(0.25, 1.50)),
+    ("gemini-3-flash-preview", price(0.50, 3.00)),
     ("gemini-2.5-pro", price(1.25, 10.00)),
     ("gemini-2.5-flash", price(0.30, 2.50)),
     ("gemini-2.5-flash-lite", price(0.10, 0.40)),
     ("gemini-2.0-flash", price(0.10, 0.40)),
     ("gemini-1.5-pro", price(1.25, 5.00)),
     ("gemini-1.5-flash", price(0.075, 0.30)),
-    // DeepSeek peak, uncached rates checked 2026-11-24.
+    // DeepSeek peak, uncached rates.
     // https://api-docs.deepseek.com/quick_start/pricing/
     ("deepseek-flash", price(0.30, 1.20)),
     ("deepseek-v4-flash", price(0.30, 1.20)),
@@ -99,9 +123,12 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     // https://api-docs.deepseek.com/news/news260424/
     ("deepseek-chat", price(0.14, 0.28)),
     ("deepseek-reasoner", price(0.14, 0.28)),
-    // Mistral
+    // Mistral: https://docs.mistral.ai/inference/pricing
+    ("mistral-large-4", price(0.70, 2.10)),
+    ("mistral-large-latest", price(0.70, 2.10)),
     ("mistral-large-3", price(0.50, 1.50)),
     ("mistral-medium-3.5", price(1.50, 7.50)),
+    ("mistral-medium-3-5", price(1.50, 7.50)),
     ("mistral-small-4", price(0.15, 0.60)),
     ("ministral-3-14b", price(0.20, 0.20)),
     ("ministral-3-8b", price(0.15, 0.15)),
@@ -109,34 +136,71 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("mistral-large", price(0.50, 1.50)),
     ("mistral-medium", price(1.50, 7.50)),
     ("mistral-small", price(0.15, 0.60)),
-    // Meta
+    ("zai-glm-5-3", price(1.40, 4.40)),
+    ("zai-glm-5-3-flash", price(0.15, 0.50)),
+    // Meta reference rates: Amazon Bedrock on demand in us-east-1.
+    ("llama-4-scout", price(0.17, 0.66)),
     ("llama-4-maverick", price(0.24, 0.97)),
-    ("llama-3.3-70b", price(0.59, 0.79)),
-    ("llama-3.1-70b", price(0.59, 0.79)),
-    ("llama-3.1-8b", price(0.05, 0.08)),
+    ("llama-3.3-70b", price(0.72, 0.72)),
+    ("llama-3.1-70b", price(0.72, 0.72)),
+    ("llama-3.1-8b", price(0.22, 0.22)),
+    // Historical estimate.
     ("llama-3.1-405b", price(3.50, 3.50)),
-    // xAI
+    // xAI: https://docs.x.ai/developers/pricing
+    ("grok-4.7", price(2.00, 6.00)),
     ("grok-4.6", price(2.00, 6.00)),
     ("grok-4.5", price(2.00, 6.00)),
+    ("grok-4.3", price(1.25, 2.50)),
+    ("grok-4.20-0309-reasoning", price(1.25, 2.50)),
+    ("grok-4.20-0309-non-reasoning", price(1.25, 2.50)),
+    ("grok-4.20-multi-agent-0309", price(1.25, 2.50)),
     ("grok-3", price(3.00, 15.00)),
     ("grok-3-mini", price(0.30, 0.50)),
     ("grok-2", price(2.00, 10.00)),
-    // Alibaba
+    // Alibaba Model Studio international USD list rates where available.
+    // https://www.alibabacloud.com/help/en/model-studio/model-pricing
+    ("qwen4-max", price(1.50, 4.50)),
+    ("qwen3.8-max", price(2.00, 6.00)),
+    ("qwen3.8-flash", price(0.15, 0.47)),
     ("qwen3.7-max", price(2.50, 7.50)),
     ("qwen3.7-plus", price(0.40, 1.60)),
-    ("qwen3.6-flash", price(0.165, 0.99)),
+    ("qwen3.7-flash", price(0.03, 0.13)),
+    ("qwen3.6-plus", price(0.50, 3.00)),
+    ("qwen3.6-flash", price(0.25, 1.50)),
+    ("qwen3.5-plus", price(0.40, 2.40)),
     ("qwen3.5-flash", price(0.10, 0.40)),
-    ("qwen-max", price(1.60, 6.40)),
+    // Mainland USD reference rate for this legacy model.
+    ("qwen-max", price(0.345, 1.377)),
     ("qwen-plus", price(0.40, 1.20)),
     ("qwen-turbo", price(0.05, 0.20)),
-    // Cohere
+    // Cohere reference rates: https://openrouter.ai/provider/cohere
     ("command-a", price(2.50, 10.00)),
+    ("command-a-plus", price(0.30, 1.50)),
     ("command-r", price(0.15, 0.60)),
     ("command-r-plus", price(2.50, 10.00)),
-    // Amazon
+    ("command-r7b", price(0.0375, 0.15)),
+    // Amazon Bedrock on demand in us-east-1, with a distinct global profile.
+    // https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/us-east-1/index.json
+    ("nova-2-lite", price(0.33, 2.75)),
+    ("amazon.nova-2-lite", price(0.33, 2.75)),
+    ("us.amazon.nova-2-lite", price(0.33, 2.75)),
+    ("global.amazon.nova-2-lite", price(0.30, 2.50)),
     ("nova-pro", price(0.80, 3.20)),
     ("nova-lite", price(0.06, 0.24)),
     ("nova-micro", price(0.035, 0.14)),
+    ("amazon.nova-pro", price(0.80, 3.20)),
+    ("amazon.nova-lite", price(0.06, 0.24)),
+    ("amazon.nova-micro", price(0.035, 0.14)),
+    // Groq: https://console.groq.com/docs/models
+    ("gpt-oss-120b", price(0.15, 0.60)),
+    ("gpt-oss-20b", price(0.075, 0.30)),
+    ("qwen3.8-27b", price(0.80, 4.00)),
+    // Perplexity Sonar token rates: https://openrouter.ai/perplexity/sonar-pro
+    ("sonar", price(1.00, 1.00)),
+    ("sonar-pro", price(3.00, 15.00)),
+    ("sonar-pro-search", price(3.00, 15.00)),
+    ("sonar-reasoning-pro", price(2.00, 8.00)),
+    ("sonar-deep-research", price(2.00, 8.00)),
 ];
 
 /// `const`-context constructor so [`DEFAULT_PRICES`] stays readable.
@@ -264,21 +328,36 @@ mod tests {
     #[test]
     fn prices_current_models_across_provider_families() {
         let expected = [
+            ("gpt-6.2-astra", (8.00, 40.00)),
+            ("gpt-6-astra", (10.00, 50.00)),
             ("gpt-5.6", (4.00, 20.00)),
             ("gpt-5.6-sol", (4.00, 20.00)),
             ("gpt-5.6-terra", (2.00, 12.00)),
             ("gpt-5.6-luna", (0.20, 1.20)),
+            ("claude-haiku-5-5", (0.10, 0.50)),
+            ("claude-fable-5-2", (8.00, 40.00)),
             ("claude-sonnet-5", (2.00, 10.00)),
+            ("gemini-4-carbon", (2.00, 10.00)),
             ("gemini-3.7-flash", (0.75, 3.75)),
             ("deepseek-flash", (0.30, 1.20)),
             ("deepseek-v4-flash", (0.30, 1.20)),
             ("deepseek-v4-pro", (1.32, 3.96)),
             ("mistral-small-4", (0.15, 0.60)),
+            ("mistral-large-latest", (0.70, 2.10)),
+            ("mistral-large-2512", (0.50, 1.50)),
             ("llama-4-maverick", (0.24, 0.97)),
+            ("llama-3.1-8b", (0.22, 0.22)),
             ("grok-4.6", (2.00, 6.00)),
+            ("grok-4.20-0309-reasoning", (1.25, 2.50)),
             ("qwen3.7-plus", (0.40, 1.60)),
+            ("qwen3.6-flash", (0.25, 1.50)),
             ("command-a", (2.50, 10.00)),
+            ("cohere/command-a-plus", (0.30, 1.50)),
             ("nova-micro", (0.035, 0.14)),
+            ("amazon.nova-2-lite-v1:0", (0.33, 2.75)),
+            ("global.amazon.nova-2-lite-v1:0", (0.30, 2.50)),
+            ("openai/gpt-oss-120b", (0.15, 0.60)),
+            ("perplexity/sonar-pro", (3.00, 15.00)),
         ];
         for (model, pair) in expected {
             let p = price_for_model(model).unwrap();

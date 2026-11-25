@@ -1133,6 +1133,26 @@ mod tests {
     }
 
     #[test]
+    fn built_in_default_models_have_usage_prices() {
+        for provider in [
+            "openai",
+            "anthropic",
+            "gemini",
+            "mistral",
+            "deepseek",
+            "qwen",
+            "groq",
+            "perplexity",
+        ] {
+            let model = builtin_default_model(provider).unwrap();
+            assert!(
+                crate::model_pricing::price_for_model(model).is_some(),
+                "missing pricing for {provider} default {model}"
+            );
+        }
+    }
+
+    #[test]
     fn resolve_model_prefers_param_and_requires_one_for_aggregators() {
         assert_eq!(
             resolve_model(&json!({"model": "mistral-small-4"}), "mistral").unwrap(),
