@@ -1,6 +1,7 @@
 //! Static LLM model pricing table used to estimate USD cost from token usage.
 //!
-//! Prices are **estimates** (USD per 1M tokens, list prices as of 2026-08-23)
+//! Prices are **estimates** (USD per 1M tokens, based on list prices checked
+//! on 2026-08-23 unless a newer date is noted below)
 //! and exist so `GET /usage` can attach a ballpark `cost_usd` to each
 //! aggregate — and so tenant spend budgets ([`crate::tenant_budgets`]) can be
 //! enforced — without calling out to any provider. Deployments can correct or
@@ -26,10 +27,13 @@ pub struct ModelPrice {
 /// names like `gpt-4o-2024-08-06` or `claude-sonnet-4-6` resolve to their
 /// family entry.
 const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
-    // OpenAI
-    ("gpt-5.6-sol", price(5.00, 30.00)),
-    ("gpt-5.6-terra", price(2.50, 15.00)),
-    ("gpt-5.6-luna", price(1.00, 6.00)),
+    // OpenAI GPT-5.6 standard short-context rates checked 2026-11-24.
+    // https://developers.openai.com/api/docs/models/gpt-5.6-sol
+    // Sol's promotional rate is listed through 2026-11-30.
+    ("gpt-5.6", price(4.00, 20.00)),
+    ("gpt-5.6-sol", price(4.00, 20.00)),
+    ("gpt-5.6-terra", price(2.00, 12.00)),
+    ("gpt-5.6-luna", price(0.20, 1.20)),
     ("gpt-5.5", price(5.00, 30.00)),
     ("gpt-5.5-pro", price(30.00, 180.00)),
     ("gpt-5.4", price(2.50, 15.00)),
@@ -86,10 +90,13 @@ const DEFAULT_PRICES: &[(&str, ModelPrice)] = &[
     ("gemini-2.0-flash", price(0.10, 0.40)),
     ("gemini-1.5-pro", price(1.25, 5.00)),
     ("gemini-1.5-flash", price(0.075, 0.30)),
-    // DeepSeek
-    ("deepseek-v4-flash", price(0.14, 0.28)),
-    ("deepseek-v4-pro", price(0.435, 0.87)),
-    // Deprecated aliases currently map to V4 Flash modes.
+    // DeepSeek peak, uncached rates checked 2026-11-24.
+    // https://api-docs.deepseek.com/quick_start/pricing/
+    ("deepseek-flash", price(0.30, 1.20)),
+    ("deepseek-v4-flash", price(0.30, 1.20)),
+    ("deepseek-v4-pro", price(1.32, 3.96)),
+    // Keep the existing estimates for historical usage under retired IDs.
+    // https://api-docs.deepseek.com/news/news260424/
     ("deepseek-chat", price(0.14, 0.28)),
     ("deepseek-reasoner", price(0.14, 0.28)),
     // Mistral
@@ -257,10 +264,15 @@ mod tests {
     #[test]
     fn prices_current_models_across_provider_families() {
         let expected = [
-            ("gpt-5.6-terra", (2.50, 15.00)),
+            ("gpt-5.6", (4.00, 20.00)),
+            ("gpt-5.6-sol", (4.00, 20.00)),
+            ("gpt-5.6-terra", (2.00, 12.00)),
+            ("gpt-5.6-luna", (0.20, 1.20)),
             ("claude-sonnet-5", (2.00, 10.00)),
             ("gemini-3.7-flash", (0.75, 3.75)),
-            ("deepseek-v4-pro", (0.435, 0.87)),
+            ("deepseek-flash", (0.30, 1.20)),
+            ("deepseek-v4-flash", (0.30, 1.20)),
+            ("deepseek-v4-pro", (1.32, 3.96)),
             ("mistral-small-4", (0.15, 0.60)),
             ("llama-4-maverick", (0.24, 0.97)),
             ("grok-4.6", (2.00, 6.00)),
