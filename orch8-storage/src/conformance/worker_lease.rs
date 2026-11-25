@@ -13,6 +13,7 @@ use super::{
 };
 use crate::StorageBackend;
 
+const ADMISSION: &str = "worker_admission_ready";
 const CLAIM: &str = "worker_exclusive_claim";
 const RENEW: &str = "worker_lease_renewal";
 const CHECKPOINT: &str = "worker_checkpoint_monotonic";
@@ -24,6 +25,7 @@ const FENCE: &str = "worker_previous_claim_fenced";
 pub async fn run_worker_lease_conformance(
     storage: &dyn StorageBackend,
 ) -> Result<ConformanceReport, ConformanceError> {
+    backend(ADMISSION, storage.verify_worker_admission().await)?;
     let marker = Uuid::now_v7();
     let scope = format!("orch8-lease-conformance-{marker}");
     let tenant = TenantId::new(scope.clone()).map_err(|message| ConformanceError::Violation {
@@ -51,7 +53,7 @@ pub async fn run_worker_lease_conformance(
         scope,
         instance_id: instance.id,
         sequence_id: sequence.id,
-        checks: vec![CLAIM, RENEW, CHECKPOINT, EXPIRE, FENCE],
+        checks: vec![ADMISSION, CLAIM, RENEW, CHECKPOINT, EXPIRE, FENCE],
     })
 }
 

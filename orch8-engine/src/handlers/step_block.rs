@@ -945,6 +945,21 @@ pub(crate) async fn execute_step_node_with_clock(
     let result = crate::handlers::step::execute_step(storage, handlers, exec_params)
         .await
         .map_err(|e| e.normalize_timeout_as_retryable(instance.id));
+    if matches!(result, Err(EngineError::StepFailed { .. }))
+        && storage.has_deferred_cancel(instance.id).await?
+        && storage
+            .get_execution_tree(instance.id)
+            .await?
+            .iter()
+            .any(|current| {
+                current.id == node.id
+                    && current.state == orch8_types::execution::NodeState::Cancelled
+            })
+    {
+        // A scoped cancel leaves the instance claim active while protected
+        // work drains. An interrupted handler must preserve its cancelled node.
+        return Ok(true);
+    }
     match result {
         Err(e @ EngineError::ClaimLost { .. }) => Err(e),
         Err(e)

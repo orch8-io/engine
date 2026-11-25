@@ -201,6 +201,18 @@ pub(super) async fn get_latest_completed(
     rows.into_iter().map(BlockOutputRow::into_output).collect()
 }
 
+pub(super) async fn get_comparison(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows =
+        sqlx::query_as::<_, BlockOutputRow>(crate::current_outputs::POSTGRES_COMPARISON_QUERY)
+            .bind(instance_id.into_uuid())
+            .fetch_all(&store.pool)
+            .await?;
+    rows.into_iter().map(BlockOutputRow::into_output).collect()
+}
+
 pub(super) async fn get_latest_diagnostic(
     store: &PostgresStorage,
     instance_id: InstanceId,
@@ -801,6 +813,33 @@ pub(super) async fn delete_by_id(store: &PostgresStorage, id: Uuid) -> Result<()
         .execute(&store.pool)
         .await?;
     Ok(())
+}
+
+/// Compact one instance without selecting or decoding any output payload.
+pub(super) async fn compact_on(
+    conn: &mut sqlx::PgConnection,
+    instance_id: InstanceId,
+    block_ids: &[&BlockId],
+    retain: u32,
+) -> Result<u64, StorageError> {
+    let blocks: Vec<&str> = block_ids.iter().map(|block| block.as_str()).collect();
+    let deleted = sqlx::query(
+        "DELETE FROM block_outputs WHERE instance_id=$1 AND id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY block_id ORDER BY created_at DESC, id DESC
+                ) AS retention_rank
+                FROM block_outputs WHERE instance_id=$1 AND block_id = ANY($2)
+            ) ranked
+            WHERE retention_rank > $3
+        )",
+    )
+    .bind(instance_id.into_uuid())
+    .bind(&blocks)
+    .bind(i64::from(retain))
+    .execute(conn)
+    .await?;
+    Ok(deleted.rows_affected())
 }
 
 pub(super) async fn delete_owned_by_id_on(

@@ -11,12 +11,16 @@ use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use orch8_storage::workbench::{self as storage_workbench, EventData, EventKey};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+use orch8_types::error::StorageError;
 use orch8_types::execution::ExecutionNode;
-use orch8_types::ids::InstanceId;
+use orch8_types::ids::{ExecutionNodeId, InstanceId};
 use orch8_types::redaction::RedactionPolicy;
 
 use crate::AppState;
@@ -46,8 +50,8 @@ pub fn routes() -> Router<AppState> {
 }
 
 /// One event on the unified timeline. Ordering contract: `(timestamp,
-/// kind, id)` — equal timestamps order by kind (state transitions before
-/// outputs before logs), then by id, so repeated queries render
+/// kind, id)` — equal timestamps order by kind (state transitions, audit,
+/// outputs, then logs), then by id, so repeated queries render
 /// identically.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct WorkbenchEvent {
@@ -84,11 +88,16 @@ pub struct ExecutionWorkbenchView {
     pub context_data: serde_json::Value,
     /// Definition tree nodes with their execution state.
     pub nodes: Vec<ExecutionNode>,
+    /// Pass this to `nodes_after` to continue the node list.
+    pub next_node: Option<ExecutionNodeId>,
     /// Unified, stably-ordered event timeline (bounded by `limit`).
     pub events: Vec<WorkbenchEvent>,
+    /// Output metadata for the events on this page. Payloads are fetched separately.
     pub outputs: Vec<BlockOutputSummary>,
     /// True when `events` was truncated at the requested limit.
     pub events_truncated: bool,
+    /// Pass this to `cursor` to continue after the last event.
+    pub next_cursor: Option<String>,
     /// Shareable deep-link path (ids only, never payloads).
     pub share_path: String,
 }
@@ -98,19 +107,70 @@ pub(crate) struct WorkbenchQuery {
     /// Max timeline events returned (default 500, max 2000).
     #[serde(default)]
     limit: Option<u32>,
+    cursor: Option<String>,
+    nodes_after: Option<ExecutionNodeId>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct WorkbenchCursor {
+    instance: Uuid,
+    key: EventKey,
+}
+
+fn decode_cursor(encoded: &str, instance: Uuid) -> Result<EventKey, ApiError> {
+    let invalid = || ApiError::InvalidArgument("invalid workbench cursor".into());
+    if encoded.len() > 512 {
+        return Err(invalid());
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
+    let cursor: WorkbenchCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.instance != instance || !(0..=3).contains(&cursor.key.rank) {
+        return Err(invalid());
+    }
+    Ok(cursor.key)
+}
+
+async fn workbench_nodes(
+    storage: &dyn orch8_storage::StorageBackend,
+    instance: InstanceId,
+    after: Option<ExecutionNodeId>,
+) -> Result<(Vec<ExecutionNode>, Option<ExecutionNodeId>), StorageError> {
+    const PAGE_SIZE: u32 = 500;
+    let mut nodes = match storage
+        .get_execution_tree_page(instance, after, PAGE_SIZE + 1)
+        .await
+    {
+        Ok(nodes) => nodes,
+        Err(StorageError::Unsupported(_)) => {
+            let mut nodes = storage.get_execution_tree(instance).await?;
+            nodes.retain(|node| after.is_none_or(|id| node.id > id));
+            nodes.sort_unstable_by_key(|node| node.id);
+            nodes
+        }
+        Err(error) => return Err(error),
+    };
+    let next_node = if nodes.len() > PAGE_SIZE as usize {
+        nodes.truncate(PAGE_SIZE as usize);
+        nodes.last().map(|node| node.id)
+    } else {
+        None
+    };
+    Ok((nodes, next_node))
 }
 
 #[utoipa::path(get, path = "/instances/{id}/workbench", tag = "instances",
     params(
         ("id" = Uuid, Path, description = "Instance id"),
-        ("limit" = Option<u32>, Query, description = "Max timeline events (default 500)"),
+        ("limit" = Option<u32>, Query, description = "Max timeline events (default 500, max 2000)"),
+        ("cursor" = Option<String>, Query, description = "Continue after the previous page"),
+        ("nodes_after" = Option<ExecutionNodeId>, Query, description = "Continue the node list after the previous node"),
     ),
     responses(
         (status = 200, description = "Joined, redacted execution view", body = ExecutionWorkbenchView),
         (status = 404, description = "Instance not found"),
     )
 )]
-#[allow(clippy::too_many_lines)] // joins five sources into one view; splitting obscures the ordering contract
+#[allow(clippy::too_many_lines)] // constructs the joined view in timeline order
 pub(crate) async fn get_workbench(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -130,10 +190,13 @@ pub(crate) async fn get_workbench(
         &format!("instance {id}"),
     )?;
 
-    // These sources are independent. Fetch them concurrently and fail the
-    // joined view closed if any source is unavailable: an empty timeline or
-    // output list is valid evidence, while a storage failure is not.
-    let (sequence, nodes, outputs_raw, logs, audit) = tokio::try_join!(
+    let limit = q.limit.unwrap_or(500).clamp(1, 2000);
+    let after = q
+        .cursor
+        .as_deref()
+        .map(|cursor| decode_cursor(cursor, id))
+        .transpose()?;
+    let (sequence, (nodes, next_node), mut rows) = tokio::try_join!(
         async {
             state
                 .storage
@@ -142,99 +205,98 @@ pub(crate) async fn get_workbench(
                 .map_err(|e| ApiError::from_storage(e, "sequence"))
         },
         async {
-            state
-                .storage
-                .get_execution_tree(instance_id)
+            workbench_nodes(state.storage.as_ref(), instance_id, q.nodes_after)
                 .await
                 .map_err(|e| ApiError::from_storage(e, "execution_tree"))
         },
         async {
-            state
-                .storage
-                .get_all_outputs(instance_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "block_outputs"))
-        },
-        async {
-            state
-                .storage
-                .list_step_logs(instance_id)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "step_logs"))
-        },
-        async {
-            state
-                .storage
-                .list_audit_log(instance_id, 500)
-                .await
-                .map_err(|e| ApiError::from_storage(e, "audit_log"))
+            storage_workbench::event_page(
+                state.storage.as_ref(),
+                instance_id,
+                &instance.tenant_id,
+                after,
+                limit + 1,
+            )
+            .await
+            .map_err(|e| ApiError::from_storage(e, "workbench_events"))
         },
     )?;
-    // --- unified timeline with a stable ordering contract ---
-    let mut events: Vec<WorkbenchEvent> = Vec::new();
-    for a in &audit {
-        let kind = if a.event_type == "state_transition" {
-            "state_transition"
-        } else {
-            "audit"
-        };
-        events.push(WorkbenchEvent {
-            timestamp: a.created_at,
-            kind: kind.to_string(),
-            block_id: None,
-            summary: match (&a.from_state, &a.to_state) {
-                (Some(from), Some(to)) => format!("{}: {from} → {to}", a.event_type),
-                _ => a.event_type.clone(),
-            },
-            id: a.id.to_string(),
-        });
-    }
+    let events_truncated = rows.len() > limit as usize;
+    let next_cursor = if events_truncated {
+        rows.truncate(limit as usize);
+        rows.last().map(|row| {
+            let bytes = serde_json::to_vec(&WorkbenchCursor {
+                instance: id,
+                key: row.key,
+            })
+            .expect("workbench cursor consists of serializable values");
+            URL_SAFE_NO_PAD.encode(bytes)
+        })
+    } else {
+        None
+    };
     let mut outputs = Vec::new();
-    for o in &outputs_raw {
-        let block = o.block_id.as_str();
-        if block.starts_with('_') {
-            continue;
-        }
-        let status = match o.output_ref.as_deref() {
-            Some("__error__") => "error",
-            Some("__retry__") => "retry",
-            _ => "ok",
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let timestamp = row.key.timestamp;
+        let mut event = WorkbenchEvent {
+            timestamp,
+            kind: String::new(),
+            block_id: None,
+            summary: String::new(),
+            id: row.key.id.to_string(),
         };
-        outputs.push(BlockOutputSummary {
-            block_id: block.to_string(),
-            attempt: o.attempt,
-            output_size: o.output_size,
-            status: status.to_string(),
-            recorded_at: o.created_at,
-        });
-        events.push(WorkbenchEvent {
-            timestamp: o.created_at,
-            kind: "block_output".to_string(),
-            block_id: Some(block.to_string()),
-            summary: format!("block '{block}' attempt {} recorded ({status})", o.attempt),
-            id: o.id.to_string(),
-        });
+        match row.data {
+            EventData::Audit {
+                event_type,
+                from,
+                to,
+            } => {
+                event.kind = if event_type == "state_transition" {
+                    "state_transition".into()
+                } else {
+                    "audit".into()
+                };
+                event.summary = match (from, to) {
+                    (Some(from), Some(to)) => format!("{event_type}: {from} → {to}"),
+                    _ => event_type,
+                };
+            }
+            EventData::Output {
+                block_id,
+                output_ref,
+                attempt,
+                size,
+            } => {
+                let status = match output_ref.as_deref() {
+                    Some("__error__") => "error",
+                    Some("__retry__") => "retry",
+                    _ => "ok",
+                };
+                outputs.push(BlockOutputSummary {
+                    block_id: block_id.clone(),
+                    attempt,
+                    output_size: size,
+                    status: status.into(),
+                    recorded_at: timestamp,
+                });
+                event.kind = "block_output".into();
+                event.summary = format!("block '{block_id}' attempt {attempt} recorded ({status})");
+                event.block_id = Some(block_id);
+            }
+            EventData::Log {
+                block_id,
+                level,
+                message,
+            } => {
+                event.kind = "log".into();
+                event.block_id = Some(block_id);
+                event.summary = format!("[{level}] {}", truncate(&message, 200));
+                event.id.insert_str(0, "log-");
+            }
+        }
+        events.push(event);
     }
-    for (i, log) in logs.iter().enumerate() {
-        events.push(WorkbenchEvent {
-            timestamp: log.ts,
-            kind: "log".to_string(),
-            block_id: Some(log.block_id.clone()),
-            summary: format!("[{}] {}", log.level, truncate(&log.message, 200)),
-            id: format!("log-{i}"),
-        });
-    }
-    // Stable ordering: timestamp, then kind, then id — equal timestamps
-    // never flap between requests.
-    events.sort_by(|a, b| {
-        a.timestamp
-            .cmp(&b.timestamp)
-            .then_with(|| kind_rank(&a.kind).cmp(&kind_rank(&b.kind)))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let limit = q.limit.unwrap_or(500).clamp(1, 2000) as usize;
-    let events_truncated = events.len() > limit;
-    events.truncate(limit);
 
     let redaction = RedactionPolicy::default();
     Ok(Json(ExecutionWorkbenchView {
@@ -248,20 +310,13 @@ pub(crate) async fn get_workbench(
         state: instance.state.to_string(),
         context_data: redaction.redacted(&instance.context.data),
         nodes,
+        next_node,
         events,
         outputs,
         events_truncated,
+        next_cursor,
         share_path: format!("/instances/{id}/workbench"),
     }))
-}
-
-const fn kind_rank(kind: &str) -> u8 {
-    match kind.as_bytes() {
-        b"state_transition" => 0,
-        b"audit" => 1,
-        b"block_output" => 2,
-        _ => 3, // logs and anything else
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -315,26 +370,16 @@ async fn load_comparison_side(
     crate::auth::enforce_tenant_access(tenant_ctx, &instance.tenant_id, &format!("instance {id}"))?;
     let outputs = state
         .storage
-        .get_all_outputs(instance.id)
+        .get_comparison_outputs(instance.id)
         .await
         .map_err(|e| ApiError::from_storage(e, "block_outputs"))?;
 
-    let mut order = Vec::new();
+    let mut order = Vec::with_capacity(outputs.len());
     let mut last = std::collections::BTreeMap::new();
     for output in outputs {
-        let block = output.block_id.as_str();
-        if block.starts_with('_') || output.output_ref.as_deref() == Some("__retry__") {
-            continue;
-        }
-        match last.entry(block.to_string()) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                order.push(entry.key().clone());
-                entry.insert(output.output);
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                entry.insert(output.output);
-            }
-        }
+        let block = output.block_id.to_string();
+        order.push(block.clone());
+        last.insert(block, output.output);
     }
 
     Ok((instance.state.to_string(), order, last))

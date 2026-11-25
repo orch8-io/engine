@@ -670,27 +670,19 @@ pub(super) async fn conditional_update_state_with_outbox(
     next_fire_at: Option<DateTime<Utc>>,
     entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
 ) -> Result<bool, StorageError> {
-    let mut tx = store.pool.begin().await?;
-    let result = sqlx::query(
-        "UPDATE task_instances \
-         SET state = $2, next_fire_at = $3, updated_at = NOW() \
-         WHERE id = $1 AND state = $4",
+    write_lifecycle(
+        store,
+        crate::LifecycleTransition {
+            instance_id: id,
+            claim_token: None,
+            from: expected_state,
+            to: new_state,
+            next_fire_at,
+            webhooks: entries,
+        },
+        false,
     )
-    .bind(id.into_uuid())
-    .bind(new_state.to_string())
-    .bind(next_fire_at)
-    .bind(expected_state.to_string())
-    .execute(&mut *tx)
-    .await?;
-    if result.rows_affected() == 0 {
-        tx.rollback().await?;
-        return Ok(false);
-    }
-    for entry in entries {
-        super::webhook_outbox::park_tx(&mut tx, entry).await?;
-    }
-    tx.commit().await?;
-    Ok(true)
+    .await
 }
 
 pub(super) async fn conditional_update_claimed_state_with_outbox(
@@ -702,27 +694,85 @@ pub(super) async fn conditional_update_claimed_state_with_outbox(
     next_fire_at: Option<DateTime<Utc>>,
     entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
 ) -> Result<bool, StorageError> {
-    let mut tx = store.pool.begin().await?;
-    let result = sqlx::query(
-        "UPDATE task_instances SET state = $2, next_fire_at = $3, updated_at = NOW() \
-         WHERE id = $1 AND state = $4 AND claimed_at = $5",
+    write_lifecycle(
+        store,
+        crate::LifecycleTransition {
+            instance_id: id,
+            claim_token: Some(claimed_at),
+            from: expected_state,
+            to: new_state,
+            next_fire_at,
+            webhooks: entries,
+        },
+        false,
     )
-    .bind(id.into_uuid())
-    .bind(new_state.to_string())
-    .bind(next_fire_at)
-    .bind(expected_state.to_string())
-    .bind(claimed_at)
-    .execute(&mut *tx)
+    .await
+}
+
+pub(super) async fn commit_lifecycle_transition(
+    store: &PostgresStorage,
+    transition: crate::LifecycleTransition<'_>,
+) -> Result<bool, StorageError> {
+    write_lifecycle(store, transition, true).await
+}
+
+async fn write_lifecycle(
+    store: &PostgresStorage,
+    transition: crate::LifecycleTransition<'_>,
+    audit: bool,
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let tenant: Option<String> = sqlx::query_scalar(
+        "UPDATE task_instances SET state=$2, next_fire_at=$3, updated_at=NOW()
+         WHERE id=$1 AND state=$4 AND ($5::timestamptz IS NULL OR claimed_at=$5)
+         RETURNING tenant_id",
+    )
+    .bind(transition.instance_id.into_uuid())
+    .bind(transition.to.to_string())
+    .bind(transition.next_fire_at)
+    .bind(transition.from.to_string())
+    .bind(transition.claim_token)
+    .fetch_optional(&mut *tx)
     .await?;
-    if result.rows_affected() == 0 {
+    let Some(tenant) = tenant else {
         tx.rollback().await?;
         return Ok(false);
+    };
+    if audit {
+        let entry = orch8_types::audit::AuditLogEntry {
+            id: uuid::Uuid::now_v7(),
+            instance_id: transition.instance_id,
+            tenant_id: TenantId::unchecked(tenant),
+            event_type: "state_transition".into(),
+            from_state: Some(transition.from.to_string()),
+            to_state: Some(transition.to.to_string()),
+            block_id: None,
+            details: serde_json::Value::Null,
+            created_at: Utc::now(),
+        };
+        super::audit::append_on(&mut tx, &entry).await?;
     }
-    for entry in entries {
+    if transition.to.is_terminal() {
+        clear_deferred_cancel(&mut tx, transition.instance_id).await?;
+    }
+    for entry in transition.webhooks {
         super::webhook_outbox::park_tx(&mut tx, entry).await?;
     }
     tx.commit().await?;
     Ok(true)
+}
+
+async fn clear_deferred_cancel(
+    conn: &mut sqlx::PgConnection,
+    id: InstanceId,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE signal_inbox SET deferred_cancel=FALSE WHERE instance_id=$1 AND deferred_cancel",
+    )
+    .bind(id.into_uuid())
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 pub(super) async fn update_context(
@@ -817,8 +867,10 @@ pub(super) async fn reset_run(
     id: InstanceId,
     run_id: &str,
 ) -> Result<(), StorageError> {
-    let mut conn = store.pool.acquire().await?;
-    reset_run_on(&mut conn, id, run_id).await
+    let mut tx = store.pool.begin().await?;
+    reset_run_on(&mut tx, id, run_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(super) async fn reset_run_on(
@@ -843,7 +895,7 @@ pub(super) async fn reset_run_on(
     .bind(run_id)
     .execute(&mut *conn)
     .await?;
-    Ok(())
+    clear_deferred_cancel(conn, id).await
 }
 
 pub(super) async fn update_current_step_started_at(

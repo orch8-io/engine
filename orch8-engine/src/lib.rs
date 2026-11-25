@@ -193,6 +193,7 @@ impl Engine {
     pub async fn run(&self) -> Result<(), error::EngineError> {
         self.liveness.arm();
         let started = retry_transient_startup(&self.cancel, "engine startup", || async {
+            self.storage.verify_worker_admission().await?;
             // Register this node in the cluster.
             self.register_node().await?;
             // Recover stale instances from previous crash

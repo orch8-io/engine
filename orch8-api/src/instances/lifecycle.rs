@@ -753,7 +753,7 @@ pub async fn get_instance_logs(
         ("offset" = u64, Query, description = "Pagination offset"),
         ("limit" = u32, Query, description = "Pagination limit (max 1000)"),
     ),
-    responses((status = 200, description = "List of instances", body = Vec<TaskInstance>))
+    responses((status = 200, description = "Page of instances", body = crate::Page<TaskInstance>))
 )]
 pub async fn list_instances(
     State(state): State<AppState>,

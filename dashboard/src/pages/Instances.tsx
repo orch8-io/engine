@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { usePolling } from "../hooks/usePolling";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { useDebounce } from "../hooks/useDebounce";
@@ -385,7 +385,7 @@ export default function Instances() {
                 {instances.map((i) => (
                   <TR
                     key={i.id}
-                    onClick={() => navigate(`/instances/${i.id}`)}
+                    onClick={() => navigate(`/instances/${encodeURIComponent(i.id)}`)}
                     className="cursor-pointer"
                   >
                     <TD>
@@ -398,7 +398,17 @@ export default function Instances() {
                       </Badge>
                     </TD>
                     <TD>
-                      <Id value={i.id} copy />
+                      <div className="flex items-center gap-2">
+                        <Link
+                          to={`/instances/${encodeURIComponent(i.id)}`}
+                          aria-label={`Open execution ${i.id}`}
+                          onClick={(event) => event.stopPropagation()}
+                          className="text-signal underline-offset-2 hover:underline focus-visible:underline"
+                        >
+                          Open
+                        </Link>
+                        <Id value={i.id} copy />
+                      </div>
                     </TD>
                     <TD className="font-mono text-[12px]">{i.namespace}</TD>
                     <TD>

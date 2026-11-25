@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { setApiUrl, setApiKey, clearApiKey, setTenantId, clearTenantId, checkHealth } from "../api";
+import { getConnection, saveConnection, checkHealth } from "../api";
+import { engineUrl } from "../lib/connection";
 import { usePageTitle } from "../hooks/usePageTitle";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Section } from "../components/ui/Section";
@@ -9,28 +10,31 @@ import { StatusDot } from "../components/ui/StatusDot";
 
 export default function Settings() {
   usePageTitle("Settings");
-  const [url, setUrl] = useState(
-    localStorage.getItem("orch8_api_url") ||
-      import.meta.env.VITE_ORCH8_API_URL ||
-      "http://localhost:8080",
-  );
-  const [key, setKey] = useState(localStorage.getItem("orch8_api_key") || "");
-  const [tenant, setTenant] = useState(localStorage.getItem("orch8_tenant_id") || "");
-  const [status, setStatus] = useState<"idle" | "ok" | "error">("idle");
+  const [draft, setDraft] = useState(getConnection);
+  const [status, setStatus] = useState<"idle" | "checking" | "ok" | "error">("idle");
   const [msg, setMsg] = useState("");
 
-  async function testConnection() {
+  function changeUrl(baseUrl: string) {
     setStatus("idle");
-    try {
-      if (url) setApiUrl(url);
-      if (key) setApiKey(key);
-      else clearApiKey();
-      if (tenant) setTenantId(tenant);
-      else clearTenantId();
+    setDraft((previous) => {
+      try {
+        if (engineUrl(baseUrl).origin === engineUrl(previous.baseUrl).origin) {
+          return { ...previous, baseUrl };
+        }
+      } catch {
+        // An incomplete address is no longer a match for the credential's origin.
+      }
+      return { baseUrl, apiKey: null, tenantId: null };
+    });
+  }
 
-      await checkHealth();
+  async function testConnection() {
+    setStatus("checking");
+    try {
+      await checkHealth(undefined, draft.baseUrl);
+      saveConnection(draft);
       setStatus("ok");
-      setMsg("Connected");
+      setMsg("Saved. Engine is reachable.");
     } catch (e: unknown) {
       setStatus("error");
       setMsg(e instanceof Error ? e.message : "Connection failed");
@@ -42,7 +46,7 @@ export default function Settings() {
       <PageHeader
         eyebrow="Operator"
         title="Settings"
-        description="Where the console lives: which engine it talks to and what credentials it presents. Settings are stored in your browser's local storage — nothing is sent to any third party."
+        description="Choose the engine for this console. Connection settings are stored in your browser."
       />
 
       <Section
@@ -73,11 +77,13 @@ export default function Settings() {
       >
         <div className="max-w-[520px] space-y-6">
           <div>
-            <FieldLabel>Engine API URL</FieldLabel>
+            <FieldLabel htmlFor="engine-api-url">Engine API URL</FieldLabel>
             <Input
+              id="engine-api-url"
               type="text"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
+              value={draft.baseUrl}
+              onChange={(e) => changeUrl(e.target.value)}
+              disabled={status === "checking"}
               className="w-full font-mono"
               placeholder="http://localhost:8080"
             />
@@ -89,25 +95,36 @@ export default function Settings() {
           </div>
 
           <div>
-            <FieldLabel>API key</FieldLabel>
+            <FieldLabel htmlFor="engine-api-key">API key</FieldLabel>
             <Input
+              id="engine-api-key"
               type="password"
-              value={key}
-              onChange={(e) => setKey(e.target.value)}
+              autoComplete="new-password"
+              value={draft.apiKey ?? ""}
+              onChange={(e) => {
+                setDraft({ ...draft, apiKey: e.target.value || null });
+                setStatus("idle");
+              }}
+              disabled={status === "checking"}
               className="w-full font-mono"
               placeholder="Leave empty if no auth required"
             />
             <p className="annotation mt-1.5">
-              Optional. Sent in the <code className="font-mono">X-API-Key</code> header.
+              Enter a new key when switching engines.
             </p>
           </div>
 
           <div>
-            <FieldLabel>Tenant ID</FieldLabel>
+            <FieldLabel htmlFor="engine-tenant-id">Tenant ID</FieldLabel>
             <Input
+              id="engine-tenant-id"
               type="text"
-              value={tenant}
-              onChange={(e) => setTenant(e.target.value)}
+              value={draft.tenantId ?? ""}
+              onChange={(e) => {
+                setDraft({ ...draft, tenantId: e.target.value || null });
+                setStatus("idle");
+              }}
+              disabled={status === "checking"}
               className="w-full font-mono"
               placeholder="Required when tenant headers are enforced"
             />
@@ -117,27 +134,25 @@ export default function Settings() {
           </div>
 
           <div className="flex items-center gap-3 pt-1">
-            <Button variant="primary" onClick={testConnection}>
-              Test connection
+            <Button variant="primary" onClick={testConnection} disabled={status === "checking"}>
+              {status === "checking" ? "Checking…" : "Test connection and save"}
             </Button>
             {status === "ok" && (
-              <span className="flex items-center gap-1.5 text-ok text-[12px] font-mono uppercase tracking-wider">
+              <span role="status" className="flex items-center gap-1.5 text-ok text-[12px] font-mono uppercase tracking-wider">
                 <StatusDot tone="ok" live />
                 {msg}
               </span>
             )}
             {status === "error" && (
-              <span className="flex items-center gap-1.5 text-warn text-[12px] font-mono uppercase tracking-wider">
+              <span role="alert" className="flex items-center gap-1.5 text-warn text-[12px] font-mono uppercase tracking-wider">
                 <StatusDot tone="warn" />
                 {msg}
               </span>
             )}
           </div>
           <p className="annotation">
-            “Test connection” pings <code className="font-mono">/health</code>{" "}
-            with your current settings. A success means the console can
-            reach the engine and authenticate — not that the engine itself
-            is fully healthy. Use the Overview page for that.
+            The connection test checks <code className="font-mono">/health/live</code>{" "}
+            before saving. API requests verify your credentials when you open an engine page.
           </p>
         </div>
       </Section>

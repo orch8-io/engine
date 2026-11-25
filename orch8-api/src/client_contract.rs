@@ -60,6 +60,72 @@ pub fn generate_javascript_client() -> String {
     )
 }
 
+/// Produce a client that checks the list response against the generated envelope.
+pub fn generate_instances_client(document: &Value) -> Result<String, String> {
+    let operation = document
+        .pointer("/paths/~1instances/get/responses/200/content/application~1json/schema")
+        .ok_or("GET /instances is missing a success response schema")?;
+    let schema = if let Some(reference) = operation.get("$ref").and_then(Value::as_str) {
+        document
+            .pointer(
+                reference
+                    .strip_prefix('#')
+                    .ok_or("external response schema")?,
+            )
+            .ok_or("GET /instances response schema reference is unresolved")?
+    } else {
+        operation
+    };
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .ok_or("GET /instances must document required envelope fields")?;
+    let properties = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .ok_or("GET /instances must document an object envelope")?;
+    let mut checks = serde_json::Map::new();
+    for name in required {
+        let name = name.as_str().ok_or("invalid required property name")?;
+        let kind = properties
+            .get(name)
+            .and_then(|field| field.get("type"))
+            .and_then(Value::as_str)
+            .ok_or("required envelope property must declare its type")?;
+        checks.insert(name.into(), Value::String(kind.into()));
+    }
+    if checks.get("items").and_then(Value::as_str) != Some("array")
+        || checks.get("has_more").and_then(Value::as_str) != Some("boolean")
+    {
+        return Err("GET /instances must require items and has_more".into());
+    }
+    Ok(format!(
+        r#"
+// Generated from Orch8 OpenAPI. Do not edit.
+'use strict';
+const shapes = {checks};
+(async () => {{
+  const url = new URL('/instances', process.argv[1]);
+  url.searchParams.set('tenant_id', process.argv[2]);
+  url.searchParams.set('limit', '1');
+  const response = await fetch(url, {{ headers: {{ 'X-Tenant-Id': process.argv[2] }} }});
+  if (!response.ok) throw new Error(`GET /instances returned HTTP ${{response.status}}`);
+  const page = await response.json();
+  for (const [key, expected] of Object.entries(shapes)) {{
+    const value = page?.[key];
+    const actual = Array.isArray(value) ? 'array' : typeof value;
+    if (actual !== expected) throw new Error(`GET /instances field ${{key}}: expected ${{expected}}, got ${{actual}}`);
+  }}
+  if (page.items.length !== 1) throw new Error('GET /instances did not return the seeded instance');
+}})().catch(error => {{
+  console.error(error);
+  process.exitCode = 1;
+}});
+"#,
+        checks = Value::Object(checks)
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

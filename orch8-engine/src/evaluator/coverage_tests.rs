@@ -122,6 +122,7 @@ fn coverage_evaluator_001_pair_found_across_distinct_branches() {
         &handlers,
         &index,
         &PendingStepDeferrals::default(),
+        None,
     )
     .unwrap();
     assert_eq!(pair, [1, 2]);
@@ -166,7 +167,8 @@ fn coverage_evaluator_002_same_branch_steps_are_never_paired() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         )
         .is_none()
     );
@@ -185,7 +187,8 @@ fn coverage_evaluator_003_pending_steps_are_not_paired() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         )
         .is_none()
     );
@@ -203,7 +206,8 @@ fn coverage_evaluator_004_unregistered_handler_is_not_paired() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         )
         .is_none()
     );
@@ -239,7 +243,8 @@ fn coverage_evaluator_005_steps_without_parallel_ancestor_are_not_paired() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         )
         .is_none()
     );
@@ -296,7 +301,8 @@ fn coverage_evaluator_006_distinct_parallels_are_not_cross_paired() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         )
         .is_none()
     );
@@ -315,7 +321,8 @@ fn coverage_evaluator_007_empty_tree_yields_no_pair() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         )
         .is_none()
     );
@@ -371,7 +378,8 @@ fn coverage_evaluator_008_three_branches_pair_the_first_two_seen() {
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         ),
         Some([1, 2])
     );
@@ -507,7 +515,8 @@ fn coverage_evaluator_012_step_inside_parallel_dispatches_with_transparent_nesti
             &block_map,
             &handlers,
             &index,
-            &PendingStepDeferrals::default()
+            &PendingStepDeferrals::default(),
+            None,
         ),
         Some([2, 3])
     );

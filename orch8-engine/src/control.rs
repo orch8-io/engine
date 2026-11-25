@@ -400,6 +400,26 @@ pub trait ExecutionControl: Send + Sync {
                 .map_err(EngineError::Storage)
         }
     }
+    async fn compact_block_outputs(
+        &self,
+        id: InstanceId,
+        blocks: &[&BlockId],
+        retain: u32,
+    ) -> Result<u64, EngineError> {
+        let claim = self.execution_claim();
+        if let Some(claim) = claim {
+            same_instance(claim, id)?;
+        }
+        OutputStore::compact_block_outputs(
+            self.backend(),
+            id,
+            blocks,
+            retain,
+            claim.map(|c| c.token),
+        )
+        .await?
+        .ok_or(EngineError::ClaimLost { instance_id: id })
+    }
     async fn delete_block_output_by_id(&self, id: uuid::Uuid) -> Result<(), EngineError> {
         if let Some(claim) = self.execution_claim() {
             held(

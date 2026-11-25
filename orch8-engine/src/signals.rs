@@ -1,12 +1,13 @@
 use chrono::Utc;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use orch8_storage::StorageBackend;
-use orch8_types::execution::NodeState;
-use orch8_types::ids::InstanceId;
+use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId};
 use orch8_types::instance::InstanceState;
-use orch8_types::sequence::SequenceDefinition;
+use orch8_types::sequence::{BlockDefinition, SequenceDefinition};
 use orch8_types::signal::{Signal, SignalAction};
 
 use crate::error::EngineError;
@@ -226,13 +227,13 @@ async fn process_signals_inner(
                 // Scoped cancellation: if we have the sequence definition, cancel only
                 // cancellable nodes and let non-cancellable ones finish.
                 if let Some(seq) = sequence_def {
-                    let has_non_cancellable = cancel_scoped(storage, instance_id, seq).await?;
+                    let has_non_cancellable =
+                        cancel_scoped(storage, instance_id, signal.id, seq).await?;
                     if has_non_cancellable {
                         debug!(
                             instance_id = %instance_id,
                             "cancel signal: non-cancellable nodes still running, deferring full cancel"
                         );
-                        storage.mark_signal_delivered(signal.id).await?;
                         // Don't abort — let the evaluator continue running
                         // non-cancellable nodes. The evaluator will check for
                         // all-terminal and complete the cancellation.
@@ -369,108 +370,116 @@ async fn process_signals_inner(
     Ok(false)
 }
 
-/// Cancel all cancellable nodes and return `true` if any non-cancellable nodes are still active.
-///
-/// Collects all cancellable node IDs into a Vec and batch-updates them in a
-/// single `update_nodes_state` call, avoiding N individual UPDATE queries for
-/// large execution trees.
-async fn cancel_scoped(
-    storage: &dyn StorageBackend,
-    instance_id: InstanceId,
-    sequence_def: &SequenceDefinition,
-) -> Result<bool, EngineError> {
-    use orch8_types::execution::BlockType;
-    use orch8_types::ids::ExecutionNodeId;
-    use orch8_types::sequence::BlockDefinition;
+pub(crate) struct ScopedCancelPlan {
+    pub protected_work: bool,
+    /// Controllers outside protected regions are held only to keep ancestors
+    /// intact. They must not resolve a race or start more unprotected work.
+    pub held_parents: HashSet<ExecutionNodeId>,
+    pub cancellable: Vec<ExecutionNodeId>,
+}
 
-    let tree = storage.get_execution_tree(instance_id).await?;
-    let mut has_non_cancellable_active = false;
-    let mut cancellable_node_ids: Vec<ExecutionNodeId> = Vec::new();
+fn has_entered(node: &ExecutionNode) -> bool {
+    matches!(node.state, NodeState::Running | NodeState::Waiting)
+}
 
-    let (node_index, children_of) = build_tree_indexes(&tree);
-
-    // Collect IDs of CancellationScope nodes so we can check ancestry.
+/// Keep ancestors of protected work alive so they can drive it to completion.
+pub(crate) fn scoped_cancel_plan(
+    tree: &[ExecutionNode],
+    block_map: &[(&BlockId, &BlockDefinition)],
+) -> ScopedCancelPlan {
+    let (node_index, children_of) = build_tree_indexes(tree);
     let mut scope_node_ids: Vec<_> = tree
         .iter()
-        .filter(|n| n.block_type == BlockType::CancellationScope)
+        .filter(|node| node.block_type == BlockType::CancellationScope && has_entered(node))
         .map(|n| n.id)
         .collect();
     scope_node_ids.sort_unstable();
 
-    let block_map = crate::evaluator::flatten_blocks(&sequence_def.blocks);
-
-    for node in &tree {
-        let is_active = matches!(
-            node.state,
-            NodeState::Pending | NodeState::Running | NodeState::Waiting
-        );
-        if !is_active {
-            continue;
-        }
-
-        // A node inside a CancellationScope is non-cancellable. The scope
-        // node itself is also non-cancellable — cancelling it would
-        // terminate the scope (and its children) before they had a chance
-        // to drain, defeating the purpose of the scope in the first place.
-        let inside_scope = is_descendant_of_any(&node_index, node, &scope_node_ids);
-        let is_scope_node = node.block_type == BlockType::CancellationScope;
-
-        // Nodes inside a try-catch `finally` branch (branch_index == 2) are
-        // non-cancellable: the finally block must run to completion regardless
-        // of external signals. This mirrors Java/Python try-finally semantics.
-        let inside_finally = is_inside_finally_branch(&node_index, &children_of, node);
-
-        // Check per-step cancellable flag.
-        let step_cancellable = block_map
+    let mut protected = HashSet::new();
+    let mut held_parents = HashSet::new();
+    let active = |node: &&ExecutionNode| !node.state.is_terminal();
+    for node in tree.iter().filter(active) {
+        let protected_step = block_map
             .binary_search_by_key(&&node.block_id, |(id, _)| *id)
-            .map(|idx| block_map[idx].1)
             .ok()
-            .and_then(|block| match block {
-                BlockDefinition::Step(step) => Some(step.cancellable),
-                _ => None,
-            })
-            .unwrap_or(true);
-
-        let is_cancellable = step_cancellable && !inside_scope && !is_scope_node && !inside_finally;
-
-        if is_cancellable {
-            cancellable_node_ids.push(node.id);
-        } else {
-            has_non_cancellable_active = true;
-        }
-    }
-
-    // Batch-update all cancellable nodes in a single round-trip instead of
-    // N individual UPDATE queries.
-    if !cancellable_node_ids.is_empty() {
-        storage
-            .update_nodes_state(&cancellable_node_ids, NodeState::Cancelled)
-            .await?;
-        // Cancelled step nodes must not leave their external-worker tasks
-        // claimable. Non-cancellable nodes (scopes, finally branches) are
-        // untouched, so their in-flight work still completes.
-        cancellable_node_ids.sort_unstable();
-        let step_block_ids: Vec<String> = tree
-            .iter()
-            .filter(|n| {
-                n.block_type == BlockType::Step && cancellable_node_ids.binary_search(&n.id).is_ok()
-            })
-            .map(|n| n.block_id.as_str().to_owned())
-            .collect();
-        if !step_block_ids.is_empty()
-            && let Err(e) = storage
-                .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &step_block_ids)
-                .await
+            .is_some_and(|index| {
+                matches!(block_map[index].1, BlockDefinition::Step(step) if !step.cancellable)
+            });
+        if (has_entered(node)
+            && (protected_step || node.block_type == BlockType::CancellationScope))
+            || is_descendant_of_any(&node_index, node, &scope_node_ids)
+            || is_inside_finally_branch(&node_index, &children_of, node)
         {
-            warn!(
-                instance_id = %instance_id,
-                error = %e,
-                "scoped cancel: failed to purge worker tasks of cancelled nodes"
-            );
+            protected.insert(node.id);
+            let mut parent = node.parent_id;
+            while let Some(id) = parent {
+                if !held_parents.insert(id) {
+                    break;
+                }
+                parent = node_index
+                    .binary_search_by_key(&id, |n| n.id)
+                    .ok()
+                    .and_then(|index| node_index[index].parent_id);
+            }
         }
     }
+    let mut cancellable: Vec<_> = tree
+        .iter()
+        .filter(active)
+        .filter(|node| !protected.contains(&node.id) && !held_parents.contains(&node.id))
+        .map(|node| node.id)
+        .collect();
+    cancellable.sort_unstable();
+    held_parents.retain(|id| !protected.contains(id));
+    ScopedCancelPlan {
+        protected_work: !protected.is_empty(),
+        held_parents,
+        cancellable,
+    }
+}
 
-    Ok(has_non_cancellable_active)
+pub(crate) fn cancelled_step_blocks(
+    tree: &[ExecutionNode],
+    sorted_cancel_ids: &[ExecutionNodeId],
+) -> Vec<String> {
+    tree.iter()
+        .filter(|node| {
+            node.block_type == BlockType::Step && sorted_cancel_ids.binary_search(&node.id).is_ok()
+        })
+        .map(|node| node.block_id.as_str().to_owned())
+        .collect()
+}
+
+async fn cancel_scoped(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+    signal_id: uuid::Uuid,
+    sequence_def: &SequenceDefinition,
+) -> Result<bool, EngineError> {
+    let tree = storage.get_execution_tree(instance_id).await?;
+    let blocks = crate::evaluator::merged_blocks(storage, instance_id, sequence_def).await?;
+    let block_map = crate::evaluator::flatten_blocks(&blocks);
+    let plan = scoped_cancel_plan(&tree, &block_map);
+    if plan.protected_work {
+        // A restarted evaluator can resume the drain after acknowledgement.
+        storage.defer_cancel_signal(instance_id, signal_id).await?;
+    }
+
+    if !plan.cancellable.is_empty() {
+        // Revoke worker tasks first. If interrupted, a live node remains in
+        // the next drain plan and these idempotent writes can be retried.
+        let step_block_ids = cancelled_step_blocks(&tree, &plan.cancellable);
+        if !step_block_ids.is_empty() {
+            storage
+                .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &step_block_ids)
+                .await?;
+        }
+        storage
+            .update_nodes_state(&plan.cancellable, NodeState::Cancelled)
+            .await?;
+    }
+
+    Ok(plan.protected_work)
 }
 
 /// Remove the pending/claimed worker tasks of a just-cancelled instance:
@@ -562,7 +571,7 @@ fn is_inside_finally_branch(
     // Case 1: The node itself is a TryCatch with active finally children.
     // Cancelling it would orphan the finally branch. (A `Pending` child is
     // active, so an all-pending finally branch is covered by the same check.)
-    if node.block_type == BlockType::TryCatch {
+    if node.block_type == BlockType::TryCatch && has_entered(node) {
         let start = children_of.partition_point(|&(p, _)| p < node.id);
         let mut has_active_finally = false;
         for &(p, c) in children_of.iter().skip(start) {
@@ -595,7 +604,10 @@ fn is_inside_finally_branch(
             return false;
         };
         let parent = node_index[idx];
-        if current.branch_index == Some(2) && parent.block_type == BlockType::TryCatch {
+        if current.branch_index == Some(2)
+            && parent.block_type == BlockType::TryCatch
+            && has_entered(parent)
+        {
             return true;
         }
         current = parent;

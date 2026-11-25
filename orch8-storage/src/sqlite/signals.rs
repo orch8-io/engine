@@ -209,6 +209,38 @@ pub(super) async fn get_pending_batch(
     Ok(result)
 }
 
+pub(super) async fn defer_cancel(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+    signal_id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE signal_inbox SET delivered=1, deferred_cancel=1, delivered_at=?3
+         WHERE instance_id=?1 AND id=?2 AND signal_type=?4 AND delivered=0",
+    )
+    .bind(instance_id.into_uuid().to_string())
+    .bind(signal_id.to_string())
+    .bind(ts(chrono::Utc::now()))
+    .bind(serde_json::to_string(
+        &orch8_types::signal::SignalType::Cancel,
+    )?)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn has_deferred_cancel(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM signal_inbox WHERE instance_id=?1 AND deferred_cancel=1)",
+    )
+    .bind(instance_id.into_uuid().to_string())
+    .fetch_one(&store.pool)
+    .await?)
+}
+
 pub(super) async fn mark_delivered(
     storage: &SqliteStorage,
     signal_id: Uuid,

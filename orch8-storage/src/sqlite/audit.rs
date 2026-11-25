@@ -9,6 +9,14 @@ pub(super) async fn append(
     storage: &SqliteStorage,
     entry: &AuditLogEntry,
 ) -> Result<(), StorageError> {
+    let mut conn = storage.pool.acquire().await?;
+    append_on(&mut conn, entry).await
+}
+
+pub(super) async fn append_on(
+    conn: &mut sqlx::SqliteConnection,
+    entry: &AuditLogEntry,
+) -> Result<(), StorageError> {
     sqlx::query("INSERT INTO audit_log (id,instance_id,tenant_id,event_type,from_state,to_state,block_id,details,created_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)")
         .bind(entry.id.to_string())
         .bind(entry.instance_id.into_uuid().to_string())
@@ -19,7 +27,7 @@ pub(super) async fn append(
         .bind(&entry.block_id)
         .bind(serde_json::to_string(&entry.details)?)
         .bind(ts(entry.created_at))
-        .execute(&storage.pool).await?;
+        .execute(conn).await?;
     Ok(())
 }
 

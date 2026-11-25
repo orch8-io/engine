@@ -9,6 +9,14 @@ pub(super) async fn append(
     store: &PostgresStorage,
     entry: &orch8_types::audit::AuditLogEntry,
 ) -> Result<(), StorageError> {
+    let mut conn = store.pool.acquire().await?;
+    append_on(&mut conn, entry).await
+}
+
+pub(super) async fn append_on(
+    conn: &mut sqlx::PgConnection,
+    entry: &orch8_types::audit::AuditLogEntry,
+) -> Result<(), StorageError> {
     sqlx::query(
         r"INSERT INTO audit_log (id, instance_id, tenant_id, event_type, from_state, to_state, block_id, details, created_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
@@ -22,7 +30,7 @@ pub(super) async fn append(
     .bind(&entry.block_id)
     .bind(&entry.details)
     .bind(entry.created_at)
-    .execute(&store.pool)
+    .execute(conn)
     .await?;
     Ok(())
 }

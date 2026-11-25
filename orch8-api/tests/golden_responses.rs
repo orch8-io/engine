@@ -71,13 +71,6 @@ fn validate_against_openapi(doc: &Value, path: &str, method: &str, status: u16, 
     );
 }
 
-/// Known spec-vs-server drift, allowlisted once so the gate can land; burn down,
-/// never add. Each entry is a fixture name whose `OpenAPI` check is skipped.
-///
-/// * `list_instances`: the spec documents a bare array but the server returns
-///   a page object `{ "items": [...], "has_more": bool }`.
-const KNOWN_OPENAPI_DRIFT: &[&str] = &["list_instances"];
-
 struct Golden {
     doc: Value,
     update: bool,
@@ -85,9 +78,7 @@ struct Golden {
 
 impl Golden {
     fn check(&self, name: &str, path: &str, method: &str, status: u16, mut body: Value) {
-        if !KNOWN_OPENAPI_DRIFT.contains(&name) {
-            validate_against_openapi(&self.doc, path, method, status, &body);
-        }
+        validate_against_openapi(&self.doc, path, method, status, &body);
         normalize(&mut body);
         let file = corpus_dir().join(format!("{name}.json"));
         let rendered = format!("{}\n", serde_json::to_string_pretty(&body).unwrap());
@@ -201,6 +192,25 @@ async fn golden_corpus_matches_responses_and_openapi() {
         200,
         json_of(r, StatusCode::OK).await,
     );
+
+    if std::env::var_os("ORCH8_TEST_GENERATED_CLIENT").is_some() {
+        let generated = orch8_api::client_contract::generate_instances_client(&g.doc).unwrap();
+        let base = base.to_string();
+        let tenant = tenant.to_string();
+        let output = tokio::task::spawn_blocking(move || {
+            std::process::Command::new("node")
+                .args(["-e", &generated, "--", &base, &tenant])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "generated JavaScript instance client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     // Job.
     let r = c

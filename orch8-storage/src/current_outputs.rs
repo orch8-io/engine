@@ -107,6 +107,85 @@ pub(crate) const POSTGRES_QUERY: &str = postgres_query!(
 pub(crate) const POSTGRES_DIAGNOSTIC_QUERY: &str =
     postgres_query!("(b.output_ref IS NULL OR b.output_ref <> '__in_progress__')");
 
+// Comparison displays the first recorded encounter order while comparing the
+// final non-retry row. Preserve the comparison contract for in-progress rows.
+macro_rules! comparison_query {
+    ($tail:literal) => {
+        concat!(
+            key_stream!("(b.output_ref IS NULL OR b.output_ref <> '__retry__')"),
+            $tail
+        )
+    };
+}
+
+pub(crate) const SQLITE_COMPARISON_QUERY: &str = comparison_query!(
+    r"
+SELECT o.* FROM block_keys k CROSS JOIN block_outputs o
+WHERE o.instance_id = $1 AND o.id = (
+    SELECT b.id FROM block_outputs b
+    WHERE b.instance_id = $1 AND b.block_id = k.block_id
+      AND (b.output_ref IS NULL OR b.output_ref <> '__retry__')
+      AND substr(b.block_id, 1, 13) <> '_interceptor:'
+      AND substr(b.block_id, 1, 5) <> '_sla:'
+    ORDER BY b.created_at DESC, b.id DESC LIMIT 1
+)
+AND substr(k.block_id, 1, 1) <> '_'
+ORDER BY (
+    SELECT b.created_at FROM block_outputs b
+    WHERE b.instance_id = $1 AND b.block_id = k.block_id
+      AND (b.output_ref IS NULL OR b.output_ref <> '__retry__')
+    ORDER BY b.created_at, b.id LIMIT 1
+), (
+    SELECT b.id FROM block_outputs b
+    WHERE b.instance_id = $1 AND b.block_id = k.block_id
+      AND (b.output_ref IS NULL OR b.output_ref <> '__retry__')
+    ORDER BY b.created_at, b.id LIMIT 1
+)
+"
+);
+
+#[cfg(feature = "postgres")]
+pub(crate) const POSTGRES_COMPARISON_QUERY: &str = comparison_query!(
+    r"
+SELECT o.* FROM block_keys k
+CROSS JOIN LATERAL (
+    SELECT b.* FROM block_outputs b
+    WHERE b.instance_id = $1 AND b.block_id = k.block_id
+      AND (b.output_ref IS NULL OR b.output_ref <> '__retry__')
+      AND substr(b.block_id, 1, 13) <> '_interceptor:'
+      AND substr(b.block_id, 1, 5) <> '_sla:'
+    ORDER BY b.created_at DESC, b.id DESC LIMIT 1
+) o
+CROSS JOIN LATERAL (
+    SELECT b.created_at, b.id FROM block_outputs b
+    WHERE b.instance_id = $1 AND b.block_id = k.block_id
+      AND (b.output_ref IS NULL OR b.output_ref <> '__retry__')
+    ORDER BY b.created_at, b.id LIMIT 1
+) first
+WHERE substr(k.block_id, 1, 1) <> '_'
+ORDER BY first.created_at, first.id
+"
+);
+
+pub(crate) fn comparison_from_history(mut rows: Vec<BlockOutput>) -> Vec<BlockOutput> {
+    rows.retain(|row| {
+        !row.block_id.as_str().starts_with('_') && row.output_ref.as_deref() != Some("__retry__")
+    });
+    rows.sort_unstable_by_key(|row| (row.created_at, row.id));
+    let mut by_block = HashMap::new();
+    let mut ordered = Vec::new();
+    for row in rows {
+        let next = ordered.len();
+        let index = *by_block.entry(row.block_id.clone()).or_insert(next);
+        if index == next {
+            ordered.push(row);
+        } else {
+            ordered[index] = row;
+        }
+    }
+    ordered
+}
+
 /// Compatibility fallback for third-party backends without a direct query.
 pub(crate) fn from_history(outputs: Vec<BlockOutput>) -> Vec<BlockOutput> {
     project_history(outputs, false)
@@ -195,6 +274,87 @@ mod tests {
         assert!(from_history(vec![]).is_empty());
     }
 
+    crate::backend_test!(kinds = [sqlite, postgres], async fn compact_outputs_respects_ties_block_scope_and_claim(b) {
+        let sequence = SequenceBuilder::new("retention").build();
+        b.storage.create_sequence(&sequence).await.unwrap();
+        let instance = InstanceBuilder::for_sequence(&sequence).due_now().build();
+        b.storage.create_instance(&instance).await.unwrap();
+        let claim = b.storage.claim_due_instances(Utc::now(), 1, 1).await.unwrap()[0]
+            .claimed_at.unwrap();
+        let other = InstanceBuilder::for_sequence(&sequence).build();
+        b.storage.create_instance(&other).await.unwrap();
+        let at = Utc::now();
+        let first = BlockId::new("first");
+        let nested = BlockId::new("nested");
+        let unselected = BlockId::new("unselected");
+        for (id, owner, block) in [
+            (5, instance.id, &first), (1, instance.id, &first), (3, instance.id, &first),
+            (6, instance.id, &nested), (2, instance.id, &nested),
+            (7, instance.id, &unselected), (4, instance.id, &unselected),
+            (8, other.id, &first), (9, other.id, &first),
+        ] {
+            b.storage.save_block_output(&BlockOutput {
+                id: Uuid::from_u128(id), instance_id: owner,
+                block_id: block.clone(), output: json!({}), output_ref: None,
+                output_size: 0, attempt: 0, created_at: at,
+            }).await.unwrap();
+        }
+        let scope = [&first, &nested, &first];
+        assert_eq!(b.storage.compact_block_outputs(instance.id, &scope, 1, Some(claim - Duration::seconds(1))).await.unwrap(), None);
+        assert_eq!(b.storage.get_all_outputs(instance.id).await.unwrap().len(), 7);
+        assert_eq!(b.storage.compact_block_outputs(instance.id, &scope, 1, Some(claim)).await.unwrap(), Some(3));
+        let ids = b.storage.get_all_outputs(instance.id).await.unwrap()
+            .iter().map(|row| row.id.as_u128()).collect::<Vec<_>>();
+        assert_eq!(ids, [4, 5, 6, 7]);
+        assert_eq!(b.storage.get_all_outputs(other.id).await.unwrap().len(), 2);
+    });
+
+    crate::backend_test!(kinds = [sqlite, postgres], async fn workbench_metadata_queries_seek_past_history(b) {
+        let sequence = SequenceBuilder::new("workbench-plan").build();
+        b.storage.create_sequence(&sequence).await.unwrap();
+        let instance = InstanceBuilder::for_sequence(&sequence).build();
+        b.storage.create_instance(&instance).await.unwrap();
+        let at = Utc::now();
+        for n in 1..=320u32 {
+            b.storage.save_block_output(&BlockOutput {
+                id: Uuid::from_u128(u128::from(n)), instance_id: instance.id,
+                block_id: BlockId::new("loop/task"),
+                output: json!({"padding": "x".repeat(4096)}),
+                output_ref: None, output_size: 4096, attempt: 0,
+                created_at: at + Duration::seconds(i64::from(n)),
+            }).await.unwrap();
+        }
+        let cursor = crate::workbench::EventKey {
+            timestamp: at + Duration::seconds(260), rank: 2, id: Uuid::from_u128(260),
+        };
+        let page = crate::workbench::event_page(
+            b.storage.as_ref(), instance.id, &instance.tenant_id, Some(cursor), 11,
+        ).await.unwrap();
+        let ids: Vec<_> = page.iter().map(|row| row.key.id.as_u128()).collect();
+        assert_eq!(ids, (261..=271).collect::<Vec<_>>());
+        match &b.raw {
+            RawPool::Sqlite(pool) => {
+                let query = crate::workbench::SQLITE_EVENT_PAGE_QUERY;
+                let plan: Vec<(i64,i64,i64,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("EXPLAIN QUERY PLAN {query}")))
+                    .bind(instance.id.to_string()).bind(cursor.timestamp.to_rfc3339())
+                    .bind(cursor.rank).bind(cursor.id.to_string()).bind(11_i64)
+                    .bind(instance.tenant_id.as_str()).fetch_all(pool).await.unwrap();
+                assert!(plan.iter().any(|row| row.3.contains("idx_block_outputs_history_page") && row.3.contains("created_at>?")), "must seek output time index: {plan:?}");
+            }
+            #[cfg(feature = "postgres")]
+            RawPool::Postgres(pool) => {
+                sqlx::query("ANALYZE block_outputs").execute(pool).await.unwrap();
+                let query = crate::workbench::POSTGRES_EVENT_PAGE_QUERY;
+                let plan: Value = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}")))
+                    .bind(instance.id.into_uuid()).bind(cursor.timestamp).bind(cursor.rank)
+                    .bind(cursor.id).bind(11_i64).bind(instance.tenant_id.as_str())
+                    .fetch_one(pool).await.unwrap();
+                let (rows, _) = visits(&plan[0]["Plan"]);
+                assert!(rows <= 20.0, "cursor page must seek output history: {plan}");
+            }
+        }
+    });
+
     crate::backend_test!(kinds = [sqlite, postgres], async fn current_output_query_seeks_past_loop_history(b) {
         let sequence = SequenceBuilder::new("projection-plan").build();
         b.storage.create_sequence(&sequence).await.unwrap();
@@ -229,6 +389,8 @@ mod tests {
         assert_eq!(diagnostics.len(), 2);
         assert!(projected.iter().all(|row| row.output_ref.is_none()));
         assert!(diagnostics.iter().all(|row| row.output_ref.as_deref() == Some("__retry__")));
+        let compared = b.storage.get_comparison_outputs(instance.id).await.unwrap();
+        assert_eq!(compared.iter().map(|row| row.output["iteration"].as_i64()).collect::<Vec<_>>(), [Some(510), Some(511)]);
         match &b.raw {
             RawPool::Sqlite(pool) => {
                 for (query, index) in [(SQLITE_QUERY, "idx_block_outputs_current"), (SQLITE_DIAGNOSTIC_QUERY, "idx_block_outputs_diagnostics")] {

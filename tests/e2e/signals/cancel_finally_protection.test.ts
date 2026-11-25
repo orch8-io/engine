@@ -91,10 +91,7 @@ describe("Cancel signal deferral during finally / cancellation_scope", () => {
           catch_block: [step("c", "noop")],
           finally_block: [step("fin", "sleep", { duration_ms: 2000 })],
         } as Block,
-        // Give the deferred cancel a post-finally scheduling boundary to
-        // intercept. If the sequence ends at `tc`, the evaluator may
-        // legitimately complete the instance in the same pass that drains
-        // `finally`, leaving no subsequent work for cancellation to stop.
+        // Cancellation must also stop the step after finally.
         step("after", "noop"),
       ],
       { tenantId, namespace },
@@ -197,16 +194,8 @@ describe("Cancel signal deferral during finally / cancellation_scope", () => {
     });
     assert.equal(innerDone.state, "completed");
 
-    // Once the scope drains, the deferred cancel is applied (or, if the
-    // engine absorbed it post-scope, the instance simply completes — either
-    // terminal state is acceptable; the shielding is the behavior under test).
-    const final = await client.waitForState(id, ["cancelled", "completed"], {
-      timeoutMs: 15_000,
-    });
-    assert.ok(
-      ["cancelled", "completed"].includes(final.state),
-      `expected terminal state after scope drains, got ${final.state}`,
-    );
+    // The acknowledged cancel applies only after the protected child finishes.
+    await client.waitForState(id, "cancelled", { timeoutMs: 15_000 });
 
     const outputs = await client.getOutputs(id);
     assert.ok(

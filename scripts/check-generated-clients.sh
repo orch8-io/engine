@@ -6,15 +6,15 @@ gate_dir="$(mktemp -d)"
 trap 'rm -rf "$gate_dir"' EXIT
 
 cd "$repo_root"
-cargo run --quiet -p orch8-api --example client_contract -- rust > "$gate_dir/client.rs"
+cargo run --locked --quiet -p orch8-api --example client_contract -- rust > "$gate_dir/client.rs"
 rustc --edition=2024 "$gate_dir/client.rs" -o "$gate_dir/rust-client"
 "$gate_dir/rust-client"
 
-cargo run --quiet -p orch8-api --example client_contract -- javascript > "$gate_dir/client.js"
+cargo run --locked --quiet -p orch8-api --example client_contract -- javascript > "$gate_dir/client.js"
 node --check "$gate_dir/client.js"
 node "$gate_dir/client.js"
 
-actual="$(cargo run --quiet -p orch8-api --example client_contract -- fingerprint)"
+actual="$(cargo run --locked --quiet -p orch8-api --example client_contract -- fingerprint)"
 expected="$(tr -d '[:space:]' < orch8-api/openapi.sha256)"
 if [[ "$actual" != "$expected" ]]; then
   echo "OpenAPI drift detected. Regenerate representative clients and update orch8-api/openapi.sha256." >&2

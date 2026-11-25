@@ -37,6 +37,32 @@ jobs:
       - name: Check MSRV
         run: cargo check --locked --workspace
 
+  release-contracts:
+    name: Release Contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Documentation links and example syntax
+        run: python3 scripts/check-docs.py
+      - name: Migration immutability
+        run: ./scripts/check-migration-immutability.sh
+      - name: Destructive migration lint
+        run: ./scripts/check-destructive-migrations.sh
+      - name: Review-fix guard regression tests
+        run: ./scripts/test-review-fix-guards.sh
+      - name: SDK packaging contracts
+        run: ./scripts/check-sdk-packaging.sh
+      - name: Definition wire protocol vectors
+        run: |
+          node --test scripts/test-delegation-definition-wire.mjs
+          python3 scripts/test-delegation-definition-wire.py
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
@@ -47,8 +73,6 @@ jobs:
       SQLX_OFFLINE: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
         with:
           toolchain: "1.97.0"
@@ -59,22 +83,6 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Format
         run: cargo fmt --check
-      - name: Documentation links and example syntax
-        run: python3 scripts/check-docs.py
-      - name: Migration immutability
-        run: ./scripts/check-migration-immutability.sh
-      - name: Destructive migration lint
-        run: ./scripts/check-destructive-migrations.sh
-      - name: Review-fix guard regression tests
-        run: ./scripts/test-review-fix-guards.sh
-      - name: SDK version alignment
-        run: ./scripts/check-sdk-versions.sh
-      - name: SDK packaging contracts
-        run: ./scripts/check-sdk-packaging.sh
-      - name: Definition wire protocol vectors
-        run: |
-          node --test scripts/test-delegation-definition-wire.mjs
-          python3 scripts/test-delegation-definition-wire.py
       - name: Verify all Rust lockfiles
         # Resolve the actual dependency graphs before compilation; --no-deps
         # skips lockfile validation and cannot detect standalone workspace drift.
@@ -91,6 +99,9 @@ jobs:
           for manifest in packages/node-native/Cargo.toml packages/python-native/Cargo.toml fuzz/Cargo.toml; do
             cargo clippy --locked --all-targets --manifest-path "$manifest"
           done
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
       - name: Generated client contract
         run: ./scripts/check-generated-clients.sh
       - name: Clippy (all targets)
@@ -205,6 +216,7 @@ jobs:
           toolchain: "1.97.0"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install protoc and PostgreSQL client
+        id: unit_postgres_client
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler postgresql-client
       - name: Install age for the encrypted backup fixture
         run: |
@@ -227,27 +239,50 @@ jobs:
       # single test (which looks like a hang and eats the job timeout).
       - name: Build orch8-server
         run: cargo build --locked -p orch8-server --bin orch8-server
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
       - name: Test
         id: workspace_tests
         env:
           ORCH8_SERVER_BIN: ${{ github.workspace }}/target/debug/orch8-server
           ORCH8_REQUIRE_AGE: "1"
-        run: cargo test --locked --workspace
+          ORCH8_TEST_GENERATED_CLIENT: "1"
+        run: cargo test --locked --workspace --no-fail-fast
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: failure() && steps.workspace_tests.outcome == 'failure'
         with:
           name: storage-backend-divergences
           path: target/backend-differential/
           if-no-files-found: ignore
+      - name: Verify partitioned output-index prebuild
+        if: ${{ !cancelled() && steps.unit_postgres_client.outcome == 'success' }}
+        run: python3 scripts/check-output-index-prebuild.py
+
+  previews:
+    name: Preview Parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      SQLX_OFFLINE: true
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - name: Compare native and WebAssembly previews
-        id: preview_differential
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: "1.97.0"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: previews
+      - name: Verify and install the pinned wasm-bindgen release
+        id: wasm_bindgen
         run: |
-          rustup target add wasm32-unknown-unknown
-          cargo build --locked -p orch8-cli --bin orch8
-          cargo build --locked -p orch8-wasm --target wasm32-unknown-unknown
           version="$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)"
           folder="wasm-bindgen-$version-x86_64-unknown-linux-musl"
           tool_dir="$RUNNER_TEMP/preview-tools"
@@ -268,7 +303,24 @@ jobs:
             printf '%s  %s\n' "$checksum" "$folder.tar.gz" | sha256sum -c -
             tar -xzf "$folder.tar.gz"
           )
-          "$tool_dir/$folder/wasm-bindgen" --target nodejs --out-dir "$RUNNER_TEMP/orch8-wasm" \
+          echo "$tool_dir/$folder" >> "$GITHUB_PATH"
+      - name: Install protoc
+        id: preview_protoc
+        if: ${{ !cancelled() }}
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build CLI
+        id: preview_cli
+        if: ${{ !cancelled() && steps.preview_protoc.outcome == 'success' }}
+        run: cargo build --locked -p orch8-cli --bin orch8
+      - name: Build WebAssembly
+        id: preview_wasm
+        if: ${{ !cancelled() && steps.wasm_bindgen.outcome == 'success' }}
+        run: cargo build --locked -p orch8-wasm --target wasm32-unknown-unknown
+      - name: Compare native and WebAssembly previews
+        id: preview_differential
+        if: ${{ !cancelled() && steps.preview_cli.outcome == 'success' && steps.preview_wasm.outcome == 'success' }}
+        run: |
+          wasm-bindgen --target nodejs --out-dir "$RUNNER_TEMP/orch8-wasm" \
             target/wasm32-unknown-unknown/debug/orch8_wasm.wasm
           node --test scripts/check-preview-differential.test.cjs
           node scripts/check-preview-differential.cjs target/debug/orch8 \
@@ -279,29 +331,82 @@ jobs:
           name: preview-divergences
           path: ${{ runner.temp }}/preview-divergences/
           if-no-files-found: ignore
+      - name: Install dashboard dependencies and Chromium
+        id: replay_setup
+        if: ${{ !cancelled() && steps.preview_cli.outcome == 'success' }}
+        working-directory: dashboard
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          npm exec -- playwright install --with-deps chromium
+      - name: Test dashboard replay in Chromium
+        if: ${{ !cancelled() && steps.replay_setup.outcome == 'success' }}
+        working-directory: dashboard
+        run: npm run test:replay-browser
+
+  runtime-smoke:
+    name: Local Runtime Examples
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      SQLX_OFFLINE: true
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: runtime-smoke
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Build server and CLI
+        id: runtime_build
+        run: cargo build --locked --bin orch8-server --bin orch8
       - name: Exercise hybrid worker sandbox and private fallback
         env:
           ORCH8_BIN: ${{ github.workspace }}/target/debug/orch8
         run: |
-          cargo build --locked -p orch8-cli --bin orch8
           timeout 60s sh examples/private-workers/sandbox.sh
           ORCH8_RESIDENCY=eu timeout 60s sh examples/private-workers/sandbox.sh fallback.json
       - name: Verify inspection reconnect through worker and approval
+        if: ${{ !cancelled() && steps.runtime_build.outcome == 'success' }}
         env:
           ORCH8_BIN: ${{ github.workspace }}/target/debug/orch8
           ORCH8_SERVER_BIN: ${{ github.workspace }}/target/debug/orch8-server
         run: |
           python3 -B -m unittest discover -s examples/mobile-inspection -p 'test_doctor_runtime.py'
           python3 -B -m unittest discover -s examples/mobile-inspection/reconnect
-      - name: Verify partitioned output-index prebuild
-        run: python3 scripts/check-output-index-prebuild.py
+
+  benchmark-smoke:
+    name: Benchmark Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      SQLX_OFFLINE: true
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: "1.97.0"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+        with:
+          key: benchmark-smoke
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       # Criterion's test mode exercises each workload without collecting
       # measurements. Keep fixtures and completion assertions covered when
       # evaluator contracts change; the scheduled workflow measures timings.
       - name: Benchmark smoke
         run: |
-          cargo bench --locked -p orch8-engine --bench engine_bench --profile test -- --test
-          cargo bench --locked -p orch8-storage --bench storage_bench --profile test -- --test
+          cargo bench --locked --no-fail-fast -p orch8-engine -p orch8-storage \
+            --bench engine_bench --bench storage_bench --profile test -- --test
 
   embed:
     name: Web embed SDK
@@ -336,15 +441,53 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: dashboard/package-lock.json
+      - name: Install locked dependencies
+        id: dashboard_deps
+        working-directory: dashboard
+        run: npm ci --no-audit --no-fund
       - name: Test and build
         working-directory: dashboard
-        run: npm ci --no-audit --no-fund && npm test && npm run build
+        run: npm test && npm run build
+      - name: Install Chromium
+        id: dashboard_chromium
+        working-directory: dashboard
+        run: npm exec -- playwright install --with-deps chromium
+      - name: Test worker placement in Chromium
+        working-directory: dashboard
+        run: npm run test:worker-browser
+      - name: Test operator flows in Chromium
+        if: ${{ !cancelled() && steps.dashboard_chromium.outcome == 'success' }}
+        working-directory: dashboard
+        run: npm run test:operator-browser
+      - name: Dependency advisories
+        if: ${{ !cancelled() && steps.dashboard_deps.outcome == 'success' }}
+        working-directory: dashboard
+        run: npm audit --audit-level=moderate
+
+  email-classifier:
+    name: Email Classifier Example
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: examples/email-classifier
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24"
+      - name: Install, type-check, and test the locked example
+        run: |
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+      - name: Production dependency advisories
+        run: npm audit --omit=dev
 
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    needs: [check]
     services:
       postgres:
         image: postgres:16

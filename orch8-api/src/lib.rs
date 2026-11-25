@@ -89,7 +89,7 @@ pub const UNVERSIONED_DEPRECATION: &str = "@1767225600";
 pub const UNVERSIONED_SUNSET: &str = "Sat, 01 Jan 2028 00:00:00 GMT";
 
 /// Canonical cursor-capable response envelope for list endpoints.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct Page<T> {
     pub items: Vec<T>,
     #[serde(skip_serializing_if = "Option::is_none")]

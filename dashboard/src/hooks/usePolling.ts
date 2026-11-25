@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { createPollingLoop } from "../lib/polling";
 
 interface PollingResult<T> {
   data: T | null;
@@ -29,79 +30,56 @@ export function usePolling<T>(
   const [reloading, setReloading] = useState(false);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
 
-  const abortRef = useRef<AbortController | null>(null);
-  const inFlight = useRef(false);
-  const errorStreak = useRef(0);
   const hasData = useRef(false);
+  const pollerRef = useRef<ReturnType<typeof createPollingLoop> | null>(null);
 
   const refresh = useCallback(async () => {
-    if (inFlight.current) return;
-    inFlight.current = true;
-
-    abortRef.current?.abort();
-    const ac = new AbortController();
-    abortRef.current = ac;
-
-    const isBackground = hasData.current;
-    if (isBackground) setReloading(true);
-
-    try {
-      const d = await fetcher(ac.signal);
-      if (ac.signal.aborted) return;
-      setData(d);
-      setError(null);
-      setUpdatedAt(new Date().toISOString());
-      errorStreak.current = 0;
-      hasData.current = true;
-    } catch (e) {
-      if (ac.signal.aborted) return;
-      setError(e instanceof Error ? e : new Error(String(e)));
-      errorStreak.current += 1;
-    } finally {
-      inFlight.current = false;
-      setLoading(false);
-      setReloading(false);
-    }
-  }, [fetcher]);
+    await pollerRef.current?.refresh();
+  }, []);
 
   useEffect(() => {
-    refresh();
+    const poller = createPollingLoop(async (signal) => {
+      if (hasData.current) setReloading(true);
 
-    let id: ReturnType<typeof setInterval> | null = null;
-    const start = () => {
-      if (id !== null) return;
-      // Back-off: cap at 5× interval on repeated errors
-      const delay = intervalMs * Math.min(1 + errorStreak.current, 5);
-      id = setInterval(refresh, delay);
-    };
-    const stop = () => {
-      if (id !== null) {
-        clearInterval(id);
-        id = null;
+      try {
+        const value = await fetcher(signal);
+        if (signal.aborted) return false;
+        setData(value);
+        setError(null);
+        setUpdatedAt(new Date().toISOString());
+        hasData.current = true;
+        return true;
+      } catch (error) {
+        if (!signal.aborted) setError(error instanceof Error ? error : new Error(String(error)));
+        return false;
+      } finally {
+        if (!signal.aborted) {
+          setLoading(false);
+          setReloading(false);
+        }
       }
-    };
+    }, intervalMs, document.hidden);
+    pollerRef.current = poller;
+    void poller.refresh();
 
     const onVisibility = () => {
-      if (document.hidden) {
-        stop();
-      } else {
-        refresh();
-        start();
-      }
+      if (document.hidden) poller.pause();
+      else void poller.resume();
     };
-    const onFocus = () => refresh();
+    const onFocus = () => {
+      if (!document.hidden) void poller.refresh();
+    };
 
-    if (!document.hidden) start();
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("focus", onFocus);
 
     return () => {
-      stop();
-      abortRef.current?.abort();
+      poller.dispose();
+      pollerRef.current = null;
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("focus", onFocus);
     };
-  }, [refresh, intervalMs]);
+  }, [fetcher, intervalMs]);
 
   return { data, error, loading, reloading, updatedAt, refresh };
 }

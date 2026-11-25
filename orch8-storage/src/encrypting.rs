@@ -1741,6 +1741,7 @@ passthrough_impl! {
     async fn batch_reschedule_instances(&self, ids: &[InstanceId], fire_at: DateTime<Utc>) -> Result<(), StorageError>;
     async fn conditional_update_instance_state(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
     async fn conditional_update_claimed_instance_state(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
+    async fn commit_lifecycle_transition(&self, transition: crate::LifecycleTransition<'_>) -> Result<bool, StorageError>;
     async fn conditional_update_instance_state_with_outbox(&self, id: InstanceId, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
     async fn conditional_update_claimed_instance_state_with_outbox(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: orch8_types::instance::InstanceState, new_state: orch8_types::instance::InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
     async fn update_instance_sequence(&self, id: InstanceId, new_sequence_id: orch8_types::ids::SequenceId) -> Result<(), StorageError>;
@@ -1877,6 +1878,16 @@ passthrough_impl! {
         instance_id: InstanceId,
     ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
         let mut out = self.inner.get_latest_completed_outputs(instance_id).await?;
+        for output in &mut out {
+            self.decrypt_block_output(output)?;
+        }
+        Ok(out)
+    }
+    async fn get_comparison_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<orch8_types::output::BlockOutput>, StorageError> {
+        let mut out = self.inner.get_comparison_outputs(instance_id).await?;
         for output in &mut out {
             self.decrypt_block_output(output)?;
         }
@@ -2019,6 +2030,7 @@ passthrough_impl! {
     }
     async fn delete_block_outputs(&self, instance_id: InstanceId, block_id: &orch8_types::ids::BlockId) -> Result<u64, StorageError>;
     async fn delete_block_outputs_batch_claimed(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
+    async fn compact_block_outputs(&self, instance_id: InstanceId, block_ids: &[&orch8_types::ids::BlockId], retain: u32, claim_token: Option<DateTime<Utc>>) -> Result<Option<u64>, StorageError>;
     async fn delete_block_output_by_id_claimed(&self, instance_id: InstanceId, id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
 
     async fn delete_block_outputs_batch(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId]) -> Result<u64, StorageError>;
@@ -2118,6 +2130,8 @@ passthrough_impl! {
         }
         Ok(batch)
     }
+    async fn defer_cancel_signal(&self, instance_id: InstanceId, signal_id: Uuid) -> Result<(), StorageError>;
+    async fn has_deferred_cancel(&self, instance_id: InstanceId) -> Result<bool, StorageError>;
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
     async fn mark_signal_delivered_claimed(&self, instance_id: InstanceId, signal_id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
     async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
@@ -2173,6 +2187,7 @@ passthrough_impl! {
         let encrypted = self.encrypt_worker_task(task)?;
         self.inner.create_worker_task(encrypted.as_ref()).await
     }
+    async fn verify_worker_admission(&self) -> Result<(), StorageError>;
     async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
     async fn admit_worker_dispatch(&self,intent:&crate::worker_admission::WorkerDispatchIntent)->Result<crate::worker_admission::WorkerDispatchPublication,StorageError>{
         let task=self.encrypt_worker_task(&intent.task)?;
@@ -2915,6 +2930,7 @@ passthrough_impl! {
 
     // --- Audit Log (pass-through) ---
     async fn append_audit_log(&self, entry: &orch8_types::audit::AuditLogEntry) -> Result<(), StorageError>;
+    async fn get_bounded_workbench_events(&self, instance: InstanceId, tenant: &orch8_types::ids::TenantId, after: Option<crate::workbench::EventKey>, limit: u32) -> Result<Option<Vec<crate::workbench::EventRow>>, StorageError>;
     async fn list_audit_log(&self, instance_id: InstanceId, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
     async fn list_audit_log_by_tenant(&self, tenant_id: &orch8_types::ids::TenantId, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;
     async fn list_tenant_changes(&self, tenant_id: &orch8_types::ids::TenantId, after: Option<orch8_types::audit::ChangeCursor>, limit: u32) -> Result<Vec<orch8_types::audit::AuditLogEntry>, StorageError>;

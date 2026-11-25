@@ -12,9 +12,7 @@ use crate::error::EngineError;
 
 /// Transition an instance to a new state, validating the transition.
 ///
-/// Automatically logs an audit entry for the transition. The `tenant_id`
-/// is fetched from storage if not already known — callers do NOT need to
-/// invoke [`audit_transition`] separately.
+/// The transition and its audit entry commit together using the stored tenant.
 pub async fn transition_instance(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
@@ -119,7 +117,7 @@ pub async fn transition_claimed_instance_with_webhook(
 async fn transition_instance_inner(
     storage: &dyn StorageBackend,
     instance_id: InstanceId,
-    tenant_id: Option<&TenantId>,
+    _tenant_id: Option<&TenantId>,
     claim_token: Option<DateTime<Utc>>,
     from: InstanceState,
     to: InstanceState,
@@ -143,50 +141,16 @@ async fn transition_instance_inner(
         });
     }
 
-    // Atomic CAS: only update if the row is still in `from` state.
-    // Prevents a concurrent cancel/fail from being silently overwritten
-    // by a late scheduler or worker callback.
-    let updated = match (claim_token, outbox_entries.is_empty()) {
-        (Some(token), true) => {
-            storage
-                .conditional_update_claimed_instance_state(
-                    instance_id,
-                    token,
-                    from,
-                    to,
-                    next_fire_at,
-                )
-                .await?
-        }
-        (Some(token), false) => {
-            storage
-                .conditional_update_claimed_instance_state_with_outbox(
-                    instance_id,
-                    token,
-                    from,
-                    to,
-                    next_fire_at,
-                    outbox_entries,
-                )
-                .await?
-        }
-        (None, true) => {
-            storage
-                .conditional_update_instance_state(instance_id, from, to, next_fire_at)
-                .await?
-        }
-        (None, false) => {
-            storage
-                .conditional_update_instance_state_with_outbox(
-                    instance_id,
-                    from,
-                    to,
-                    next_fire_at,
-                    outbox_entries,
-                )
-                .await?
-        }
-    };
+    let updated = storage
+        .commit_lifecycle_transition(orch8_storage::LifecycleTransition {
+            instance_id,
+            claim_token,
+            from,
+            to,
+            next_fire_at,
+            webhooks: outbox_entries,
+        })
+        .await?;
     if !updated {
         warn!(
             instance_id = %instance_id,
@@ -208,19 +172,7 @@ async fn transition_instance_inner(
         "instance state transitioned"
     );
 
-    // Best-effort audit logging. Use caller-supplied tenant_id if available;
-    // fall back to a DB fetch only when the caller didn't have it handy.
-    match tenant_id {
-        Some(tid) => {
-            audit_transition(storage, instance_id, tid, from, to, None).await;
-        }
-        None => {
-            if let Ok(Some(inst)) = storage.get_instance(instance_id).await {
-                audit_transition(storage, instance_id, &inst.tenant_id, from, to, None).await;
-            }
-        }
-    }
-
+    crate::cloud_observability::record_transition(instance_id, to, None);
     Ok(())
 }
 

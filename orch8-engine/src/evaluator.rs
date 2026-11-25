@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use tracing::{debug, warn};
@@ -81,6 +82,8 @@ struct EvalContext {
     tree_stale: bool,
     /// When true, the instance must be re-read from storage before the next use.
     instance_stale: bool,
+    draining_cancel: bool,
+    held_cancel_parents: HashSet<ExecutionNodeId>,
 }
 
 impl EvalContext {
@@ -411,42 +414,9 @@ pub(crate) async fn compact_iteration_outputs(
     }
     let mut block_ids: Vec<&BlockId> = Vec::new();
     collect_body_block_ids(body, &mut block_ids);
-    if block_ids.is_empty() {
-        return Ok(0);
-    }
-    block_ids.sort_unstable();
-    block_ids.dedup();
-
-    let all = storage.get_all_outputs(instance_id).await?;
-    let mut filtered_outputs: Vec<&orch8_types::output::BlockOutput> = all
-        .iter()
-        .filter(|o| block_ids.binary_search(&&o.block_id).is_ok())
-        .collect();
-
-    // ⚡ Bolt: Sort by block_id and created_at to allow chunking without HashMap allocation
-    filtered_outputs.sort_unstable_by(|a, b| {
-        a.block_id
-            .cmp(&b.block_id)
-            .then_with(|| a.created_at.cmp(&b.created_at))
-    });
-
-    let retain = retain as usize;
-    let mut deleted = 0u64;
-
-    // ⚡ Bolt: Chunk sequentially by block_id to avoid HashMap construction overhead
-    for chunk in filtered_outputs.chunk_by(|a, b| a.block_id == b.block_id) {
-        if chunk.len() <= retain {
-            continue;
-        }
-        // Array is already sorted by created_at due to the unstable sort above.
-        // Oldest first; delete everything before the last `retain`.
-        let cut = chunk.len() - retain;
-        for o in chunk.iter().take(cut) {
-            storage.delete_block_output_by_id(o.id).await?;
-            deleted += 1;
-        }
-    }
-    Ok(deleted)
+    storage
+        .compact_block_outputs(instance_id, &block_ids, retain)
+        .await
 }
 
 /// Reasons `instance` cannot be rebound to `target` without corrupting its
@@ -694,6 +664,8 @@ pub async fn evaluate_with_claim_token(
         clock: clock.clone(),
         tree_stale: false,
         instance_stale: false,
+        draining_cancel: storage.has_deferred_cancel(instance.id).await?,
+        held_cancel_parents: HashSet::new(),
     };
 
     let max_iterations = 200;
@@ -712,6 +684,7 @@ pub async fn evaluate_with_claim_token(
 
         // Refresh stale caches before this iteration.
         ctx.refresh_instance(storage.as_ref(), instance_id).await?;
+        let tree_reloaded = ctx.tree_stale;
         ctx.refresh_tree(storage.as_ref(), instance_id).await?;
 
         // If a dispatch within this tick moved the instance out of Running,
@@ -742,8 +715,45 @@ pub async fn evaluate_with_claim_token(
             ctx.refresh_tree(storage.as_ref(), instance_id).await?;
         }
 
-        // Check termination conditions on root nodes.
-        if let Some(outcome) = check_termination(&ctx.tree) {
+        let root_termination = check_termination(&ctx.tree);
+        // Interruptible handlers can consume a cancel during dispatch.
+        // Observe that acknowledgement before applying root termination.
+        if !ctx.draining_cancel
+            && (root_termination.is_some()
+                || (tree_reloaded
+                    && ctx
+                        .tree
+                        .iter()
+                        .any(|node| node.state == NodeState::Cancelled)))
+        {
+            ctx.draining_cancel = storage.has_deferred_cancel(instance_id).await?;
+        }
+        // A partially applied external cancel is recovered under the current
+        // claim. Normal fail-fast cleanup would discard protected live nodes.
+        let termination = if ctx.draining_cancel {
+            let plan = crate::signals::scoped_cancel_plan(&ctx.tree, &block_map);
+            ctx.held_cancel_parents = plan.held_parents;
+            if !plan.cancellable.is_empty() {
+                let steps = crate::signals::cancelled_step_blocks(&ctx.tree, &plan.cancellable);
+                use crate::control::ExecutionControl as _;
+                if !steps.is_empty() {
+                    control
+                        .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &steps)
+                        .await?;
+                }
+                control
+                    .update_nodes_state(&plan.cancellable, NodeState::Cancelled)
+                    .await?;
+                ctx.tree_stale = true;
+                ctx.refresh_tree(storage.as_ref(), instance_id).await?;
+            }
+            (!plan.protected_work).then_some(EvalOutcome::Done {
+                reason: TerminalReason::Cancelled,
+            })
+        } else {
+            root_termination
+        };
+        if let Some(outcome) = termination {
             // [C5] When a root node has failed/cancelled, transition all
             // non-terminal nodes (Pending, Running, Waiting) to Cancelled
             // so the tree does not contain orphaned live nodes.
@@ -1019,6 +1029,7 @@ async fn phase_root_activation(
         }
         ctx.instance_stale = true;
         ctx.tree_stale = true;
+        ctx.draining_cancel = storage.has_deferred_cancel(instance_id).await?;
         return Ok(IterAction::Continue);
     }
 
@@ -1073,6 +1084,7 @@ async fn phase_running_steps(
         handlers,
         &node_index,
         &ctx.pending_deferrals,
+        Some(&ctx.held_cancel_parents),
     ) {
         return dispatch_parallel_steps(
             storage,
@@ -1093,6 +1105,7 @@ async fn phase_running_steps(
         &node_index,
         &ctx.pending_deferrals,
         StepSelection::PreferComposites,
+        Some(&ctx.held_cancel_parents),
     ) else {
         return Ok(IterAction::FallThrough);
     };
@@ -1236,6 +1249,7 @@ fn find_parallel_step_pair(
     handlers: &HandlerRegistry,
     node_index: &NodeIndex<'_>,
     deferred: &crate::handlers::step_deferral::PendingStepDeferrals,
+    held_cancel_parents: Option<&HashSet<ExecutionNodeId>>,
 ) -> Option<[usize; 2]> {
     // ⚡ Bolt: Use a flat Vec instead of a HashMap to avoid allocation overhead on the hot path.
     // The number of concurrent parallel branches is typically very small.
@@ -1251,7 +1265,7 @@ fn find_parallel_step_pair(
         if node.state != NodeState::Running
             || deferred.contains(node.id)
             || !handlers.contains(&step_def.handler)
-            || is_inside_decided_race(tree, block_map, node, node_index)
+            || is_inside_decided_race(tree, block_map, node, node_index, held_cancel_parents)
             || has_racing_composite_sibling(tree, block_map, node, node_index)
         {
             continue;
@@ -1324,7 +1338,7 @@ async fn phase_composite_reevaluation(
     let mut early_restart = false;
     for idx in &composite_indices {
         let node = &ctx.tree[*idx];
-        if ctx.pending_deferrals.contains(node.id) {
+        if ctx.pending_deferrals.contains(node.id) || ctx.held_cancel_parents.contains(&node.id) {
             continue;
         }
         let Ok(block) = block_map
@@ -1410,6 +1424,7 @@ async fn dispatch_ready_step(
             &node_index,
             &ctx.pending_deferrals,
             StepSelection::AnyReady,
+            Some(&ctx.held_cancel_parents),
         )
     };
     let Some(idx) = idx else {
@@ -1493,6 +1508,7 @@ fn find_running_step_index(
     node_index: &NodeIndex<'_>,
     deferred: &crate::handlers::step_deferral::PendingStepDeferrals,
     selection: StepSelection,
+    held_cancel_parents: Option<&HashSet<ExecutionNodeId>>,
 ) -> Option<usize> {
     for (i, node) in tree.iter().enumerate() {
         if node.state != NodeState::Running || deferred.contains(node.id) {
@@ -1502,7 +1518,7 @@ fn find_running_step_index(
             .binary_search_by_key(&&node.block_id, |(id, _)| *id)
             .map(|idx| block_map[idx].1)
         {
-            if is_inside_decided_race(tree, block_map, node, node_index) {
+            if is_inside_decided_race(tree, block_map, node, node_index, held_cancel_parents) {
                 continue;
             }
             if matches!(selection, StepSelection::PreferComposites)
@@ -1538,7 +1554,7 @@ fn find_running_step<'a>(
             && let BlockDefinition::Step(step_def) = block
         {
             // Skip steps inside a race where another branch already won.
-            if is_inside_decided_race(tree, block_map, node, node_index) {
+            if is_inside_decided_race(tree, block_map, node, node_index, None) {
                 continue;
             }
             // Defer *in-process* steps that race against a composite sibling
@@ -1605,12 +1621,17 @@ fn is_inside_decided_race(
     block_map: &[(&BlockId, &BlockDefinition)],
     node: &ExecutionNode,
     node_index: &NodeIndex<'_>,
+    held_cancel_parents: Option<&HashSet<ExecutionNodeId>>,
 ) -> bool {
     let mut child = node;
     while let Some(parent_id) = child.parent_id {
         let Some(parent) = get_node(node_index, parent_id) else {
             return false;
         };
+        if held_cancel_parents.is_some_and(|parents| parents.contains(&parent_id)) {
+            child = parent;
+            continue;
+        }
         if let Ok(BlockDefinition::Race(race_def)) = block_map
             .binary_search_by_key(&&parent.block_id, |(id, _)| *id)
             .map(|idx| block_map[idx].1)

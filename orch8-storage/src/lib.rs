@@ -54,6 +54,7 @@ pub mod telemetry_validation;
 pub mod tenancy;
 #[cfg(feature = "postgres")]
 pub mod tenant_partition;
+pub mod workbench;
 // Test-only infrastructure (fault injection, fixtures, backend matrix).
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
@@ -103,7 +104,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 159;
+pub const STORAGE_SCHEMA_VERSION: u32 = 161;
 
 /// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
 const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
@@ -470,6 +471,17 @@ pub enum ClaimedRead<T> {
     Value(T),
 }
 
+/// Effects of a single compare-and-set lifecycle transition.
+#[derive(Clone, Copy)]
+pub struct LifecycleTransition<'a> {
+    pub instance_id: InstanceId,
+    pub claim_token: Option<DateTime<Utc>>,
+    pub from: InstanceState,
+    pub to: InstanceState,
+    pub next_fire_at: Option<DateTime<Utc>>,
+    pub webhooks: &'a [orch8_types::webhook_outbox::WebhookOutboxEntry],
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait InstanceStore: Send + Sync + 'static {
@@ -818,6 +830,13 @@ pub trait InstanceStore: Send + Sync + 'static {
         expected_state: InstanceState,
         new_state: InstanceState,
         next_fire_at: Option<DateTime<Utc>>,
+    ) -> Result<bool, StorageError>;
+
+    /// Commit a lifecycle transition, its audit event, and its webhook rows.
+    /// A stale state or claim commits none of them.
+    async fn commit_lifecycle_transition(
+        &self,
+        transition: LifecycleTransition<'_>,
     ) -> Result<bool, StorageError>;
 
     /// CAS the instance state AND enqueue webhook outbox rows in one
@@ -1591,6 +1610,17 @@ pub trait OutputStore: Send + Sync + 'static {
         ))
     }
 
+    /// Final comparison output per visible block, ordered by first recording.
+    /// Retry markers and private block IDs are ignored when choosing either row.
+    async fn get_comparison_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        Ok(current_outputs::comparison_from_history(
+            self.get_all_outputs(instance_id).await?,
+        ))
+    }
+
     /// Latest current result per block, including retry diagnostics. Excludes
     /// in-progress markers and interceptor/SLA metadata before choosing each
     /// winner. Ordered by `(created_at, id)`; the provided database backends
@@ -1794,6 +1824,46 @@ pub trait OutputStore: Send + Sync + 'static {
         id: Uuid,
         claim_token: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
+
+    /// Keep the newest `retain` rows per selected block, ordered by `(created_at, id)`.
+    /// Zero retains all outputs. A stale running claim returns `None`.
+    /// Built-in backends select and delete metadata in one statement under the claim lock.
+    async fn compact_block_outputs(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[&BlockId],
+        retain: u32,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<Option<u64>, StorageError> {
+        if retain == 0 || block_ids.is_empty() {
+            return Ok(Some(0));
+        }
+        let block_ids: std::collections::HashSet<_> = block_ids.iter().copied().collect();
+        let mut rows = self.get_all_outputs(instance_id).await?;
+        rows.retain(|row| block_ids.contains(&row.block_id));
+        rows.sort_unstable_by(|a, b| {
+            a.block_id
+                .cmp(&b.block_id)
+                .then_with(|| (b.created_at, b.id).cmp(&(a.created_at, a.id)))
+        });
+        let mut deleted = 0;
+        for block in rows.chunk_by(|a, b| a.block_id == b.block_id) {
+            for row in block.iter().skip(retain as usize) {
+                if let Some(token) = claim_token {
+                    if !self
+                        .delete_block_output_by_id_claimed(instance_id, row.id, token)
+                        .await?
+                    {
+                        return Ok(None);
+                    }
+                } else {
+                    self.delete_block_output_by_id(row.id).await?;
+                }
+                deleted += 1;
+            }
+        }
+        Ok(Some(deleted))
+    }
 
     /// Delete ALL `block_outputs` for an instance.
     async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
@@ -2124,6 +2194,16 @@ pub trait SignalStore: Send + Sync + 'static {
         instance_ids: &[InstanceId],
     ) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError>;
 
+    /// Acknowledge a cancel and persist its pending drain in one write.
+    async fn defer_cancel_signal(
+        &self,
+        instance_id: InstanceId,
+        signal_id: Uuid,
+    ) -> Result<(), StorageError>;
+
+    /// Whether an acknowledged cancel must still be applied by the evaluator.
+    async fn has_deferred_cancel(&self, instance_id: InstanceId) -> Result<bool, StorageError>;
+
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
 
     /// Deliver a pending signal belonging to this instance under its original
@@ -2162,6 +2242,9 @@ pub trait SignalStore: Send + Sync + 'static {
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait WorkerStore: Send + Sync + 'static {
+    /// Verify the durable tables required to admit and publish worker steps.
+    async fn verify_worker_admission(&self) -> Result<(), StorageError>;
+
     /// Claim and retain authenticated ownership and transport references atomically.
     async fn claim_worker_tasks_with_transport(
         &self,
@@ -2213,25 +2296,16 @@ pub trait WorkerStore: Send + Sync + 'static {
     /// Returns `None` for a lost claim, invalid target or unavailable owner.
     async fn prepare_worker_dispatch(
         &self,
-        _instance: &TaskInstance,
-        _block_id: &orch8_types::ids::BlockId,
-        _selection: &crate::worker_invocation::WorkerDispatchSelection,
-    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError> {
-        Err(StorageError::Unsupported(
-            "worker dispatch preparation".into(),
-        ))
-    }
+        instance: &TaskInstance,
+        block_id: &orch8_types::ids::BlockId,
+        selection: &crate::worker_invocation::WorkerDispatchSelection,
+    ) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
 
     /// Atomically admit the logical effect and publish its exact prepared task.
     async fn admit_worker_dispatch(
         &self,
         intent: &crate::worker_admission::WorkerDispatchIntent,
-    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError> {
-        let _ = intent;
-        Err(StorageError::Unsupported(
-            "atomic worker dispatch admission".into(),
-        ))
-    }
+    ) -> Result<crate::worker_admission::WorkerDispatchPublication, StorageError>;
 
     /// Identity-only primitive. Remote activity producers must use atomic admission.
     /// Returns the actual queued id when an idempotent upsert retains a retry row.
@@ -2239,12 +2313,7 @@ pub trait WorkerStore: Send + Sync + 'static {
         &self,
         task: &WorkerTask,
         fence: &worker_invocation::WorkerDispatchFence,
-    ) -> Result<Option<Uuid>, StorageError> {
-        let _ = (task, fence);
-        Err(StorageError::Unsupported(
-            "claim-bound worker dispatch".into(),
-        ))
-    }
+    ) -> Result<Option<Uuid>, StorageError>;
 
     async fn get_worker_task(&self, task_id: Uuid) -> Result<Option<WorkerTask>, StorageError>;
 
@@ -3563,6 +3632,18 @@ pub trait AdminStore: Send + Sync + 'static {
     async fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), StorageError>;
 
     /// List audit log entries for an instance.
+    /// Fast, payload-free workbench scan. `None` selects the compatibility
+    /// implementation for an external adapter. `Some(vec![])` is an empty page.
+    async fn get_bounded_workbench_events(
+        &self,
+        _instance: InstanceId,
+        _tenant: &TenantId,
+        _after: Option<workbench::EventKey>,
+        _limit: u32,
+    ) -> Result<Option<Vec<workbench::EventRow>>, StorageError> {
+        Ok(None)
+    }
+
     async fn list_audit_log(
         &self,
         instance_id: InstanceId,

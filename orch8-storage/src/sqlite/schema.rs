@@ -446,8 +446,15 @@ CREATE INDEX IF NOT EXISTS idx_worker_tasks_stranded
     ON worker_tasks(created_at) WHERE state = 'pending' AND awaiting_dispatch = 1;
 CREATE INDEX IF NOT EXISTS idx_worker_tasks_created ON worker_tasks(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_block_outputs_instance ON block_outputs(instance_id);
+CREATE INDEX IF NOT EXISTS idx_block_outputs_history_page
+    ON block_outputs(instance_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_block_outputs_retention
+    ON block_outputs(instance_id, block_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_execution_tree_instance ON execution_tree(instance_id);
+CREATE INDEX IF NOT EXISTS idx_execution_tree_instance_id ON execution_tree(instance_id, id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_instance ON audit_log(instance_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_instance_page
+    ON audit_log(instance_id, tenant_id, created_at, id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_tenant ON audit_log(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_task_instances_waiting_updated
     ON task_instances(updated_at) WHERE state = 'waiting';
@@ -1816,7 +1823,7 @@ CREATE INDEX IF NOT EXISTS idx_capsule_source_cut_instance
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 87;
+pub(super) const SCHEMA_VERSION: i64 = 88;
 
 pub(super) const WASM_RETIREMENT_TRIGGERS: &str = "
 CREATE TRIGGER IF NOT EXISTS guard_sequence_wasm_artifacts

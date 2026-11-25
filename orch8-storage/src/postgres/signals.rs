@@ -203,6 +203,34 @@ pub(super) async fn get_pending_batch(
     Ok(map)
 }
 
+pub(super) async fn defer_cancel(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+    signal_id: Uuid,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE signal_inbox SET delivered=TRUE, deferred_cancel=TRUE, delivered_at=NOW()
+         WHERE instance_id=$1 AND id=$2 AND signal_type='cancel' AND delivered=FALSE",
+    )
+    .bind(instance_id.into_uuid())
+    .bind(signal_id)
+    .execute(&store.pool)
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn has_deferred_cancel(
+    store: &PostgresStorage,
+    instance_id: InstanceId,
+) -> Result<bool, StorageError> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM signal_inbox WHERE instance_id=$1 AND deferred_cancel)",
+    )
+    .bind(instance_id.into_uuid())
+    .fetch_one(&store.pool)
+    .await?)
+}
+
 pub(super) async fn mark_delivered(
     store: &PostgresStorage,
     signal_id: Uuid,

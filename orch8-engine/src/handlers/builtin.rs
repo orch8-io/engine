@@ -518,7 +518,10 @@ async fn is_inside_finally(ctx: &StepContext) -> bool {
 }
 
 /// Check for pending pause/cancel signals during a sleep and handle them.
-async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepError>> {
+async fn check_sleep_signals(
+    ctx: &StepContext,
+    shielded: bool,
+) -> Option<Result<Value, StepError>> {
     let signals = ctx
         .storage
         .get_pending_signals(ctx.instance_id)
@@ -530,7 +533,7 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
     let has_pause = signals
         .iter()
         .any(|s| matches!(s.signal_type, orch8_types::signal::SignalType::Pause));
-    if has_pause && !has_cancel {
+    if has_pause && !has_cancel && !shielded {
         debug!(
             instance_id = %ctx.instance_id,
             block_id = %ctx.block_id,
@@ -563,26 +566,38 @@ async fn check_sleep_signals(ctx: &StepContext) -> Option<Result<Value, StepErro
             block_id = %ctx.block_id,
             "sleep step interrupted by cancel signal — driving cancel"
         );
-        let _ = crate::signals::process_signals_owned(
+        let signals = if shielded {
+            signals
+                .into_iter()
+                .filter(|signal| {
+                    matches!(signal.signal_type, orch8_types::signal::SignalType::Cancel)
+                })
+                .collect()
+        } else {
+            signals
+        };
+        let aborted = crate::signals::process_signals_prefetched_owned(
             &ctx.storage,
             ctx.instance_id,
             orch8_types::instance::InstanceState::Running,
+            signals,
+            None,
         )
-        .await;
-        if let Ok(tree) = ctx.storage.get_execution_tree(ctx.instance_id).await {
-            for n in tree.iter().filter(|n| {
-                matches!(
-                    n.state,
-                    orch8_types::execution::NodeState::Pending
-                        | orch8_types::execution::NodeState::Running
-                        | orch8_types::execution::NodeState::Waiting
-                )
-            }) {
-                let _ = ctx
-                    .storage
-                    .update_node_state(n.id, orch8_types::execution::NodeState::Cancelled)
-                    .await;
-            }
+        .await
+        .ok()?;
+        let step_cancelled = ctx
+            .storage
+            .get_execution_tree(ctx.instance_id)
+            .await
+            .ok()
+            .is_some_and(|tree| {
+                tree.iter().any(|node| {
+                    node.block_id == ctx.block_id
+                        && node.state == orch8_types::execution::NodeState::Cancelled
+                })
+            });
+        if !aborted && !step_cancelled {
+            return None;
         }
         return Some(Err(StepError::Retryable {
             message: "sleep cancelled by signal".into(),
@@ -682,8 +697,7 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
     // it cannot change while we're asleep. The previous loop re-queried the
     // full execution tree every 250ms, producing ~14,400 DB round-trips per
     // hour of sleep per in-flight instance. Resolve both flags once up front.
-    let suppress_signals =
-        is_inside_cancellation_scope(&ctx).await || is_inside_finally(&ctx).await;
+    let shielded = is_inside_cancellation_scope(&ctx).await || is_inside_finally(&ctx).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(duration_ms);
     loop {
@@ -695,18 +709,9 @@ async fn handle_sleep(ctx: StepContext) -> Result<Value, StepError> {
         let tick = remaining.min(std::time::Duration::from_millis(CANCEL_POLL_MS));
         tokio::time::sleep(tick).await;
 
-        // Check for a pending cancel signal. A failed lookup must not
-        // abort the sleep — storage glitches should be transparent here.
-        //
-        // Skip cancel handling if this sleep is running inside a
-        // `CancellationScope` — scoped children are intentionally shielded
-        // from external cancel signals (`handlers/cancellation_scope.rs`).
-        // The scheduler's regular signal path will defer the cancel until
-        // the scope drains, matching `cancel_scoped`'s semantics.
-        if suppress_signals {
-            continue;
-        }
-        if let Some(result) = check_sleep_signals(&ctx).await {
+        // Consume cancel while the protected sleep is still running so the
+        // evaluator can finish the drain even if this is the last step.
+        if let Some(result) = check_sleep_signals(&ctx, shielded).await {
             return result;
         }
     }

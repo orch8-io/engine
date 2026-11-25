@@ -10,9 +10,12 @@
 
 use chrono::{DateTime, Duration, Utc};
 use orch8_api::test_harness::{TestServer, spawn_test_server};
-use orch8_storage::{AdminStore, InstanceStore, OutputStore, SequenceStore, WorkerStore};
+use orch8_storage::{
+    AdminStore, ExecutionTreeStore, InstanceStore, OutputStore, SequenceStore, WorkerStore,
+};
 use orch8_types::audit::AuditLogEntry;
-use orch8_types::ids::{BlockId, InstanceId, SequenceId, TenantId};
+use orch8_types::execution::{BlockType, ExecutionNode, NodeState};
+use orch8_types::ids::{BlockId, ExecutionNodeId, InstanceId, SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::output::BlockOutput;
 use orch8_types::step_log::StepLogEntry;
@@ -688,6 +691,81 @@ async fn workbench_limit_1_returns_single_event_and_truncated_flag() {
 }
 
 #[tokio::test]
+async fn workbench_cursor_pages_equal_timestamps_without_duplicates() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (_, inst) = fixture(&srv, &client, json!({})).await;
+    let at = past_ts(0);
+    seed_audit(
+        &srv,
+        inst,
+        "state_transition",
+        Some("waiting"),
+        Some("running"),
+        at,
+    )
+    .await;
+    record_output_full(&srv, inst, "a", json!({}), None, 1, at).await;
+    record_output_full(&srv, inst, "b", json!({}), None, 1, at).await;
+    seed_log(&srv, inst, "a", "first", at).await;
+    seed_log(&srv, inst, "b", "second", at).await;
+
+    let base = srv.v1_url();
+    let expected = get_workbench(&base, &client, inst, "").await;
+    let first = get_workbench(&base, &client, inst, "?limit=2").await;
+    let cursor = first["next_cursor"]
+        .as_str()
+        .expect("a truncated page has a cursor");
+    let second = get_workbench(&base, &client, inst, &format!("?limit=2&cursor={cursor}")).await;
+    let cursor = second["next_cursor"].as_str().expect("more results follow");
+    let last = get_workbench(&base, &client, inst, &format!("?limit=20&cursor={cursor}")).await;
+
+    assert_eq!(
+        [event_ids(&first), event_ids(&second), event_ids(&last)].concat(),
+        event_ids(&expected),
+    );
+    assert_eq!(first["outputs"].as_array().unwrap().len(), 1);
+    assert_eq!(second["outputs"].as_array().unwrap().len(), 1);
+    assert_eq!(last["events_truncated"], false);
+    assert!(last["next_cursor"].is_null());
+}
+
+#[tokio::test]
+async fn workbench_pages_nodes_in_id_order() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (_, inst) = fixture(&srv, &client, json!({})).await;
+    let nodes: Vec<_> = (1..=501)
+        .rev()
+        .map(|id| ExecutionNode {
+            id: ExecutionNodeId::from_uuid(Uuid::from_u128(id)),
+            instance_id: InstanceId::from_uuid(inst),
+            block_id: BlockId::new(format!("step-{id}")),
+            parent_id: None,
+            block_type: BlockType::Step,
+            branch_index: None,
+            state: NodeState::Pending,
+            started_at: None,
+            completed_at: None,
+        })
+        .collect();
+    srv.storage
+        .create_execution_nodes_batch(&nodes)
+        .await
+        .unwrap();
+    let base = srv.v1_url();
+    let first = get_workbench(&base, &client, inst, "").await;
+    assert_eq!(first["nodes"].as_array().unwrap().len(), 500);
+    assert_eq!(first["nodes"][0]["id"], Uuid::from_u128(1).to_string());
+    let next_node = first["next_node"].as_str().unwrap();
+    let second = get_workbench(&base, &client, inst, &format!("?nodes_after={next_node}")).await;
+    let remaining = second["nodes"].as_array().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0]["id"], Uuid::from_u128(501).to_string());
+    assert!(second["next_node"].is_null());
+}
+
+#[tokio::test]
 async fn workbench_limit_0_clamps_to_1() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1238,6 +1316,7 @@ async fn compare_execution_order_preserved_in_only_lists() {
     record_output_full(&srv, left, "zeta", json!({}), None, 1, past_ts(0)).await;
     record_output_full(&srv, left, "alpha", json!({}), None, 1, past_ts(1)).await;
     record_output_full(&srv, left, "mid", json!({}), None, 1, past_ts(2)).await;
+    record_output_full(&srv, left, "zeta", json!({}), None, 2, past_ts(3)).await;
     let _ = right;
 
     let cmp = get_compare(&srv.v1_url(), &client, left, right).await;

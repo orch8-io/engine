@@ -8,10 +8,8 @@
     "worker": "tsx --env-file=.env worker.ts",
     "trigger": "tsx --env-file=.env trigger.ts",
     "webhook": "tsx --env-file=.env webhook.ts",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "@orch8.io/sdk": "^0.7.0"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test worker.test.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",

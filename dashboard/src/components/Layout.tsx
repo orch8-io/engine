@@ -74,9 +74,6 @@ const NAV_GROUPS: Array<{
 type ConnState = "connecting" | "online" | "offline";
 
 export default function Layout() {
-  const [conn, setConn] = useState<ConnState>("connecting");
-  const [workers, setWorkers] = useState<number>(0);
-  const [lastPoll, setLastPoll] = useState<string>("—");
   const [info, setInfo] = useState<EngineInfo | null>(null);
 
   // Deployment info is static for the life of the process — fetch once.
@@ -96,28 +93,15 @@ export default function Layout() {
   );
   const approvalCount = approvalsData?.total ?? 0;
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const tick = async () => {
-      try {
-        await checkHealth();
-        const stats = await getWorkerTaskStats().catch(() => null);
-        if (cancelled) return;
-        setConn("online");
-        setWorkers(stats?.active_workers.length ?? 0);
-        setLastPoll(new Date().toLocaleTimeString());
-      } catch {
-        if (!cancelled) setConn("offline");
-      }
-    };
-    tick();
-    const id = setInterval(tick, 2000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+  const connectionFetcher = useCallback(async (signal?: AbortSignal) => {
+    await checkHealth(signal);
+    const stats = await getWorkerTaskStats(signal).catch(() => null);
+    return stats?.active_workers?.length ?? 0;
   }, []);
+  const { data: workerCount, error: connectionError, updatedAt } = usePolling(connectionFetcher, 2000);
+  const conn: ConnState = connectionError ? "offline" : updatedAt ? "online" : "connecting";
+  const workers = workerCount ?? 0;
+  const lastPoll = updatedAt ? new Date(updatedAt).toLocaleTimeString() : "—";
 
   return (
     <div className="min-h-screen grid grid-cols-1 grid-rows-[auto_1fr] lg:grid-cols-[220px_1fr] lg:grid-rows-[1fr_28px] bg-bg text-ink">

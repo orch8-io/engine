@@ -16,7 +16,7 @@ backend_test!(
             .await
             .unwrap_or_else(|e| panic!("{} violates the storage contract: {e}", b.name()));
 
-        assert_eq!(report.checks.len(), 9);
+        assert_eq!(report.checks.len(), 10);
         let evidence = b
             .storage
             .get_instance(report.instance_id)
@@ -126,5 +126,53 @@ backend_test!(
 
         assert!(!raw.contains("plaintext-marker"), "row holds plaintext: {raw}");
         assert_eq!(read_back.context.data["secret"], "plaintext-marker");
+    }
+);
+
+backend_test!(
+    async fn lifecycle_audit_failure_rolls_back_state(b) {
+        match b.kind {
+            BackendKind::Sqlite | BackendKind::EncryptedSqlite => {
+                sqlx::raw_sql(
+                    "CREATE TRIGGER fail_state_audit BEFORE INSERT ON audit_log
+                     WHEN NEW.event_type='state_transition'
+                     BEGIN SELECT RAISE(ABORT, 'test audit failure'); END;",
+                )
+                .execute(b.sqlite_pool())
+                .await
+                .unwrap();
+            }
+            BackendKind::Postgres | BackendKind::EncryptedPostgres => {
+                sqlx::raw_sql(
+                    "CREATE FUNCTION fail_state_audit() RETURNS trigger LANGUAGE plpgsql AS
+                     $$ BEGIN RAISE EXCEPTION 'test audit failure'; END; $$;
+                     CREATE TRIGGER fail_state_audit BEFORE INSERT ON audit_log
+                     FOR EACH ROW WHEN (NEW.event_type='state_transition')
+                     EXECUTE FUNCTION fail_state_audit();",
+                )
+                .execute(b.pg_pool())
+                .await
+                .unwrap();
+            }
+        }
+        let seq = SequenceBuilder::new("t").step("s", "noop").build();
+        b.storage.create_sequence(&seq).await.unwrap();
+        let inst = InstanceBuilder::for_sequence(&seq).due_now().build();
+        b.storage.create_instance(&inst).await.unwrap();
+        assert!(
+            b.storage
+                .commit_lifecycle_transition(orch8_storage::LifecycleTransition {
+                    instance_id: inst.id,
+                    claim_token: None,
+                    from: InstanceState::Scheduled,
+                    to: InstanceState::Cancelled,
+                    next_fire_at: None,
+                    webhooks: &[],
+                })
+                .await
+                .is_err()
+        );
+        let actual = b.storage.get_instance(inst.id).await.unwrap().unwrap();
+        assert_eq!(actual.state, InstanceState::Scheduled);
     }
 );

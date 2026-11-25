@@ -865,6 +865,13 @@ impl crate::InstanceStore for PostgresStorage {
         .await
     }
 
+    async fn commit_lifecycle_transition(
+        &self,
+        transition: crate::LifecycleTransition<'_>,
+    ) -> Result<bool, StorageError> {
+        instances::commit_lifecycle_transition(self, transition).await
+    }
+
     async fn conditional_update_instance_state_with_outbox(
         &self,
         id: InstanceId,
@@ -1378,6 +1385,13 @@ impl crate::OutputStore for PostgresStorage {
         outputs::get_latest_completed(self, instance_id).await
     }
 
+    async fn get_comparison_outputs(
+        &self,
+        instance_id: InstanceId,
+    ) -> Result<Vec<BlockOutput>, StorageError> {
+        outputs::get_comparison(self, instance_id).await
+    }
+
     async fn get_latest_diagnostic_outputs(
         &self,
         instance_id: InstanceId,
@@ -1527,6 +1541,30 @@ impl crate::OutputStore for PostgresStorage {
         claim_token: DateTime<Utc>,
     ) -> Result<Option<u64>, StorageError> {
         claimed_writes::delete_outputs(self, instance_id, block_ids, claim_token).await
+    }
+    async fn compact_block_outputs(
+        &self,
+        instance_id: InstanceId,
+        block_ids: &[&BlockId],
+        retain: u32,
+        claim_token: Option<DateTime<Utc>>,
+    ) -> Result<Option<u64>, StorageError> {
+        if retain == 0 || block_ids.is_empty() {
+            return Ok(Some(0));
+        }
+        if let Some(token) = claim_token {
+            let Some(mut tx) = claimed_writes::begin(self, instance_id, token).await? else {
+                return Ok(None);
+            };
+            let deleted = outputs::compact_on(&mut tx, instance_id, block_ids, retain).await?;
+            tx.commit().await?;
+            Ok(Some(deleted))
+        } else {
+            let mut conn = self.pool.acquire().await?;
+            outputs::compact_on(&mut conn, instance_id, block_ids, retain)
+                .await
+                .map(Some)
+        }
     }
     async fn delete_block_output_by_id_claimed(
         &self,
@@ -1778,6 +1816,18 @@ impl crate::SignalStore for PostgresStorage {
         signals::get_pending_batch(self, instance_ids).await
     }
 
+    async fn defer_cancel_signal(
+        &self,
+        instance_id: InstanceId,
+        signal_id: Uuid,
+    ) -> Result<(), StorageError> {
+        signals::defer_cancel(self, instance_id, signal_id).await
+    }
+
+    async fn has_deferred_cancel(&self, instance_id: InstanceId) -> Result<bool, StorageError> {
+        signals::has_deferred_cancel(self, instance_id).await
+    }
+
     async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError> {
         signals::mark_delivered(self, signal_id).await
     }
@@ -1809,6 +1859,18 @@ impl crate::SignalStore for PostgresStorage {
 
 #[async_trait]
 impl crate::WorkerStore for PostgresStorage {
+    async fn verify_worker_admission(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "SELECT task.id FROM worker_tasks task
+             JOIN worker_task_invocations invocation ON 1=0
+             JOIN worker_task_admissions admission ON 1=0
+             WHERE 1=0",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn claim_worker_tasks_with_authority(
         &self,
         request: &crate::worker_claim::WorkerClaimRequest,
@@ -3228,6 +3290,30 @@ impl crate::AdminStore for PostgresStorage {
         entry: &orch8_types::audit::AuditLogEntry,
     ) -> Result<(), StorageError> {
         audit::append(self, entry).await
+    }
+
+    async fn get_bounded_workbench_events(
+        &self,
+        instance: InstanceId,
+        tenant: &TenantId,
+        after: Option<crate::workbench::EventKey>,
+        limit: u32,
+    ) -> Result<Option<Vec<crate::workbench::EventRow>>, StorageError> {
+        let rows = sqlx::query_as::<_, crate::workbench::EventRecord>(
+            crate::workbench::POSTGRES_EVENT_PAGE_QUERY,
+        )
+        .bind(instance.into_uuid())
+        .bind(after.map(|key| key.timestamp))
+        .bind(after.map(|key| key.rank))
+        .bind(after.map(|key| key.id))
+        .bind(i64::from(limit))
+        .bind(tenant.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(crate::workbench::EventRecord::into_event)
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     async fn list_audit_log(

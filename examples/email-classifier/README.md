@@ -1,6 +1,6 @@
 # Email Classifier Pipeline
 
-A production-ready example of an orch8 workflow that automatically triages
+An example of an orch8 workflow that automatically triages
 inbound emails: classifies them with AI, enriches with web context, and posts
 a formatted notification to Slack.
 
@@ -94,6 +94,7 @@ this with your own filtering rules (sender allowlist, regex patterns, etc).
 | -------------- | ------------------------------------------------------------------------------- |
 | `deploy.ts`    | Registers the workflow sequence with orch8 (raw JSON, no SDK abstraction)       |
 | `worker.ts`    | Node.js worker polling for `check_subject_prefix` and `search_and_format` tasks |
+| `worker-leases.ts` | Worker polling, heartbeat, and claim-epoch reporting over the engine HTTP API |
 | `webhook.ts`   | HTTP adapter converting Resend webhook payload → orch8 instance creation        |
 | `trigger.ts`   | CLI script to simulate an inbound email (for testing without real email)        |
 | `.env.example` | All required environment variables with documentation                           |
@@ -105,13 +106,14 @@ this with your own filtering rules (sender allowlist, regex patterns, etc).
 ### Prerequisites
 
 - orch8 engine binary (built from this repo)
-- Node.js 20+ (required by the Activepieces sidecar)
+- Node.js 22+
 - ngrok (for local development with Resend webhooks)
 - Activepieces sidecar with `@activepieces/piece-slack` installed
 
 ### 1. Environment variables
 
 ```bash
+npm ci
 cp .env.example .env
 ```
 
@@ -121,6 +123,8 @@ cp .env.example .env
 | `SLACK_ACCESS_TOKEN` | Slack app → OAuth & Permissions → Bot Token (`xoxb-...`)      |
 | `SLACK_CHANNEL_ID`   | Right-click channel → View details → ID at bottom             |
 | `ORCH8_URL`          | Default: `http://localhost:8080/api/v1`                       |
+| `ORCH8_API_KEY`      | Optional key for the worker, scoped to the `example` tenant   |
+| `ORCH8_WORKER_ID`    | Optional worker ID. Defaults to a unique ID per process.    |
 
 ### 2. Slack app setup
 
@@ -177,6 +181,8 @@ After starting ngrok, copy the URL it shows (e.g.
 ---
 
 ## Testing without real email
+
+Run `npm test` to verify the worker’s HTTP lease protocol against a local fixture.
 
 ```bash
 # Trigger with "VIVA ORCH8:" prefix — full pipeline runs

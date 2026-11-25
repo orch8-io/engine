@@ -3457,7 +3457,11 @@ fn use_tree_evaluator(
         |ir| ir.top_level_has_plugin_handler,
     );
 
-    has_composite || has_plugin_handler
+    has_composite
+        || has_plugin_handler
+        || blocks.iter().any(|block| {
+            matches!(block, orch8_types::sequence::BlockDefinition::Step(step) if !step.cancellable)
+        })
 }
 
 /// Fast path: all blocks are Steps. Execute multi-block per claim cycle.

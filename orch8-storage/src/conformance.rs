@@ -74,6 +74,7 @@ pub async fn run_core_conformance(
     check_output(storage, instance.id).await?;
     check_signal(storage, instance.id).await?;
     check_change_feed(storage, &tenant, instance.id).await?;
+    check_terminal_lifecycle(storage, instance.id).await?;
     finalize_evidence(storage, sequence.id, instance.id).await?;
     Ok(ConformanceReport {
         scope,
@@ -89,6 +90,7 @@ pub async fn run_core_conformance(
             "signal_delivery",
             "tenant_change_cursor",
             "terminal_evidence",
+            "durable_terminal_lifecycle",
         ],
     })
 }
@@ -305,16 +307,65 @@ async fn check_signal(
     )
 }
 
+async fn check_terminal_lifecycle(
+    storage: &dyn StorageBackend,
+    instance_id: InstanceId,
+) -> Result<(), ConformanceError> {
+    const CHECK: &str = "durable_terminal_lifecycle";
+    let signal = Signal {
+        id: Uuid::now_v7(),
+        instance_id,
+        signal_type: SignalType::Cancel,
+        payload: json!({}),
+        delivered: false,
+        created_at: Utc::now(),
+        delivered_at: None,
+    };
+    backend(CHECK, storage.enqueue_signal(&signal).await)?;
+    backend(
+        CHECK,
+        storage.defer_cancel_signal(instance_id, signal.id).await,
+    )?;
+    let pending = backend(CHECK, storage.get_pending_signals(instance_id).await)?;
+    require(
+        CHECK,
+        pending.is_empty() && backend(CHECK, storage.has_deferred_cancel(instance_id).await)?,
+        "cancel acknowledgement must persist the deferred intent",
+    )?;
+    let transition = crate::LifecycleTransition {
+        instance_id,
+        claim_token: None,
+        from: InstanceState::Running,
+        to: InstanceState::Cancelled,
+        next_fire_at: None,
+        webhooks: &[],
+    };
+    let won = backend(CHECK, storage.commit_lifecycle_transition(transition).await)?;
+    let retried = backend(CHECK, storage.commit_lifecycle_transition(transition).await)?;
+    let audit = backend(CHECK, storage.list_audit_log(instance_id, 10).await)?;
+    require(
+        CHECK,
+        won && !retried
+            && !backend(CHECK, storage.has_deferred_cancel(instance_id).await)?
+            && audit
+                .iter()
+                .filter(|entry| entry.to_state.as_deref() == Some("cancelled"))
+                .count()
+                == 1,
+        "terminal transition must clear intent and record exactly one audit event",
+    )
+}
+
 async fn finalize_evidence(
     storage: &dyn StorageBackend,
     sequence_id: SequenceId,
     instance_id: InstanceId,
 ) -> Result<(), ConformanceError> {
-    backend(
+    let instance = backend("terminal_evidence", storage.get_instance(instance_id).await)?;
+    require(
         "terminal_evidence",
-        storage
-            .update_instance_state(instance_id, InstanceState::Cancelled, None)
-            .await,
+        instance.is_some_and(|row| row.state == InstanceState::Cancelled),
+        "expected cancelled instance",
     )?;
     backend(
         "terminal_evidence",

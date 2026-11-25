@@ -610,28 +610,19 @@ pub(super) async fn conditional_update_state_with_outbox(
     next_fire_at: Option<DateTime<Utc>>,
     entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
 ) -> Result<bool, StorageError> {
-    let mut tx = storage.pool.begin().await?;
-    let result = sqlx::query(
-        "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 WHERE id=?1 AND state=?5",
+    write_lifecycle(
+        storage,
+        crate::LifecycleTransition {
+            instance_id: id,
+            claim_token: None,
+            from: expected_state,
+            to: new_state,
+            next_fire_at,
+            webhooks: entries,
+        },
+        false,
     )
-    .bind(id.to_string())
-    .bind(new_state.to_string())
-    .bind(next_fire_at.map(ts))
-    .bind(ts(Utc::now()))
-    .bind(expected_state.to_string())
-    .execute(&mut *tx)
-    .await?;
-    if result.rows_affected() == 0 {
-        // CAS lost — roll back so no outbox rows are queued for a transition
-        // that never happened.
-        tx.rollback().await?;
-        return Ok(false);
-    }
-    for entry in entries {
-        super::webhook_outbox::park_tx(&mut tx, entry).await?;
-    }
-    tx.commit().await?;
-    Ok(true)
+    .await
 }
 
 pub(super) async fn conditional_update_claimed_state_with_outbox(
@@ -643,29 +634,87 @@ pub(super) async fn conditional_update_claimed_state_with_outbox(
     next_fire_at: Option<DateTime<Utc>>,
     entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry],
 ) -> Result<bool, StorageError> {
+    write_lifecycle(
+        storage,
+        crate::LifecycleTransition {
+            instance_id: id,
+            claim_token: Some(claimed_at),
+            from: expected_state,
+            to: new_state,
+            next_fire_at,
+            webhooks: entries,
+        },
+        false,
+    )
+    .await
+}
+
+pub(super) async fn commit_lifecycle_transition(
+    storage: &SqliteStorage,
+    transition: crate::LifecycleTransition<'_>,
+) -> Result<bool, StorageError> {
+    write_lifecycle(storage, transition, true).await
+}
+
+async fn write_lifecycle(
+    storage: &SqliteStorage,
+    transition: crate::LifecycleTransition<'_>,
+    audit: bool,
+) -> Result<bool, StorageError> {
     let mut tx = storage.pool.begin().await?;
-    let result = sqlx::query(sqlx::AssertSqlSafe(format!(
-        "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4 \
-         WHERE id=?1 AND state=?5 AND claimed_at=?6 AND {scope}",
+    let tenant: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "UPDATE task_instances SET state=?2, next_fire_at=?3, updated_at=?4
+          WHERE id=?1 AND state=?5 AND (?6 IS NULL OR (claimed_at=?6 AND {scope}))
+          RETURNING tenant_id",
         scope = super::mobile_execution::ALLOWED
     )))
-    .bind(id.to_string())
-    .bind(new_state.to_string())
-    .bind(next_fire_at.map(ts))
+    .bind(transition.instance_id.to_string())
+    .bind(transition.to.to_string())
+    .bind(transition.next_fire_at.map(ts))
     .bind(ts(Utc::now()))
-    .bind(expected_state.to_string())
-    .bind(ts(claimed_at))
-    .execute(&mut *tx)
+    .bind(transition.from.to_string())
+    .bind(transition.claim_token.map(ts))
+    .fetch_optional(&mut *tx)
     .await?;
-    if result.rows_affected() == 0 {
+    let Some(tenant) = tenant else {
         tx.rollback().await?;
         return Ok(false);
+    };
+    if audit {
+        let entry = orch8_types::audit::AuditLogEntry {
+            id: uuid::Uuid::now_v7(),
+            instance_id: transition.instance_id,
+            tenant_id: TenantId::unchecked(tenant),
+            event_type: "state_transition".into(),
+            from_state: Some(transition.from.to_string()),
+            to_state: Some(transition.to.to_string()),
+            block_id: None,
+            details: serde_json::Value::Null,
+            created_at: Utc::now(),
+        };
+        super::audit::append_on(&mut tx, &entry).await?;
     }
-    for entry in entries {
+    if transition.to.is_terminal() {
+        clear_deferred_cancel(&mut tx, transition.instance_id).await?;
+    }
+    for entry in transition.webhooks {
         super::webhook_outbox::park_tx(&mut tx, entry).await?;
     }
     tx.commit().await?;
     Ok(true)
+}
+
+async fn clear_deferred_cancel(
+    conn: &mut sqlx::SqliteConnection,
+    id: InstanceId,
+) -> Result<(), StorageError> {
+    sqlx::query(
+        "UPDATE signal_inbox SET deferred_cancel=0 WHERE instance_id=?1 AND deferred_cancel=1",
+    )
+    .bind(id.to_string())
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 pub(super) async fn update_context(
@@ -758,8 +807,10 @@ pub(super) async fn reset_instance_run(
     id: InstanceId,
     run_id: &str,
 ) -> Result<(), StorageError> {
-    let mut conn = storage.pool.acquire().await?;
-    reset_instance_run_on(&mut conn, id, run_id).await
+    let mut tx = storage.pool.begin().await?;
+    reset_instance_run_on(&mut tx, id, run_id).await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub(super) async fn reset_instance_run_on(
@@ -783,7 +834,7 @@ pub(super) async fn reset_instance_run_on(
     .bind(ts(Utc::now()))
     .execute(&mut *conn)
     .await?;
-    Ok(())
+    clear_deferred_cancel(conn, id).await
 }
 
 pub(super) async fn update_current_step_started_at(

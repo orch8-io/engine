@@ -625,6 +625,18 @@ GET /instances/{id}/effects?tenant_id={tenant_id}
 
 ---
 
+### Inspect an Execution
+
+`GET /instances/{id}/workbench` returns the execution state, redacted context,
+execution nodes, and a timeline of audit events, outputs, and step logs.
+
+- `limit` controls the timeline page size. The default is 500 and the maximum is 2000.
+- Pass `next_cursor` back as `cursor` to continue the timeline. Events sort by timestamp, event type, and ID.
+- Pass `next_node` back as `nodes_after` to continue the execution nodes, which are paged independently at 500 per page.
+- `outputs` summarizes the output events on that timeline page. Use [Get Outputs](#get-outputs) for payloads.
+
+---
+
 ### Retry Failed Instance
 
 ```
@@ -1654,7 +1666,7 @@ Routes traffic to one of several variants by weight. Useful for A/B testing diff
 }
 ```
 
-Child blocks inside a cancellation scope cannot be cancelled by external cancel signals. Provides subtree-level non-cancellability (Temporal-style structured concurrency). Use for critical sections like payment processing that must complete atomically.
+An external cancel signal stops unprotected workflow work and lets children in an already-entered cancellation scope finish, including children waiting for input. The engine records the cancellation before acknowledging it and resumes the drain after a restart. Once the protected work settles, the instance becomes `cancelled`. Handlers that perform external side effects still need their own idempotency and transaction guarantees.
 
 ---
 

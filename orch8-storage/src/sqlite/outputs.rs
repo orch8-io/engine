@@ -162,6 +162,17 @@ pub(super) async fn get_latest_completed(
     rows.iter().map(row_to_output).collect()
 }
 
+pub(super) async fn get_comparison(
+    store: &SqliteStorage,
+    instance_id: InstanceId,
+) -> Result<Vec<BlockOutput>, StorageError> {
+    let rows = sqlx::query(crate::current_outputs::SQLITE_COMPARISON_QUERY)
+        .bind(instance_id.to_string())
+        .fetch_all(&store.pool)
+        .await?;
+    rows.iter().map(row_to_output).collect()
+}
+
 pub(super) async fn get_latest_diagnostic(
     storage: &SqliteStorage,
     instance_id: InstanceId,
@@ -748,6 +759,33 @@ pub(super) async fn delete_by_id(
         .execute(&storage.pool)
         .await?;
     Ok(())
+}
+
+/// Compact one instance without selecting or decoding any output payload.
+pub(super) async fn compact_on(
+    conn: &mut sqlx::SqliteConnection,
+    instance_id: InstanceId,
+    block_ids: &[&BlockId],
+    retain: u32,
+) -> Result<u64, StorageError> {
+    let blocks: Vec<&str> = block_ids.iter().map(|block| block.as_str()).collect();
+    let deleted = sqlx::query(
+        "DELETE FROM block_outputs WHERE instance_id=?1 AND id IN (
+            SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY block_id ORDER BY created_at DESC, id DESC
+                ) AS retention_rank
+                FROM block_outputs WHERE instance_id=?1 AND block_id IN (SELECT value FROM json_each(?2))
+            ) ranked
+            WHERE retention_rank > ?3
+        )",
+    )
+    .bind(instance_id.to_string())
+    .bind(serde_json::to_string(&blocks).map_err(StorageError::Serialization)?)
+    .bind(i64::from(retain))
+    .execute(conn)
+    .await?;
+    Ok(deleted.rows_affected())
 }
 
 pub(super) async fn delete_owned_by_id_on(

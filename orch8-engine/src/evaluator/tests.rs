@@ -989,7 +989,7 @@ fn is_inside_decided_race_no_winner() {
     let pm = build_node_index(&tree);
 
     let block_map = flatten_blocks(&blocks);
-    assert!(!is_inside_decided_race(&tree, &block_map, leaf, &pm));
+    assert!(!is_inside_decided_race(&tree, &block_map, leaf, &pm, None));
 }
 
 // EV11: is_inside_decided_race returns true when sibling branch completed.
@@ -1036,7 +1036,7 @@ fn is_inside_decided_race_with_winner() {
     let pm = build_node_index(&tree);
 
     let block_map = flatten_blocks(&blocks);
-    assert!(is_inside_decided_race(&tree, &block_map, loser, &pm));
+    assert!(is_inside_decided_race(&tree, &block_map, loser, &pm, None));
 }
 
 // ENG-C1: a race is decided by a WHOLE branch, not by one branch's first
@@ -1101,7 +1101,7 @@ fn is_inside_decided_race_partial_branch_is_not_a_win() {
         let pm = build_node_index(&tree);
         let b1 = tree.iter().find(|n| n.id == b1_id).unwrap();
         assert!(
-            !is_inside_decided_race(&tree, &block_map, b1, &pm),
+            !is_inside_decided_race(&tree, &block_map, b1, &pm, None),
             "a1 alone completing must not decide the race"
         );
     }
@@ -1119,7 +1119,7 @@ fn is_inside_decided_race_whole_branch_wins() {
     );
     let pm = build_node_index(&tree);
     let b1 = tree.iter().find(|n| n.id == b1_id).unwrap();
-    assert!(is_inside_decided_race(&tree, &block_map, b1, &pm));
+    assert!(is_inside_decided_race(&tree, &block_map, b1, &pm, None));
 }
 
 #[test]
@@ -1133,12 +1133,12 @@ fn is_inside_decided_race_failure_respects_semantics() {
     // FirstToSucceed: branch a failed, b1 can still win → keep dispatching.
     let blocks = race_blocks(RaceSemantics::FirstToSucceed);
     let block_map = flatten_blocks(&blocks);
-    assert!(!is_inside_decided_race(&tree, &block_map, b1, &pm));
+    assert!(!is_inside_decided_race(&tree, &block_map, b1, &pm, None));
 
     // FirstToResolve: the first failure decides the race.
     let blocks = race_blocks(RaceSemantics::FirstToResolve);
     let block_map = flatten_blocks(&blocks);
-    assert!(is_inside_decided_race(&tree, &block_map, b1, &pm));
+    assert!(is_inside_decided_race(&tree, &block_map, b1, &pm, None));
 }
 
 // Run-past-failure: the shared sequential cursor must stop at a failed or

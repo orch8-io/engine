@@ -1,4 +1,6 @@
 import type { ConnectionInfo } from "./lib/copyAs";
+import { engineUrl, readEngineConnection, saveEngineConnection, type EngineConnection } from "./lib/connection";
+import { decodeInstancePage } from "./lib/instancePage";
 import type { TimelineEntryDto, TimelineTransitionDto } from "./lib/timeTravel";
 import {
   batchActionRequest,
@@ -14,41 +16,33 @@ import {
 
 const DEFAULT_API_URL = import.meta.env.VITE_ORCH8_API_URL || "http://localhost:8080";
 
-function getApiUrl(): string {
-  return localStorage.getItem("orch8_api_url") || DEFAULT_API_URL;
+export function getConnection(): EngineConnection {
+  return readEngineConnection(localStorage, DEFAULT_API_URL);
 }
 
-function getApiKey(): string | null {
-  return localStorage.getItem("orch8_api_key");
+export function saveConnection(connection: EngineConnection) {
+  saveEngineConnection(localStorage, connection);
 }
 
-function getTenantId(): string | null {
-  return localStorage.getItem("orch8_tenant_id");
+function engineEndpoint(path: string, baseUrl: string): URL {
+  const base = engineUrl(baseUrl);
+  const url = new URL(path, base);
+  if (url.origin !== base.origin) throw new Error("Request must target the configured engine.");
+  return url;
 }
 
 /** Base URL + tenant header the dashboard uses (never the API key). */
 export function connectionInfo(): ConnectionInfo {
-  return { baseUrl: getApiUrl(), tenantId: getTenantId() };
+  const { baseUrl, tenantId } = getConnection();
+  return { baseUrl, tenantId };
 }
 
-export function setApiUrl(url: string) {
-  localStorage.setItem("orch8_api_url", url);
-}
-
-export function setApiKey(key: string) {
-  localStorage.setItem("orch8_api_key", key);
-}
-
-export function clearApiKey() {
-  localStorage.removeItem("orch8_api_key");
-}
-
-export function setTenantId(tenantId: string) {
-  localStorage.setItem("orch8_tenant_id", tenantId);
-}
-
-export function clearTenantId() {
-  localStorage.removeItem("orch8_tenant_id");
+function engineRequestOptions(connection: EngineConnection) {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (connection.apiKey) headers["X-API-Key"] = connection.apiKey;
+  if (connection.tenantId) headers["X-Tenant-Id"] = connection.tenantId;
+  const redirect: RequestRedirect = connection.apiKey || connection.tenantId ? "error" : "follow";
+  return { headers, redirect };
 }
 
 async function request<T>(
@@ -56,20 +50,15 @@ async function request<T>(
   params?: Record<string, string | undefined>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const url = new URL(path, getApiUrl());
+  const connection = getConnection();
+  const url = engineEndpoint(path, connection.baseUrl);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v) url.searchParams.set(k, v);
     }
   }
 
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const apiKey = getApiKey();
-  if (apiKey) headers["X-API-Key"] = apiKey;
-  const tenantId = getTenantId();
-  if (tenantId) headers["X-Tenant-Id"] = tenantId;
-
-  const res = await fetch(url.toString(), { headers, signal });
+  const res = await fetch(url, { ...engineRequestOptions(connection), signal });
 
   if (res.status === 401) {
     throw new AuthError();
@@ -214,15 +203,16 @@ export function enqueueWorkerCommand(
   payload?: unknown,
   signal?: AbortSignal,
 ): Promise<WorkerCommand> {
-  return mutate("/workers/commands", "POST", { worker_id, command, tenant_id: getTenantId() ?? "", payload: payload ?? {} }, undefined, signal);
+  return mutate("/workers/commands", "POST", { worker_id, command, tenant_id: getConnection().tenantId ?? "", payload: payload ?? {} }, undefined, signal);
 }
 
 export function listWorkerCommands(worker_id: string, signal?: AbortSignal): Promise<WorkerCommand[]> {
   return request(`/workers/${encodeURIComponent(worker_id)}/commands`, undefined, signal);
 }
 
-export function checkHealth(signal?: AbortSignal): Promise<void> {
-  return request("/health/live", undefined, signal);
+export async function checkHealth(signal?: AbortSignal, baseUrl = getConnection().baseUrl): Promise<void> {
+  const res = await fetch(engineEndpoint("/health/live", baseUrl), { credentials: "omit", signal });
+  if (!res.ok) throw new ApiRequestError(res.status, await res.text());
 }
 
 /** Engine version + optional operator-set environment label/color. */
@@ -277,9 +267,9 @@ export interface TaskInstance {
   namespace: string;
   state: InstanceState;
   next_fire_at: string | null;
-  priority: Priority;
+  priority: Priority | "Low" | "Normal" | "High" | "Critical";
   timezone: string;
-  metadata: Record<string, unknown>;
+  metadata: unknown;
   context: Record<string, unknown>;
   concurrency_key?: string;
   max_concurrency?: number;
@@ -331,8 +321,8 @@ export async function listInstances(
       if (v) query[`metadata.${k}`] = v;
     }
   }
-  const raw = await request<TaskInstance[] | { items: TaskInstance[] }>("/instances", query, signal);
-  return Array.isArray(raw) ? raw : raw.items;
+  const raw = await request<unknown>("/instances", query, signal);
+  return decodeInstancePage(raw).items;
 }
 
 export function getInstance(id: string, signal?: AbortSignal): Promise<TaskInstance> {
@@ -1065,15 +1055,13 @@ async function mutate<T>(
   extraHeaders?: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const url = new URL(path, getApiUrl());
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const apiKey = getApiKey();
-  if (apiKey) headers["X-API-Key"] = apiKey;
-  const tenantId = getTenantId();
-  if (tenantId) headers["X-Tenant-Id"] = tenantId;
-  if (extraHeaders) Object.assign(headers, extraHeaders);
+  const connection = getConnection();
+  const url = engineEndpoint(path, connection.baseUrl);
+  const options = engineRequestOptions(connection);
+  const headers = { ...options.headers, ...extraHeaders };
 
-  const res = await fetch(url.toString(), {
+  const res = await fetch(url, {
+    ...options,
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -1406,12 +1394,12 @@ export function streamInstance(
   onEvent: (e: StreamEvent) => void,
   opts: { pollMs?: number } = {},
 ): () => void {
-  const url = new URL(
+  const { baseUrl, apiKey } = getConnection();
+  const url = engineEndpoint(
     `/instances/${encodeURIComponent(instanceId)}/stream`,
-    getApiUrl(),
+    baseUrl,
   );
   if (opts.pollMs) url.searchParams.set("poll_ms", String(opts.pollMs));
-  const apiKey = getApiKey();
   if (apiKey) url.searchParams.set("api_key", apiKey);
 
   const es = new EventSource(url.toString());
@@ -1695,8 +1683,8 @@ export function listInstanceArtifacts(id: string, signal?: AbortSignal): Promise
 }
 
 export function getArtifactUrl(key: string): string {
-  const url = new URL(`/artifacts/${encodeURIComponent(key)}`, getApiUrl());
-  const apiKey = getApiKey();
+  const { baseUrl, apiKey } = getConnection();
+  const url = engineEndpoint(`/artifacts/${encodeURIComponent(key)}`, baseUrl);
   if (apiKey) url.searchParams.set("api_key", apiKey);
   return url.toString();
 }

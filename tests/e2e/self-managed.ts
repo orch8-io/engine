@@ -41,6 +41,7 @@ export interface SelfManagedSuite {
 
 export const SELF_MANAGED_SUITES: readonly SelfManagedSuite[] = [
   // Server-lifecycle: restarts mid-test.
+  { file: "handlers/cancellation_scope.test.ts", reason: "restarts with a protected cancellation still pending" },
   { file: "resilience/persistence_recovery.test.ts", reason: "restarts the server mid-test" },
   // Globally-scoped state (rule #2).
   { file: "features/triggers.test.ts", reason: "trigger defs are globally scoped" },

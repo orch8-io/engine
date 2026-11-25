@@ -55,7 +55,8 @@ fault_impl! {
         async fn batch_reschedule_instances(&self, ids: &[InstanceId], fire_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn conditional_update_instance_state(&self, id: InstanceId, _expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
         async fn conditional_update_claimed_instance_state(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>) -> Result<bool, StorageError>;
-        async fn conditional_update_instance_state_with_outbox(&self, id: InstanceId, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
+        async fn commit_lifecycle_transition(&self, transition: crate::LifecycleTransition<'_>) -> Result<bool, StorageError>;
+    async fn conditional_update_instance_state_with_outbox(&self, id: InstanceId, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
         async fn conditional_update_claimed_instance_state_with_outbox(&self, id: InstanceId, claimed_at: DateTime<Utc>, expected_state: InstanceState, new_state: InstanceState, next_fire_at: Option<DateTime<Utc>>, entries: &[orch8_types::webhook_outbox::WebhookOutboxEntry]) -> Result<bool, StorageError>;
         async fn reset_instance_run(&self, id: InstanceId, run_id: &str) -> Result<(), StorageError>;
         async fn update_instance_context(&self, id: InstanceId, context: &orch8_types::context::ExecutionContext) -> Result<(), StorageError>;
@@ -135,6 +136,7 @@ fault_impl! {
         async fn get_scoped_block_output_attempt(&self, tenant: &TenantId, instance_id: InstanceId, block_id: &BlockId, attempt: u16) -> Result<Option<BlockOutput>, StorageError>;
         async fn get_block_outputs_batch(&self, keys: &[(InstanceId, &BlockId)]) -> Result<HashMap<(InstanceId, BlockId), BlockOutput>, StorageError>;
         async fn get_latest_completed_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
+        async fn get_comparison_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_latest_diagnostic_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_all_outputs(&self, instance_id: InstanceId) -> Result<Vec<BlockOutput>, StorageError>;
         async fn get_outputs_after_created_at(&self, instance_id: InstanceId, after: Option<DateTime<Utc>>) -> Result<Vec<BlockOutput>, StorageError>;
@@ -149,6 +151,7 @@ fault_impl! {
         async fn delete_block_outputs(&self, instance_id: InstanceId, block_id: &BlockId) -> Result<u64, StorageError>;
     async fn delete_block_outputs_batch_claimed(&self, instance_id: InstanceId, block_ids: &[orch8_types::ids::BlockId], claim_token: DateTime<Utc>) -> Result<Option<u64>, StorageError>;
     async fn delete_block_output_by_id_claimed(&self, instance_id: InstanceId, id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
+    async fn compact_block_outputs(&self, instance_id: InstanceId, block_ids: &[&BlockId], retain: u32, claim_token: Option<DateTime<Utc>>) -> Result<Option<u64>, StorageError>;
 
         async fn delete_block_outputs_batch(&self, instance_id: InstanceId, block_ids: &[BlockId]) -> Result<u64, StorageError>;
         async fn delete_all_block_outputs(&self, instance_id: InstanceId) -> Result<u64, StorageError>;
@@ -186,7 +189,9 @@ fault_impl! {
         async fn update_event_wait(&self, wait: &orch8_types::event_correlation::EventWait, expected_status: orch8_types::event_correlation::WaitStatus, expected_matched_event_ids: &[Uuid]) -> Result<bool, StorageError>;
         async fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) -> Result<u64, StorageError>;
         async fn get_pending_signals_batch(&self, instance_ids: &[InstanceId]) -> Result<std::collections::HashMap<InstanceId, Vec<Signal>>, StorageError>;
-        async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
+        async fn defer_cancel_signal(&self, instance_id: InstanceId, signal_id: Uuid) -> Result<(), StorageError>;
+    async fn has_deferred_cancel(&self, instance_id: InstanceId) -> Result<bool, StorageError>;
+    async fn mark_signal_delivered(&self, signal_id: Uuid) -> Result<(), StorageError>;
         async fn mark_signal_delivered_claimed(&self, instance_id: InstanceId, signal_id: Uuid, claim_token: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn mark_signals_delivered(&self, signal_ids: &[Uuid]) -> Result<(), StorageError>;
         async fn get_signalled_instance_ids(&self, limit: u32) -> Result<Vec<(InstanceId, InstanceState)>, StorageError>;
@@ -202,7 +207,8 @@ fault_impl! {
     async fn get_worker_issued_claim(&self,tenant:Option<&TenantId>,task_id:Uuid,claim:&WorkerClaim)->Result<Option<crate::worker_claim::WorkerIssuedClaim>,StorageError>;
 
         async fn create_worker_task(&self, task: &WorkerTask) -> Result<(), StorageError>;
-        async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
+        async fn verify_worker_admission(&self) -> Result<(), StorageError>;
+    async fn prepare_worker_dispatch(&self, instance: &orch8_types::instance::TaskInstance, block_id: &orch8_types::ids::BlockId, selection: &crate::worker_invocation::WorkerDispatchSelection) -> Result<Option<crate::worker_invocation::WorkerDispatchFence>, StorageError>;
         async fn admit_worker_dispatch(&self,intent:&crate::worker_admission::WorkerDispatchIntent)->Result<crate::worker_admission::WorkerDispatchPublication,StorageError>;
         async fn list_worker_task_archive_page(&self, instance: &TaskInstance, after: Option<Uuid>, limit: u32) -> Result<Vec<crate::restore::WorkerTaskArchive>, StorageError>;
         async fn get_worker_dispatch_admission(&self,tenant_id:&TenantId,task_id:Uuid)->Result<Option<crate::worker_admission::WorkerDispatchAdmission>,StorageError>;
@@ -393,6 +399,7 @@ fault_impl! {
         async fn delete_circuit_breaker(&self, tenant_id: &TenantId, handler: &str) -> Result<(), StorageError>;
         async fn append_audit_log(&self, entry: &AuditLogEntry) -> Result<(), StorageError>;
         async fn list_audit_log(&self, instance_id: InstanceId, limit: u32) -> Result<Vec<AuditLogEntry>, StorageError>;
+        async fn get_bounded_workbench_events(&self, instance: InstanceId, tenant: &TenantId, after: Option<workbench::EventKey>, limit: u32) -> Result<Option<Vec<workbench::EventRow>>, StorageError>;
         async fn list_audit_log_by_tenant(&self, tenant_id: &TenantId, limit: u32) -> Result<Vec<AuditLogEntry>, StorageError>;
         async fn list_tenant_changes(&self, tenant_id: &TenantId, after: Option<ChangeCursor>, limit: u32) -> Result<Vec<AuditLogEntry>, StorageError>;
         async fn create_rollback_policy(&self, tenant_id: &str, sequence_name: &str, error_rate_threshold: f64, time_window_secs: i32, cooldown_secs: Option<i32>, confirmation_window_secs: Option<i32>, webhook_url: Option<&str>) -> Result<(), StorageError>;

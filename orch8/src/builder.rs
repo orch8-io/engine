@@ -181,6 +181,7 @@ impl EngineBuilder {
         let tenant = TenantId::new(self.tenant).map_err(Error::Config)?;
 
         let storage = storage_cfg.connect().await?;
+        storage.verify_worker_admission().await?;
 
         let config = SchedulerConfig {
             tick_interval_ms: u64::try_from(self.tick_interval.as_millis())

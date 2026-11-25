@@ -3431,14 +3431,11 @@
         ],
         "responses": {
           "200": {
-            "description": "List of instances",
+            "description": "Page of instances",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TaskInstance"
-                  }
+                  "$ref": "#/components/schemas/Page_TaskInstance"
                 }
               }
             }
@@ -5193,12 +5190,30 @@
           {
             "name": "limit",
             "in": "query",
-            "description": "Max timeline events (default 500)",
+            "description": "Max timeline events (default 500, max 2000)",
             "required": false,
             "schema": {
               "type": "integer",
               "format": "int32",
               "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Continue after the previous page",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "nodes_after",
+            "in": "query",
+            "description": "Continue the node list after the previous node",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ExecutionNodeId"
             }
           }
         ],
@@ -15659,6 +15674,24 @@
             "type": "string",
             "format": "uuid"
           },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass this to `cursor` to continue after the last event."
+          },
+          "next_node": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionNodeId",
+                "description": "Pass this to `nodes_after` to continue the node list."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "nodes": {
             "type": "array",
             "items": {
@@ -15670,7 +15703,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/BlockOutputSummary"
-            }
+            },
+            "description": "Output metadata for the events on this page. Payloads are fetched separately."
           },
           "sequence_id": {
             "type": "string",
@@ -17762,6 +17796,146 @@
           "buffer_one",
           "cancel_previous"
         ]
+      },
+      "Page_TaskInstance": {
+        "type": "object",
+        "description": "Canonical cursor-capable response envelope for list endpoints.",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "sequence_id",
+                "tenant_id",
+                "namespace",
+                "state",
+                "priority",
+                "timezone",
+                "metadata",
+                "context",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "budget": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/Budget",
+                      "description": "Optional resource budget enforced by the scheduler (see [`Budget`])."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "concurrency_key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Optional concurrency key for limiting parallel executions."
+                },
+                "context": {
+                  "$ref": "#/components/schemas/ExecutionContext"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "$ref": "#/components/schemas/InstanceId"
+                },
+                "idempotency_key": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Optional idempotency key for deduplication at creation time."
+                },
+                "max_concurrency": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "int32",
+                  "description": "Max concurrent running instances with the same concurrency key.",
+                  "minimum": 0
+                },
+                "metadata": {},
+                "namespace": {
+                  "$ref": "#/components/schemas/Namespace"
+                },
+                "next_fire_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "parent_instance_id": {
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/InstanceId",
+                      "description": "Parent instance ID (set when this instance is a sub-sequence child)."
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "priority": {
+                  "$ref": "#/components/schemas/Priority"
+                },
+                "sequence_id": {
+                  "$ref": "#/components/schemas/SequenceId"
+                },
+                "session_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid",
+                  "description": "Session ID for cross-instance shared state."
+                },
+                "state": {
+                  "$ref": "#/components/schemas/InstanceState"
+                },
+                "sub_tenant": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "End customer (sub-tenant) inside `tenant_id`; `None` = tenant-level."
+                },
+                "tenant_id": {
+                  "$ref": "#/components/schemas/TenantId"
+                },
+                "timezone": {
+                  "type": "string"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "ParallelDef": {
         "type": "object",
@@ -22916,7 +23090,7 @@
       },
       "WorkbenchEvent": {
         "type": "object",
-        "description": "One event on the unified timeline. Ordering contract: `(timestamp,\nkind, id)` — equal timestamps order by kind (state transitions before\noutputs before logs), then by id, so repeated queries render\nidentically.",
+        "description": "One event on the unified timeline. Ordering contract: `(timestamp,\nkind, id)` — equal timestamps order by kind (state transitions, audit,\noutputs, then logs), then by id, so repeated queries render\nidentically.",
         "required": [
           "timestamp",
           "kind",
