@@ -108,7 +108,7 @@ lettre = { version = "0.11.24", default-features = false, features = ["builder",
 # JSON Schema validation (llm_call `response_schema`). default-features off:
 # the default feature set enables remote `$ref` resolution over HTTP, which
 # is an SSRF hazard for workflow-supplied schemas and drags in extra deps.
-jsonschema = { version = "0.60", default-features = false }
+jsonschema = { version = "0.61", default-features = false }
 
 # Object storage for artifacts — local FS, S3-compatible (R2/MinIO/S3), in-memory (tests)
 # 0.14.2 includes the quick-xml 0.41 fix and a backend HTTP-500 panic fix.
@@ -130,11 +130,11 @@ hmac = "0.13"
 ed25519-dalek = { version = "3.0", features = ["rand_core"] }
 criterion = { version = "0.8", features = ["async_tokio"] }
 tikv-jemallocator = "0.7"
-async-nats = "0.51"
+async-nats = "0.52"
 # Trigger sources (each optional behind an orch8-engine feature).
 rskafka = { version = "0.6", default-features = false, features = ["transport-tls", "compression-gzip", "compression-snappy"] }
 redis = { version = "1", default-features = false, features = ["tokio-comp", "streams", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
-jsonwebtoken = { version = "11", default-features = false, features = ["aws_lc_rs", "use_pem"] }
+jsonwebtoken = { version = "12", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 notify = { version = "8", features = ["serde"] }
 # Preserve Wasmtime's runtime/compiler defaults except its unused disk cache.
 # wasm_plugin builds Config::new() with cache=None and keeps its own bounded

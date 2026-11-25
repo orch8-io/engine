@@ -12,7 +12,7 @@ reqwest = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-jsonwebtoken = { version = "11", features = ["aws_lc_rs"], optional = true }
+jsonwebtoken = { version = "12", features = ["aws_lc_rs"], optional = true }
 chrono.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }
 urlencoding = { version = "2", optional = true }

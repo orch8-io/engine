@@ -274,7 +274,7 @@ async fn republishes_known_behavior_as_new_signed_revisions_and_keeps_manifest_v
         canary: None,
     };
     let delivery = restarted
-        .issue(&rollback, &next_signer, "3", "0.7.1")
+        .issue(&rollback, &next_signer, "3", env!("CARGO_PKG_VERSION"))
         .unwrap();
     assert!(delivery.receipt.manifest_version > removal.receipt.manifest_version);
     assert_eq!(delivery.manifest.body.manifest.sequences[0].version, 3);
