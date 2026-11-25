@@ -195,7 +195,7 @@ async fn golden_corpus_matches_responses_and_openapi() {
 
     if std::env::var_os("ORCH8_TEST_GENERATED_CLIENT").is_some() {
         let generated = orch8_api::client_contract::generate_instances_client(&g.doc).unwrap();
-        let base = base.to_string();
+        let base = base.clone();
         let tenant = tenant.to_string();
         let output = tokio::task::spawn_blocking(move || {
             std::process::Command::new("node")

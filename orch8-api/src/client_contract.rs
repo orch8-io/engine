@@ -100,7 +100,7 @@ pub fn generate_instances_client(document: &Value) -> Result<String, String> {
         return Err("GET /instances must require items and has_more".into());
     }
     Ok(format!(
-        r#"
+        r"
 // Generated from Orch8 OpenAPI. Do not edit.
 'use strict';
 const shapes = {checks};
@@ -121,7 +121,7 @@ const shapes = {checks};
   console.error(error);
   process.exitCode = 1;
 }});
-"#,
+",
         checks = Value::Object(checks)
     ))
 }

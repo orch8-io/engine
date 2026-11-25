@@ -734,8 +734,9 @@ pub async fn evaluate_with_claim_token(
             let plan = crate::signals::scoped_cancel_plan(&ctx.tree, &block_map);
             ctx.held_cancel_parents = plan.held_parents;
             if !plan.cancellable.is_empty() {
-                let steps = crate::signals::cancelled_step_blocks(&ctx.tree, &plan.cancellable);
                 use crate::control::ExecutionControl as _;
+
+                let steps = crate::signals::cancelled_step_blocks(&ctx.tree, &plan.cancellable);
                 if !steps.is_empty() {
                     control
                         .cancel_worker_tasks_for_blocks(instance_id.into_uuid(), &steps)
