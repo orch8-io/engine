@@ -1,6 +1,6 @@
 plugins {
-    id("com.android.application") version "8.7.0"
-    id("org.jetbrains.kotlin.android") version "2.1.0"
+    id("com.android.application") version "8.13.2"
+    id("org.jetbrains.kotlin.android") version "2.4.21"
 }
 
 val orch8Version = providers.gradleProperty("orch8Version").getOrElse("0.7.1")

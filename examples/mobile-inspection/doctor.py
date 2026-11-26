@@ -58,7 +58,7 @@ def android_checks(test: bool) -> list[tuple[bool, str]]:
     checks = [
         (bool(re.search(r'version "17(?:\.|"|\+)', output(java, "-version"))), "Set JAVA_HOME to JDK 17."),
         (bool(re.search(r"(?m)^Gradle 8\.9(?:\.|$)", output("gradle", "--version"))),
-         "Install Gradle 8.9 and put gradle on PATH."),
+         "Install Gradle 8.14.8 and put gradle on PATH."),
         ((sdk / "platforms/android-35/android.jar").is_file(), "Set ANDROID_HOME and install Android SDK Platform 35."),
     ]
     if test:

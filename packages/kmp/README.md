@@ -479,14 +479,14 @@ The common tests run on the JVM target, which also type-checks
 Android SDK or a Mac for that:
 
 ```bash
-# from packages/kmp (Gradle 8.9 + JDK 17), or via Docker:
-docker run --rm -v "$PWD/../..":/work -w /work/packages/kmp gradle:8.9-jdk17 \
+# from packages/kmp (Gradle 8.14.8 + JDK 17), or via Docker:
+docker run --rm -v "$PWD/../..":/work -w /work/packages/kmp gradle:8.14.8-jdk17 \
   gradle --no-daemon jvmTest -Porch8.kmp.targets=jvm
 ```
 
 A full build (`gradle build`) needs the Android SDK (compileSdk 35) and, for
 the iOS targets, macOS with Xcode 16. The Gradle wrapper JAR is not checked
-in. Run `gradle wrapper --gradle-version 8.9` once to create `./gradlew`.
+in. Run `gradle wrapper --gradle-version 8.14.8` once to create `./gradlew`.
 
 To execute the real JVM/native installation tests too, pass
 `-Porch8.native.lib.path=/absolute/path/to/the/native/library/directory` to

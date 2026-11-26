@@ -1,3 +1,5 @@
+import org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi
+import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 
@@ -46,24 +48,28 @@ android {
             jniLibs.srcDirs("src/main/jniLibs")
         }
     }
+
+    publishing { singleVariant("release") }
 }
 
 // Consumer compatibility: React Native 0.76 and Expo SDK 52 apps build with
 // Kotlin 1.9.x, whose compiler rejects class metadata newer than 2.0. The
-// Kotlin Gradle plugin here is 2.1, so pin the emitted language/API level and
-// the Kotlin libraries the POM pulls in to 1.9:
+// Kotlin 2.4 removed language level 1.9. Use the patched Gradle plugin with
+// the last compiler series that can emit 1.9 metadata on the JVM:
 //   - languageVersion/apiVersion 1.9 -> class metadata 1.9.0, and no stdlib
 //     API newer than 1.9 is referenced by the UniFFI bindings;
-//   - coreLibrariesVersion -> the POM depends on kotlin-stdlib 1.9.24, not 2.1;
+//   - coreLibrariesVersion -> the POM depends on kotlin-stdlib 1.9.24;
 //   - kotlinx-coroutines 1.8.1 is the last line compiled with Kotlin 1.9.
 // Apps on Kotlin 2.x are unaffected: they read 1.9 metadata and resolve their
 // own newer stdlib/coroutines. Raise these together when dropping Kotlin 1.9.
 kotlin {
+    @OptIn(ExperimentalBuildToolsApi::class, ExperimentalKotlinGradlePluginApi::class)
+    compilerVersion.set("2.3.21")
     coreLibrariesVersion = "1.9.24"
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
-        languageVersion.set(KotlinVersion.KOTLIN_1_9)
-        apiVersion.set(KotlinVersion.KOTLIN_1_9)
+        languageVersion.set(KotlinVersion.fromVersion("1.9"))
+        apiVersion.set(KotlinVersion.fromVersion("1.9"))
     }
 }
 

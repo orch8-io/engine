@@ -9,11 +9,11 @@ import urllib.request
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-REACT = "0.88.0"
+REACT = "0.88.1"
 FLUTTER_ENGINE = "cf636b1dfb818dd6a3ff16e390e93b1a036969c8"
 ARTIFACTS = (
-    ("react-core.tar.gz", "react", f"https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/{REACT}/react-native-artifacts-{REACT}-reactnative-core-debug.tar.gz", "c33c04dca2c14be698877c381c8916888e55eb81ea704563aed99294f18871ff"),
-    ("react-dependencies.tar.gz", "react-dependencies", f"https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/{REACT}/react-native-artifacts-{REACT}-reactnative-dependencies-debug.tar.gz", "e2ff39ab5e7c3d45e7eb9fc092b40eae0c0f34f52b54fdcda816a5c24d3bb5b1"),
+    ("react-core.tar.gz", "react", f"https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/{REACT}/react-native-artifacts-{REACT}-reactnative-core-debug.tar.gz", "09a02b331f80b66cf1cb3207ecc32387da790179b79ff43aba7959834e1cbebd"),
+    ("react-dependencies.tar.gz", "react-dependencies", f"https://repo1.maven.org/maven2/com/facebook/react/react-native-artifacts/{REACT}/react-native-artifacts-{REACT}-reactnative-dependencies-debug.tar.gz", "669995ce9b129d275881295c5826bd28e09dc6f779aaf94be0e953abe7200fd6"),
     ("flutter-ios.zip", "flutter", f"https://storage.googleapis.com/flutter_infra_release/flutter/{FLUTTER_ENGINE}/ios/artifacts.zip", "638d629f791904477c932e73e4a4b5849435a24ff5dc9eabfde583cb4a1a59a9"),
 )
 

@@ -93,7 +93,7 @@ async-trait = "0.1"
 utoipa = { version = "6", features = ["axum_extras", "chrono", "uuid"] }
 # `vendored` ships the Swagger UI bundle inside the crate so builds (Docker,
 # CI, offline) never fetch it from GitHub at compile time.
-utoipa-swagger-ui = { version = "10", features = ["axum", "vendored"] }
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum", "vendored"] }
 
 # Encryption
 aes-gcm = "0.11"

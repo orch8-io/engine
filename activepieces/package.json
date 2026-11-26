@@ -31,11 +31,11 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "@activepieces/piece-http": "^0.13.0",
-    "@activepieces/piece-slack": "^0.23.1"
+    "@activepieces/piece-http": "^0.13.3",
+    "@activepieces/piece-slack": "^0.23.5"
   },
   "devDependencies": {
-    "@types/node": "^22.20.5",
+    "@types/node": "^22.20.7",
     "tsx": "^4.23.15",
     "typescript": "^6.0.3"
   }
