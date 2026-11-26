@@ -288,11 +288,11 @@ test(
     assert.equal(crashed.signal, 'SIGKILL', `process A should die hard: ${crashed.stderr}`)
     assert.deepEqual(effects(dir), ['reserve'])
 
-    const resumed = runWorker(dir, 'resume')
+    const resumed = runWorker(dir, 'resume-between')
     assert.equal(resumed.status, 0, resumed.stderr)
     const result = JSON.parse(resumed.stdout)
     assert.equal(result.state, 'completed')
-    assert.deepEqual(result.data, { sku: 'A-1', amount: 42 })
+    assert.deepEqual(result.data, { sku: 'A-1', amount: 42, restart_allowed: 'yes' })
     assert.deepEqual(result.outputs, {
       reserve: { sku: 'A-1', reserved: true },
       charge: { charged: 42, sku: 'A-1' },

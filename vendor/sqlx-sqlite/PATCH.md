@@ -11,5 +11,6 @@ The release bindings job runs a linked probe against the mobile host archive
 with `scripts/check-mobile-sqlite-host.sh`. The probe calls SQLite's own
 version functions and requires 3.54.1 or newer.
 
-Remove this patch and the root and standalone workspace overrides when a released
-SQLx driver permits patched SQLite. Keep the SQLite lockfile version at 0.39.1 or newer.
+SQLx 0.9.1 permits the patched SQLite version, so the workspace and standalone
+projects now use the published driver. This directory records the retired
+patch. Keep the SQLite lockfile version at 0.39.1 or newer.

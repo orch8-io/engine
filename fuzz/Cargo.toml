@@ -42,7 +42,3 @@ doc = false
 bench = false
 
 [workspace]
-
-# Keep native/fuzz SQLite aligned with the root security patch.
-[patch.crates-io]
-sqlx-sqlite = { path = "../vendor/sqlx-sqlite" }
