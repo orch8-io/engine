@@ -5,7 +5,7 @@ modules and runs their lifecycle regression tests. It uses the React Native
 version from the npm package's development dependencies and an actual pinned
 Flutter embedding jar. It does not replace UniFFI classes with protocol stubs.
 
-With JDK 17, Gradle 8.9 and Android SDK 35 installed, publish the Android producer
+With JDK 17, Gradle 8.14.8 and Android SDK 35 installed, publish the Android producer
 to an isolated local Maven repository, then run:
 
 ```bash

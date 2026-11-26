@@ -16,6 +16,6 @@
     "build:debug": "napi build --platform --no-js --dts native.d.ts",
     "test": "node --test test/*.test.js"
   },
-  "devDependencies": { "@napi-rs/cli": "^3.0.0" },
+  "devDependencies": { "@napi-rs/cli": "^3.11.1" },
   "license": "BUSL-1.1"
 }

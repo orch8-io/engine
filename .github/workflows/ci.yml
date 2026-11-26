@@ -418,11 +418,19 @@ jobs:
         with:
           node-version: "24"
       - name: Install pinned package manager
-        run: npm install --global pnpm@10.12.1
+        run: npm install --global pnpm@10.34.9
       - name: Install locked dependencies
         run: pnpm --dir packages/embed install --frozen-lockfile --ignore-scripts
-      - name: Dependency advisories
-        run: pnpm --dir packages/embed audit
+      - name: Audit pnpm lockfiles
+        run: |
+          pnpm audit
+          pnpm --dir packages/embed audit
+          pnpm --dir examples/create-orch8-embed audit
+      - name: Audit npm lockfiles
+        run: |
+          for project in activepieces dashboard examples/email-classifier loadgen loadgen/bench/systems/inngest packages/react-native tests/e2e; do
+            npm --prefix "$project" audit --package-lock-only
+          done
       - name: Typecheck, lint, test, and build
         run: |
           pnpm --dir packages/embed typecheck

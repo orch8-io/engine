@@ -26,7 +26,7 @@ submit the inspection if the camera is unavailable or permission is denied.
 
 ## Android
 
-With JDK 17, Gradle 8.9, Android SDK Platform 35, and a running emulator or authorized device, run from this directory.
+With JDK 17, Gradle 8.14.8, Android SDK Platform 35, and a running emulator or authorized device, run from this directory.
 
 ```sh
 python3 doctor.py android --test

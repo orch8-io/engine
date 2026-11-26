@@ -18,5 +18,7 @@ dependencyResolutionManagement {
     }
 }
 
+apply(from = file("../../../gradle/android-build-dependencies.gradle"))
+
 rootProject.name = "Orch8Inspection"
 include(":app")

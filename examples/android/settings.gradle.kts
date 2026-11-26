@@ -14,5 +14,7 @@ dependencyResolutionManagement {
     }
 }
 
+apply(from = file("../../gradle/android-build-dependencies.gradle"))
+
 rootProject.name = "Orch8Example"
 include(":app")

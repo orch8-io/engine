@@ -1,0 +1,24 @@
+// Keep the Android Gradle Plugin's JVM dependencies on patched releases.
+// These constraints apply to the build classpath, separate from SDK dependencies.
+def patchedVersions = [
+    'com.google.guava:guava': '33.8.0-jre',
+    'org.apache.commons:commons-compress': '1.28.0',
+    'org.bitbucket.b_c:jose4j': '0.9.7',
+    'org.jdom:jdom2': '2.0.6.1',
+]
+
+gradle.beforeProject { project ->
+    project.buildscript.configurations.classpath.resolutionStrategy.eachDependency {
+        def patchedVersion = patchedVersions["${requested.group}:${requested.name}".toString()]
+        if (requested.group == 'io.netty' && requested.version?.startsWith('4.1.')) {
+            patchedVersion = '4.1.141.Final'
+        }
+        if (requested.group == 'org.bouncycastle' && requested.name.endsWith('-jdk18on')) {
+            patchedVersion = '1.87'
+        }
+        if (patchedVersion != null) {
+            useVersion(patchedVersion)
+            because('Patch vulnerabilities in the Android build classpath')
+        }
+    }
+}
