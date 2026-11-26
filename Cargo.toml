@@ -197,7 +197,3 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 option_if_let_else = "allow"
 duration_suboptimal_units = "allow"
-
-# Temporary SQLx compatibility patch; see vendor/sqlx-sqlite/PATCH.md.
-[patch.crates-io]
-sqlx-sqlite = { path = "vendor/sqlx-sqlite" }
