@@ -515,20 +515,25 @@ fn run_disconnects(backend: &Backend) {
 
     // Reconnect: the phone reads the outcome and resumes.
     phone_link.set_online(true);
+    node.phone.wait_delegation("completed", LONG);
     assert_delegated_once(&cloud, &node, &db, &local, &desktop, &delegation_id);
+    // Either the delegation pump or scheduler recovery can apply the accepted
+    // outcome. Only the pump records a resume in DelegationStats.
+    let first = node.phone.engine.delegation_stats();
+    assert_eq!(first.delegated, 1, "{backend}: {first:?}");
+    assert!(first.resumed <= 1, "{backend}: {first:?}");
 
     // Duplicate delivery on the phone: the journal forgets it applied the
     // result; the next pass reads it again but the resume is fenced.
     db.replay_delegation(&delegation_id);
     node.phone.engine.on_push_received();
     node.phone.wait_delegation("completed", LONG);
-    std::thread::sleep(Duration::from_millis(500));
     assert_delegated_once(&cloud, &node, &db, &local, &desktop, &delegation_id);
     let stats = node.phone.engine.delegation_stats();
     assert_eq!(
         (stats.delegated, stats.resumed),
-        (1, 1),
-        "{backend}: resumed exactly once: {stats:?}"
+        (first.delegated, first.resumed),
+        "{backend}: replay must not resume the parent: {stats:?}"
     );
 
     node.phone.engine.shutdown();
