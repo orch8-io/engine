@@ -30,7 +30,7 @@ pub fn routes() -> Router<AppState> {
         .route("/sessions/{id}/instances", get(list_session_instances))
 }
 
-const SESSION_PAGE_SIZE: usize = 40;
+const SESSION_PAGE_SIZE: u16 = 40;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,12 +81,13 @@ async fn list_sessions(
             query.cursor,
             query.search.as_deref(),
             query.state,
-            (SESSION_PAGE_SIZE + 1) as u32,
+            u32::from(SESSION_PAGE_SIZE) + 1,
         )
         .await
         .map_err(|error| ApiError::from_storage(error, "session inventory"))?;
-    let has_more = items.len() > SESSION_PAGE_SIZE;
-    items.truncate(SESSION_PAGE_SIZE);
+    let page_size = usize::from(SESSION_PAGE_SIZE);
+    let has_more = items.len() > page_size;
+    items.truncate(page_size);
     let next_cursor = items.last().filter(|_| has_more).map(|item| item.id);
     Ok(Json(SessionInventoryPage {
         tenant_id: tenant.tenant_id.clone(),
@@ -315,7 +316,7 @@ pub(crate) enum SessionRunsResponse {
     Full(Vec<orch8_types::instance::TaskInstance>),
 }
 
-const SESSION_RUNS_PAGE_SIZE: usize = 50;
+const SESSION_RUNS_PAGE_SIZE: u16 = 50;
 
 #[utoipa::path(
     get,
@@ -373,7 +374,7 @@ async fn list_session_instances(
             before: cursor.map(InstanceId::from_uuid),
             terms: &terms,
             state: execution_state,
-            limit: (SESSION_RUNS_PAGE_SIZE + 1) as u32,
+            limit: u32::from(SESSION_RUNS_PAGE_SIZE) + 1,
         };
         match state
             .storage
@@ -381,8 +382,9 @@ async fn list_session_instances(
             .await
         {
             Ok(mut items) => {
-                let has_more = items.len() > SESSION_RUNS_PAGE_SIZE;
-                items.truncate(SESSION_RUNS_PAGE_SIZE);
+                let page_size = usize::from(SESSION_RUNS_PAGE_SIZE);
+                let has_more = items.len() > page_size;
+                items.truncate(page_size);
                 let next_cursor = items.last().filter(|_| has_more).map(|row| row.id);
                 return Ok(Json(SessionRunsResponse::Page(SessionRunsPage {
                     session_id: id,

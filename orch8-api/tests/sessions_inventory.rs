@@ -13,6 +13,18 @@ use reqwest::StatusCode;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+async fn read_json(request: reqwest::RequestBuilder) -> Value {
+    request
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn pages_associated_execution_metadata_before_fetching_context() {
     let server = spawn_test_server().await;
@@ -68,16 +80,7 @@ async fn pages_associated_execution_metadata_before_fetching_context() {
         ("search", "OPS_% north"),
         ("state", "completed"),
     ];
-    let first: Value = list()
-        .query(&filters)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let first = read_json(list().query(&filters)).await;
     let rows = first["items"].as_array().unwrap();
     assert_eq!(rows.len(), 50);
     assert_eq!(rows[0]["id"], Uuid::from_u128(52).to_string());
@@ -85,28 +88,10 @@ async fn pages_associated_execution_metadata_before_fetching_context() {
         && row.get("metadata").is_none()
         && row["session_id"] == session_id.to_string()));
     let next = first["next_cursor"].as_str().unwrap();
-    let second: Value = list()
-        .query(&filters)
-        .query(&[("cursor", next)])
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let second = read_json(list().query(&filters).query(&[("cursor", next)])).await;
     assert_eq!(second["items"].as_array().unwrap().len(), 2);
     assert_eq!(second["next_cursor"], Value::Null);
-    let legacy: Value = list()
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let legacy = read_json(list()).await;
     assert_eq!(legacy.as_array().unwrap().len(), 54);
     assert_eq!(legacy[0]["metadata"]["private"], "FULL_CONTEXT_IS_SEPARATE");
     assert_eq!(

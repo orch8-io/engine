@@ -191,7 +191,7 @@ pub(super) async fn list_execution_summaries(
                     .parse::<InstanceState>()
                     .map_err(StorageError::Query)?,
                 priority: Priority::try_from(row.try_get::<i16, _>("priority")?)
-                    .map_err(|error| StorageError::Query(error.to_string()))?,
+                    .map_err(StorageError::Query)?,
                 created_at: row.try_get("created_at")?,
                 updated_at: row.try_get("updated_at")?,
             })
