@@ -8,7 +8,7 @@
 //! win and the audit trail is complete.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
@@ -47,6 +47,10 @@ pub fn routes() -> Router<AppState> {
         .route("/releases/{id}/diff", get(diff_release))
         .route("/releases/{id}/validate", post(validate_release))
         .route(
+            "/releases/{id}/validate/guarded",
+            post(guarded_validate_release),
+        )
+        .route(
             "/releases/{id}/divergences/{instance_id}/fixture",
             post(replay_fixture::export_replay_fixture),
         )
@@ -55,12 +59,18 @@ pub fn routes() -> Router<AppState> {
             "/releases/{id}/executor-readiness",
             get(release_executor_readiness).post(transition_with_executor_readiness),
         )
+        .route("/releases/{id}/rollout", post(guarded_rollout))
         .route("/releases/{id}/evaluate", post(evaluate_release))
+        .route(
+            "/releases/{id}/evaluate/guarded",
+            post(guarded_evaluate_release),
+        )
         .route("/releases/{id}/gate-preview", get(preview_release_gates))
         .route("/releases/{id}/promote", post(promote_release))
         .route("/releases/{id}/pause", post(pause_release))
         .route("/releases/{id}/rollback", post(rollback_release))
         .route("/releases/{id}/target", put(set_release_target))
+        .route("/releases/{id}/target/guarded", put(guarded_release_target))
         .route("/sequences/releases/diff", post(diff_sequences))
 }
 
@@ -337,7 +347,8 @@ pub(crate) async fn list_releases(
 #[utoipa::path(get, path = "/releases/{id}", tag = "releases",
     params(("id" = Uuid, Path, description = "Release id")),
     responses(
-        (status = 200, description = "Release", body = WorkflowRelease),
+        (status = 200, description = "Release", body = WorkflowRelease,
+            headers(("X-Orch8-Release-Snapshot" = String, description = "Proof for a guarded rollout from this exact release"))),
         (status = 404, description = "Not found"),
     )
 )]
@@ -347,7 +358,23 @@ pub(crate) async fn get_release(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
-    Ok(Json(release))
+    let snapshot = release_snapshot(&release)?;
+    Ok((
+        [
+            (header::CACHE_CONTROL.as_str(), "no-store".to_owned()),
+            ("x-orch8-release-snapshot", snapshot),
+        ],
+        Json(release),
+    ))
+}
+
+fn release_snapshot(release: &WorkflowRelease) -> Result<String, ApiError> {
+    let mut value = serde_json::to_value(release)
+        .map_err(|error| ApiError::Internal(format!("release snapshot: {error}")))?;
+    value.sort_all_objects();
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|error| ApiError::Internal(format!("release snapshot: {error}")))?;
+    Ok(crate::continuity::hex_sha256(&bytes))
 }
 
 #[utoipa::path(get, path = "/releases/{id}/decisions", tag = "releases",
@@ -494,47 +521,83 @@ pub(crate) async fn validate_release(
     Json(req): Json<ValidateRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
+    validate_release_from(&state, &release, req).await.map(Json)
+}
 
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuardedValidation {
+    /// Snapshot from the X-Orch8-Release-Snapshot header on an exact release read.
+    snapshot: String,
+    #[serde(deserialize_with = "orch8_types::strict::deserialize")]
+    options: ValidateRequest,
+}
+
+#[utoipa::path(post, path = "/releases/{id}/validate/guarded", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    request_body = GuardedValidation,
+    responses(
+        (status = 200, description = "Validation report for the reviewed release", body = ValidationReport),
+        (status = 400, description = "Invalid snapshot or validation options"),
+        (status = 409, description = "Release changed or is no longer a draft"),
+    )
+)]
+pub(crate) async fn guarded_validate_release(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuardedValidation>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !crate::migration_chunks::valid_digest(&req.snapshot) {
+        return Err(ApiError::InvalidArgument("invalid release snapshot".into()));
+    }
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    if release_snapshot(&release)? != req.snapshot {
+        return Err(ApiError::ReleaseValidationChanged);
+    }
+    validate_release_from(&state, &release, req.options)
+        .await
+        .map(Json)
+}
+
+async fn validate_release_from(
+    state: &AppState,
+    release: &WorkflowRelease,
+    req: ValidateRequest,
+) -> Result<ValidationReport, ApiError> {
+    let (next, reason) = if req.skip {
+        (ReleaseState::Ready, "validation explicitly skipped")
+    } else {
+        (ReleaseState::Validating, "historical validation started")
+    };
+    if release.state != ReleaseState::Draft
+        || !state
+            .storage
+            .cas_release_state_with_executors(release, next, None, &[])
+            .await
+            .map_err(|error| ApiError::from_storage(error, "release"))?
+    {
+        return Err(ApiError::ReleaseValidationChanged);
+    }
+    record_decision(state, release.id, release.state, next, "operator", reason).await;
     if req.skip {
-        transition(
-            &state,
-            &release,
-            ReleaseState::Draft,
-            ReleaseState::Ready,
-            "operator",
-            "validation explicitly skipped",
-            &[],
-        )
-        .await?;
-        return Ok(Json(ValidationReport {
+        return Ok(ValidationReport {
             replayed: 0,
             matches: 0,
             divergences: vec![],
             inconclusive: 0,
             release_state: ReleaseState::Ready,
-        }));
+        });
     }
-
-    // CAS into validating so two concurrent validations cannot both run.
-    transition(
-        &state,
-        &release,
-        ReleaseState::Draft,
-        ReleaseState::Validating,
-        "operator",
-        "historical validation started",
-        &[],
-    )
-    .await?;
 
     // Any failure past this point must not strand the release in
     // `Validating` — no API transition leads out of it. Roll back to
     // `Draft` (best effort) so the operator can fix the cause and
     // re-validate.
-    match run_validation(&state, &release, req.sample).await {
-        Ok(report) => Ok(Json(report)),
+    match run_validation(state, release, req.sample).await {
+        Ok(report) => Ok(report),
         Err(e) => {
-            rollback_validating(&state, &release).await;
+            rollback_validating(state, release).await;
             Err(e)
         }
     }
@@ -844,11 +907,20 @@ pub(crate) async fn start_canary(
     Path(id): Path<Uuid>,
     Json(req): Json<CanaryRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    start_canary_from(&state, &release, req).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+async fn start_canary_from(
+    state: &AppState,
+    release: &WorkflowRelease,
+    req: CanaryRequest,
+) -> Result<(), ApiError> {
     if req.percent == 0 || req.percent > 100 {
         return Err(ApiError::InvalidArgument("percent must be 1–100".into()));
     }
-    let release = load_release(&state, &tenant_ctx, id).await?;
-    require_candidate_ready_executors(&state, &release, &req.ready_executor_ids).await?;
+    require_candidate_ready_executors(state, release, &req.ready_executor_ids).await?;
     let from = match release.state {
         ReleaseState::Ready => ReleaseState::Ready,
         ReleaseState::Paused => ReleaseState::Paused,
@@ -860,16 +932,16 @@ pub(crate) async fn start_canary(
         }
     };
     apply_release_state(
-        &state,
-        &release,
+        state,
+        release,
         ReleaseState::Canary,
         Some(req.percent),
         &req.ready_executor_ids,
     )
     .await?;
     record_decision(
-        &state,
-        id,
+        state,
+        release.id,
         from,
         ReleaseState::Canary,
         "operator",
@@ -879,8 +951,7 @@ pub(crate) async fn start_canary(
         ),
     )
     .await;
-    let fresh = load_release(&state, &tenant_ctx, id).await?;
-    Ok(Json(fresh))
+    Ok(())
 }
 
 #[derive(Serialize, ToSchema)]
@@ -951,7 +1022,51 @@ pub(crate) async fn evaluate_release(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
-    let (baseline, candidate) = observe(&state, &release).await?;
+    evaluate_release_from(&state, &tenant_ctx, &release)
+        .await
+        .map(Json)
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuardedEvaluation {
+    /// Snapshot from the X-Orch8-Release-Snapshot header on an exact release read.
+    snapshot: String,
+}
+
+#[utoipa::path(post, path = "/releases/{id}/evaluate/guarded", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    request_body = GuardedEvaluation,
+    responses(
+        (status = 200, description = "Gate evaluation for the reviewed release, with rollback if a gate failed", body = EvaluationReport),
+        (status = 400, description = "Invalid snapshot"),
+        (status = 409, description = "Release snapshot changed before evaluation or automatic rollback"),
+    )
+)]
+pub(crate) async fn guarded_evaluate_release(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuardedEvaluation>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !crate::migration_chunks::valid_digest(&req.snapshot) {
+        return Err(ApiError::InvalidArgument("invalid release snapshot".into()));
+    }
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    if release_snapshot(&release)? != req.snapshot {
+        return Err(ApiError::ReleaseEvaluationChanged);
+    }
+    evaluate_release_from(&state, &tenant_ctx, &release)
+        .await
+        .map(Json)
+}
+
+async fn evaluate_release_from(
+    state: &AppState,
+    tenant: &crate::auth::OptionalTenant,
+    release: &WorkflowRelease,
+) -> Result<EvaluationReport, ApiError> {
+    let (baseline, candidate) = observe(state, release).await?;
     let gates = evaluate_gates(&release.gates, baseline, candidate);
 
     let mut auto_rolled_back = false;
@@ -959,44 +1074,40 @@ pub(crate) async fn evaluate_release(
     if release.state == ReleaseState::Canary
         && let Some(failed) = gates.iter().find(|g| g.verdict == GateVerdict::Fail)
     {
-        // Idempotent under concurrency: only the CAS winner records the
-        // decision; a concurrent evaluate simply observes rolled_back.
-        let ok = state
+        // A failed gate only applies to the release that supplied its evidence.
+        let applied = state
             .storage
-            .cas_release_state(
-                id,
-                ReleaseState::Canary,
-                ReleaseState::RolledBack,
-                None,
-                None,
-            )
+            .cas_release_state_with_executors(release, ReleaseState::RolledBack, None, &[])
             .await
             .map_err(|e| ApiError::from_storage(e, "release"))?;
-        if ok {
-            record_decision(
-                &state,
-                id,
-                ReleaseState::Canary,
-                ReleaseState::RolledBack,
-                &format!("gate:{:?}", failed.gate.metric),
-                &format!(
-                    "gate failed: baseline {:?} vs candidate {:?} exceeds max regression {}",
-                    failed.baseline_rate, failed.candidate_rate, failed.gate.max_regression
-                ),
-            )
-            .await;
-            auto_rolled_back = true;
+        if !applied {
+            return Err(ApiError::ReleaseEvaluationChanged);
         }
+        record_decision(
+            state,
+            release.id,
+            ReleaseState::Canary,
+            ReleaseState::RolledBack,
+            &format!("gate:{:?}", failed.gate.metric),
+            &format!(
+                "gate failed: baseline {:?} vs candidate {:?} exceeds max regression {}",
+                failed.baseline_rate, failed.candidate_rate, failed.gate.max_regression
+            ),
+        )
+        .await;
+        auto_rolled_back = true;
         current_state = ReleaseState::RolledBack;
+    } else if load_release(state, tenant, release.id).await? != *release {
+        return Err(ApiError::ReleaseEvaluationChanged);
     }
 
-    Ok(Json(EvaluationReport {
+    Ok(EvaluationReport {
         baseline,
         candidate,
         gates,
         auto_rolled_back,
         release_state: current_state,
-    }))
+    })
 }
 
 /// Aggregate terminal outcomes per variant since the canary started,
@@ -1058,9 +1169,18 @@ pub(crate) async fn promote_release(
     Json(req): Json<PromoteRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
-    require_candidate_ready_executors(&state, &release, &req.ready_executor_ids).await?;
+    promote_from(&state, &release, req).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+async fn promote_from(
+    state: &AppState,
+    release: &WorkflowRelease,
+    req: PromoteRequest,
+) -> Result<(), ApiError> {
+    require_candidate_ready_executors(state, release, &req.ready_executor_ids).await?;
     if !req.force && !release.gates.is_empty() {
-        let (baseline, candidate) = observe(&state, &release).await?;
+        let (baseline, candidate) = observe(state, release).await?;
         let gates = evaluate_gates(&release.gates, baseline, candidate);
         if let Some(bad) = gates.iter().find(|g| g.verdict != GateVerdict::Pass) {
             return Err(ApiError::Conflict(format!(
@@ -1075,8 +1195,8 @@ pub(crate) async fn promote_release(
         "promoted: all gates pass"
     };
     transition(
-        &state,
-        &release,
+        state,
+        release,
         ReleaseState::Canary,
         ReleaseState::Promoted,
         "operator",
@@ -1084,8 +1204,7 @@ pub(crate) async fn promote_release(
         &req.ready_executor_ids,
     )
     .await?;
-    let fresh = load_release(&state, &tenant_ctx, id).await?;
-    Ok(Json(fresh))
+    Ok(())
 }
 
 async fn require_candidate_ready_executors(
@@ -1211,14 +1330,88 @@ pub(crate) enum ExecutorCheckedTransition {
     )
 )]
 pub(crate) async fn transition_with_executor_readiness(
-    state: State<AppState>,
+    State(state): State<AppState>,
     admin: crate::auth::OptionalAdmin,
     tenant_ctx: crate::auth::OptionalTenant,
-    path: Path<Uuid>,
+    Path(id): Path<Uuid>,
     Json(req): Json<ExecutorCheckedTransition>,
-) -> Result<axum::response::Response, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     crate::api_keys::require_admin(&admin)?;
-    let ids = match &req {
+    validate_rollout_executors(&req, true)?;
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    execute_rollout(&state, &release, req).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuardedRollout {
+    /// Snapshot from the X-Orch8-Release-Snapshot header on an exact release read.
+    snapshot: String,
+    transition: GuardedRoutingTransition,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(untagged)]
+enum GuardedRoutingTransition {
+    Rollout(ExecutorCheckedTransition),
+    Halt(ReleaseHalt),
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+enum ReleaseHalt {
+    Pause {},
+    Rollback {},
+}
+
+#[utoipa::path(post, path = "/releases/{id}/rollout", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    request_body = GuardedRollout,
+    responses(
+        (status = 200, description = "Rollout applied to the reviewed release", body = WorkflowRelease),
+        (status = 400, description = "Invalid snapshot or executor selection"),
+        (status = 409, description = "Release snapshot, gates or executor readiness changed"),
+    )
+)]
+pub(crate) async fn guarded_rollout(
+    State(state): State<AppState>,
+    admin: crate::auth::OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuardedRollout>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !crate::migration_chunks::valid_digest(&req.snapshot) {
+        return Err(ApiError::InvalidArgument("invalid release snapshot".into()));
+    }
+    if let GuardedRoutingTransition::Rollout(transition) = &req.transition
+        && !validate_rollout_executors(transition, false)?.is_empty()
+    {
+        crate::api_keys::require_admin(&admin)?;
+    }
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    if release_snapshot(&release)? != req.snapshot {
+        return Err(ApiError::ReleaseRolloutChanged);
+    }
+    match req.transition {
+        GuardedRoutingTransition::Rollout(transition) => {
+            execute_rollout(&state, &release, transition).await?;
+        }
+        GuardedRoutingTransition::Halt(ReleaseHalt::Pause {}) => {
+            pause_from(&state, &release).await?;
+        }
+        GuardedRoutingTransition::Halt(ReleaseHalt::Rollback {}) => {
+            rollback_from(&state, &release).await?;
+        }
+    }
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+fn validate_rollout_executors(
+    req: &ExecutorCheckedTransition,
+    require_selection: bool,
+) -> Result<&[Uuid], ApiError> {
+    let ids = match req {
         ExecutorCheckedTransition::Canary {
             ready_executor_ids, ..
         }
@@ -1226,43 +1419,56 @@ pub(crate) async fn transition_with_executor_readiness(
             ready_executor_ids, ..
         } => ready_executor_ids,
     };
-    if ids.is_empty()
+    if (require_selection && ids.is_empty())
         || ids.len() > 64
         || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
     {
         return Err(ApiError::InvalidArgument(
-            "select 1–64 distinct designated executors".into(),
+            if require_selection {
+                "select 1–64 distinct designated executors"
+            } else {
+                "select at most 64 distinct designated executors"
+            }
+            .into(),
         ));
     }
+    Ok(ids)
+}
+
+async fn execute_rollout(
+    state: &AppState,
+    release: &WorkflowRelease,
+    req: ExecutorCheckedTransition,
+) -> Result<(), ApiError> {
     match req {
         ExecutorCheckedTransition::Canary {
             percent,
             ready_executor_ids,
-        } => Ok(start_canary(
-            state,
-            tenant_ctx,
-            path,
-            Json(CanaryRequest {
-                percent,
-                ready_executor_ids,
-            }),
-        )
-        .await?
-        .into_response()),
+        } => {
+            start_canary_from(
+                state,
+                release,
+                CanaryRequest {
+                    percent,
+                    ready_executor_ids,
+                },
+            )
+            .await
+        }
         ExecutorCheckedTransition::Promote {
             ready_executor_ids,
             force,
-        } => Ok(promote_release(
-            state,
-            tenant_ctx,
-            path,
-            Json(PromoteRequest {
-                force,
-                ready_executor_ids,
-            }),
-        )
-        .await?
-        .into_response()),
+        } => {
+            promote_from(
+                state,
+                release,
+                PromoteRequest {
+                    force,
+                    ready_executor_ids,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -1276,18 +1482,21 @@ pub(crate) async fn pause_release(
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
     let release = load_release(&state, &tenant_ctx, id).await?;
+    pause_from(&state, &release).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+async fn pause_from(state: &AppState, release: &WorkflowRelease) -> Result<(), ApiError> {
     transition(
-        &state,
-        &release,
+        state,
+        release,
         ReleaseState::Canary,
         ReleaseState::Paused,
         "operator",
         "canary paused",
         &[],
     )
-    .await?;
-    let fresh = load_release(&state, &tenant_ctx, id).await?;
-    Ok(Json(fresh))
+    .await
 }
 
 #[utoipa::path(post, path = "/releases/{id}/rollback", tag = "releases",
@@ -1308,9 +1517,15 @@ pub(crate) async fn rollback_release(
         // Idempotent: repeat rollbacks succeed without a second decision.
         return Ok(Json(release));
     }
+    rollback_from(&state, &release).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+async fn rollback_from(state: &AppState, release: &WorkflowRelease) -> Result<(), ApiError> {
     let from = match release.state {
         ReleaseState::Canary => ReleaseState::Canary,
         ReleaseState::Paused => ReleaseState::Paused,
+        ReleaseState::RolledBack => return Ok(()),
         other => {
             return Err(ApiError::Conflict(format!(
                 "cannot roll back from '{}'",
@@ -1319,17 +1534,15 @@ pub(crate) async fn rollback_release(
         }
     };
     transition(
-        &state,
-        &release,
+        state,
+        release,
         from,
         ReleaseState::RolledBack,
         "operator",
         "rolled back by operator",
         &[],
     )
-    .await?;
-    let fresh = load_release(&state, &tenant_ctx, id).await?;
-    Ok(Json(fresh))
+    .await
 }
 
 #[utoipa::path(put, path = "/releases/{id}/target", tag = "releases",
@@ -1350,10 +1563,62 @@ pub(crate) async fn set_release_target(
         orch8_types::strict::Strict<Option<ReleaseTarget>>,
     >,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Some(target) = &target {
+    validate_target(target.as_ref())?;
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    apply_release_target(&state, &release, target.as_ref()).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GuardedReleaseTarget {
+    /// Snapshot from the X-Orch8-Release-Snapshot header on an exact release read.
+    snapshot: String,
+    /// Explicit null restores per-instance cohorts.
+    #[serde(deserialize_with = "orch8_types::strict::deserialize")]
+    #[schema(required = true)]
+    target: Option<ReleaseTarget>,
+}
+
+#[utoipa::path(put, path = "/releases/{id}/target/guarded", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    request_body = GuardedReleaseTarget,
+    responses(
+        (status = 200, description = "Reviewed target replaced", body = WorkflowRelease),
+        (status = 400, description = "Invalid target or snapshot"),
+        (status = 409, description = "Release changed or can no longer be retargeted"),
+    )
+)]
+pub(crate) async fn guarded_release_target(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    Json(req): Json<GuardedReleaseTarget>,
+) -> Result<impl IntoResponse, ApiError> {
+    if !crate::migration_chunks::valid_digest(&req.snapshot) {
+        return Err(ApiError::InvalidArgument("invalid release snapshot".into()));
+    }
+    validate_target(req.target.as_ref())?;
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    if release_snapshot(&release)? != req.snapshot {
+        return Err(ApiError::ReleaseTargetChanged);
+    }
+    apply_release_target(&state, &release, req.target.as_ref()).await?;
+    Ok(Json(load_release(&state, &tenant_ctx, id).await?))
+}
+
+fn validate_target(target: Option<&ReleaseTarget>) -> Result<(), ApiError> {
+    if let Some(target) = target {
         target.validate().map_err(ApiError::InvalidArgument)?;
     }
-    let release = load_release(&state, &tenant_ctx, id).await?;
+    Ok(())
+}
+
+async fn apply_release_target(
+    state: &AppState,
+    release: &WorkflowRelease,
+    target: Option<&ReleaseTarget>,
+) -> Result<(), ApiError> {
     if matches!(
         release.state,
         ReleaseState::Promoted | ReleaseState::RolledBack
@@ -1365,13 +1630,13 @@ pub(crate) async fn set_release_target(
     }
     let updated = state
         .storage
-        .set_release_target(id, target.as_ref())
+        .cas_release_target(release, target)
         .await
         .map_err(|e| ApiError::from_storage(e, "release"))?;
     if !updated {
-        return Err(ApiError::NotFound(format!("release {id}")));
+        return Err(ApiError::ReleaseTargetChanged);
     }
-    let reason = match &target {
+    let reason = match target {
         Some(t) => format!(
             "rollout target set: {} listed sub-tenant(s), percentage {}",
             t.sub_tenants.as_ref().map_or(0, Vec::len),
@@ -1381,16 +1646,15 @@ pub(crate) async fn set_release_target(
         None => "rollout target cleared".to_string(),
     };
     record_decision(
-        &state,
-        id,
+        state,
+        release.id,
         release.state,
         release.state,
         "operator",
         &reason,
     )
     .await;
-    let fresh = load_release(&state, &tenant_ctx, id).await?;
-    Ok(Json(fresh))
+    Ok(())
 }
 
 /// CAS transition + decision record. The state machine is validated
@@ -1430,7 +1694,19 @@ async fn apply_release_state(
     canary_percent: Option<u8>,
     executors: &[Uuid],
 ) -> Result<(), ApiError> {
-    let applied = if executors.is_empty() {
+    let changes_routing = matches!(
+        to,
+        ReleaseState::Canary
+            | ReleaseState::Promoted
+            | ReleaseState::Paused
+            | ReleaseState::RolledBack
+    );
+    let applied = if changes_routing {
+        state
+            .storage
+            .cas_release_state_with_executors(release, to, canary_percent, executors)
+            .await
+    } else {
         state
             .storage
             .cas_release_state(
@@ -1441,14 +1717,12 @@ async fn apply_release_state(
                 canary_percent.map(|_| Utc::now()),
             )
             .await
-    } else {
-        state
-            .storage
-            .cas_release_state_with_executors(release, to, canary_percent, executors)
-            .await
     }
     .map_err(|error| ApiError::from_storage(error, "release"))?;
     if !applied {
+        if changes_routing && executors.is_empty() {
+            return Err(ApiError::ReleaseRolloutChanged);
+        }
         let message = if executors.is_empty() {
             "concurrent state change — reload the release"
         } else {

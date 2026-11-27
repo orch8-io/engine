@@ -10,7 +10,9 @@ use uuid::Uuid;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
-use orch8_types::release::{ReleaseDecision, ReleaseState, ReleaseVariant, WorkflowRelease};
+use orch8_types::release::{
+    ReleaseDecision, ReleaseState, ReleaseTarget, ReleaseVariant, WorkflowRelease,
+};
 
 use super::PostgresStorage;
 
@@ -207,6 +209,55 @@ pub(super) async fn cas_state(
     Ok(result.rows_affected() == 1)
 }
 
+async fn matches_locked_release(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    release: &WorkflowRelease,
+) -> Result<bool, StorageError> {
+    let locked: Option<Option<sqlx::types::Json<ReleaseTarget>>> = sqlx::query_scalar(
+        "SELECT target FROM workflow_releases
+         WHERE id = $1 AND tenant_id = $2 AND candidate_sequence_id = $3 AND state = $4
+           AND updated_at = $5 AND canary_percent = $6
+         FOR UPDATE",
+    )
+    .bind(release.id)
+    .bind(release.tenant_id.as_str())
+    .bind(release.candidate_sequence_id.into_uuid())
+    .bind(release.state.as_str())
+    .bind(release.updated_at)
+    .bind(i16::from(release.canary_percent))
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(locked.is_some_and(|target| target.map(|target| target.0) == release.target))
+}
+
+pub(super) async fn cas_target(
+    store: &PostgresStorage,
+    release: &WorkflowRelease,
+    target: Option<&ReleaseTarget>,
+) -> Result<bool, StorageError> {
+    if matches!(
+        release.state,
+        ReleaseState::Promoted | ReleaseState::RolledBack
+    ) {
+        return Ok(false);
+    }
+    let mut tx = store.pool.begin().await?;
+    if !matches_locked_release(&mut tx, release).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let result = sqlx::query(
+        "UPDATE workflow_releases SET target = $2, updated_at = clock_timestamp() WHERE id = $1",
+    )
+    .bind(release.id)
+    .bind(target.map(serde_json::to_value).transpose()?)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn cas_state_with_executors(
     store: &PostgresStorage,
     release: &WorkflowRelease,
@@ -215,18 +266,7 @@ pub(super) async fn cas_state_with_executors(
     executors: &[Uuid],
 ) -> Result<bool, StorageError> {
     let mut tx = store.pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM workflow_releases
-         WHERE id = $1 AND tenant_id = $2 AND candidate_sequence_id = $3 AND state = $4
-         FOR UPDATE",
-    )
-    .bind(release.id)
-    .bind(release.tenant_id.as_str())
-    .bind(release.candidate_sequence_id.into_uuid())
-    .bind(release.state.as_str())
-    .fetch_optional(&mut *tx)
-    .await?;
-    if locked.is_none() {
+    if !matches_locked_release(&mut tx, release).await? {
         tx.rollback().await?;
         return Ok(false);
     }

@@ -315,7 +315,7 @@ async fn usage_comes_from_the_ledger_and_live_rows() {
 }
 
 #[tokio::test]
-async fn embed_theme_and_release_target_persist() {
+async fn embed_theme_persists() {
     for backend in backends().await {
         let (name, storage) = (backend.name(), std::sync::Arc::clone(&backend.storage));
         let t = tenant();
@@ -334,7 +334,14 @@ async fn embed_theme_and_release_target_persist() {
             Some(theme.clone()),
             "{name}"
         );
+    }
+}
 
+#[tokio::test]
+async fn rollout_and_release_target_updates_are_guarded() {
+    for backend in backends().await {
+        let (name, storage) = (backend.name(), &backend.storage);
+        let t = tenant();
         let baseline = sequence(storage.as_ref(), &t, None).await;
         let candidate = sequence(storage.as_ref(), &t, None).await;
         let now = Utc::now();
@@ -347,7 +354,7 @@ async fn embed_theme_and_release_target_persist() {
             baseline_version: 1,
             candidate_sequence_id: candidate.id,
             candidate_version: 2,
-            state: ReleaseState::Draft,
+            state: ReleaseState::Ready,
             canary_percent: 0,
             gates: Vec::new(),
             in_flight_policy: orch8_types::release::InFlightPolicy::default(),
@@ -361,32 +368,61 @@ async fn embed_theme_and_release_target_persist() {
             updated_at: now,
         };
         storage.create_release(&release).await.unwrap();
-        let got = storage.get_release(release.id).await.unwrap().unwrap();
-        assert_eq!(got.target, release.target, "{name}");
+        let before_retarget = storage.get_release(release.id).await.unwrap().unwrap();
+        assert_eq!(before_retarget.target, release.target, "{name}");
 
         let retarget = ReleaseTarget {
             sub_tenants: None,
             percentage: Some(30),
         };
+        let (replaced, cleared) = tokio::join!(
+            storage.cas_release_target(&before_retarget, Some(&retarget)),
+            storage.cas_release_target(&before_retarget, None),
+        );
+        let replaced = replaced.unwrap();
+        assert_ne!(
+            replaced,
+            cleared.unwrap(),
+            "{name}: exactly one target edit wins"
+        );
+        let got = storage.get_release(release.id).await.unwrap().unwrap();
+        assert_eq!(got.target, replaced.then_some(retarget), "{name}");
+        assert!(
+            !storage
+                .cas_release_state_with_executors(
+                    &before_retarget,
+                    ReleaseState::Canary,
+                    Some(25),
+                    &[],
+                )
+                .await
+                .unwrap(),
+            "{name}: rollout cannot use the old target"
+        );
+        assert!(storage.set_release_target(release.id, None).await.unwrap());
+        let cleared = storage.get_release(release.id).await.unwrap().unwrap();
+        assert_eq!(cleared.target, None, "{name}");
         assert!(
             storage
-                .set_release_target(release.id, Some(&retarget))
+                .cas_release_state_with_executors(&cleared, ReleaseState::Canary, Some(25), &[])
+                .await
+                .unwrap(),
+            "{name}: a fresh observation can start the canary"
+        );
+        let canary = storage.get_release(release.id).await.unwrap().unwrap();
+        assert!(
+            storage
+                .cas_release_state_with_executors(&canary, ReleaseState::Promoted, None, &[])
                 .await
                 .unwrap(),
             "{name}"
         );
-        let got = storage.get_release(release.id).await.unwrap().unwrap();
-        assert_eq!(got.target, Some(retarget), "{name}");
-        assert!(storage.set_release_target(release.id, None).await.unwrap());
-        assert_eq!(
-            storage
-                .get_release(release.id)
+        assert!(
+            !storage
+                .set_release_target(release.id, before_retarget.target.as_ref())
                 .await
-                .unwrap()
-                .unwrap()
-                .target,
-            None,
-            "{name}"
+                .unwrap(),
+            "{name}: the promoted target is immutable"
         );
         assert!(
             !storage

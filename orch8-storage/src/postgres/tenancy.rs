@@ -349,7 +349,8 @@ impl crate::TenancyStore for PostgresStorage {
         target: Option<&ReleaseTarget>,
     ) -> Result<bool, StorageError> {
         let result = sqlx::query(
-            "UPDATE workflow_releases SET target = $2, updated_at = now() WHERE id = $1",
+            "UPDATE workflow_releases SET target = $2, updated_at = clock_timestamp()
+             WHERE id = $1 AND state NOT IN ('promoted', 'rolled_back')",
         )
         .bind(release_id)
         .bind(target.map(serde_json::to_value).transpose()?)

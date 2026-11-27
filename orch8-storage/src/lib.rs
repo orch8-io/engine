@@ -400,9 +400,10 @@ pub trait SequenceStore: Send + Sync + 'static {
         canary_started_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<bool, StorageError>;
 
-    /// Transition the reviewed release only while every designated executor has
-    /// current readiness for the candidate. Stores must synchronize this check
-    /// with the state write; a separate readiness preflight is insufficient.
+    /// Transition the observed release only if it is unchanged and each
+    /// designated executor has current candidate readiness. An empty executor
+    /// list still requires the release to match. Both checks run under the
+    /// same write reservation as the transition.
     async fn cas_release_state_with_executors(
         &self,
         _release: &orch8_types::release::WorkflowRelease,
@@ -411,6 +412,15 @@ pub trait SequenceStore: Send + Sync + 'static {
         _executors: &[Uuid],
     ) -> Result<bool, StorageError> {
         Err(StorageError::Unsupported("checked executor rollout".into()))
+    }
+
+    /// Replace a mutable target only if the observed release still matches.
+    async fn cas_release_target(
+        &self,
+        _release: &orch8_types::release::WorkflowRelease,
+        _target: Option<&orch8_types::release::ReleaseTarget>,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported("guarded release target".into()))
     }
 
     /// Store the historical-validation summary on the release.
@@ -6561,7 +6571,8 @@ pub trait TenancyStore: Send + Sync + 'static {
         theme: &orch8_types::sub_tenant::EmbedTheme,
     ) -> Result<(), StorageError>;
 
-    /// Replace a release's sub-tenant rollout target. `false` if unknown.
+    /// Replace a release's sub-tenant rollout target unless promoted or rolled
+    /// back. Returns `false` if the release is missing or its state disallows it.
     async fn set_release_target(
         &self,
         release_id: Uuid,

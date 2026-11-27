@@ -582,6 +582,14 @@ impl crate::SequenceStore for PostgresStorage {
         releases::cas_state_with_executors(self, release, next, canary_percent, executors).await
     }
 
+    async fn cas_release_target(
+        &self,
+        release: &orch8_types::release::WorkflowRelease,
+        target: Option<&orch8_types::release::ReleaseTarget>,
+    ) -> Result<bool, StorageError> {
+        releases::cas_target(self, release, target).await
+    }
+
     async fn set_release_validation_summary(
         &self,
         id: Uuid,

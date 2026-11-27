@@ -380,13 +380,15 @@ impl crate::TenancyStore for SqliteStorage {
         release_id: Uuid,
         target: Option<&ReleaseTarget>,
     ) -> Result<bool, StorageError> {
-        let result =
-            sqlx::query("UPDATE workflow_releases SET target = ?2, updated_at = ?3 WHERE id = ?1")
-                .bind(release_id.to_string())
-                .bind(target.map(serde_json::to_string).transpose()?)
-                .bind(ts(Utc::now()))
-                .execute(&self.pool)
-                .await?;
+        let result = sqlx::query(
+            "UPDATE workflow_releases SET target = ?2, updated_at = ?3
+             WHERE id = ?1 AND state NOT IN ('promoted', 'rolled_back')",
+        )
+        .bind(release_id.to_string())
+        .bind(target.map(serde_json::to_string).transpose()?)
+        .bind(ts(Utc::now()))
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 }
