@@ -60,8 +60,7 @@ async function runOne(index, { sequenceId, runTag }, deadline) {
       }),
     { deadline, label: "create instance" },
   );
-  for (;;) {
-    if (Date.now() > deadline) throw new Error("instance did not finish before the driver deadline");
+  while (Date.now() < deadline) {
     await sleep(pollMs);
     let instance;
     try {
@@ -74,12 +73,16 @@ async function runOne(index, { sequenceId, runTag }, deadline) {
       return {
         id: created.id,
         status: instance.state === "completed" ? "completed" : "failed",
+        engine_state: instance.state,
         completed_at_ms: Date.now(),
         server_started_at_ms: Date.parse(instance.created_at),
         server_closed_at_ms: Date.parse(instance.updated_at),
       };
     }
   }
+  const error = "instance did not finish before the driver deadline";
+  recordError(error);
+  return { id: created.id, status: "failed", error };
 }
 
 await main(runOne, { setup });
