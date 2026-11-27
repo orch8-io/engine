@@ -1,6 +1,6 @@
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -9,6 +9,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use orch8_types::cron::{CronInventoryFilter, CronSchedule};
+use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 
 use crate::AppState;
@@ -32,6 +33,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/cron/{id}",
             get(get_cron).put(update_cron).delete(delete_cron),
+        )
+        .route(
+            "/cron/{id}/reviewed",
+            axum::routing::put(update_reviewed_cron).delete(delete_reviewed_cron),
         )
         .route("/cron/{id}/next-fires", get(next_fires))
 }
@@ -243,7 +248,8 @@ pub(crate) async fn create_cron(
 #[utoipa::path(get, path = "/cron/{id}", tag = "cron",
     params(("id" = Uuid, Path, description = "Cron schedule ID")),
     responses(
-        (status = 200, description = "Cron schedule found", body = CronSchedule),
+        (status = 200, description = "Cron schedule found", body = CronSchedule,
+            headers(("X-Orch8-Cron-Revision" = String, description = "Configuration revision when reviewed writes are supported"))),
         (status = 404, description = "Cron schedule not found"),
     )
 )]
@@ -252,20 +258,25 @@ pub(crate) async fn get_cron(
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let schedule = state
-        .storage
-        .get_cron_schedule(id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?
-        .ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
-
-    crate::auth::enforce_tenant_access(
-        &tenant_ctx,
-        &schedule.tenant_id,
-        &format!("cron_schedule {id}"),
-    )?;
-
-    Ok(Json(schedule))
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let (schedule, reviewed) = match state.storage.review_cron_schedule(id).await {
+        Ok(schedule) => (scope_cron(schedule, &tenant_ctx, id)?, true),
+        Err(StorageError::Unsupported(_)) => (scoped_cron(&state, &tenant_ctx, id).await?, false),
+        Err(error) => return Err(ApiError::from_storage(error, "cron_schedule")),
+    };
+    let schedule = schedule.ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
+    if reviewed {
+        let revision = schedule
+            .configuration_revision()
+            .map_err(|_| ApiError::Internal("Could not fingerprint cron configuration".into()))?;
+        headers.insert(
+            "x-orch8-cron-revision",
+            HeaderValue::from_str(&revision)
+                .map_err(|_| ApiError::Internal("Invalid cron configuration revision".into()))?,
+        );
+    }
+    Ok((headers, Json(schedule)))
 }
 
 #[utoipa::path(get, path = "/cron/{id}/next-fires", tag = "cron",
@@ -382,19 +393,20 @@ pub(crate) async fn update_cron(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateCronRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mut schedule = state
-        .storage
-        .get_cron_schedule(id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?
+    let mut schedule = scoped_cron(&state, &tenant_ctx, id)
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
+    apply_cron_update(&mut schedule, req)?;
 
-    crate::auth::enforce_tenant_access(
-        &tenant_ctx,
-        &schedule.tenant_id,
-        &format!("cron_schedule {id}"),
-    )?;
+    state
+        .storage
+        .update_cron_schedule(&schedule)
+        .await
+        .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?;
 
+    Ok(Json(schedule))
+}
+fn apply_cron_update(schedule: &mut CronSchedule, req: UpdateCronRequest) -> Result<(), ApiError> {
     if let Some(expr) = req.cron_expr {
         orch8_engine::cron::validate_cron_expr(&expr)
             .map_err(|e| ApiError::InvalidArgument(format!("invalid cron expression: {e}")))?;
@@ -414,15 +426,146 @@ pub(crate) async fn update_cron(
         schedule.overlap_policy = policy;
     }
 
-    schedule.next_fire_at = orch8_engine::cron::calculate_next_fire(&schedule);
+    schedule.next_fire_at = orch8_engine::cron::calculate_next_fire(schedule);
 
-    state
+    Ok(())
+}
+
+fn scope_cron(
+    schedule: Option<CronSchedule>,
+    tenant_ctx: &crate::auth::OptionalTenant,
+    id: Uuid,
+) -> Result<Option<CronSchedule>, ApiError> {
+    if let Some(value) = &schedule {
+        crate::auth::enforce_tenant_access(
+            tenant_ctx,
+            &value.tenant_id,
+            &format!("cron_schedule {id}"),
+        )?;
+    }
+    Ok(schedule)
+}
+
+async fn scoped_cron(
+    state: &AppState,
+    tenant_ctx: &crate::auth::OptionalTenant,
+    id: Uuid,
+) -> Result<Option<CronSchedule>, ApiError> {
+    scope_cron(
+        state
+            .storage
+            .get_cron_schedule(id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "cron_schedule"))?,
+        tenant_ctx,
+        id,
+    )
+}
+
+fn cron_expected_revision(headers: &HeaderMap) -> Result<&str, ApiError> {
+    let mut values = headers.get_all("x-orch8-cron-if-revision").iter();
+    if let Some(value) = values.next().and_then(|value| value.to_str().ok())
+        && values.next().is_none()
+        && value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Ok(value);
+    }
+    Err(ApiError::InvalidArgument(
+        "One valid reviewed cron revision is required".into(),
+    ))
+}
+
+fn cron_guard(mut response: Response, outcome: &'static str) -> Response {
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+        .headers_mut()
+        .insert("x-orch8-cron-guard", HeaderValue::from_static(outcome));
+    response
+}
+
+fn stale_cron_review() -> Response {
+    cron_guard(
+        ApiError::Conflict("Cron configuration changed. Inspect the schedule again.".into())
+            .into_response(),
+        "stale",
+    )
+}
+
+#[utoipa::path(put, path = "/cron/{id}/reviewed", tag = "cron",
+    params(
+        ("id" = Uuid, Path, description = "Cron schedule ID"),
+        ("X-Orch8-Cron-If-Revision" = String, Header, description = "Reviewed configuration revision"),
+    ),
+    request_body = UpdateCronRequest,
+    responses(
+        (status = 200, description = "Reviewed cron configuration updated", body = CronSchedule,
+            headers(("X-Orch8-Cron-Guard" = String, description = "Applied when the reviewed configuration matched"))),
+        (status = 400, description = "Invalid revision or configuration"),
+        (status = 409, description = "The reviewed configuration changed",
+            headers(("X-Orch8-Cron-Guard" = String, description = "Stale when the comparison rejected the write")))
+    )
+)]
+pub(crate) async fn update_reviewed_cron(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(req): Json<UpdateCronRequest>,
+) -> Result<Response, ApiError> {
+    let revision = cron_expected_revision(&headers)?;
+    let Some(mut schedule) = scoped_cron(&state, &tenant_ctx, id).await? else {
+        return Ok(stale_cron_review());
+    };
+    apply_cron_update(&mut schedule, req)?;
+    let updated = state
         .storage
-        .update_cron_schedule(&schedule)
+        .update_reviewed_cron_schedule(&schedule, revision)
         .await
-        .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?;
+        .map_err(|error| ApiError::from_storage(error, "cron_schedule"))?;
+    Ok(match updated {
+        Some(row) => cron_guard(Json(row).into_response(), "applied"),
+        None => stale_cron_review(),
+    })
+}
 
-    Ok(Json(schedule))
+#[utoipa::path(delete, path = "/cron/{id}/reviewed", tag = "cron",
+    params(
+        ("id" = Uuid, Path, description = "Cron schedule ID"),
+        ("X-Orch8-Cron-If-Revision" = String, Header, description = "Reviewed configuration revision"),
+    ),
+    responses(
+        (status = 204, description = "Reviewed cron configuration removed",
+            headers(("X-Orch8-Cron-Guard" = String, description = "Applied when the reviewed configuration matched"))),
+        (status = 400, description = "Invalid revision"),
+        (status = 409, description = "The reviewed configuration changed",
+            headers(("X-Orch8-Cron-Guard" = String, description = "Stale when the comparison rejected the write")))
+    )
+)]
+pub(crate) async fn delete_reviewed_cron(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let revision = cron_expected_revision(&headers)?;
+    let Some(schedule) = scoped_cron(&state, &tenant_ctx, id).await? else {
+        return Ok(stale_cron_review());
+    };
+    let removed = state
+        .storage
+        .delete_reviewed_cron_schedule(id, &schedule.tenant_id, revision)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "cron_schedule"))?;
+    Ok(if removed {
+        cron_guard(StatusCode::NO_CONTENT.into_response(), "applied")
+    } else {
+        stale_cron_review()
+    })
 }
 
 #[utoipa::path(delete, path = "/cron/{id}", tag = "cron",
@@ -434,18 +577,9 @@ pub(crate) async fn delete_cron(
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let schedule = state
-        .storage
-        .get_cron_schedule(id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "cron_schedule"))?
+    scoped_cron(&state, &tenant_ctx, id)
+        .await?
         .ok_or_else(|| ApiError::NotFound(format!("cron_schedule {id}")))?;
-
-    crate::auth::enforce_tenant_access(
-        &tenant_ctx,
-        &schedule.tenant_id,
-        &format!("cron_schedule {id}"),
-    )?;
 
     state
         .storage

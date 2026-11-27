@@ -633,6 +633,7 @@ impl SqliteStorage {
         }
         migration.commit().await?;
         self.reconcile_columns().await?;
+        queue_dispatch::install_revision_triggers(self).await?;
         plugins::reconcile_tenant_key(self).await?;
         for stmt in &index_stmts {
             if let Err(e) = sqlx::query(AssertSqlSafe(*stmt)).execute(&self.pool).await {
@@ -3351,6 +3352,33 @@ impl crate::WorkerStore for SqliteStorage {
         queue_dispatch::get_metadata(self, tenant_id, queue_name).await
     }
 
+    async fn review_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<Option<(orch8_types::queue_dispatch::QueueDispatchConfig, String)>, StorageError>
+    {
+        queue_dispatch::review(self, tenant_id, queue_name).await
+    }
+
+    async fn set_reviewed_queue_dispatch(
+        &self,
+        config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+        preserve_secret: bool,
+        expected_revision: Option<&str>,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        queue_dispatch::set_reviewed(self, config, preserve_secret, expected_revision).await
+    }
+
+    async fn delete_reviewed_queue_dispatch(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+        expected_revision: &str,
+    ) -> Result<bool, StorageError> {
+        queue_dispatch::delete_reviewed(self, tenant_id, queue_name, expected_revision).await
+    }
+
     async fn list_queue_dispatch(
         &self,
         tenant_id: Option<&str>,
@@ -3440,6 +3468,27 @@ impl crate::SchedulingStore for SqliteStorage {
 
     async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError> {
         cron::delete(self, id).await
+    }
+
+    async fn review_cron_schedule(&self, id: Uuid) -> Result<Option<CronSchedule>, StorageError> {
+        cron::get(self, id).await
+    }
+
+    async fn update_reviewed_cron_schedule(
+        &self,
+        schedule: &CronSchedule,
+        revision: &str,
+    ) -> Result<Option<CronSchedule>, StorageError> {
+        cron::update_reviewed(self, schedule, revision).await
+    }
+
+    async fn delete_reviewed_cron_schedule(
+        &self,
+        id: Uuid,
+        tenant_id: &TenantId,
+        revision: &str,
+    ) -> Result<bool, StorageError> {
+        cron::delete_reviewed(self, id, tenant_id, revision).await
     }
 
     async fn claim_due_cron_schedules(

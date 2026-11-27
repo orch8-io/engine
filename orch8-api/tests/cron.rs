@@ -1,6 +1,7 @@
 //! E2E tests for the Cron API.
 
 use orch8_api::test_harness::spawn_test_server;
+use orch8_storage::SchedulingStore;
 use reqwest::StatusCode;
 use serde_json::json;
 use uuid::Uuid;
@@ -38,6 +39,95 @@ async fn create_sequence(client: &reqwest::Client, base_url: &str) -> Uuid {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CREATED);
     seq_id
+}
+
+#[tokio::test]
+async fn cron_review_fences_competing_configuration_writes() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq = create_sequence(&client, &srv.base_url).await;
+    let created = client.post(format!("{}/cron",srv.base_url))
+        .header("x-tenant-id","t1")
+        .json(&json!({"tenant_id":"t1","namespace":"ns1","sequence_id":seq,"cron_expr":"0 * * * *","enabled":false}))
+        .send().await.unwrap().error_for_status().unwrap().json::<serde_json::Value>().await.unwrap();
+    let uri = format!("{}/cron/{}", srv.base_url, created["id"].as_str().unwrap());
+    let reviewed = format!("{uri}/reviewed");
+    let get_revision = || async {
+        let res = client
+            .get(&uri)
+            .header("x-tenant-id", "t1")
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        res.headers()["x-orch8-cron-revision"]
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let before = get_revision().await;
+    let schedule_id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let now = chrono::Utc::now();
+    srv.storage
+        .update_cron_fire_times(schedule_id, now, now + chrono::Duration::hours(1))
+        .await
+        .unwrap();
+    assert_eq!(get_revision().await, before);
+
+    let update = |expression| {
+        client
+            .put(&reviewed)
+            .header("x-tenant-id", "t1")
+            .header("x-orch8-cron-if-revision", &before)
+            .json(&json!({"cron_expr":expression}))
+            .send()
+    };
+    let (one, two) = tokio::join!(update("0 1 * * *"), update("0 2 * * *"));
+    let one = one.unwrap();
+    let two = two.unwrap();
+    assert_eq!(
+        [one.status(), two.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [one.status(), two.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let after = get_revision().await;
+    assert_ne!(before, after);
+    let stale = client
+        .delete(&reviewed)
+        .header("x-tenant-id", "t1")
+        .header("x-orch8-cron-if-revision", &before)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(stale.headers()["x-orch8-cron-guard"], "stale");
+    let foreign = client
+        .delete(&reviewed)
+        .header("x-tenant-id", "t2")
+        .header("x-orch8-cron-if-revision", &after)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let removed = client
+        .delete(&reviewed)
+        .header("x-tenant-id", "t1")
+        .header("x-orch8-cron-if-revision", &after)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(removed.headers()["x-orch8-cron-guard"], "applied");
 }
 
 #[tokio::test]
