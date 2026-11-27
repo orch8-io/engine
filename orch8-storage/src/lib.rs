@@ -400,6 +400,19 @@ pub trait SequenceStore: Send + Sync + 'static {
         canary_started_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<bool, StorageError>;
 
+    /// Transition the reviewed release only while every designated executor has
+    /// current readiness for the candidate. Stores must synchronize this check
+    /// with the state write; a separate readiness preflight is insufficient.
+    async fn cas_release_state_with_executors(
+        &self,
+        _release: &orch8_types::release::WorkflowRelease,
+        _next: orch8_types::release::ReleaseState,
+        _canary_percent: Option<u8>,
+        _executors: &[Uuid],
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported("checked executor rollout".into()))
+    }
+
     /// Store the historical-validation summary on the release.
     async fn set_release_validation_summary(
         &self,
@@ -3258,6 +3271,13 @@ impl From<TriggerInventoryRow> for orch8_types::trigger::TriggerInventoryEntry {
     }
 }
 
+/// Executor readiness for a candidate revision, as observed by the store.
+pub struct WasmExecutorReadiness {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait AdminStore: Send + Sync + 'static {
@@ -3713,6 +3733,33 @@ pub trait AdminStore: Send + Sync + 'static {
         _now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Uuid>, StorageError> {
         Err(StorageError::Unsupported("WASM revision readiness".into()))
+    }
+
+    /// Observe executor readiness and its status for one candidate.
+    async fn list_wasm_executor_readiness(
+        &self,
+        revision: orch8_types::ids::SequenceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<WasmExecutorReadiness>, StorageError> {
+        let nodes = self.list_nodes().await?;
+        let ready: std::collections::HashSet<_> = self
+            .list_wasm_ready_nodes(revision, now)
+            .await?
+            .into_iter()
+            .collect();
+        Ok(nodes
+            .into_iter()
+            .map(|node| WasmExecutorReadiness {
+                id: node.id,
+                name: node.name,
+                status: if ready.contains(&node.id) {
+                    "ready"
+                } else {
+                    "unavailable"
+                }
+                .into(),
+            })
+            .collect())
     }
 
     /// Set the drain flag on a node, triggering coordinated shutdown.

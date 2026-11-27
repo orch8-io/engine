@@ -1118,6 +1118,16 @@ impl crate::SequenceStore for SqliteStorage {
         releases::cas_state(self, id, expected, next, canary_percent, canary_started_at).await
     }
 
+    async fn cas_release_state_with_executors(
+        &self,
+        release: &orch8_types::release::WorkflowRelease,
+        next: orch8_types::release::ReleaseState,
+        canary_percent: Option<u8>,
+        executors: &[Uuid],
+    ) -> Result<bool, StorageError> {
+        releases::cas_state_with_executors(self, release, next, canary_percent, executors).await
+    }
+
     async fn set_release_validation_summary(
         &self,
         id: Uuid,
@@ -4007,6 +4017,14 @@ impl crate::AdminStore for SqliteStorage {
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<Uuid>, StorageError> {
         cluster::list_wasm_ready_nodes(self, revision, now).await
+    }
+
+    async fn list_wasm_executor_readiness(
+        &self,
+        revision: orch8_types::ids::SequenceId,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<crate::WasmExecutorReadiness>, StorageError> {
+        cluster::list_wasm_executor_readiness(self, revision, now).await
     }
 
     async fn drain_node(&self, node_id: Uuid) -> Result<(), StorageError> {

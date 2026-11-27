@@ -503,6 +503,7 @@ pub(crate) async fn validate_release(
             ReleaseState::Ready,
             "operator",
             "validation explicitly skipped",
+            &[],
         )
         .await?;
         return Ok(Json(ValidationReport {
@@ -522,6 +523,7 @@ pub(crate) async fn validate_release(
         ReleaseState::Validating,
         "operator",
         "historical validation started",
+        &[],
     )
     .await?;
 
@@ -675,6 +677,7 @@ async fn run_validation(
              {inconclusive} inconclusive",
             divergences.len()
         ),
+        &[],
     )
     .await?;
 
@@ -856,20 +859,14 @@ pub(crate) async fn start_canary(
             )));
         }
     };
-    let ok = state
-        .storage
-        .cas_release_state(
-            id,
-            from,
-            ReleaseState::Canary,
-            Some(req.percent),
-            Some(Utc::now()),
-        )
-        .await
-        .map_err(|e| ApiError::from_storage(e, "release"))?;
-    if !ok {
-        return Err(ApiError::Conflict("concurrent state change".into()));
-    }
+    apply_release_state(
+        &state,
+        &release,
+        ReleaseState::Canary,
+        Some(req.percent),
+        &req.ready_executor_ids,
+    )
+    .await?;
     record_decision(
         &state,
         id,
@@ -1071,7 +1068,6 @@ pub(crate) async fn promote_release(
                 bad.gate.metric, bad.verdict
             )));
         }
-        require_candidate_ready_executors(&state, &release, &req.ready_executor_ids).await?;
     }
     let reason = if req.force {
         "promoted (forced)"
@@ -1085,6 +1081,7 @@ pub(crate) async fn promote_release(
         ReleaseState::Promoted,
         "operator",
         &describe_executor_check(reason.to_owned(), &req.ready_executor_ids),
+        &req.ready_executor_ids,
     )
     .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
@@ -1116,7 +1113,7 @@ async fn require_candidate_ready_executors(
         .collect();
     if !pending.is_empty() {
         return Err(ApiError::Conflict(format!(
-            "candidate revision {} awaits WASM prewarm on executors {}",
+            "candidate revision {} is not ready on executors {}",
             release.candidate_sequence_id,
             pending.join(", ")
         )));
@@ -1141,6 +1138,7 @@ struct ReleaseExecutorStatus {
     id: Uuid,
     name: String,
     ready: bool,
+    readiness_status: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -1164,25 +1162,18 @@ pub(crate) async fn release_executor_readiness(
 ) -> Result<impl IntoResponse, ApiError> {
     crate::api_keys::require_admin(&admin)?;
     let release = load_release(&state, &tenant_ctx, id).await?;
-    let nodes = state
-        .storage
-        .list_nodes()
-        .await
-        .map_err(|error| ApiError::from_storage(error, "executor inventory"))?;
     let checked_at = Utc::now();
-    let ready: std::collections::HashSet<_> = state
+    let mut executors: Vec<_> = state
         .storage
-        .list_wasm_ready_nodes(release.candidate_sequence_id, checked_at)
+        .list_wasm_executor_readiness(release.candidate_sequence_id, checked_at)
         .await
         .map_err(|error| ApiError::from_storage(error, "executor readiness"))?
         .into_iter()
-        .collect();
-    let mut executors: Vec<_> = nodes
-        .into_iter()
         .map(|node| ReleaseExecutorStatus {
+            ready: node.status == "ready",
             id: node.id,
             name: node.name,
-            ready: ready.contains(&node.id),
+            readiness_status: node.status,
         })
         .collect();
     executors.sort_unstable_by_key(|node| node.id);
@@ -1292,6 +1283,7 @@ pub(crate) async fn pause_release(
         ReleaseState::Paused,
         "operator",
         "canary paused",
+        &[],
     )
     .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
@@ -1333,6 +1325,7 @@ pub(crate) async fn rollback_release(
         ReleaseState::RolledBack,
         "operator",
         "rolled back by operator",
+        &[],
     )
     .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
@@ -1409,6 +1402,7 @@ async fn transition(
     to: ReleaseState,
     actor: &str,
     reason: &str,
+    executors: &[Uuid],
 ) -> Result<(), ApiError> {
     if release.state != from {
         return Err(ApiError::Conflict(format!(
@@ -1424,17 +1418,44 @@ async fn transition(
             to.as_str()
         )));
     }
-    let ok = state
-        .storage
-        .cas_release_state(release.id, from, to, None, None)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "release"))?;
-    if !ok {
-        return Err(ApiError::Conflict(
-            "concurrent state change — reload the release".into(),
-        ));
-    }
+    apply_release_state(state, release, to, None, executors).await?;
     record_decision(state, release.id, from, to, actor, reason).await;
+    Ok(())
+}
+
+async fn apply_release_state(
+    state: &AppState,
+    release: &WorkflowRelease,
+    to: ReleaseState,
+    canary_percent: Option<u8>,
+    executors: &[Uuid],
+) -> Result<(), ApiError> {
+    let applied = if executors.is_empty() {
+        state
+            .storage
+            .cas_release_state(
+                release.id,
+                release.state,
+                to,
+                canary_percent,
+                canary_percent.map(|_| Utc::now()),
+            )
+            .await
+    } else {
+        state
+            .storage
+            .cas_release_state_with_executors(release, to, canary_percent, executors)
+            .await
+    }
+    .map_err(|error| ApiError::from_storage(error, "release"))?;
+    if !applied {
+        let message = if executors.is_empty() {
+            "concurrent state change — reload the release"
+        } else {
+            "release state or executor readiness changed before rollout — refresh and review"
+        };
+        return Err(ApiError::Conflict(message.into()));
+    }
     Ok(())
 }
 
