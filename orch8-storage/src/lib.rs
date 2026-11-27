@@ -3037,6 +3037,19 @@ pub trait WorkerStore: Send + Sync + 'static {
         queue_name: &str,
     ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
 
+    /// Read metadata for one exact queue. The signing secret is never returned.
+    async fn get_queue_dispatch_metadata(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        Ok(self
+            .list_queue_dispatch(Some(tenant_id))
+            .await?
+            .into_iter()
+            .find(|config| config.tenant_id == tenant_id && config.queue_name == queue_name))
+    }
+
     /// List dispatch configs, optionally filtered by tenant. Secrets are not
     /// returned (the `secret` field is always `None` in listed rows).
     async fn list_queue_dispatch(

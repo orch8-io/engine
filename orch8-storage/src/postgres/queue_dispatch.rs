@@ -105,12 +105,30 @@ pub(super) async fn get(
     row.as_ref().map(|r| row_to_config(r, true)).transpose()
 }
 
+pub(super) async fn get_metadata(
+    store: &PostgresStorage,
+    tenant_id: &str,
+    queue_name: &str,
+) -> Result<Option<QueueDispatchConfig>, StorageError> {
+    let row = sqlx::query(
+        "SELECT tenant_id, queue_name, mode, push_url, created_at, updated_at
+         FROM queue_dispatch WHERE tenant_id = $1 AND queue_name = $2",
+    )
+    .bind(tenant_id)
+    .bind(queue_name)
+    .fetch_optional(&store.pool)
+    .await?;
+    row.as_ref()
+        .map(|row| row_to_config(row, false))
+        .transpose()
+}
+
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&str>,
 ) -> Result<Vec<QueueDispatchConfig>, StorageError> {
     let mut qb = sqlx::QueryBuilder::new(
-        r"SELECT tenant_id, queue_name, mode, push_url, secret, created_at, updated_at
+        r"SELECT tenant_id, queue_name, mode, push_url, created_at, updated_at
           FROM queue_dispatch WHERE 1=1",
     );
     if let Some(t) = tenant_id {
