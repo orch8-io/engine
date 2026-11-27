@@ -863,3 +863,53 @@ async fn mobile_approval_pages_cover_the_limit_boundary_and_preserve_tenant_scop
     }
     assert_eq!(ids.len(), 501);
 }
+
+#[tokio::test]
+async fn exact_device_registration_is_tenant_bound_and_metadata_only() {
+    let srv = spawn_test_server_with_mobile_sync().await;
+    let client = reqwest::Client::new();
+    let endpoint = format!("{}/mobile/devices", srv.base_url);
+    let id = " exact/device + café ";
+    let registered = client
+        .post(format!("{endpoint}/register"))
+        .header("X-Tenant-Id", "tenant-1")
+        .json(&json!({"device_id": id, "platform": "ios", "push_token":"private-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(registered.status(), StatusCode::CREATED);
+
+    for (request_tenant, expected_count) in [("tenant-1", 1), ("tenant-2", 0)] {
+        let body: serde_json::Value = client
+            .get(&endpoint)
+            .query(&[("device_id", id), ("tenant_id", "tenant-1"), ("limit", "0")])
+            .header("X-Tenant-Id", request_tenant)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            body["selection"],
+            json!({"device_id":id,"tenant_id":request_tenant})
+        );
+        assert_eq!(body["total"], expected_count);
+        assert_eq!(body["items"].as_array().unwrap().len(), expected_count);
+        if expected_count == 1 {
+            assert_eq!(body["items"][0]["device_id"], id);
+            assert_eq!(body["items"][0]["has_push_token"], true);
+            assert!(body["items"][0].get("push_token").is_none());
+        }
+    }
+
+    let missing_scope = client
+        .get(&endpoint)
+        .query(&[("device_id", id)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_scope.status(), StatusCode::BAD_REQUEST);
+}

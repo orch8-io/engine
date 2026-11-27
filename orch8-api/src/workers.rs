@@ -545,22 +545,45 @@ pub(crate) async fn enqueue_command(
     Ok((StatusCode::CREATED, Json(cmd)))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct WorkerCommandsQuery {
+    tenant_id: Option<String>,
+}
+
 /// List a worker's pending control commands (the worker control channel).
 #[utoipa::path(get, path = "/workers/{worker_id}/commands", tag = "workers",
-    params(("worker_id" = String, Path, description = "Worker id")),
+    params(
+        ("worker_id" = String, Path, description = "Worker id"),
+        ("tenant_id" = Option<String>, Query, description = "List one tenant's commands. The authenticated tenant takes precedence when present.")
+    ),
     responses((status = 200, description = "Pending commands", body = Vec<orch8_types::worker::WorkerCommand>))
 )]
 pub(crate) async fn list_commands(
     State(state): State<AppState>,
     admin: OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
     Path(worker_id): Path<String>,
+    Query(query): Query<WorkerCommandsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::api_keys::require_admin(&admin)?;
-    let commands = state
-        .storage
-        .list_worker_commands(&worker_id)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "worker_command"))?;
+    let commands = if let Some(requested) = query.tenant_id.as_deref() {
+        if requested.trim().is_empty() || requested.contains('\0') {
+            return Err(ApiError::InvalidArgument(
+                "tenant_id must be nonblank and contain no NUL".into(),
+            ));
+        }
+        let tenant =
+            crate::auth::scoped_tenant_id(&tenant_ctx, Some(requested)).ok_or_else(|| {
+                ApiError::InvalidArgument("worker command inspection requires a tenant".into())
+            })?;
+        state
+            .storage
+            .list_scoped_worker_commands(&worker_id, tenant.as_str())
+            .await
+    } else {
+        state.storage.list_worker_commands(&worker_id).await
+    }
+    .map_err(|e| ApiError::from_storage(e, "worker_command"))?;
     Ok(Json(commands))
 }
 

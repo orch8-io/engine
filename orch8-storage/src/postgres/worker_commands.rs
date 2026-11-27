@@ -42,12 +42,15 @@ pub(super) async fn enqueue(
 pub(super) async fn list(
     store: &PostgresStorage,
     worker_id: &str,
+    tenant_id: Option<&str>,
 ) -> Result<Vec<WorkerCommand>, StorageError> {
     let rows = sqlx::query(
         r"SELECT id, worker_id, tenant_id, command, payload, created_at
-          FROM worker_commands WHERE worker_id = $1 ORDER BY created_at ASC",
+          FROM worker_commands WHERE worker_id = $1 AND ($2::text IS NULL OR tenant_id = $2)
+          ORDER BY created_at ASC",
     )
     .bind(worker_id)
+    .bind(tenant_id)
     .fetch_all(&store.pool)
     .await?;
     rows.iter().map(row_to_command).collect()
