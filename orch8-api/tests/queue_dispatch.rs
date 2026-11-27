@@ -6,6 +6,58 @@ use reqwest::StatusCode;
 use serde_json::json;
 
 #[tokio::test]
+async fn queue_metadata_can_select_one_literal_queue_without_exposing_secrets() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/queues/dispatch", server.base_url);
+    let selected = " queue #é?% ";
+    for (tenant, queue) in [("t1", selected), ("t1", selected.trim()), ("t2", selected)] {
+        let response = client
+            .post(&url)
+            .header("X-Tenant-Id", tenant)
+            .json(&json!({"tenant_id":tenant,"queue_name":queue,"mode":"poll","secret":"fixture-secret"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let get = |queue| {
+        client
+            .get(&url)
+            .header("X-Tenant-Id", "t1")
+            .query(&[("tenant_id", "t1"), ("queue_name", queue)])
+    };
+    let response = get(selected)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(response.headers()["x-orch8-queue-dispatch-scope"], "exact");
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let rows = response.json::<Vec<serde_json::Value>>().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["tenant_id"], "t1");
+    assert_eq!(rows[0]["queue_name"], selected);
+    assert!(rows[0].get("secret").is_none());
+    assert_eq!(
+        get("absent")
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap(),
+        json!([])
+    );
+    assert_eq!(
+        get(" ").send().await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn push_url_rejects_internal_addresses() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

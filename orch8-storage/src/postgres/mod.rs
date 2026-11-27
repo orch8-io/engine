@@ -2662,6 +2662,14 @@ impl crate::WorkerStore for PostgresStorage {
         queue_dispatch::get(self, tenant_id, queue_name).await
     }
 
+    async fn get_queue_dispatch_metadata(
+        &self,
+        tenant_id: &str,
+        queue_name: &str,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        queue_dispatch::get_metadata(self, tenant_id, queue_name).await
+    }
+
     async fn list_queue_dispatch(
         &self,
         tenant_id: Option<&str>,

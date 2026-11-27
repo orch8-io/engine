@@ -7490,11 +7490,28 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "queue_name",
+            "in": "query",
+            "description": "Select one exact queue name",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
             "description": "Dispatch configs",
+            "headers": {
+              "X-Orch8-Queue-Dispatch-Scope": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Exact when the queue selector was applied"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

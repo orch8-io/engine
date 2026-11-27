@@ -1,7 +1,7 @@
 //! Per-queue dispatch mode management (poll vs push).
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::{Json, Router};
@@ -72,6 +72,7 @@ where
 #[derive(Deserialize)]
 pub(crate) struct ListDispatchQuery {
     tenant_id: Option<String>,
+    queue_name: Option<String>,
 }
 
 #[utoipa::path(post, path = "/queues/dispatch", tag = "routing",
@@ -126,8 +127,12 @@ pub(crate) async fn set_dispatch(
 }
 
 #[utoipa::path(get, path = "/queues/dispatch", tag = "routing",
-    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
-    responses((status = 200, description = "Dispatch configs", body = Vec<QueueDispatchConfig>))
+    params(
+        ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
+        ("queue_name" = Option<String>, Query, description = "Select one exact queue name"),
+    ),
+    responses((status = 200, description = "Dispatch configs", body = Vec<QueueDispatchConfig>,
+        headers(("X-Orch8-Queue-Dispatch-Scope" = String, description = "Exact when the queue selector was applied"))))
 )]
 pub(crate) async fn list_dispatch(
     State(state): State<AppState>,
@@ -136,16 +141,35 @@ pub(crate) async fn list_dispatch(
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref())
         .ok_or_else(|| ApiError::InvalidArgument("tenant_id is required".into()))?;
-    let mut configs = state
-        .storage
-        .list_queue_dispatch(Some(scoped.as_str()))
-        .await
-        .map_err(|e| ApiError::from_storage(e, "queue_dispatch"))?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    let mut configs = if let Some(queue_name) = q.queue_name {
+        if queue_name.trim().is_empty() {
+            return Err(ApiError::InvalidArgument("queue_name is required".into()));
+        }
+        headers.insert(
+            "x-orch8-queue-dispatch-scope",
+            HeaderValue::from_static("exact"),
+        );
+        state
+            .storage
+            .get_queue_dispatch_metadata(scoped.as_str(), &queue_name)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "queue_dispatch"))?
+            .into_iter()
+            .collect()
+    } else {
+        state
+            .storage
+            .list_queue_dispatch(Some(scoped.as_str()))
+            .await
+            .map_err(|e| ApiError::from_storage(e, "queue_dispatch"))?
+    };
     // Secrets are write-only: never return them in list responses.
     for cfg in &mut configs {
         cfg.secret = None;
     }
-    Ok(Json(configs))
+    Ok((headers, Json(configs)))
 }
 
 #[utoipa::path(delete, path = "/queues/dispatch/{tenant_id}/{queue_name}", tag = "routing",

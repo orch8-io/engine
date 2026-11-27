@@ -300,6 +300,7 @@ fault_impl! {
         async fn upsert_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig) -> Result<(), StorageError>;
         async fn set_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig, preserve_secret: bool) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError>;
         async fn get_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+        async fn get_queue_dispatch_metadata(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
         async fn list_queue_dispatch(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
         async fn delete_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<(), StorageError>;
         async fn append_step_logs(&self, instance_id: InstanceId, block_id: &BlockId, entries: &[orch8_types::step_log::StepLogEntry]) -> Result<(), StorageError>;

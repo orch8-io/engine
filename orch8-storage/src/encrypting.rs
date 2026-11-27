@@ -2641,6 +2641,7 @@ passthrough_impl! {
             .map(|config| self.decrypt_queue_dispatch(config))
             .transpose()
     }
+    async fn get_queue_dispatch_metadata(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
     async fn list_queue_dispatch(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
     async fn delete_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<(), StorageError>;
 
