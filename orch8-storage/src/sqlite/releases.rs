@@ -139,6 +139,35 @@ pub(super) async fn list(
     rows.iter().map(row_to_release).collect()
 }
 
+pub(super) async fn page(
+    storage: &SqliteStorage,
+    tenant: &TenantId,
+    filter: &crate::release_inventory::ReleasePageFilter,
+    limit: u32,
+) -> Result<Vec<WorkflowRelease>, StorageError> {
+    let mut qb = sqlx::QueryBuilder::new(format!(
+        "SELECT {RELEASE_COLUMNS} FROM workflow_releases WHERE tenant_id = "
+    ));
+    qb.push_bind(tenant.as_str());
+    if let Some((at, id)) = filter.before {
+        qb.push(" AND (created_at, id) < (")
+            .push_bind(ts(at))
+            .push(", ")
+            .push_bind(id.to_string())
+            .push(")");
+    }
+    if let Some(state) = filter.state {
+        qb.push(" AND state = ").push_bind(state.as_str());
+    }
+    for term in &filter.terms {
+        qb.push(" AND instr(lower(sequence_name || char(10) || namespace || char(10) || id || char(10) || baseline_sequence_id || char(10) || candidate_sequence_id || char(10) || 'v' || baseline_version || char(10) || 'v' || candidate_version), ").push_bind(term.as_str()).push(") > 0");
+    }
+    qb.push(" ORDER BY created_at DESC, id DESC LIMIT ")
+        .push_bind(i64::from(limit));
+    let rows = qb.build().fetch_all(&storage.pool).await?;
+    rows.iter().map(row_to_release).collect()
+}
+
 pub(super) async fn cas_state(
     storage: &SqliteStorage,
     id: Uuid,

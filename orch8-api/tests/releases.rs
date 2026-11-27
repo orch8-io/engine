@@ -14,6 +14,83 @@ struct Fixture {
     candidate_id: Uuid,
 }
 
+#[tokio::test]
+async fn release_inventory_filters_before_paging_and_breaks_timestamp_ties() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let timestamp = "2026-11-27T12:30:00.123456789Z";
+    let first = "10000000-0000-4000-8000-000000000001";
+    let second = "10000000-0000-4000-8000-000000000002";
+    for (id, tenant, name, state) in [
+        (first, "t1", "Invoice % follow-up", "ready"),
+        (second, "t1", "INVOICE % intake", "ready"),
+        (
+            "10000000-0000-4000-8000-000000000003",
+            "t1",
+            "Invoice % draft",
+            "draft",
+        ),
+        (
+            "10000000-0000-4000-8000-000000000004",
+            "t2",
+            "Invoice % foreign",
+            "ready",
+        ),
+        (
+            "10000000-0000-4000-8000-000000000005",
+            "t1",
+            "Invoice without marker",
+            "ready",
+        ),
+    ] {
+        let release = serde_json::from_value(json!({
+            "id":id,"tenant_id":tenant,"namespace":"Billing","sequence_name":name,
+            "baseline_sequence_id":Uuid::nil(),"baseline_version":1,
+            "candidate_sequence_id":Uuid::nil(),"candidate_version":-2,"state":state,
+            "canary_percent":0,"created_at":timestamp,"updated_at":timestamp
+        }))
+        .unwrap();
+        srv.storage.create_release(&release).await.unwrap();
+    }
+    let query = [
+        ("view", "page"),
+        ("page_size", "1"),
+        ("search", "billing invoice % v-2"),
+        ("release_state", "ready"),
+    ];
+    let read = || {
+        client
+            .get(format!("{}/releases", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .query(&query)
+    };
+    let page: Value = read()
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["items"][0]["id"], second);
+    assert_eq!(page["next_before"]["id"], second);
+    let next = page["next_before"]["created_at"].as_str().unwrap();
+    let older: Value = read()
+        .query(&[("before_id", second), ("before_created_at", next)])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(older["items"][0]["id"], first);
+    assert!(older["next_before"].is_null());
+    assert_eq!(older["before"], page["next_before"]);
+}
+
 /// Publish v1 (baseline) and v2 (candidate, adds a step) of one sequence.
 async fn publish_versions(base: &str, client: &reqwest::Client) -> Fixture {
     let name = format!("release-seq-{}", Uuid::now_v7());

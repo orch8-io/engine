@@ -136,6 +136,8 @@ pub struct ListQuery {
     pub(crate) namespace: Option<String>,
     pub(crate) sequence_id: Option<Uuid>,
     pub(crate) state: Option<String>,
+    pub(crate) release_id: Option<Uuid>,
+    pub(crate) release_variant: Option<orch8_types::release::ReleaseVariant>,
     /// Restrict to one sub-tenant (the `X-Orch8-Sub-Tenant` header, when
     /// present, overrides it).
     #[serde(default)]

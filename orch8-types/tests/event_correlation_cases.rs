@@ -1223,6 +1223,7 @@ fn wait_count_join_round_trips() {
 fn outcome_round_trips_full() {
     let o = IngestOutcome {
         event_id: Uuid::now_v7(),
+        stored_event_id: Some(Uuid::now_v7()),
         duplicate: false,
         matched_wait: Some(Uuid::now_v7()),
         satisfied: true,
@@ -1235,6 +1236,7 @@ fn outcome_round_trips_full() {
 fn outcome_round_trips_minimal() {
     let o = IngestOutcome {
         event_id: Uuid::now_v7(),
+        stored_event_id: None,
         duplicate: true,
         matched_wait: None,
         satisfied: false,
@@ -1247,6 +1249,7 @@ fn outcome_round_trips_minimal() {
 fn outcome_matched_wait_none_omitted_from_json() {
     let o = IngestOutcome {
         event_id: Uuid::now_v7(),
+        stored_event_id: None,
         duplicate: false,
         matched_wait: None,
         satisfied: false,
@@ -1260,6 +1263,7 @@ fn outcome_matched_wait_some_present_in_json() {
     let wait_id = Uuid::now_v7();
     let o = IngestOutcome {
         event_id: Uuid::now_v7(),
+        stored_event_id: None,
         duplicate: false,
         matched_wait: Some(wait_id),
         satisfied: true,
@@ -1273,6 +1277,7 @@ fn outcome_satisfied_defaults_to_false_when_missing() {
     let j = json!({"event_id": Uuid::now_v7().to_string(), "duplicate": false});
     let o: IngestOutcome = serde_json::from_value(j).unwrap();
     assert!(!o.satisfied);
+    assert_eq!(o.stored_event_id, None);
     assert_eq!(o.matched_wait, None);
 }
 

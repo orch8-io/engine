@@ -6,7 +6,7 @@
 //! consumed, and expired events.
 
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -22,11 +22,20 @@ use crate::AppState;
 use crate::error::ApiError;
 
 const MAX_OUTBOX_BATCH: usize = 100;
+const STORED_EVENT_ID_HEADER: &str = "x-orch8-include-stored-event-id";
+
+fn receipt_for_client(mut outcome: IngestOutcome, include_stored_id: bool) -> IngestOutcome {
+    if !include_stored_id {
+        outcome.stored_event_id = None;
+    }
+    outcome
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/events", post(ingest_event).get(list_events))
         .route("/events/batch", post(ingest_event_batch))
+        .route("/events/lookup", post(lookup_event))
         .route("/events/{id}", get(get_event))
 }
 
@@ -87,6 +96,7 @@ pub(crate) struct IngestEventRequest {
 pub(crate) async fn ingest_event(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    headers: HeaderMap,
     Json(req): Json<IngestEventRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant_id =
@@ -108,7 +118,10 @@ pub(crate) async fn ingest_event(
     } else {
         StatusCode::CREATED
     };
-    Ok((status, Json(outcome)))
+    let include_stored_id = headers
+        .get(STORED_EVENT_ID_HEADER)
+        .is_some_and(|v| v == "true");
+    Ok((status, Json(receipt_for_client(outcome, include_stored_id))))
 }
 
 #[utoipa::path(post, path = "/events/batch", tag = "events",
@@ -121,6 +134,7 @@ pub(crate) async fn ingest_event(
 pub(crate) async fn ingest_event_batch(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
+    headers: HeaderMap,
     Json(batch): Json<BatchIngestRequest>,
 ) -> Result<Json<BatchIngestResponse>, ApiError> {
     validate_batch_size(batch.events.len())?;
@@ -138,6 +152,9 @@ pub(crate) async fn ingest_event_batch(
     }
 
     let mut outcomes = Vec::with_capacity(batch.events.len());
+    let include_stored_id = headers
+        .get(STORED_EVENT_ID_HEADER)
+        .is_some_and(|v| v == "true");
     // Intentionally serial: events sharing a correlation key must observe
     // producer order while they CAS a wait's accumulated matches. The hard
     // batch cap bounds the query work; relays page their outbox above it.
@@ -149,11 +166,10 @@ pub(crate) async fn ingest_event_batch(
             &request.correlation_key,
             request.payload,
         );
-        outcomes.push(
-            orch8_engine::event_correlation::ingest(&state.storage, envelope)
-                .await
-                .map_err(|error| ApiError::from_storage(error, "event"))?,
-        );
+        let outcome = orch8_engine::event_correlation::ingest(&state.storage, envelope)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "event"))?;
+        outcomes.push(receipt_for_client(outcome, include_stored_id));
     }
     Ok(Json(BatchIngestResponse { outcomes }))
 }
@@ -266,6 +282,61 @@ pub(crate) async fn get_event(
     )?;
     event.payload = RedactionPolicy::default().redacted(&event.payload);
     Ok(Json(event))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct EventIdentityLookup {
+    event_name: String,
+    producer_event_id: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct EventIdentityObservation {
+    tenant_id: String,
+    event_name: String,
+    producer_event_id: String,
+    event: Option<EventEnvelope>,
+}
+
+#[utoipa::path(post, path = "/events/lookup", tag = "events",
+    request_body = EventIdentityLookup,
+    params(("X-Tenant-Id" = Option<String>, Header, description = "Tenant scope for a root key")),
+    responses(
+        (status = 200, description = "Exact producer identity and optional stored event with a redacted payload", body = EventIdentityObservation),
+        (status = 400, description = "Missing tenant scope or invalid identity"),
+    )
+)]
+pub(crate) async fn lookup_event(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(identity): Json<EventIdentityLookup>,
+) -> Result<Json<EventIdentityObservation>, ApiError> {
+    let tenant = crate::auth::scoped_tenant_id(&tenant_ctx, None)
+        .ok_or_else(|| ApiError::InvalidArgument("An event tenant scope is required".into()))?;
+    if identity.event_name.trim().is_empty() || identity.producer_event_id.trim().is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "event_name and producer_event_id are required".into(),
+        ));
+    }
+    let mut event = state
+        .storage
+        .get_event_by_identity(
+            tenant.as_str(),
+            &identity.event_name,
+            &identity.producer_event_id,
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "event"))?;
+    if let Some(event) = &mut event {
+        event.payload = RedactionPolicy::default().redacted(&event.payload);
+    }
+    Ok(Json(EventIdentityObservation {
+        tenant_id: tenant.as_str().to_owned(),
+        event_name: identity.event_name,
+        producer_event_id: identity.producer_event_id,
+        event,
+    }))
 }
 
 #[cfg(test)]

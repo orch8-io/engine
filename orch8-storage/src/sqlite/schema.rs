@@ -1012,6 +1012,7 @@ CREATE TABLE IF NOT EXISTS workflow_releases (
     target                TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_releases_tenant ON workflow_releases(tenant_id, state);
+CREATE INDEX IF NOT EXISTS idx_releases_inventory ON workflow_releases(tenant_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_releases_baseline ON workflow_releases(baseline_sequence_id, state);
 
 CREATE TABLE IF NOT EXISTS release_decisions (

@@ -11,6 +11,7 @@ use orch8_types::error::StorageError;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId, Namespace, SequenceId, TenantId};
 use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::release::ReleaseVariant;
 use orch8_types::sequence::BlockDefinition;
 
 use super::types::{
@@ -78,14 +79,28 @@ async fn concurrent_idempotency_winner(
     Ok(Some(instance.id))
 }
 
-/// Collect `metadata.<key>=<value>` query params into a flat JSON object used
-/// as the metadata equality filter. Returns `None` when no such params are
-/// present (so the common unfiltered list path stays a no-op). Keys are the
-/// part after the `metadata.` prefix; values are kept as JSON strings —
-/// matching is string-equality on top-level metadata keys.
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct InstanceReleaseFilter {
+    release_id: Uuid,
+    variant: Option<ReleaseVariant>,
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+struct InstanceListPage {
+    items: Vec<TaskInstance>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    release_filter: Option<InstanceReleaseFilter>,
+}
+
+/// Literal top-level metadata matches and the optional nested release tag
+/// share the storage backends' JSON containment query.
 fn build_metadata_filter(
     raw: &std::collections::HashMap<String, String>,
-) -> Option<serde_json::Value> {
+    release: Option<&InstanceReleaseFilter>,
+) -> Result<Option<serde_json::Value>, ApiError> {
     let mut obj = serde_json::Map::new();
     for (k, v) in raw {
         if let Some(key) = k.strip_prefix("metadata.")
@@ -94,11 +109,19 @@ fn build_metadata_filter(
             obj.insert(key.to_string(), serde_json::Value::String(v.clone()));
         }
     }
-    if obj.is_empty() {
-        None
-    } else {
-        Some(serde_json::Value::Object(obj))
+    if let Some(release) = release {
+        if obj.contains_key("release") {
+            return Err(ApiError::InvalidArgument(
+                "release_id cannot be combined with literal metadata.release".into(),
+            ));
+        }
+        let mut annotation = serde_json::json!({ "release_id": release.release_id });
+        if let Some(variant) = release.variant {
+            annotation["variant"] = serde_json::json!(variant);
+        }
+        obj.insert("release".into(), annotation);
     }
+    Ok((!obj.is_empty()).then_some(serde_json::Value::Object(obj)))
 }
 
 #[utoipa::path(post, path = "/instances", tag = "instances",
@@ -749,11 +772,13 @@ pub async fn get_instance_logs(
         ("namespace" = Option<String>, Query, description = "Filter by namespace"),
         ("sequence_id" = Option<Uuid>, Query, description = "Filter by sequence"),
         ("state" = Option<String>, Query, description = "Comma-separated states"),
+        ("release_id" = Option<Uuid>, Query, description = "Match a stored release routing tag"),
+        ("release_variant" = Option<ReleaseVariant>, Query, description = "Match the stored baseline or candidate tag with release_id"),
         ("sub_tenant" = Option<String>, Query, description = "Filter by sub-tenant (X-Orch8-Sub-Tenant overrides)"),
         ("offset" = u64, Query, description = "Pagination offset"),
         ("limit" = u32, Query, description = "Pagination limit (max 1000)"),
     ),
-    responses((status = 200, description = "Page of instances", body = crate::Page<TaskInstance>))
+    responses((status = 200, description = "Page of instances and applied release filter when requested", body = InstanceListPage))
 )]
 pub async fn list_instances(
     State(state): State<AppState>,
@@ -771,12 +796,16 @@ pub async fn list_instances(
         q.tenant_id.map(TenantId::unchecked)
     };
 
-    // Top-level metadata equality filters: every `?metadata.<key>=<value>`
-    // query param becomes one entry in a JSON object matched against the
-    // instance's `metadata` (Postgres `@>` containment over the existing GIN
-    // index; SQLite `json_extract` text-equality). String-equality only — the
-    // indexed substitute for Temporal's search attributes.
-    let metadata_filter = build_metadata_filter(&raw);
+    if q.release_id.is_none() && q.release_variant.is_some() {
+        return Err(ApiError::InvalidArgument(
+            "release_variant requires release_id".into(),
+        ));
+    }
+    let release_filter = q.release_id.map(|release_id| InstanceReleaseFilter {
+        release_id,
+        variant: q.release_variant,
+    });
+    let metadata_filter = build_metadata_filter(&raw, release_filter.as_ref())?;
 
     let filter = InstanceFilter {
         tenant_id,
@@ -805,7 +834,13 @@ pub async fn list_instances(
         .await
         .map_err(|e| ApiError::from_storage(e, "instances"))?;
 
-    Ok(Json(crate::PaginatedResponse::from_vec(instances, limit)))
+    let page = crate::Page::from_vec(instances, limit);
+    Ok(Json(InstanceListPage {
+        items: page.items,
+        next_cursor: page.next_cursor,
+        has_more: page.has_more,
+        release_filter,
+    }))
 }
 
 #[utoipa::path(patch, path = "/instances/{id}/state", tag = "instances",

@@ -12,7 +12,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use orch8_storage::release_inventory::ReleasePageFilter;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -194,6 +195,37 @@ pub(crate) struct ListReleasesQuery {
     tenant_id: Option<String>,
     #[serde(default = "default_limit")]
     limit: u32,
+    view: Option<String>,
+    search: Option<String>,
+    release_state: Option<ReleaseState>,
+    before_created_at: Option<DateTime<Utc>>,
+    before_id: Option<Uuid>,
+    page_size: Option<u32>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ReleaseCursor {
+    created_at: DateTime<Utc>,
+    id: Uuid,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ReleaseInventoryPage {
+    view: &'static str,
+    tenant_id: String,
+    search: Option<String>,
+    release_state: Option<ReleaseState>,
+    before: Option<ReleaseCursor>,
+    next_before: Option<ReleaseCursor>,
+    page_size: u32,
+    items: Vec<WorkflowRelease>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+enum ReleaseListResponse {
+    Inventory(ReleaseInventoryPage),
+    Legacy(Vec<WorkflowRelease>),
 }
 
 fn default_limit() -> u32 {
@@ -204,8 +236,14 @@ fn default_limit() -> u32 {
     params(
         ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
         ("limit" = Option<u32>, Query, description = "Max rows (default 100)"),
+        ("view" = Option<String>, Query, description = "Use page for tenant-scoped cursor pagination"),
+        ("page_size" = Option<u32>, Query, description = "Page size for page view (default 25, maximum 100)"),
+        ("search" = Option<String>, Query, description = "Whitespace-separated literal terms, ignoring ASCII letter case"),
+        ("release_state" = Option<ReleaseState>, Query, description = "Filter page view by release state"),
+        ("before_created_at" = Option<DateTime<Utc>>, Query, description = "Creation timestamp from next_before"),
+        ("before_id" = Option<Uuid>, Query, description = "Release UUID from next_before"),
     ),
-    responses((status = 200, description = "Releases, newest first", body = Vec<WorkflowRelease>))
+    responses((status = 200, description = "Releases, newest first", body = ReleaseListResponse))
 )]
 pub(crate) async fn list_releases(
     State(state): State<AppState>,
@@ -213,12 +251,82 @@ pub(crate) async fn list_releases(
     Query(q): Query<ListReleasesQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let scoped = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
+    if let Some(view) = q.view.as_deref() {
+        if view != "page" {
+            return Err(ApiError::InvalidArgument(
+                "Unknown release inventory view".into(),
+            ));
+        }
+        let tenant = scoped.as_ref().ok_or_else(|| {
+            ApiError::InvalidArgument("Release pagination requires one tenant".into())
+        })?;
+        let before = match (q.before_created_at, q.before_id) {
+            (Some(created_at), Some(id)) => Some((created_at, id)),
+            (None, None) => None,
+            _ => {
+                return Err(ApiError::InvalidArgument(
+                    "Supply both release cursor fields".into(),
+                ));
+            }
+        };
+        let terms: Vec<String> = q
+            .search
+            .as_deref()
+            .unwrap_or_default()
+            .split_whitespace()
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if q.search
+            .as_ref()
+            .is_some_and(|value| value.len() > 256 || value.contains('\0'))
+            || terms.len() > 16
+        {
+            return Err(ApiError::InvalidArgument(
+                "Choose up to 16 search terms using at most 256 bytes".into(),
+            ));
+        }
+        let page_size = q.page_size.unwrap_or(25);
+        if !(1..=100).contains(&page_size) {
+            return Err(ApiError::InvalidArgument(
+                "Release page size must be 1–100".into(),
+            ));
+        }
+        let query = ReleasePageFilter {
+            before,
+            state: q.release_state,
+            terms,
+        };
+        let mut items = state
+            .storage
+            .list_release_page(tenant, &query, page_size + 1)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "release"))?;
+        let next_before = if items.len() > page_size as usize {
+            items.truncate(page_size as usize);
+            items.last().map(|row| ReleaseCursor {
+                created_at: row.created_at,
+                id: row.id,
+            })
+        } else {
+            None
+        };
+        return Ok(Json(ReleaseListResponse::Inventory(ReleaseInventoryPage {
+            view: "page",
+            tenant_id: tenant.as_str().into(),
+            search: q.search,
+            release_state: q.release_state,
+            before: before.map(|(created_at, id)| ReleaseCursor { created_at, id }),
+            next_before,
+            page_size,
+            items,
+        })));
+    }
     let releases = state
         .storage
         .list_releases(scoped.as_ref(), q.limit.clamp(1, 1000))
         .await
         .map_err(|e| ApiError::from_storage(e, "release"))?;
-    Ok(Json(releases))
+    Ok(Json(ReleaseListResponse::Legacy(releases)))
 }
 
 #[utoipa::path(get, path = "/releases/{id}", tag = "releases",
