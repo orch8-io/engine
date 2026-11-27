@@ -240,6 +240,120 @@ async fn list_cron_filters_by_tenant() {
 }
 
 #[tokio::test]
+async fn paged_cron_inventory_resumes_after_one_scoped_row() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let mut ids = Vec::new();
+    for _ in 0..3 {
+        let created: serde_json::Value = client
+            .post(format!("{}/cron", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(
+                &json!({"tenant_id":"t1","namespace":"ns1","sequence_id":seq_id,
+                "cron_expr":"0 * * * *","enabled":false}),
+            )
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_owned());
+    }
+    ids.sort_unstable_by(|a, b| b.cmp(a));
+    let foreign_id = Uuid::now_v7();
+    let mut foreign_sequence = mk_sequence_body(foreign_id);
+    foreign_sequence["tenant_id"] = json!("t2");
+    client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t2")
+        .json(&foreign_sequence)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    client
+        .post(format!("{}/cron", srv.base_url))
+        .header("X-Tenant-Id", "t2")
+        .json(
+            &json!({"tenant_id":"t2","namespace":"ns1","sequence_id":foreign_id,
+            "cron_expr":"0 * * * *","enabled":false}),
+        )
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let mut cursor = None;
+    for (index, id) in ids.iter().enumerate() {
+        let mut request = client
+            .get(format!(
+                "{}/cron?view=page&limit=1&tenant_id=t2",
+                srv.base_url
+            ))
+            .header("X-Tenant-Id", "t1");
+        if let Some(cursor) = &cursor {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let page: serde_json::Value = request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page["items"].as_array().unwrap().len(), 1);
+        assert_eq!(page["items"][0]["id"], *id);
+        assert_eq!(page["items"][0]["tenant_id"], "t1");
+        assert_eq!(page["has_more"], index + 1 < ids.len());
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        assert_eq!(cursor.as_ref(), (index + 1 < ids.len()).then_some(id));
+    }
+    let scoped_page = |query: String| {
+        client
+            .get(format!("{}/cron?view=page&{query}", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .send()
+    };
+    let page: serde_json::Value =
+        scoped_page(format!("namespace=ns1&enabled=false&sequence_id={seq_id}"))
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), ids.len());
+    assert_eq!(
+        page["filter"],
+        json!({"namespace":"ns1","enabled":false,"sequence_id":seq_id})
+    );
+    for selector in [
+        "namespace=other".to_owned(),
+        "enabled=true".to_owned(),
+        format!("sequence_id={foreign_id}"),
+    ] {
+        let empty: serde_json::Value = scoped_page(selector)
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(empty["items"], json!([]));
+        assert_eq!(empty["has_more"], false);
+    }
+}
+
+#[tokio::test]
 async fn next_fires_returns_n_ascending_instants() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

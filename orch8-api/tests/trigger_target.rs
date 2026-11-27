@@ -265,3 +265,117 @@ async fn existing_webhook_secret_creates_an_instance_of_the_replacement() {
     assert_eq!(instance["sequence_id"], target["id"]);
     assert_eq!(instance["context"]["data"]["sample"], "retargeted");
 }
+
+async fn settings(
+    client: &reqwest::Client,
+    server: &TestServer,
+    tenant: &str,
+    body: Value,
+) -> reqwest::Response {
+    client
+        .patch(format!("{}/triggers/hook/settings", server.base_url))
+        .header("X-Tenant-Id", tenant)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn settings_merge_updates_state_and_preserves_unmodified_private_fields() {
+    let (server, client, _, _) = setup().await;
+    let tenant = TenantId::new("t1").unwrap();
+    let mut original = server
+        .storage
+        .get_trigger(Some(&tenant), "hook")
+        .await
+        .unwrap()
+        .unwrap();
+    original.config = json!({"auth":{"token":"private-token", "legacy":true}, "topics":["previous"], "retained":true});
+    server.storage.update_trigger(&original).await.unwrap();
+    let original = server
+        .storage
+        .get_trigger(Some(&tenant), "hook")
+        .await
+        .unwrap()
+        .unwrap();
+    let request = json!({
+        "expected_created_at": original.created_at, "expected_updated_at": original.updated_at,
+        "enabled":false, "config_patch":{"auth":{"legacy":null, "mode":"current"}, "topics":["one"]}
+    });
+    assert_eq!(
+        settings(&client, &server, "other", request.clone())
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let reply: Value = settings(&client, &server, "t1", request.clone())
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let stored = server
+        .storage
+        .get_trigger(Some(&tenant), "hook")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply, json!({"updated_at":stored.updated_at}));
+    assert!(!stored.enabled);
+    assert_eq!(
+        stored.config,
+        json!({"auth":{"token":"private-token","mode":"current"},"topics":["one"],"retained":true})
+    );
+    assert_eq!(stored.secret.unwrap().expose(), "retained-secret");
+    assert_eq!(stored.sequence_name, original.sequence_name);
+    assert_eq!(
+        settings(&client, &server, "t1", request).await.status(),
+        StatusCode::CONFLICT
+    );
+}
+
+#[tokio::test]
+async fn settings_secret_replacement_and_clear_are_revision_guarded() {
+    let (server, client, trigger, _) = setup().await;
+    let tenant = TenantId::new("t1").unwrap();
+    let replacement = json!({"expected_created_at": trigger["created_at"],"expected_updated_at": trigger["updated_at"],
+        "secret_change":{"mode":"replace","value":"replacement-secret"}});
+    let response = settings(&client, &server, "t1", replacement)
+        .await
+        .error_for_status()
+        .unwrap();
+    let receipt: Value = response.json().await.unwrap();
+    let stored = server
+        .storage
+        .get_trigger(Some(&tenant), "hook")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.secret.unwrap().expose(), "replacement-secret");
+    assert_eq!(receipt, json!({"updated_at":stored.updated_at}));
+    let mut clear = json!({"expected_created_at": trigger["updated_at"], "expected_updated_at": receipt["updated_at"], "secret_change":{"mode":"clear"}});
+    clear["expected_created_at"] = json!("2025-01-01T00:00:00Z");
+    assert_eq!(
+        settings(&client, &server, "t1", clear.clone())
+            .await
+            .status(),
+        StatusCode::CONFLICT
+    );
+    clear["expected_created_at"] = trigger["created_at"].clone();
+    assert_eq!(
+        settings(&client, &server, "t1", clear).await.status(),
+        StatusCode::OK
+    );
+    assert!(
+        server
+            .storage
+            .get_trigger(Some(&tenant), "hook")
+            .await
+            .unwrap()
+            .unwrap()
+            .secret
+            .is_none()
+    );
+}

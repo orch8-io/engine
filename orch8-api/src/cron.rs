@@ -4,11 +4,11 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use orch8_types::cron::CronSchedule;
+use orch8_types::cron::{CronInventoryFilter, CronSchedule};
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 
 use crate::AppState;
@@ -76,6 +76,25 @@ pub(crate) struct ListCronQuery {
     tenant_id: Option<String>,
     #[serde(default = "default_limit")]
     limit: u32,
+    view: Option<CronListView>,
+    cursor: Option<Uuid>,
+    namespace: Option<String>,
+    sequence_id: Option<Uuid>,
+    enabled: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CronListView {
+    Page,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct CronSchedulePage {
+    items: Vec<CronSchedule>,
+    next_cursor: Option<Uuid>,
+    has_more: bool,
+    filter: CronInventoryFilter,
 }
 
 fn default_limit() -> u32 {
@@ -287,9 +306,24 @@ pub(crate) async fn next_fires(
     })))
 }
 
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+enum CronScheduleList {
+    Schedules(Vec<CronSchedule>),
+    Page(CronSchedulePage),
+}
+
 #[utoipa::path(get, path = "/cron", tag = "cron",
-    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
-    responses((status = 200, description = "List of cron schedules", body = Vec<CronSchedule>))
+    params(
+        ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
+        ("limit" = Option<u32>, Query, description = "Limit, default 100. Page view clamps to 1–200."),
+        ("view" = Option<String>, Query, description = "Use page for a live window in descending UUID order."),
+        ("cursor" = Option<Uuid>, Query, description = "Use the previous page's next_cursor."),
+        ("namespace" = Option<String>, Query, description = "Exact namespace in the page view."),
+        ("sequence_id" = Option<Uuid>, Query, description = "Exact stored sequence UUID in the page view."),
+        ("enabled" = Option<bool>, Query, description = "Filter by enabled state in the page view."),
+    ),
+    responses((status = 200, description = "Cron schedules or, with view=page, a CronSchedulePage", body = inline(CronScheduleList)))
 )]
 pub(crate) async fn list_cron(
     State(state): State<AppState>,
@@ -297,13 +331,40 @@ pub(crate) async fn list_cron(
     Query(q): Query<ListCronQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let tenant = crate::auth::scoped_tenant_id(&tenant_ctx, q.tenant_id.as_deref());
+    let filter = CronInventoryFilter {
+        namespace: q.namespace,
+        sequence_id: q.sequence_id,
+        enabled: q.enabled,
+    };
+    if q.view.is_some() {
+        let limit = q.limit.clamp(1, 200);
+        let mut items = state
+            .storage
+            .list_cron_schedules_page(tenant.as_ref(), q.cursor, &filter, limit + 1)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "cron_schedules"))?;
+        let has_more = items.len() > limit as usize;
+        items.truncate(limit as usize);
+        let next_cursor = items.last().filter(|_| has_more).map(|item| item.id);
+        return Ok(Json(CronScheduleList::Page(CronSchedulePage {
+            items,
+            next_cursor,
+            has_more,
+            filter,
+        })));
+    }
+    if q.cursor.is_some() || !filter.is_empty() {
+        return Err(ApiError::InvalidArgument(
+            "cron cursor and inventory filters require view=page".into(),
+        ));
+    }
     let schedules = state
         .storage
         .list_cron_schedules(tenant.as_ref(), q.limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "cron_schedules"))?;
 
-    Ok(Json(schedules))
+    Ok(Json(CronScheduleList::Schedules(schedules)))
 }
 
 #[utoipa::path(put, path = "/cron/{id}", tag = "cron",

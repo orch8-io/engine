@@ -193,8 +193,18 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
     ),
     (
         "/continuity/attention",
+        HttpMethod::Get,
+        "list_attention_tasks",
+    ),
+    (
+        "/continuity/attention",
         HttpMethod::Post,
         "create_attention_task",
+    ),
+    (
+        "/continuity/attention/{id}",
+        HttpMethod::Get,
+        "inspect_attention_task",
     ),
     (
         "/continuity/attention/{id}/assign",
@@ -628,6 +638,7 @@ impl Modify for EmbedSecurity {
         crate::triggers::remove_reviewed_trigger,
         crate::triggers::fire_trigger,
         crate::triggers::retarget_trigger,
+        crate::triggers::update_trigger_settings,
         // Webhooks
         crate::webhooks::public_webhook,
         // Interactive approvals (public, token-authenticated)
@@ -701,6 +712,7 @@ impl Modify for EmbedSecurity {
         crate::circuit_breakers::list_breakers_for_tenant,
         crate::circuit_breakers::get_breaker,
         crate::circuit_breakers::reset_breaker,
+        crate::circuit_breakers::reset_reviewed_breaker,
         // Pools
         crate::pools::create_pool,
         crate::pools::list_pools,

@@ -152,8 +152,8 @@ pub(super) async fn update_cas(
 ) -> Result<bool, StorageError> {
     let result = sqlx::query(
         r"UPDATE triggers SET sequence_name=$2, version=$3, tenant_id=$4, namespace=$5,
-          enabled=$6, secret=$7, trigger_type=$8, config=$9, updated_at=NOW()
-          WHERE slug=$1 AND tenant_id=$4 AND updated_at=$10",
+          enabled=$6, secret=$7, trigger_type=$8, config=$9, updated_at=GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+          WHERE slug=$1 AND tenant_id=$4 AND updated_at=$10 AND created_at=$11",
     )
     .bind(&trigger.slug)
     .bind(&trigger.sequence_name)
@@ -165,6 +165,7 @@ pub(super) async fn update_cas(
     .bind(trigger.trigger_type.to_string())
     .bind(trigger.config.to_string())
     .bind(expected_updated_at)
+    .bind(trigger.created_at)
     .execute(&store.pool)
     .await?;
     Ok(result.rows_affected() == 1)

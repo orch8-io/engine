@@ -8,7 +8,7 @@ use crate::ids::TenantId;
 ///
 /// Breakers are scoped per-tenant so a noisy customer cannot trip the circuit
 /// for an unrelated tenant sharing the same handler name.
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CircuitBreakerState {
     /// Owning tenant — breakers are isolated per-tenant.
     pub tenant_id: TenantId,

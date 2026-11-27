@@ -8,54 +8,71 @@ use chrono::{DateTime, Utc};
 use sqlx::AssertSqlSafe;
 
 use orch8_types::error::StorageError;
+use orch8_types::rollback::{DEFAULT_MIN_SAMPLES, RollbackPolicy};
 
 use super::PostgresStorage;
 
-pub(super) async fn create_rollback_policy(
+pub(super) async fn save_rollback_policy(
     storage: &PostgresStorage,
     tenant_id: &str,
     sequence_name: &str,
-    error_rate_threshold: f64,
-    time_window_secs: i32,
-    cooldown_secs: Option<i32>,
-    confirmation_window_secs: Option<i32>,
-    webhook_url: Option<&str>,
-) -> Result<(), StorageError> {
+    update: crate::RollbackPolicyUpdate<'_>,
+) -> Result<RollbackPolicy, StorageError> {
+    let mut tx = storage.pool.begin().await?;
     sqlx::query(
-        r"INSERT INTO rollback_policies (tenant_id, sequence_name, error_rate_threshold, time_window_secs, cooldown_secs, confirmation_window_secs, webhook_url)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        "INSERT INTO rollback_policies (
+             tenant_id, sequence_name, error_rate_threshold, time_window_secs,
+             cooldown_secs, confirmation_window_secs, webhook_url, min_samples
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8::integer, $9))
          ON CONFLICT (tenant_id, sequence_name) DO UPDATE SET
-           error_rate_threshold = EXCLUDED.error_rate_threshold,
-           time_window_secs = EXCLUDED.time_window_secs,
-           cooldown_secs = EXCLUDED.cooldown_secs,
-           confirmation_window_secs = EXCLUDED.confirmation_window_secs,
-           webhook_url = EXCLUDED.webhook_url,
+           error_rate_threshold = excluded.error_rate_threshold,
+           time_window_secs = excluded.time_window_secs,
+           cooldown_secs = excluded.cooldown_secs,
+           confirmation_window_secs = excluded.confirmation_window_secs,
+           webhook_url = excluded.webhook_url,
+           min_samples = COALESCE($8, rollback_policies.min_samples),
            enabled = TRUE,
-           updated_at = NOW()"
+           updated_at = NOW()",
     )
     .bind(tenant_id)
     .bind(sequence_name)
-    .bind(error_rate_threshold)
-    .bind(time_window_secs)
-    .bind(cooldown_secs.unwrap_or(3600))
-    .bind(confirmation_window_secs.unwrap_or(60))
-    .bind(webhook_url)
-    .execute(&storage.pool)
+    .bind(update.error_rate_threshold)
+    .bind(update.time_window_secs)
+    .bind(update.cooldown_secs.unwrap_or(3600))
+    .bind(update.confirmation_window_secs.unwrap_or(60))
+    .bind(update.webhook_url)
+    .bind(update.min_samples)
+    .bind(DEFAULT_MIN_SAMPLES)
+    .execute(&mut *tx)
     .await?;
-    Ok(())
+
+    let policy = read_rollback_policy(&mut *tx, tenant_id, sequence_name)
+        .await?
+        .ok_or_else(|| StorageError::Query("rollback policy missing after save".into()))?;
+    tx.commit().await?;
+    Ok(policy)
 }
 
 pub(super) async fn get_rollback_policy(
     storage: &PostgresStorage,
     tenant_id: &str,
     sequence_name: &str,
-) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError> {
+) -> Result<Option<RollbackPolicy>, StorageError> {
+    read_rollback_policy(&storage.pool, tenant_id, sequence_name).await
+}
+
+async fn read_rollback_policy<'e>(
+    executor: impl sqlx::PgExecutor<'e>,
+    tenant_id: &str,
+    sequence_name: &str,
+) -> Result<Option<RollbackPolicy>, StorageError> {
     let row: Option<(i64, String, String, f64, i32, bool, i32, i32, Option<String>, i32, DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, tenant_id, sequence_name, error_rate_threshold, time_window_secs, enabled, COALESCE(cooldown_secs, 3600), COALESCE(confirmation_window_secs, 60), webhook_url, min_samples, created_at, updated_at FROM rollback_policies WHERE tenant_id = $1 AND sequence_name = $2"
     )
     .bind(tenant_id)
     .bind(sequence_name)
-    .fetch_optional(&storage.pool)
+    .fetch_optional(executor)
     .await?;
     Ok(row.map(
         |(

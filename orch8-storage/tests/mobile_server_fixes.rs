@@ -5,7 +5,8 @@ use chrono::{DateTime, Duration, Utc};
 use orch8_storage::backend_test;
 use orch8_storage::testing::backends::BackendKind;
 use orch8_storage::{
-    MobileApprovalRequest, MobileCommand, MobileDevice, MobileInstanceStatus, TelemetryEvent,
+    MobileApprovalRequest, MobileCommand, MobileDevice, MobileInstanceStatus, RollbackPolicyUpdate,
+    TelemetryEvent,
 };
 use orch8_types::continuity::{RuntimeCapabilities, RuntimeId, RuntimeKind, RuntimeTrustLevel};
 use orch8_types::error::StorageError;
@@ -68,6 +69,31 @@ backend_test!(
         assert_eq!(p.min_samples, 3);
         let listed = b.storage.list_rollback_policies(Some("t1"), 10).await.unwrap();
         assert_eq!(listed[0].min_samples, 3);
+    }
+);
+
+backend_test!(
+    async fn rollback_policy_configuration_and_minimum_are_saved_together(b) {
+        let update = RollbackPolicyUpdate {
+            error_rate_threshold: 0.25,
+            time_window_secs: 120,
+            cooldown_secs: None,
+            confirmation_window_secs: None,
+            webhook_url: None,
+            min_samples: Some(140),
+        };
+        let policy = b.storage.save_rollback_policy("t1", "seq", update).await.unwrap();
+        assert_eq!(policy.min_samples, 140);
+        assert_eq!(policy.error_rate_threshold, 0.25);
+        let replacement = b.storage.save_rollback_policy("t1", "seq", RollbackPolicyUpdate {
+            error_rate_threshold: 0.5,
+            min_samples: None,
+            ..update
+        }).await.unwrap();
+        assert_eq!(replacement.id, policy.id);
+        assert_eq!(replacement.min_samples, 140);
+        assert_eq!(replacement.error_rate_threshold, 0.5);
+        assert_eq!(b.storage.get_rollback_policy("t1", "seq").await.unwrap().unwrap().min_samples, 140);
     }
 );
 

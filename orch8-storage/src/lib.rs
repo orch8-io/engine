@@ -3051,6 +3051,19 @@ pub trait SchedulingStore: Send + Sync + 'static {
         limit: u32,
     ) -> Result<Vec<CronSchedule>, StorageError>;
 
+    /// Read one live window in descending UUID order. The caller can request
+    /// one extra row to establish whether another page is available.
+    async fn list_cron_schedules_page(
+        &self,
+        tenant_id: Option<&TenantId>,
+        before: Option<Uuid>,
+        filter: &orch8_types::cron::CronInventoryFilter,
+        limit: u32,
+    ) -> Result<Vec<CronSchedule>, StorageError> {
+        let _ = (tenant_id, before, filter, limit);
+        Err(StorageError::Unsupported("cron schedule pagination".into()))
+    }
+
     /// Complete catalog enumeration for operator backups. Unlike the public
     /// list operation, this must not cap results or infer tenants from sequences.
     /// The tenant filter follows the same visibility rules as the public list.
@@ -3166,6 +3179,18 @@ pub trait SchedulingStore: Send + Sync + 'static {
 // Sub-trait 8: AdminStore
 // ============================================================================
 
+/// Configuration for saving an enabled rollback policy.
+#[derive(Debug, Clone, Copy)]
+pub struct RollbackPolicyUpdate<'a> {
+    pub error_rate_threshold: f64,
+    pub time_window_secs: i32,
+    pub cooldown_secs: Option<i32>,
+    pub confirmation_window_secs: Option<i32>,
+    pub webhook_url: Option<&'a str>,
+    /// Defaults on creation and preserves the stored value on replacement when omitted.
+    pub min_samples: Option<i32>,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait AdminStore: Send + Sync + 'static {
@@ -3260,7 +3285,7 @@ pub trait AdminStore: Send + Sync + 'static {
 
     async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
 
-    /// Update a trigger only if its tenant and modification timestamp match.
+    /// Update a trigger only if its tenant, creation time and modification time match.
     /// Backends must implement this atomically; there is no blind-write fallback.
     async fn update_trigger_cas(
         &self,
@@ -3682,6 +3707,34 @@ pub trait AdminStore: Send + Sync + 'static {
         confirmation_window_secs: Option<i32>,
         webhook_url: Option<&str>,
     ) -> Result<(), StorageError>;
+
+    /// Save the complete policy configuration and return the row written.
+    async fn save_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        update: RollbackPolicyUpdate<'_>,
+    ) -> Result<orch8_types::rollback::RollbackPolicy, StorageError> {
+        if update.min_samples.is_some() {
+            return Err(StorageError::Unsupported(
+                "atomic rollback policy minimum samples".into(),
+            ));
+        }
+
+        self.create_rollback_policy(
+            tenant_id,
+            sequence_name,
+            update.error_rate_threshold,
+            update.time_window_secs,
+            update.cooldown_secs,
+            update.confirmation_window_secs,
+            update.webhook_url,
+        )
+        .await?;
+        self.get_rollback_policy(tenant_id, sequence_name)
+            .await?
+            .ok_or_else(|| StorageError::Query("rollback policy missing after save".into()))
+    }
 
     async fn get_rollback_policy(
         &self,
