@@ -105,7 +105,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 165;
+pub const STORAGE_SCHEMA_VERSION: u32 = 167;
 
 /// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
 const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
@@ -4987,6 +4987,16 @@ pub trait ContinuityStore: Send + Sync + 'static {
         id: HandoffId,
     ) -> Result<Option<ExecutionHandoff>, StorageError>;
 
+    async fn list_handoffs(
+        &self,
+        _tenant_id: &TenantId,
+        _continuity_id: ContinuityId,
+        _before: Option<HandoffId>,
+        _limit: u32,
+    ) -> Result<Vec<orch8_types::continuity::HandoffSummary>, StorageError> {
+        Err(StorageError::Unsupported("handoff history".into()))
+    }
+
     async fn cas_handoff(
         &self,
         tenant_id: &TenantId,
@@ -5666,6 +5676,56 @@ pub trait ContinuityStore: Send + Sync + 'static {
         envelope_sha256: &str,
         accepted_at: DateTime<Utc>,
     ) -> Result<bool, StorageError>;
+
+    /// Reserve the shared replay key and append typed provenance in one transaction.
+    /// Returns false if the epoch changed, replay was recorded, or another append won.
+    async fn commit_federation_acceptance(
+        &self,
+        record: &orch8_types::continuity_advanced::RecordedFederationAcceptance,
+        replay_until: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let _ = (record, replay_until);
+        Err(StorageError::Unsupported(
+            "atomic federation acceptance".into(),
+        ))
+    }
+
+    async fn get_federation_acceptance(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        receipt_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::continuity_advanced::RecordedFederationAcceptance>, StorageError>
+    {
+        let _ = (tenant_id, continuity_id, receipt_id);
+        Err(StorageError::Unsupported(
+            "stored federation acceptance".into(),
+        ))
+    }
+
+    /// Store a signed envelope with its provenance while the reviewed epoch is current.
+    async fn commit_federation_signature(
+        &self,
+        record: &orch8_types::continuity_advanced::RecordedFederationSignature,
+    ) -> Result<bool, StorageError> {
+        let _ = record;
+        Err(StorageError::Unsupported(
+            "stored federation signature".into(),
+        ))
+    }
+
+    async fn get_federation_signature(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        receipt_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::continuity_advanced::RecordedFederationSignature>, StorageError>
+    {
+        let _ = (tenant_id, continuity_id, receipt_id);
+        Err(StorageError::Unsupported(
+            "stored federation signature".into(),
+        ))
+    }
 
     // --- Federation transport (trust registry, outbound calls, region fence) ---
 

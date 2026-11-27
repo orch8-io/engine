@@ -1155,6 +1155,8 @@ CREATE TABLE IF NOT EXISTS execution_handoffs (
 );
 CREATE INDEX IF NOT EXISTS idx_execution_handoffs_continuity
     ON execution_handoffs(tenant_id, continuity_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_execution_handoff_history
+    ON execution_handoffs(tenant_id, continuity_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS execution_capsules (
     id TEXT PRIMARY KEY,

@@ -8,8 +8,8 @@ use orch8_types::continuity::{
     CapsuleId, CapsuleManifest, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
     ContinuityExecution, ContinuityId, ContinuityLocation, ContinuityStream, EffectDispatchOutcome,
     EffectId, EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, HandoffId,
-    HandoffState, PlacementDecision, PlacementDecisionId, ProvenanceEntry, RuntimeCapabilities,
-    RuntimeId, StreamFrame, StreamId,
+    HandoffState, HandoffSummary, PlacementDecision, PlacementDecisionId, ProvenanceEntry,
+    RuntimeCapabilities, RuntimeId, StreamFrame, StreamId,
 };
 use orch8_types::continuity_advanced::{
     CompensationRunId, CompensationRunRecord, FederationEnvelope, LiveMigrationRecord,
@@ -574,6 +574,43 @@ impl crate::ContinuityStore for SqliteStorage {
                 .map_err(|error| StorageError::Query(error.to_string()))?;
         row.map(|row| decode(&row.get::<String, _>("record")))
             .transpose()
+    }
+
+    async fn list_handoffs(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        before: Option<HandoffId>,
+        limit: u32,
+    ) -> Result<Vec<HandoffSummary>, StorageError> {
+        let cursor_filter = if before.is_some() {
+            "AND (created_at, id) < (
+                SELECT created_at, id FROM execution_handoffs
+                WHERE tenant_id = ?1 AND continuity_id = ?2 AND id = ?3
+            )"
+        } else {
+            "AND ?3 IS NULL"
+        };
+        let query = format!(
+            "SELECT json_object(
+                 'id', id, 'continuity_id', continuity_id, 'tenant_id', tenant_id,
+                 'state', state, 'created_at', created_at, 'updated_at', updated_at,
+                 'source_runtime_id', json_extract(record, '$.source_runtime_id'), 'destination_runtime_id', json_extract(record, '$.destination_runtime_id')
+             ) AS summary
+             FROM execution_handoffs
+             WHERE tenant_id = ?1 AND continuity_id = ?2 {cursor_filter}
+             ORDER BY created_at DESC, id DESC LIMIT ?4"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(tenant_id.as_str())
+            .bind(continuity_id.to_string())
+            .bind(before.map(|id| id.to_string()))
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| decode(&row.try_get::<String, _>("summary")?))
+            .collect()
     }
 
     async fn cas_handoff(
@@ -1840,6 +1877,134 @@ impl crate::ContinuityStore for SqliteStorage {
         rows.into_iter()
             .map(|row| decode(&row.get::<String, _>("record")))
             .collect()
+    }
+
+    async fn commit_federation_signature(
+        &self,
+        record: &orch8_types::continuity_advanced::RecordedFederationSignature,
+    ) -> Result<bool, StorageError> {
+        let entry = &record.provenance;
+        let result = sqlx::query(
+            "INSERT INTO provenance_entries
+             (id, continuity_id, tenant_id, epoch, entry_sha256, previous_sha256, record, created_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+             FROM continuity_executions
+             WHERE continuity_id = ?2 AND tenant_id = ?3 AND epoch = ?4
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(entry.id.to_string())
+        .bind(entry.continuity_id.to_string())
+        .bind(entry.tenant_id.as_str())
+        .bind(to_i64(entry.epoch.get(), "provenance epoch")?)
+        .bind(&entry.entry_sha256)
+        .bind(&entry.previous_sha256)
+        .bind(encode(record)?)
+        .bind(entry.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn get_federation_signature(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        receipt_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::continuity_advanced::RecordedFederationSignature>, StorageError>
+    {
+        let row = sqlx::query(
+            "SELECT record FROM provenance_entries WHERE tenant_id = ? AND continuity_id = ? AND id = ?
+             AND json_type(record, '$.federation_signature') = 'object'",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.to_string())
+        .bind(receipt_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn commit_federation_acceptance(
+        &self,
+        record: &orch8_types::continuity_advanced::RecordedFederationAcceptance,
+        replay_until: DateTime<Utc>,
+    ) -> Result<bool, StorageError> {
+        let entry = &record.provenance;
+        let evidence = &record.federation_acceptance;
+        let epoch = to_i64(entry.epoch.get(), "federation epoch")?;
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM federation_receipts WHERE rowid IN (
+                 SELECT rowid FROM federation_receipts WHERE expires_at <= ? LIMIT 100
+             )",
+        )
+        .bind(entry.created_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        let reservation = sqlx::query(
+            "INSERT INTO federation_receipts
+             (tenant_id, peer_id, message_id, continuity_id, epoch, envelope_sha256,
+              accepted_at, expires_at, record)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9
+             FROM continuity_executions WHERE tenant_id = ?1 AND continuity_id = ?4 AND epoch = ?5
+             ON CONFLICT (tenant_id, peer_id, message_id) DO NOTHING",
+        )
+        .bind(entry.tenant_id.as_str())
+        .bind(evidence.peer_id.to_string())
+        .bind(evidence.message_id.to_string())
+        .bind(entry.continuity_id.to_string())
+        .bind(epoch)
+        .bind(&evidence.envelope_sha256)
+        .bind(entry.created_at.to_rfc3339())
+        .bind(replay_until.to_rfc3339())
+        .bind(encode(evidence)?)
+        .execute(&mut *transaction)
+        .await?;
+        if reservation.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        let appended = sqlx::query("INSERT INTO provenance_entries
+             (id, continuity_id, tenant_id, epoch, entry_sha256, previous_sha256, record, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT DO NOTHING")
+        .bind(entry.id.to_string())
+        .bind(entry.continuity_id.to_string())
+        .bind(entry.tenant_id.as_str())
+        .bind(epoch)
+        .bind(&entry.entry_sha256)
+        .bind(&entry.previous_sha256)
+        .bind(encode(record)?)
+        .bind(entry.created_at.to_rfc3339())
+        .execute(&mut *transaction)
+        .await?;
+        if appended.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Ok(false);
+        }
+        transaction.commit().await?;
+        Ok(true)
+    }
+
+    async fn get_federation_acceptance(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        receipt_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::continuity_advanced::RecordedFederationAcceptance>, StorageError>
+    {
+        let row = sqlx::query(
+            "SELECT record FROM provenance_entries
+             WHERE tenant_id = ? AND continuity_id = ? AND id = ?
+               AND json_type(record, '$.federation_acceptance') = 'object'",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.to_string())
+        .bind(receipt_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| decode(&row.try_get::<String, _>("record")?))
+            .transpose()
     }
 
     async fn accept_federation_message(

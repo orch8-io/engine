@@ -1293,6 +1293,116 @@
         }
       }
     },
+    "/continuity/executions/{id}/federation-signatures/{request_id}": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Read the signed envelope and its evidence by its saved request ID.",
+        "operationId": "read_federation_signature",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "Signing request ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exact signed envelope and provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordedFederationSignature"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No signature matches the request"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Sign once per request ID and bind the returned envelope to its persisted provenance.",
+        "operationId": "record_federation_signature",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "description": "Caller-generated signing request ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordFederationSignatureRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored signature and provenance",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordedFederationSignature"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Continuity execution not found"
+          },
+          "409": {
+            "description": "The signing request conflicts with current state or a stored signature"
+          }
+        }
+      }
+    },
     "/continuity/executions/{id}/handoff-preview": {
       "post": {
         "tags": [
@@ -1304,6 +1414,70 @@
             "description": "Continuity API response"
           }
         }
+      }
+    },
+    "/continuity/executions/{id}/handoffs": {
+      "get": {
+        "operationId": "list_handoffs",
+        "parameters": [
+          {
+            "description": "Continuity execution ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "description": "Tenant ID",
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Cursor from the previous page",
+            "in": "query",
+            "name": "before",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/HandoffId"
+            }
+          },
+          {
+            "description": "Handoffs per page (1–50, default 25)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HandoffPage"
+                }
+              }
+            },
+            "description": "Saved handoffs"
+          },
+          "404": {
+            "description": "Continuity execution or cursor not found"
+          }
+        },
+        "summary": "List saved handoffs for a continuity execution, newest first.",
+        "tags": [
+          "continuity"
+        ]
       }
     },
     "/continuity/executions/{id}/invariants/evaluate": {
@@ -1684,6 +1858,151 @@
         }
       }
     },
+    "/continuity/federation/acceptances": {
+      "post": {
+        "operationId": "accept_federation_envelope",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyFederationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordedFederationAcceptance"
+                }
+              }
+            },
+            "description": "Exact acceptance stored or already recorded"
+          },
+          "404": {
+            "description": "Envelope or continuity execution not found"
+          },
+          "409": {
+            "description": "Verification failed or the message could not be accepted"
+          }
+        },
+        "summary": "Accept a verified message once and store replay protection and provenance atomically.",
+        "tags": [
+          "continuity"
+        ]
+      }
+    },
+    "/continuity/federation/acceptances/{id}": {
+      "get": {
+        "operationId": "read_federation_acceptance",
+        "parameters": [
+          {
+            "description": "Signed message ID",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/FederationMessageId"
+            }
+          },
+          {
+            "description": "Tenant ID",
+            "in": "query",
+            "name": "tenant_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Continuity execution ID",
+            "in": "query",
+            "name": "continuity_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "description": "Configured peer ID",
+            "in": "query",
+            "name": "peer_id",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/FederationPeerId"
+            }
+          },
+          {
+            "description": "SHA-256 returned by inspection",
+            "in": "query",
+            "name": "envelope_sha256",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordedFederationAcceptance"
+                }
+              }
+            },
+            "description": "Exact stored acceptance and provenance"
+          },
+          "404": {
+            "description": "No stored acceptance matches the selected envelope"
+          }
+        },
+        "summary": "Read exact acceptance evidence independently of the replay receipt's retention window.",
+        "tags": [
+          "continuity"
+        ]
+      }
+    },
+    "/continuity/federation/inspect": {
+      "post": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Check a supplied envelope against the configured peer and execution epoch without recording acceptance.",
+        "operationId": "inspect_federation",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyFederationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Peer, signature, payload and current epoch matched",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FederationInspection"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Envelope or continuity execution not found"
+          },
+          "409": {
+            "description": "The configured peer, epoch or cryptographic verification rejected the envelope"
+          }
+        }
+      }
+    },
     "/continuity/federation/sign": {
       "post": {
         "tags": [
@@ -1821,6 +2140,66 @@
       }
     },
     "/continuity/handoffs/{id}/attach-device-capsule": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Read the stored handoff and exact destination import binding without transferring ownership.",
+        "operationId": "inspect_device_capsule_attachment",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Handoff ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/HandoffId"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "capsule_id",
+            "in": "query",
+            "description": "Expected capsule ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/CapsuleId"
+            }
+          },
+          {
+            "name": "destination_instance_id",
+            "in": "query",
+            "description": "Expected imported execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/InstanceId"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The handoff reached export and the exact destination import is recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachDeviceCapsuleResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The exact attachment was not verified"
+          }
+        }
+      },
       "post": {
         "tags": [
           "continuity"
@@ -11151,6 +11530,21 @@
         ],
         "description": "The value an assertion reads."
       },
+      "AttachDeviceCapsuleResponse": {
+        "type": "object",
+        "required": [
+          "handoff",
+          "destination_instance_id"
+        ],
+        "properties": {
+          "destination_instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "handoff": {
+            "$ref": "#/components/schemas/ExecutionHandoff"
+          }
+        }
+      },
       "AuditEntry": {
         "type": "object",
         "required": [
@@ -12157,6 +12551,10 @@
             "$ref": "#/components/schemas/BlockId"
           }
         }
+      },
+      "CapsuleId": {
+        "type": "string",
+        "format": "uuid"
       },
       "CapsuleRequirements": {
         "type": "object",
@@ -15686,6 +16084,89 @@
         "description": "Monotonic ownership generation for one portable execution.",
         "minimum": 0
       },
+      "ExecutionHandoff": {
+        "type": "object",
+        "description": "Persisted transfer operation. `version` is the compare-and-swap token.",
+        "required": [
+          "id",
+          "continuity_id",
+          "tenant_id",
+          "source_runtime_id",
+          "destination_runtime_id",
+          "expected_epoch",
+          "state",
+          "preview_sha256",
+          "version",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "capsule_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CapsuleId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "expected_epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "failure_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/HandoffId"
+          },
+          "placement_decision_id": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlacementDecisionId",
+                "description": "Durable evidence that authorized this destination at dispatch time."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "preview_sha256": {
+            "type": "string"
+          },
+          "source_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "state": {
+            "$ref": "#/components/schemas/HandoffState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "ExecutionLocationReceipt": {
         "type": "object",
         "required": [
@@ -16166,6 +16647,34 @@
           }
         }
       },
+      "FederationAcceptance": {
+        "type": "object",
+        "description": "Scoped identifiers for a received envelope retained with its ledger entry.",
+        "required": [
+          "peer_id",
+          "message_id",
+          "destination_runtime_id",
+          "payload_sha256",
+          "envelope_sha256"
+        ],
+        "properties": {
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "envelope_sha256": {
+            "type": "string"
+          },
+          "message_id": {
+            "$ref": "#/components/schemas/FederationMessageId"
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId"
+          }
+        }
+      },
       "FederationCall": {
         "type": "object",
         "description": "Durable record of one outbound call. `version` is the CAS token.",
@@ -16346,6 +16855,50 @@
           }
         }
       },
+      "FederationInspection": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "message_id",
+          "peer_id",
+          "continuity_id",
+          "epoch",
+          "destination_runtime_id",
+          "payload_sha256",
+          "envelope_sha256",
+          "inspected_at"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "envelope_sha256": {
+            "type": "string"
+          },
+          "epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "inspected_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "message_id": {
+            "$ref": "#/components/schemas/FederationMessageId"
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
       "FederationMessageId": {
         "type": "string",
         "format": "uuid"
@@ -16421,6 +16974,27 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "FederationSignature": {
+        "type": "object",
+        "description": "Signed outgoing envelope and its request binding. Payload bytes are held by the sender.",
+        "required": [
+          "request_id",
+          "request_sha256",
+          "envelope"
+        ],
+        "properties": {
+          "envelope": {
+            "$ref": "#/components/schemas/FederationEnvelope"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "request_sha256": {
+            "type": "string"
           }
         }
       },
@@ -16816,6 +17390,100 @@
             "description": "Handler names served by external workers (from the worker registry)."
           }
         }
+      },
+      "HandoffId": {
+        "type": "string",
+        "format": "uuid"
+      },
+      "HandoffPage": {
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "handoffs": {
+            "items": {
+              "$ref": "#/components/schemas/HandoffSummary"
+            },
+            "type": "array"
+          },
+          "next_before": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HandoffId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        },
+        "required": [
+          "tenant_id",
+          "continuity_id",
+          "handoffs"
+        ],
+        "type": "object"
+      },
+      "HandoffState": {
+        "type": "string",
+        "description": "Durable ownership-transfer lifecycle.",
+        "enum": [
+          "requested",
+          "quiescing",
+          "exported",
+          "accepted",
+          "resumed",
+          "completed",
+          "rejected",
+          "failed",
+          "expired",
+          "revoked"
+        ]
+      },
+      "HandoffSummary": {
+        "description": "A saved handoff's identity, route, and most recently stored state.",
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "id": {
+            "$ref": "#/components/schemas/HandoffId"
+          },
+          "source_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "state": {
+            "$ref": "#/components/schemas/HandoffState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "continuity_id",
+          "tenant_id",
+          "source_runtime_id",
+          "destination_runtime_id",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
       },
       "HeartbeatRequest": {
         "type": "object",
@@ -18543,6 +19211,10 @@
           }
         }
       },
+      "PlacementDecisionId": {
+        "type": "string",
+        "format": "uuid"
+      },
       "PlacementPlan": {
         "type": "object",
         "required": [
@@ -20011,6 +20683,39 @@
           }
         }
       },
+      "RecordFederationSignatureRequest": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "peer_id",
+          "destination_runtime_id",
+          "expected_epoch",
+          "payload_base64",
+          "ttl_seconds"
+        ],
+        "properties": {
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "expected_epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "payload_base64": {
+            "type": "string"
+          },
+          "peer_id": {
+            "$ref": "#/components/schemas/FederationPeerId"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "ttl_seconds": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "RecordResidencyRequest": {
         "type": "object",
         "required": [
@@ -20048,6 +20753,44 @@
             "$ref": "#/components/schemas/TenantId"
           }
         }
+      },
+      "RecordedFederationAcceptance": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProvenanceEntry"
+          },
+          {
+            "type": "object",
+            "required": [
+              "federation_acceptance"
+            ],
+            "properties": {
+              "federation_acceptance": {
+                "$ref": "#/components/schemas/FederationAcceptance"
+              }
+            }
+          }
+        ],
+        "description": "Durable acceptance evidence. The payload and signature are excluded."
+      },
+      "RecordedFederationSignature": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProvenanceEntry"
+          },
+          {
+            "type": "object",
+            "required": [
+              "federation_signature"
+            ],
+            "properties": {
+              "federation_signature": {
+                "$ref": "#/components/schemas/FederationSignature"
+              }
+            }
+          }
+        ],
+        "description": "Durable outgoing federation receipt and its chain entry."
       },
       "RecordedResidencyEvaluation": {
         "allOf": [
@@ -23449,6 +24192,25 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          }
+        }
+      },
+      "VerifyFederationRequest": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "envelope",
+          "payload_base64"
+        ],
+        "properties": {
+          "envelope": {
+            "$ref": "#/components/schemas/FederationEnvelope"
+          },
+          "payload_base64": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
           }
         }
       },

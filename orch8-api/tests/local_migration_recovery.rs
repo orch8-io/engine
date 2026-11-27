@@ -7,7 +7,10 @@ use orch8_storage::{
 };
 use orch8_types::{
     checkpoint::Checkpoint,
-    continuity::{ContinuityExecution, ContinuityId, ExecutionEpoch, OwnershipState, RuntimeId},
+    continuity::{
+        CapsuleId, ContinuityExecution, ContinuityId, ExecutionEpoch, ExecutionHandoff, HandoffId,
+        HandoffState, OwnershipState, RuntimeId,
+    },
     continuity_advanced::{
         LiveMigrationPlan, LiveMigrationRecord, LiveMigrationState, MigrationDisposition,
         MigrationPlanId, StateTransform,
@@ -282,6 +285,73 @@ orch8_storage::backend_test!(artifacts = true, async fn migration_planning_repor
     }
 });
 
+orch8_storage::backend_test!(artifacts = true, async fn saved_handoff_history_pages_scoped_summaries(b) {
+    let storage = b.storage.clone();
+    let (_, owner) = fixture(storage.as_ref()).await;
+    let (_, other) = fixture(storage.as_ref()).await;
+    let handoff = ExecutionHandoff {
+        id: HandoffId::new(),
+        continuity_id: owner.continuity_id,
+        tenant_id: owner.tenant_id.clone(),
+        source_runtime_id: owner.owner_runtime_id,
+        destination_runtime_id: RuntimeId::new(),
+        expected_epoch: owner.epoch,
+        state: HandoffState::Requested,
+        capsule_id: None,
+        placement_decision_id: None,
+        preview_sha256: "a".repeat(64),
+        version: 0,
+        failure_code: None,
+        created_at: owner.updated_at,
+        updated_at: owner.updated_at,
+    };
+    // Equal creation times exercise the ID tie-break even when an older
+    // handoff changed state after the newer handoff was created.
+    let older = ExecutionHandoff {
+        id: HandoffId::from_uuid(uuid::Uuid::nil()),
+        state: HandoffState::Failed,
+        failure_code: Some("private fixture failure".into()),
+        updated_at: handoff.updated_at + Duration::seconds(1),
+        ..handoff.clone()
+    };
+    let foreign = ExecutionHandoff {
+        id: HandoffId::new(), continuity_id: other.continuity_id, ..handoff.clone()
+    };
+    for record in [&handoff, &older, &foreign] {
+        storage.create_handoff(record).await.unwrap();
+    }
+    let server = spawn_test_server_on(storage, None).await;
+    let url = format!("{}/continuity/executions/{}/handoffs", server.v1_url(), owner.continuity_id);
+    let client = reqwest::Client::new();
+    let tenant = owner.tenant_id.as_str();
+    let first = client.get(&url).query(&[("tenant_id", tenant), ("limit", "1")])
+        .send().await.unwrap().error_for_status().unwrap();
+    let first: serde_json::Value = serde_json::from_str(&first.text().await.unwrap()).unwrap();
+    assert_eq!(first["tenant_id"], tenant);
+    assert_eq!(first["continuity_id"], owner.continuity_id.to_string());
+    let rows = first["handoffs"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], handoff.id.to_string());
+    assert_eq!(rows[0]["destination_runtime_id"], handoff.destination_runtime_id.to_string());
+    assert_eq!(rows[0].as_object().unwrap().len(), 8);
+    assert_eq!(first["next_before"], handoff.id.to_string());
+    let second = client.get(&url)
+        .query(&[("tenant_id", tenant), ("before", first["next_before"].as_str().unwrap())])
+        .send().await.unwrap().error_for_status().unwrap();
+    let second: serde_json::Value = serde_json::from_str(&second.text().await.unwrap()).unwrap();
+    assert_eq!(second["handoffs"].as_array().unwrap().len(), 1);
+    assert_eq!(second["handoffs"][0]["id"], older.id.to_string());
+    assert_eq!(second["handoffs"][0]["state"], "failed");
+    assert!(second["next_before"].is_null());
+    for query in [
+        [("tenant_id", tenant), ("before", &foreign.id.to_string())],
+        [("tenant_id", "other-tenant"), ("before", &handoff.id.to_string())],
+    ] {
+        let rejected = client.get(&url).query(&query).send().await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+    }
+});
+
 orch8_storage::backend_test!(artifacts = true, async fn saved_migration_history_pages_scoped_summaries(b) {
     let storage = b.storage.clone();
     let (record, owner) = fixture(storage.as_ref()).await;
@@ -415,4 +485,59 @@ orch8_storage::backend_test!(artifacts = true, async fn residency_history_pages_
     let excluded = body(client.get(&endpoint).query(&scope).query(&[("before", chain[2].id.to_string())])
         .send().await.unwrap()).await;
     assert_eq!(excluded["evaluations"], json!([]));
+});
+
+orch8_storage::backend_test!(artifacts = true, async fn reads_only_the_exact_committed_capsule_attachment(b) {
+    let storage = b.storage.clone();
+    let (_, owner) = fixture(storage.as_ref()).await;
+    let capsule = CapsuleId::new();
+    let destination = InstanceId::new();
+    let mut handoff = ExecutionHandoff {
+        id: HandoffId::new(),
+        continuity_id: owner.continuity_id,
+        tenant_id: owner.tenant_id.clone(),
+        source_runtime_id: owner.owner_runtime_id,
+        destination_runtime_id: RuntimeId::new(),
+        expected_epoch: owner.epoch,
+        state: HandoffState::Quiescing,
+        capsule_id: Some(capsule),
+        placement_decision_id: None,
+        preview_sha256: "a".repeat(64),
+        version: 1,
+        failure_code: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    storage.create_handoff(&handoff).await.unwrap();
+    storage.record_external_capsule_import(
+        &owner.tenant_id, capsule, handoff.destination_runtime_id, destination, Utc::now(),
+    ).await.unwrap();
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/continuity/handoffs/{}/attach-device-capsule", server.v1_url(), handoff.id);
+    let read = async |tenant: &str, capsule_id: CapsuleId, destination_id: InstanceId| {
+        client.get(&url).query(&[
+            ("tenant_id", tenant.to_owned()),
+            ("capsule_id", capsule_id.to_string()),
+            ("destination_instance_id", destination_id.to_string()),
+        ]).send().await.unwrap()
+    };
+    let tenant = owner.tenant_id.as_str();
+    assert_eq!(read(tenant, capsule, destination).await.status(), StatusCode::NOT_FOUND);
+    handoff.state = HandoffState::Exported;
+    handoff.version = 2;
+    assert!(storage.cas_handoff(&owner.tenant_id, handoff.id, HandoffState::Quiescing, 1, &handoff).await.unwrap());
+    for (tenant, capsule, destination) in [
+        ("foreign", capsule, destination),
+        (tenant, CapsuleId::new(), destination),
+        (tenant, capsule, InstanceId::new()),
+    ] {
+        assert_eq!(read(tenant, capsule, destination).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    let observed = read(tenant, capsule, destination).await.error_for_status().unwrap();
+    let observed: serde_json::Value = observed.json().await.unwrap();
+    assert_eq!(observed, json!({"handoff": handoff, "destination_instance_id": destination}));
+    assert_eq!(storage.get_handoff(&owner.tenant_id, handoff.id).await.unwrap().unwrap(), handoff);
+    assert_eq!(storage.get_continuity_execution(&owner.tenant_id, owner.continuity_id).await.unwrap().unwrap(), owner);
 });

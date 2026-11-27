@@ -1217,6 +1217,14 @@ fn federation_clock_skew() -> chrono::Duration {
     chrono::Duration::seconds(*SKEW)
 }
 
+/// Keep the replay reservation through the configured signature freshness allowance.
+#[must_use]
+pub fn federation_replay_deadline(expires_at: DateTime<Utc>) -> DateTime<Utc> {
+    expires_at
+        .checked_add_signed(federation_clock_skew())
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
 pub fn verify_federation_envelope(
     peer: &FederationPeer,
     envelope: &FederationEnvelope,
@@ -1228,7 +1236,7 @@ pub fn verify_federation_envelope(
     // freshness edges, or a sender running slightly ahead fails every call.
     let skew = federation_clock_skew();
     if envelope.issued_at > now + skew
-        || envelope.expires_at + skew <= now
+        || envelope.expires_at <= now - skew
         || envelope.issued_at < now - chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS) - skew
         || envelope.expires_at - envelope.issued_at
             > chrono::Duration::seconds(MAX_FEDERATION_TTL_SECONDS)

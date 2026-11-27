@@ -547,6 +547,7 @@ fault_impl! {
         async fn release_migrated_instance(&self, staged: &ContinuityExecution, state: &orch8_types::migration::MigratedInstanceState) -> Result<bool, StorageError>;
         async fn create_handoff(&self, handoff: &ExecutionHandoff) -> Result<(), StorageError>;
         async fn get_handoff(&self, tenant_id: &TenantId, id: HandoffId) -> Result<Option<ExecutionHandoff>, StorageError>;
+        async fn list_handoffs(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<orch8_types::continuity::HandoffId>, limit: u32) -> Result<Vec<orch8_types::continuity::HandoffSummary>, StorageError>;
         async fn cas_handoff(&self, tenant_id: &TenantId, id: HandoffId, expected_state: HandoffState, expected_version: u64, next: &ExecutionHandoff) -> Result<bool, StorageError>;
         async fn accept_handoff(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, accepted_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, accepted_execution: &ContinuityExecution) -> Result<bool, StorageError>;
         async fn commit_handoff_export(&self, tenant_id: &TenantId, expected_handoff: &ExecutionHandoff, exported_handoff: &ExecutionHandoff, expected_execution: &ContinuityExecution, transferring_execution: &ContinuityExecution) -> Result<bool, StorageError>;
@@ -603,6 +604,10 @@ fault_impl! {
         async fn list_residency_evaluations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<uuid::Uuid>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::ResidencyEvaluationSummary>, StorageError>;
         async fn get_provenance_head(&self, tenant_id: &TenantId, continuity_id: ContinuityId) -> Result<Option<ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<ProvenanceEntry>, StorageError>;
+        async fn commit_federation_signature(&self, record: &orch8_types::continuity_advanced::RecordedFederationSignature) -> Result<bool, StorageError>;
+        async fn get_federation_signature(&self, tenant_id: &TenantId, continuity_id: ContinuityId, receipt_id: uuid::Uuid) -> Result<Option<orch8_types::continuity_advanced::RecordedFederationSignature>, StorageError>;
+        async fn commit_federation_acceptance(&self, record: &orch8_types::continuity_advanced::RecordedFederationAcceptance, replay_until: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
+        async fn get_federation_acceptance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, receipt_id: uuid::Uuid) -> Result<Option<orch8_types::continuity_advanced::RecordedFederationAcceptance>, StorageError>;
         async fn accept_federation_message(&self, envelope: &FederationEnvelope, envelope_sha256: &str, accepted_at: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn upsert_federation_peer(&self, peer: &orch8_types::federation::FederationPeerRecord) -> Result<(), StorageError>;
         async fn get_federation_peer(&self, tenant_id: &TenantId, peer_id: orch8_types::continuity_advanced::FederationPeerId) -> Result<Option<orch8_types::federation::FederationPeerRecord>, StorageError>;

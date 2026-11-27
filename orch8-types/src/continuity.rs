@@ -639,6 +639,19 @@ pub struct ExecutionHandoff {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A saved handoff's identity, route, and most recently stored state.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct HandoffSummary {
+    pub id: HandoffId,
+    pub continuity_id: ContinuityId,
+    pub tenant_id: TenantId,
+    pub source_runtime_id: RuntimeId,
+    pub destination_runtime_id: RuntimeId,
+    pub state: HandoffState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantAction {

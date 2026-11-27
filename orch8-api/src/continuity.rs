@@ -8,6 +8,8 @@ pub(crate) use attention_queue::{
 mod delegation;
 mod effect_resolution;
 pub(crate) mod effect_review;
+pub(crate) mod federation_acceptance;
+pub(crate) mod federation_signing;
 use delegation::claim_delegation;
 mod local_recovery;
 pub(crate) mod residency;
@@ -35,9 +37,9 @@ use orch8_types::continuity::{
     CapsuleId, CapsuleRequirements, ContinuationGrant, ContinuationGrantId, ContinuationGrantState,
     ContinuityExecution, ContinuityId, ContinuityStream, DataClassification, EffectId,
     EffectReceipt, EffectState, ExecutionEpoch, ExecutionHandoff, GrantAction, HandoffId,
-    HandoffState, LocalityPolicy, OwnershipState, PlacementDecision, PlacementDecisionId,
-    PlacementEvidence, PolicyOutcome, RuntimeCapabilities, RuntimeId, RuntimeTrustLevel,
-    StreamFrame, StreamFrameState, StreamId,
+    HandoffState, HandoffSummary, LocalityPolicy, OwnershipState, PlacementDecision,
+    PlacementDecisionId, PlacementEvidence, PolicyOutcome, RuntimeCapabilities, RuntimeId,
+    RuntimeTrustLevel, StreamFrame, StreamFrameState, StreamId,
 };
 use orch8_types::continuity_advanced::{
     AttentionState, AttentionTask, AttentionTaskId, BudgetReservation, BudgetReservationId,
@@ -68,6 +70,7 @@ pub fn routes() -> Router<AppState> {
         .route("/continuity/executions", post(create_execution))
         .route("/continuity/executions/{id}", get(get_execution))
         .route("/continuity/executions/{id}/locations", get(list_locations))
+        .route("/continuity/executions/{id}/handoffs", get(list_handoffs))
         .route(
             "/continuity/executions/{id}/handoff-preview",
             post(handoff_preview),
@@ -77,7 +80,7 @@ pub fn routes() -> Router<AppState> {
         .route("/continuity/handoffs/{id}/export", post(export_handoff))
         .route(
             "/continuity/handoffs/{id}/attach-device-capsule",
-            post(attach_device_capsule),
+            get(inspect_device_capsule_attachment).post(attach_device_capsule),
         )
         .route("/continuity/handoffs/{id}/accept", post(accept_handoff))
         .route(
@@ -258,7 +261,20 @@ pub fn routes() -> Router<AppState> {
             get(residency::read).put(residency::record),
         )
         .route("/continuity/disclosure/minimize", post(minimize_disclosure))
+        .route("/continuity/federation/inspect", post(inspect_federation))
+        .route(
+            "/continuity/federation/acceptances",
+            post(federation_acceptance::accept),
+        )
+        .route(
+            "/continuity/federation/acceptances/{id}",
+            get(federation_acceptance::read),
+        )
         .route("/continuity/federation/verify", post(verify_federation))
+        .route(
+            "/continuity/executions/{id}/federation-signatures/{request_id}",
+            get(federation_signing::read).put(federation_signing::sign),
+        )
         .route("/continuity/federation/sign", post(sign_federation))
         .route("/continuity/delegations/claim", post(claim_delegation))
         .route("/continuity/delegations/{id}", get(get_delegation))
@@ -1069,6 +1085,79 @@ async fn create_handoff(
     Ok((StatusCode::CREATED, Json(handoff)))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct HandoffListQuery {
+    tenant_id: String,
+    before: Option<HandoffId>,
+    limit: Option<u32>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct HandoffPage {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    handoffs: Vec<HandoffSummary>,
+    next_before: Option<HandoffId>,
+}
+
+/// List saved handoffs for a continuity execution, newest first.
+#[utoipa::path(
+    get,
+    path = "/continuity/executions/{id}/handoffs",
+    tag = "continuity",
+    params(
+        ("id" = ContinuityId, Path, description = "Continuity execution ID"),
+        ("tenant_id" = String, Query, description = "Tenant ID"),
+        ("before" = Option<HandoffId>, Query, description = "Cursor from the previous page"),
+        ("limit" = Option<u32>, Query, description = "Handoffs per page (1–50, default 25)")
+    ),
+    responses(
+        (status = 200, description = "Saved handoffs", body = HandoffPage),
+        (status = 404, description = "Continuity execution or cursor not found")
+    )
+)]
+pub(crate) async fn list_handoffs(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<HandoffListQuery>,
+) -> Result<Json<HandoffPage>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    if let Some(before) = query.before {
+        state
+            .storage
+            .get_handoff(&tenant_id, before)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "handoff cursor"))?
+            .filter(|handoff| handoff.continuity_id == id)
+            .ok_or_else(|| ApiError::NotFound("handoff cursor".into()))?;
+    }
+    let limit = query.limit.unwrap_or(25).clamp(1, 50);
+    let mut handoffs = state
+        .storage
+        .list_handoffs(&tenant_id, id, query.before, limit + 1)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "handoffs"))?;
+    let next_before = if handoffs.len() > limit as usize {
+        handoffs.truncate(limit as usize);
+        handoffs.last().map(|handoff| handoff.id)
+    } else {
+        None
+    };
+    Ok(Json(HandoffPage {
+        tenant_id,
+        continuity_id: id,
+        handoffs,
+        next_before,
+    }))
+}
+
 async fn get_handoff(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -1481,16 +1570,83 @@ async fn import_capsule(
 #[derive(Deserialize)]
 struct AttachDeviceCapsuleRequest {
     tenant_id: TenantId,
+    expected_handoff_version: Option<u64>,
     destination_instance_id: InstanceId,
     capsule: SignedCapsuleManifest,
     payload_base64: String,
     payload_key_base64: TransferPayloadKey,
 }
 
-#[derive(Debug, Serialize)]
-struct AttachDeviceCapsuleResponse {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct AttachDeviceCapsuleResponse {
     handoff: ExecutionHandoff,
     destination_instance_id: InstanceId,
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)] // field names follow the documented HTTP query
+pub(crate) struct DeviceCapsuleAttachmentQuery {
+    tenant_id: String,
+    capsule_id: CapsuleId,
+    destination_instance_id: InstanceId,
+}
+
+/// Read the stored handoff and exact destination import binding without transferring ownership.
+#[utoipa::path(
+    get,
+    path = "/continuity/handoffs/{id}/attach-device-capsule",
+    tag = "continuity",
+    params(
+        ("id" = HandoffId, Path, description = "Handoff ID"),
+        ("tenant_id" = String, Query, description = "Tenant ID"),
+        ("capsule_id" = CapsuleId, Query, description = "Expected capsule ID"),
+        ("destination_instance_id" = InstanceId, Query, description = "Expected imported execution ID")
+    ),
+    responses(
+        (status = 200, description = "The handoff reached export and the exact destination import is recorded", body = AttachDeviceCapsuleResponse),
+        (status = 404, description = "The exact attachment was not verified")
+    )
+)]
+pub(crate) async fn inspect_device_capsule_attachment(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<HandoffId>,
+    Query(query): Query<DeviceCapsuleAttachmentQuery>,
+) -> Result<Json<AttachDeviceCapsuleResponse>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    let missing = || ApiError::NotFound("device capsule attachment".into());
+    let handoff = state
+        .storage
+        .get_handoff(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "handoff"))?
+        .ok_or_else(missing)?;
+    if !matches!(
+        handoff.state,
+        HandoffState::Exported
+            | HandoffState::Accepted
+            | HandoffState::Resumed
+            | HandoffState::Completed
+            | HandoffState::Expired
+            | HandoffState::Revoked
+    ) || handoff.capsule_id != Some(query.capsule_id)
+        || !state
+            .storage
+            .is_capsule_import_instance(
+                &tenant_id,
+                query.capsule_id,
+                handoff.destination_runtime_id,
+                query.destination_instance_id,
+            )
+            .await
+            .map_err(|error| ApiError::from_storage(error, "capsule import"))?
+    {
+        return Err(missing());
+    }
+    Ok(Json(AttachDeviceCapsuleResponse {
+        handoff,
+        destination_instance_id: query.destination_instance_id,
+    }))
 }
 
 #[allow(clippy::too_many_lines)] // audited external-runtime transfer phases stay explicit
@@ -1533,6 +1689,20 @@ async fn attach_device_capsule(
             "only a requested or recovering handoff can attach a device capsule".into(),
         ));
     }
+    let transitions = if handoff.state == HandoffState::Requested {
+        2
+    } else {
+        1
+    };
+    if body
+        .expected_handoff_version
+        .is_some_and(|version| version != handoff.version)
+        || handoff.version.checked_add(transitions).is_none()
+    {
+        return Err(ApiError::Conflict(
+            "the handoff version cannot be used for this attachment".into(),
+        ));
+    }
     if handoff.state == HandoffState::Quiescing
         && handoff.capsule_id != Some(body.capsule.manifest.capsule_id)
     {
@@ -1567,6 +1737,9 @@ async fn attach_device_capsule(
     if body.capsule.public_key != source_key
         || body.capsule.manifest.continuity_id != handoff.continuity_id
         || body.capsule.manifest.source_runtime_id != handoff.source_runtime_id
+        || body.capsule.manifest.source_instance_id != execution.current_instance_id
+        || body.capsule.manifest.epoch != handoff.expected_epoch
+        || body.destination_instance_id == execution.current_instance_id
         || body.capsule.manifest.allowed_destination_runtime_id
             != Some(handoff.destination_runtime_id)
     {
@@ -1626,10 +1799,22 @@ async fn attach_device_capsule(
         &payload_encryptor,
     )
     .await;
-    if let Err(error) = import {
-        return Err(
-            mark_capsule_export_failed(&state, &tenant_id, &quiescing, error.to_string()).await,
-        );
+    let (imported, _) = match import {
+        Ok(imported) => imported,
+        Err(error) => {
+            return Err(mark_capsule_export_failed(
+                &state,
+                &tenant_id,
+                &quiescing,
+                error.to_string(),
+            )
+            .await);
+        }
+    };
+    if imported.id != body.destination_instance_id {
+        return Err(ApiError::Conflict(
+            "the capsule was previously imported to another destination instance".into(),
+        ));
     }
     let mut exported = quiescing.clone();
     exported.state = HandoffState::Exported;
@@ -6885,8 +7070,8 @@ async fn minimize_disclosure(
     ))
 }
 
-#[derive(Debug, Deserialize)]
-struct VerifyFederationRequest {
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(crate) struct VerifyFederationRequest {
     tenant_id: TenantId,
     envelope: FederationEnvelope,
     payload_base64: String,
@@ -6982,13 +7167,59 @@ async fn sign_federation(
     }))
 }
 
-async fn verify_federation(
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct FederationInspection {
+    tenant_id: TenantId,
+    message_id: orch8_types::continuity_advanced::FederationMessageId,
+    peer_id: FederationPeerId,
+    continuity_id: ContinuityId,
+    epoch: ExecutionEpoch,
+    destination_runtime_id: RuntimeId,
+    payload_sha256: String,
+    envelope_sha256: String,
+    inspected_at: chrono::DateTime<Utc>,
+}
+
+/// Check a supplied envelope against the configured peer and execution epoch without recording acceptance.
+#[utoipa::path(
+    post,
+    path = "/continuity/federation/inspect",
+    tag = "continuity",
+    request_body = VerifyFederationRequest,
+    responses(
+        (status = 200, description = "Peer, signature, payload and current epoch matched", body = FederationInspection),
+        (status = 404, description = "Envelope or continuity execution not found"),
+        (status = 409, description = "The configured peer, epoch or cryptographic verification rejected the envelope")
+    )
+)]
+pub(crate) async fn inspect_federation(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Json(body): Json<VerifyFederationRequest>,
-) -> Result<Json<VerifyFederationResponse>, ApiError> {
+) -> Result<Json<FederationInspection>, ApiError> {
     let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
-    if body.envelope.tenant_id != tenant_id {
+    let (_, envelope_sha256, inspected_at) =
+        inspect_federation_input(&state, &tenant_id, &body).await?;
+    let envelope = body.envelope;
+    Ok(Json(FederationInspection {
+        tenant_id,
+        message_id: envelope.id,
+        peer_id: envelope.peer_id,
+        continuity_id: envelope.continuity_id,
+        epoch: envelope.epoch,
+        destination_runtime_id: envelope.destination_runtime_id,
+        payload_sha256: envelope.payload_sha256,
+        envelope_sha256,
+        inspected_at,
+    }))
+}
+
+async fn inspect_federation_input(
+    state: &AppState,
+    tenant_id: &TenantId,
+    body: &VerifyFederationRequest,
+) -> Result<(ContinuityExecution, String, chrono::DateTime<Utc>), ApiError> {
+    if &body.envelope.tenant_id != tenant_id {
         return Err(ApiError::NotFound("federation envelope".into()));
     }
     if body.payload_base64.len() > 16 * 1024 * 1024 {
@@ -6997,7 +7228,7 @@ async fn verify_federation(
         ));
     }
     let payload = BASE64
-        .decode(body.payload_base64)
+        .decode(&body.payload_base64)
         .map_err(|_| ApiError::InvalidArgument("payload_base64 is invalid".into()))?;
     let peer = state
         .federation_peers
@@ -7006,7 +7237,7 @@ async fn verify_federation(
         .ok_or_else(|| ApiError::Conflict("federation peer is not configured".into()))?;
     let execution = state
         .storage
-        .get_continuity_execution(&tenant_id, body.envelope.continuity_id)
+        .get_continuity_execution(tenant_id, body.envelope.continuity_id)
         .await
         .map_err(|error| ApiError::from_storage(error, "federation execution"))?
         .ok_or_else(|| ApiError::NotFound("federation execution".into()))?;
@@ -7015,17 +7246,29 @@ async fn verify_federation(
             "federation envelope carries a stale execution epoch".into(),
         ));
     }
+    let inspected_at = Utc::now();
     orch8_engine::continuity_advanced::verify_federation_envelope(
         peer,
         &body.envelope,
         &payload,
-        Utc::now(),
+        inspected_at,
     )
     .map_err(|error| ApiError::Conflict(error.to_string()))?;
     let envelope_sha256 = hex_sha256(
         &serde_json::to_vec(&body.envelope)
             .map_err(|error| ApiError::Internal(error.to_string()))?,
     );
+    Ok((execution, envelope_sha256, inspected_at))
+}
+
+async fn verify_federation(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Json(body): Json<VerifyFederationRequest>,
+) -> Result<Json<VerifyFederationResponse>, ApiError> {
+    let tenant_id = crate::auth::enforce_tenant_create(&tenant_ctx, &body.tenant_id)?;
+    let (execution, envelope_sha256, _) =
+        inspect_federation_input(&state, &tenant_id, &body).await?;
     let accepted = state
         .storage
         .accept_federation_message(&body.envelope, &envelope_sha256, Utc::now())

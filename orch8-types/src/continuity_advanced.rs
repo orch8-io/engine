@@ -749,3 +749,37 @@ pub struct FederationEnvelope {
     pub expires_at: DateTime<Utc>,
     pub signature: String,
 }
+
+/// Scoped identifiers for a received envelope retained with its ledger entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct FederationAcceptance {
+    pub peer_id: FederationPeerId,
+    pub message_id: FederationMessageId,
+    pub destination_runtime_id: RuntimeId,
+    pub payload_sha256: String,
+    pub envelope_sha256: String,
+}
+
+/// Durable acceptance evidence. The payload and signature are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RecordedFederationAcceptance {
+    #[serde(flatten)]
+    pub provenance: crate::continuity::ProvenanceEntry,
+    pub federation_acceptance: FederationAcceptance,
+}
+
+/// Signed outgoing envelope and its request binding. Payload bytes are held by the sender.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct FederationSignature {
+    pub request_id: uuid::Uuid,
+    pub request_sha256: String,
+    pub envelope: FederationEnvelope,
+}
+
+/// Durable outgoing federation receipt and its chain entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RecordedFederationSignature {
+    #[serde(flatten)]
+    pub provenance: crate::continuity::ProvenanceEntry,
+    pub federation_signature: FederationSignature,
+}

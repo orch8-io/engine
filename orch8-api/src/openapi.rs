@@ -242,6 +242,11 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         "extract_test_fixture",
     ),
     (
+        "/continuity/executions/{id}/handoffs",
+        HttpMethod::Get,
+        "list_handoffs",
+    ),
+    (
         "/continuity/executions/{id}/migrations",
         HttpMethod::Get,
         "list_live_migrations",
@@ -476,9 +481,16 @@ impl Modify for EmbedSecurity {
         (url = "/", description = "Unversioned (deprecated, backward-compat)"),
     ),
     paths(
+        crate::continuity::inspect_device_capsule_attachment,
+        crate::continuity::inspect_federation,
+        crate::continuity::federation_acceptance::accept,
+        crate::continuity::federation_acceptance::read,
+        crate::continuity::federation_signing::read,
+        crate::continuity::federation_signing::sign,
         crate::continuity::residency::list,
         crate::continuity::residency::read,
         crate::continuity::residency::record,
+        crate::continuity::list_handoffs,
         crate::continuity::list_live_migrations,
         crate::continuity::create_compensation_run,
         crate::continuity::get_active_compensation_run,
