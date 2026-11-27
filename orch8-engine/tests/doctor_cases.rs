@@ -965,6 +965,16 @@ fn open_breaker_for_involved_handler_is_direct_evidence_high() {
     assert_eq!(d.category, DiagnosisCategory::DirectEvidence);
     assert_eq!(d.finding.confidence, Confidence::High);
     assert_eq!(d.health, DiagnosisHealth::Degraded);
+    let target = d
+        .finding
+        .evidence
+        .iter()
+        .find(|item| item.label == "circuit_breaker_target")
+        .unwrap();
+    assert_eq!(
+        target.data.as_ref().unwrap(),
+        &json!({"instance_id": ctx.instance.id, "tenant_id": "t1", "handler": "flaky"})
+    );
 }
 
 #[test]
@@ -1065,14 +1075,15 @@ fn breaker_with_maximum_stored_cooldown_clamps_instead_of_panicking() {
 }
 
 #[test]
-fn breaker_without_opened_at_has_no_evidence_and_no_resume_text() {
+fn breaker_without_opened_at_has_a_target_and_no_resume_text() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     let mut b = breaker("t1", "h", BreakerState::Open);
     b.opened_at = None;
     ctx.open_breakers = Some(vec![b]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "OPEN_CIRCUIT_BREAKER");
-    assert!(d.finding.evidence.is_empty());
+    assert_eq!(d.finding.evidence.len(), 1);
+    assert_eq!(d.finding.evidence[0].label, "circuit_breaker_target");
     assert!(!d.finding.summary.contains("resume in"));
 }
 
