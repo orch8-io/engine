@@ -179,6 +179,73 @@ pub(super) async fn delete(storage: &SqliteStorage, id: Uuid) -> Result<(), Stor
     Ok(())
 }
 
+async fn matches_revision(
+    conn: &mut sqlx::SqliteConnection,
+    id: Uuid,
+    tenant_id: &TenantId,
+    revision: &str,
+) -> Result<bool, StorageError> {
+    let row = sqlx::query("SELECT * FROM cron_schedules WHERE id = ?1 AND tenant_id = ?2")
+        .bind(id.to_string())
+        .bind(tenant_id.as_str())
+        .fetch_optional(conn)
+        .await?;
+    let schedule = row.as_ref().map(row_to_cron).transpose()?;
+    match schedule {
+        Some(schedule) => Ok(schedule.configuration_revision()? == revision),
+        None => Ok(false),
+    }
+}
+
+pub(super) async fn update_reviewed(
+    storage: &SqliteStorage,
+    s: &CronSchedule,
+    revision: &str,
+) -> Result<Option<CronSchedule>, StorageError> {
+    let mut tx = begin_immediate(&storage.pool).await?;
+    if !matches_revision(&mut tx, s.id, &s.tenant_id, revision).await? {
+        return Ok(None);
+    }
+    let row = sqlx::query(
+        "UPDATE cron_schedules
+         SET cron_expr=?2, timezone=?3, enabled=?4, metadata=?5, next_fire_at=?6,
+             overlap_policy=?7, updated_at=?8
+         WHERE id=?1 RETURNING *",
+    )
+    .bind(s.id.to_string())
+    .bind(&s.cron_expr)
+    .bind(&s.timezone)
+    .bind(s.enabled as i32)
+    .bind(serde_json::to_string(&s.metadata)?)
+    .bind(s.next_fire_at.map(ts))
+    .bind(s.overlap_policy.to_string())
+    .bind(ts(Utc::now()))
+    .fetch_optional(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    row.as_ref().map(row_to_cron).transpose()
+}
+
+pub(super) async fn delete_reviewed(
+    storage: &SqliteStorage,
+    id: Uuid,
+    tenant_id: &TenantId,
+    revision: &str,
+) -> Result<bool, StorageError> {
+    let mut tx = begin_immediate(&storage.pool).await?;
+    if !matches_revision(&mut tx, id, tenant_id, revision).await? {
+        return Ok(false);
+    }
+    let removed = sqlx::query("DELETE FROM cron_schedules WHERE id = ?1")
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        == 1;
+    tx.commit().await?;
+    Ok(removed)
+}
+
 /// Maximum schedules claimed in one tick. After a long outage an unbounded
 /// claim would burst-spawn every due schedule at once — the exact thundering
 /// herd the missed-fire policy exists to avoid. Stragglers are picked up on

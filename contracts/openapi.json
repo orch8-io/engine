@@ -2925,6 +2925,14 @@
         "responses": {
           "200": {
             "description": "Cron schedule found",
+            "headers": {
+              "X-Orch8-Cron-Revision": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Configuration revision when reviewed writes are supported"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3048,6 +3056,133 @@
           },
           "404": {
             "description": "Cron schedule not found"
+          }
+        }
+      }
+    },
+    "/cron/{id}/reviewed": {
+      "put": {
+        "tags": [
+          "cron"
+        ],
+        "operationId": "update_reviewed_cron",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron schedule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Orch8-Cron-If-Revision",
+            "in": "header",
+            "description": "Reviewed configuration revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateCronRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reviewed cron configuration updated",
+            "headers": {
+              "X-Orch8-Cron-Guard": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Applied when the reviewed configuration matched"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CronSchedule"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid revision or configuration"
+          },
+          "409": {
+            "description": "The reviewed configuration changed",
+            "headers": {
+              "X-Orch8-Cron-Guard": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Stale when the comparison rejected the write"
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "cron"
+        ],
+        "operationId": "delete_reviewed_cron",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron schedule ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "X-Orch8-Cron-If-Revision",
+            "in": "header",
+            "description": "Reviewed configuration revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Reviewed cron configuration removed",
+            "headers": {
+              "X-Orch8-Cron-Guard": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Applied when the reviewed configuration matched"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid revision"
+          },
+          "409": {
+            "description": "The reviewed configuration changed",
+            "headers": {
+              "X-Orch8-Cron-Guard": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Stale when the comparison rejected the write"
+              }
+            }
           }
         }
       }
@@ -7505,6 +7640,12 @@
           "200": {
             "description": "Dispatch configs",
             "headers": {
+              "X-Orch8-Queue-Dispatch-Revision": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Comparison revision or absent when an exact queue was reviewed"
+              },
               "X-Orch8-Queue-Dispatch-Scope": {
                 "schema": {
                   "type": "string"
@@ -7553,6 +7694,107 @@
           },
           "400": {
             "description": "push mode requires push_url"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "routing"
+        ],
+        "operationId": "set_guarded_dispatch",
+        "parameters": [
+          {
+            "name": "X-Orch8-Queue-Dispatch-If-Revision",
+            "in": "header",
+            "description": "Exact review revision or absent for conditional creation",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetDispatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reviewed dispatch config set",
+            "headers": {
+              "X-Orch8-Queue-Dispatch-Guard": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Applied when the revision comparison succeeded"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueDispatchConfig"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration or revision"
+          },
+          "409": {
+            "description": "The reviewed configuration changed"
+          }
+        }
+      }
+    },
+    "/queues/dispatch/remove-reviewed": {
+      "post": {
+        "tags": [
+          "routing"
+        ],
+        "operationId": "delete_guarded_dispatch",
+        "parameters": [
+          {
+            "name": "X-Orch8-Queue-Dispatch-If-Revision",
+            "in": "header",
+            "description": "Exact review revision",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveReviewedDispatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Reviewed dispatch config removed",
+            "headers": {
+              "X-Orch8-Queue-Dispatch-Guard": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Applied when the revision comparison succeeded"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid revision"
+          },
+          "409": {
+            "description": "The reviewed configuration changed"
           }
         }
       }
@@ -22492,6 +22734,22 @@
             "type": "string"
           }
         }
+      },
+      "RemoveReviewedDispatchRequest": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "queue_name"
+        ],
+        "properties": {
+          "queue_name": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
       },
       "ReplayFixture": {
         "type": "object",

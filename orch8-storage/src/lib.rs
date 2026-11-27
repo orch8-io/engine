@@ -105,7 +105,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 168;
+pub const STORAGE_SCHEMA_VERSION: u32 = 169;
 
 /// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
 const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
@@ -3050,6 +3050,38 @@ pub trait WorkerStore: Send + Sync + 'static {
             .find(|config| config.tenant_id == tenant_id && config.queue_name == queue_name))
     }
 
+    /// Read metadata and its revision from the same row observation.
+    async fn review_queue_dispatch(
+        &self,
+        _tenant_id: &str,
+        _queue_name: &str,
+    ) -> Result<Option<(orch8_types::queue_dispatch::QueueDispatchConfig, String)>, StorageError>
+    {
+        Err(StorageError::Unsupported("queue dispatch revisions".into()))
+    }
+
+    /// Write only if the reviewed revision still exists, or create only if
+    /// absent when the expected revision is None. Returns metadata without the
+    /// signing secret. A None result means the comparison failed.
+    async fn set_reviewed_queue_dispatch(
+        &self,
+        _config: &orch8_types::queue_dispatch::QueueDispatchConfig,
+        _preserve_secret: bool,
+        _expected_revision: Option<&str>,
+    ) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError> {
+        Err(StorageError::Unsupported("queue dispatch revisions".into()))
+    }
+
+    /// Remove the row only while it has the reviewed revision.
+    async fn delete_reviewed_queue_dispatch(
+        &self,
+        _tenant_id: &str,
+        _queue_name: &str,
+        _expected_revision: &str,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported("queue dispatch revisions".into()))
+    }
+
     /// List dispatch configs, optionally filtered by tenant. Secrets are not
     /// returned (the `secret` field is always `None` in listed rows).
     async fn list_queue_dispatch(
@@ -3137,6 +3169,36 @@ pub trait SchedulingStore: Send + Sync + 'static {
     async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
 
     async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
+
+    /// Read a schedule on a store that supports transactional cron review.
+    async fn review_cron_schedule(&self, _id: Uuid) -> Result<Option<CronSchedule>, StorageError> {
+        Err(StorageError::Unsupported(
+            "guarded cron configuration".into(),
+        ))
+    }
+
+    /// Update configuration only while the reviewed revision still matches.
+    async fn update_reviewed_cron_schedule(
+        &self,
+        _schedule: &CronSchedule,
+        _revision: &str,
+    ) -> Result<Option<CronSchedule>, StorageError> {
+        Err(StorageError::Unsupported(
+            "guarded cron configuration".into(),
+        ))
+    }
+
+    /// Remove a tenant's schedule only while the reviewed revision matches.
+    async fn delete_reviewed_cron_schedule(
+        &self,
+        _id: Uuid,
+        _tenant_id: &TenantId,
+        _revision: &str,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported(
+            "guarded cron configuration".into(),
+        ))
+    }
 
     /// Atomically claim enabled cron schedules whose `next_fire_at <= now`.
     ///

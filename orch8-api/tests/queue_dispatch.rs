@@ -58,6 +58,108 @@ async fn queue_metadata_can_select_one_literal_queue_without_exposing_secrets() 
 }
 
 #[tokio::test]
+async fn guarded_writes_check_the_review_at_mutation_time() {
+    const REVISION: &str = "x-orch8-queue-dispatch-revision";
+    const EXPECTED: &str = "x-orch8-queue-dispatch-if-revision";
+    const GUARD: &str = "x-orch8-queue-dispatch-guard";
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/queues/dispatch", server.base_url);
+    let delete_url = format!("{url}/remove-reviewed");
+    let selected = " guarded/../queue % # é ";
+    let payload = json!({
+        "tenant_id": "t1", "queue_name": selected, "mode": "poll", "secret": "first"
+    });
+    let get = || {
+        client
+            .get(&url)
+            .header("x-tenant-id", "t1")
+            .query(&[("tenant_id", "t1"), ("queue_name", selected)])
+            .send()
+    };
+    let put = |revision| {
+        client
+            .put(&url)
+            .header("x-tenant-id", "t1")
+            .header(EXPECTED, revision)
+            .json(&payload)
+            .send()
+    };
+
+    let absent = get().await.unwrap();
+    assert_eq!(absent.headers()[REVISION], "absent");
+    let (first, second) = tokio::join!(put("absent"), put("absent"));
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(
+        [first.status(), second.status()]
+            .into_iter()
+            .filter(|status| *status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        [
+            first.headers()[GUARD].clone(),
+            second.headers()[GUARD].clone()
+        ]
+        .into_iter()
+        .filter(|outcome| outcome == "stale")
+        .count(),
+        1
+    );
+
+    let read = get().await.unwrap().error_for_status().unwrap();
+    let revision = read.headers()[REVISION].to_str().unwrap().to_owned();
+    assert_eq!(revision.len(), 32);
+    assert!(
+        read.json::<serde_json::Value>().await.unwrap()[0]
+            .get("secret")
+            .is_none()
+    );
+
+    // An older client can rotate a secret without changing the visible fields.
+    client
+        .post(&url)
+        .header("x-tenant-id", "t1")
+        .json(&json!({
+            "tenant_id": "t1", "queue_name": selected, "mode": "poll", "secret": "second"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let conflict = put(revision.as_str()).await.unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(conflict.headers()[GUARD], "stale");
+    let remove = |expected_tenant, revision| {
+        client
+            .post(&delete_url)
+            .header("x-tenant-id", "t1")
+            .header(EXPECTED, revision)
+            .json(&json!({"tenant_id":expected_tenant,"queue_name":selected}))
+            .send()
+    };
+    assert_eq!(
+        remove("t1", revision.as_str()).await.unwrap().status(),
+        StatusCode::CONFLICT
+    );
+    let fresh = get().await.unwrap().headers()[REVISION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        remove("t2", fresh.as_str()).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    let removed = remove("t1", fresh.as_str()).await.unwrap();
+    assert_eq!(removed.status(), StatusCode::NO_CONTENT);
+    assert_eq!(removed.headers()[GUARD], "applied");
+    assert_eq!(get().await.unwrap().headers()[REVISION], "absent");
+}
+
+#[tokio::test]
 async fn push_url_rejects_internal_addresses() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

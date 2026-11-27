@@ -635,6 +635,8 @@ impl Modify for EmbedSecurity {
         crate::cron::list_cron,
         crate::cron::update_cron,
         crate::cron::delete_cron,
+        crate::cron::update_reviewed_cron,
+        crate::cron::delete_reviewed_cron,
         crate::cron::next_fires,
         // Webhook outbox
         crate::webhook_outbox::list_outbox,
@@ -657,6 +659,8 @@ impl Modify for EmbedSecurity {
         crate::placement::delete_budget,
         // Queue dispatch
         crate::queue_dispatch::set_dispatch,
+        crate::queue_dispatch::set_guarded_dispatch,
+        crate::queue_dispatch::delete_guarded_dispatch,
         crate::queue_dispatch::list_dispatch,
         crate::queue_dispatch::delete_dispatch,
         // Workers

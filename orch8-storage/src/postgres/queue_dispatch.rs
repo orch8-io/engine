@@ -123,6 +123,87 @@ pub(super) async fn get_metadata(
         .transpose()
 }
 
+pub(super) async fn review(
+    store: &PostgresStorage,
+    tenant_id: &str,
+    queue_name: &str,
+) -> Result<Option<(QueueDispatchConfig, String)>, StorageError> {
+    let row = sqlx::query(
+        "SELECT tenant_id, queue_name, mode, push_url, created_at, updated_at, revision
+         FROM queue_dispatch WHERE tenant_id = $1 AND queue_name = $2",
+    )
+    .bind(tenant_id)
+    .bind(queue_name)
+    .fetch_optional(&store.pool)
+    .await?;
+    row.as_ref()
+        .map(|row| Ok((row_to_config(row, false)?, row.try_get("revision")?)))
+        .transpose()
+}
+
+pub(super) async fn set_reviewed(
+    store: &PostgresStorage,
+    cfg: &QueueDispatchConfig,
+    preserve_secret: bool,
+    revision: Option<&str>,
+) -> Result<Option<QueueDispatchConfig>, StorageError> {
+    let row = if let Some(revision) = revision {
+        sqlx::query(
+            "UPDATE queue_dispatch
+             SET mode = $3, push_url = $4, secret = CASE WHEN $7 THEN secret ELSE $5 END,
+                 updated_at = $6
+             WHERE tenant_id = $1 AND queue_name = $2 AND revision = $8
+             RETURNING tenant_id, queue_name, mode, push_url, created_at, updated_at",
+        )
+        .bind(&cfg.tenant_id)
+        .bind(&cfg.queue_name)
+        .bind(mode_str(cfg.mode))
+        .bind(&cfg.push_url)
+        .bind(&cfg.secret)
+        .bind(cfg.updated_at)
+        .bind(preserve_secret)
+        .bind(revision)
+        .fetch_optional(&store.pool)
+        .await?
+    } else {
+        sqlx::query(
+            "INSERT INTO queue_dispatch (tenant_id, queue_name, mode, push_url, secret, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (tenant_id, queue_name) DO NOTHING
+             RETURNING tenant_id, queue_name, mode, push_url, created_at, updated_at",
+        )
+        .bind(&cfg.tenant_id)
+        .bind(&cfg.queue_name)
+        .bind(mode_str(cfg.mode))
+        .bind(&cfg.push_url)
+        .bind(&cfg.secret)
+        .bind(cfg.created_at)
+        .bind(cfg.updated_at)
+        .fetch_optional(&store.pool)
+        .await?
+    };
+    row.as_ref()
+        .map(|row| row_to_config(row, false))
+        .transpose()
+}
+
+pub(super) async fn delete_reviewed(
+    store: &PostgresStorage,
+    tenant_id: &str,
+    queue_name: &str,
+    revision: &str,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "DELETE FROM queue_dispatch WHERE tenant_id = $1 AND queue_name = $2 AND revision = $3",
+    )
+    .bind(tenant_id)
+    .bind(queue_name)
+    .bind(revision)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() != 0)
+}
+
 pub(super) async fn list(
     store: &PostgresStorage,
     tenant_id: Option<&str>,

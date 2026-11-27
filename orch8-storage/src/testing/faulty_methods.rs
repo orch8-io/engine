@@ -301,6 +301,9 @@ fault_impl! {
         async fn set_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig, preserve_secret: bool) -> Result<orch8_types::queue_dispatch::QueueDispatchConfig, StorageError>;
         async fn get_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
         async fn get_queue_dispatch_metadata(&self, tenant_id: &str, queue_name: &str) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
+        async fn review_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<Option<(orch8_types::queue_dispatch::QueueDispatchConfig, String)>, StorageError>;
+        async fn delete_reviewed_queue_dispatch(&self, tenant_id: &str, queue_name: &str, expected_revision: &str) -> Result<bool, StorageError>;
+        async fn set_reviewed_queue_dispatch(&self, config: &orch8_types::queue_dispatch::QueueDispatchConfig, preserve_secret: bool, expected_revision: Option<&str>) -> Result<Option<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
         async fn list_queue_dispatch(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::queue_dispatch::QueueDispatchConfig>, StorageError>;
         async fn delete_queue_dispatch(&self, tenant_id: &str, queue_name: &str) -> Result<(), StorageError>;
         async fn append_step_logs(&self, instance_id: InstanceId, block_id: &BlockId, entries: &[orch8_types::step_log::StepLogEntry]) -> Result<(), StorageError>;
@@ -318,6 +321,9 @@ fault_impl! {
         async fn list_all_cron_schedules(&self, tenant_id: Option<&TenantId>) -> Result<Vec<CronSchedule>, StorageError>;
         async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError>;
         async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
+        async fn review_cron_schedule(&self, id: Uuid) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn update_reviewed_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule, revision: &str) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn delete_reviewed_cron_schedule(&self, id: Uuid, tenant_id: &TenantId, revision: &str) -> Result<bool, StorageError>;
         async fn claim_due_cron_schedules(&self, now: DateTime<Utc>) -> Result<Vec<CronSchedule>, StorageError>;
         async fn update_cron_fire_times(&self, id: Uuid, last_triggered_at: DateTime<Utc>, next_fire_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn record_cron_skip(&self, id: Uuid, now: DateTime<Utc>, next_fire_at: DateTime<Utc>) -> Result<(), StorageError>;

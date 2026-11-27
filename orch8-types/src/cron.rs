@@ -96,6 +96,27 @@ pub struct CronSchedule {
 }
 
 impl CronSchedule {
+    /// Configuration identity for a reviewed change. Claims and fire-time
+    /// observations advance independently of operator configuration.
+    pub fn configuration_revision(&self) -> Result<String, serde_json::Error> {
+        let configuration = serde_json::to_value((
+            "cron-configuration-v1",
+            self.id,
+            &self.tenant_id,
+            &self.namespace,
+            self.sequence_id,
+            self.created_at,
+            &self.cron_expr,
+            &self.timezone,
+            self.enabled,
+            &self.metadata,
+            self.overlap_policy,
+        ))?;
+        Ok(crate::delegation_definition::semantic_json_sha256(
+            &configuration,
+        ))
+    }
+
     /// Stable identity of the currently due occurrence.
     #[must_use]
     pub fn occurrence_key(&self) -> Option<String> {
