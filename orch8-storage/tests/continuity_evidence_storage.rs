@@ -116,19 +116,20 @@ async fn invariant_and_evaluation_evidence_is_deduplicated() {
     );
 }
 
-#[tokio::test]
-async fn attention_claim_is_single_winner() {
-    let (storage, tenant, continuity_id, _) = setup().await;
-    let now = Utc::now();
-    let task = AttentionTask {
+fn pending_attention_task(
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    deadline: chrono::DateTime<Utc>,
+) -> AttentionTask {
+    AttentionTask {
         id: AttentionTaskId::new(),
-        tenant_id: tenant.clone(),
+        tenant_id,
         continuity_id,
         required_skills: vec!["fraud".into()],
         classification: orch8_types::continuity::DataClassification::Confidential,
         allowed_regions: vec!["br".into()],
         priority: 2,
-        deadline: now + Duration::minutes(5),
+        deadline,
         estimated_attention_units: 2,
         state: AttentionState::Pending,
         assignee: None,
@@ -136,7 +137,17 @@ async fn attention_claim_is_single_winner() {
         budget_reservation_id: None,
         decision_sha256: None,
         decided_at: None,
-    };
+    }
+}
+
+#[tokio::test]
+async fn attention_queue_pages_by_deadline_and_id_within_tenant_and_state() {
+    let (storage, tenant, continuity_id, _) = setup().await;
+    let task = pending_attention_task(
+        tenant.clone(),
+        continuity_id,
+        Utc::now() + Duration::minutes(5),
+    );
     storage.create_attention_task(&task).await.unwrap();
     let mut same_deadline = task.clone();
     same_deadline.id = AttentionTaskId::new();
@@ -186,7 +197,14 @@ async fn attention_claim_is_single_winner() {
             .unwrap()
             .is_empty()
     );
+}
 
+#[tokio::test]
+async fn attention_claim_is_single_winner() {
+    let (storage, tenant, continuity_id, _) = setup().await;
+    let now = Utc::now();
+    let task = pending_attention_task(tenant.clone(), continuity_id, now + Duration::minutes(5));
+    storage.create_attention_task(&task).await.unwrap();
     let mut assigned = task.clone();
     assigned.state = AttentionState::Assigned;
     assigned.assignee = Some("reviewer-a".into());
