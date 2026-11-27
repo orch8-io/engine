@@ -1,0 +1,65 @@
+{
+  "system": "orch8",
+  "system_version": {
+    "images": {
+      "bench-orch8-2-worker-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-orch8-2-engine-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794",
+      "bench-orch8-2-postgres-1": "postgres@sha256:ce81150802644ddfac1db4da9e63be6f2a3818aa6ee98a7a28838aeea65dc37a"
+    },
+    "sdk": {}
+  },
+  "harness_version": "0.1.0",
+  "git_sha": "d553d5159d1028d00fb45a85f8770c1d9e7e6e98",
+  "scenario": "crash_recovery",
+  "run_index": 2,
+  "workload": {
+    "workflows": 500,
+    "steps": 3,
+    "activity_ms": 50,
+    "concurrency": 50,
+    "warmup_workflows": 50
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "cores": 2,
+    "memory_bytes": 8317911040,
+    "os": "Linux 7.0.0-1020-azure x64",
+    "docker_version": "28.0.4",
+    "docker_cpus": 2,
+    "docker_memory_bytes": 8317911040
+  },
+  "timings": {
+    "started_at": "2026-11-27T14:41:52.268Z",
+    "ended_at": "2026-11-27T14:51:55.061Z",
+    "total_duration_ms": 602793
+  },
+  "results": {
+    "completed": 497,
+    "failed": 3,
+    "throughput_wf_per_s": 1.59,
+    "latency_ms": {
+      "p50": 1265,
+      "p95": 10181,
+      "p99": 308073,
+      "max": 308120
+    },
+    "latency_source": "server",
+    "errors": [
+      "fetch failed (x3024)",
+      "benchmark request deadline exceeded (x1)",
+      "instance did not finish before the driver deadline (x1)"
+    ]
+  },
+  "crash_recovery": {
+    "killed_service": "engine",
+    "kill_at": "2026-11-27T14:42:00.031Z",
+    "restart_at": "2026-11-27T14:42:06.105Z",
+    "in_flight_at_kill": 50,
+    "recovered_count": 47,
+    "lost_count": 3,
+    "duplicate_activity_executions": 0,
+    "time_to_recover_ms": 961
+  },
+  "raw_samples_file": "samples.jsonl",
+  "activity_log_file": "activity.jsonl"
+}
