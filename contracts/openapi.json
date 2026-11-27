@@ -20028,6 +20028,13 @@
               "type": "string"
             }
           },
+          "key_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Lowercase SHA-256 of the verified token as loaded, without surrounding whitespace."
+          },
           "licensee": {
             "type": [
               "string",

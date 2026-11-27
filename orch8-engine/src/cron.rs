@@ -155,15 +155,18 @@ async fn apply_overlap_policy(
 
     match schedule.overlap_policy {
         OverlapPolicy::Skip => {
-            if let Some(next_at) = calculate_next_fire_after(schedule, now) {
-                storage.record_cron_skip(schedule.id, now, next_at).await?;
+            if let Some(next_at) = calculate_next_fire_after(schedule, now)
+                && storage
+                    .advance_claimed_cron_schedule(schedule, now, next_at, true)
+                    .await?
+            {
+                crate::metrics::inc(crate::metrics::CRON_SKIPPED);
+                info!(
+                    cron_id = %schedule.id,
+                    active_runs = active.len(),
+                    "cron occurrence skipped (overlap policy: previous run still active)"
+                );
             }
-            crate::metrics::inc(crate::metrics::CRON_SKIPPED);
-            info!(
-                cron_id = %schedule.id,
-                active_runs = active.len(),
-                "cron occurrence skipped (overlap policy: previous run still active)"
-            );
             Ok(false)
         }
         OverlapPolicy::BufferOne => {
@@ -171,14 +174,16 @@ async fn apply_overlap_policy(
             // pending and fires on the first tick after the previous run
             // finishes. Missed occurrences collapse into one buffered fire.
             let retry_at = now + chrono::Duration::seconds(BUFFER_RETRY_SECS);
-            storage
-                .update_cron_fire_times(schedule.id, now, retry_at)
-                .await?;
-            debug!(
-                cron_id = %schedule.id,
-                active_runs = active.len(),
-                "cron occurrence deferred (buffer_one: previous run still active)"
-            );
+            if storage
+                .advance_claimed_cron_schedule(schedule, now, retry_at, false)
+                .await?
+            {
+                debug!(
+                    cron_id = %schedule.id,
+                    active_runs = active.len(),
+                    "cron occurrence deferred (buffer_one: previous run still active)"
+                );
+            }
             Ok(false)
         }
         OverlapPolicy::CancelPrevious => {
@@ -237,7 +242,7 @@ async fn trigger_cron_schedule(
     // Create a new instance for this schedule.
     //
     // `idempotency_key` binds this instance to the exact (schedule, fire_at)
-    // pair: `create_instance` then `update_cron_fire_times` are two separate
+    // pair: `create_instance` then `advance_claimed_cron_schedule` are two separate
     // writes, and a crash between them would otherwise re-fire the same tick
     // on the next scheduler pass (fire time never advanced) and create a
     // duplicate instance. With the key set, the retry's `create_instance`
@@ -283,7 +288,7 @@ async fn trigger_cron_schedule(
             );
         }
         Err(StorageError::Conflict(_)) => {
-            // A crash between `create_instance` and `update_cron_fire_times`
+            // A crash between `create_instance` and `advance_claimed_cron_schedule`
             // on a previous attempt at this exact fire — the instance for
             // this tick already exists. Nothing to do but advance the fire
             // time below.
@@ -327,14 +332,14 @@ async fn trigger_cron_schedule(
     let next = calculate_next_fire_after(schedule, now);
     match next {
         Some(next_at) => {
-            storage
-                .update_cron_fire_times(schedule.id, now, next_at)
-                .await?;
-            debug!(
-                cron_id = %schedule.id,
-                next_fire_at = %next_at,
-                "cron schedule advanced"
-            );
+            if storage
+                .advance_claimed_cron_schedule(schedule, now, next_at, false)
+                .await?
+            {
+                debug!(cron_id = %schedule.id, next_fire_at = %next_at, "cron schedule advanced");
+            } else {
+                debug!(cron_id = %schedule.id, "cron claim was superseded before completion");
+            }
         }
         None => {
             warn!(

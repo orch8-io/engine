@@ -3219,13 +3219,27 @@ pub trait SchedulingStore: Send + Sync + 'static {
     /// hundreds of instances after a prolonged outage.
     ///
     /// The claim is a lease: it lasts `CRON_CLAIM_LEASE_SECS` unless
-    /// `update_cron_fire_times` / `record_cron_skip` release it earlier, so a
+    /// `advance_claimed_cron_schedule` releases it earlier, so a
     /// fire that fails or crashes mid-way is retried instead of disabling the
     /// schedule. Callers must make firing idempotent per `next_fire_at`.
     async fn claim_due_cron_schedules(
         &self,
         now: DateTime<Utc>,
     ) -> Result<Vec<CronSchedule>, StorageError>;
+
+    /// Advance scheduler state only if this claim and due occurrence still
+    /// match the stored row. An operator edit or a newer claim supersedes it.
+    async fn advance_claimed_cron_schedule(
+        &self,
+        _claimed: &CronSchedule,
+        _finished_at: DateTime<Utc>,
+        _next_fire_at: DateTime<Utc>,
+        _skipped: bool,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported(
+            "guarded cron claim completion".into(),
+        ))
+    }
 
     /// After triggering, update `last_triggered_at` and `next_fire_at`.
     async fn update_cron_fire_times(

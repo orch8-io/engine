@@ -3506,6 +3506,16 @@ impl crate::SchedulingStore for SqliteStorage {
         cron::claim_due(self, now).await
     }
 
+    async fn advance_claimed_cron_schedule(
+        &self,
+        claimed: &CronSchedule,
+        finished_at: DateTime<Utc>,
+        next_fire_at: DateTime<Utc>,
+        skipped: bool,
+    ) -> Result<bool, StorageError> {
+        cron::advance_claimed(self, claimed, finished_at, next_fire_at, skipped).await
+    }
+
     async fn update_cron_fire_times(
         &self,
         id: Uuid,

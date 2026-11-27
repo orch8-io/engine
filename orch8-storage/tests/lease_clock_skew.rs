@@ -136,3 +136,49 @@ backend_test!(
         );
     }
 );
+
+backend_test!(
+    async fn retired_cron_claim_cannot_change_an_edited_schedule(b) {
+        let seq = SequenceBuilder::new("t_cron").step("s", "noop").build();
+        b.storage.create_sequence(&seq).await.unwrap();
+        let now = Utc::now();
+        let schedule = CronSchedule {
+            id: Uuid::now_v7(),
+            tenant_id: TenantId::unchecked("t_cron"),
+            namespace: Namespace::new("default"),
+            sequence_id: seq.id,
+            cron_expr: "0 * * * * * *".into(),
+            timezone: "UTC".into(),
+            enabled: true,
+            metadata: json!({}),
+            overlap_policy: orch8_types::cron::OverlapPolicy::default(),
+            skipped_fires: 0,
+            last_skipped_at: None,
+            last_triggered_at: None,
+            next_fire_at: Some(now - Duration::seconds(5)),
+            created_at: now,
+            updated_at: now,
+        };
+        b.storage.create_cron_schedule(&schedule).await.unwrap();
+        let first = b.storage.claim_due_cron_schedules(now).await.unwrap().pop().unwrap();
+        let mut changed = first.clone();
+        changed.cron_expr = "30 * * * * * *".into();
+        let revised_time = now - Duration::seconds(1);
+        changed.next_fire_at = Some(revised_time);
+        b.storage.update_cron_schedule(&changed).await.unwrap();
+
+        let current = b.storage.claim_due_cron_schedules(now).await.unwrap().pop().unwrap();
+        assert!(!b.storage.advance_claimed_cron_schedule(&first, now, now + Duration::hours(1), true).await.unwrap());
+        let stored = b.storage.get_cron_schedule(schedule.id).await.unwrap().unwrap();
+        // PostgreSQL truncates timestamps to microseconds. Use the observed
+        // occurrence as the comparison baseline across the backend matrix.
+        assert_eq!(stored.next_fire_at, current.next_fire_at);
+        assert_eq!(stored.cron_expr, changed.cron_expr);
+        assert_eq!(stored.skipped_fires, 0);
+        assert!(b.storage.advance_claimed_cron_schedule(&current, now, now + Duration::minutes(1), true).await.unwrap());
+        assert!(!b.storage.advance_claimed_cron_schedule(&current, now, now + Duration::hours(1), true).await.unwrap());
+        let stored = b.storage.get_cron_schedule(schedule.id).await.unwrap().unwrap();
+        assert_eq!(stored.skipped_fires, 1);
+        assert!(stored.next_fire_at.unwrap() > now);
+    }
+);
