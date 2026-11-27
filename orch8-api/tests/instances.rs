@@ -545,6 +545,89 @@ async fn list_instances_filters_by_metadata_key_value() {
 }
 
 #[tokio::test]
+async fn list_instances_filters_release_tags_before_pagination() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let seq_id = create_sequence(&client, &srv.base_url).await;
+    let release_id = uuid::Uuid::new_v4();
+    let other_release = uuid::Uuid::new_v4();
+    for metadata in [
+        json!({"release": {"release_id": release_id, "variant": "candidate"}, "region": "test"}),
+        json!({"release": {"release_id": release_id, "variant": "baseline"}, "region": "test"}),
+        json!({"release": {"release_id": other_release, "variant": "candidate"}, "region": "test"}),
+        json!({"release.release_id": release_id, "release.variant": "candidate", "region": "test"}),
+    ] {
+        let response = client
+            .post(format!("{}/instances", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({
+                "sequence_id": seq_id, "tenant_id": "t1", "namespace": "ns1",
+                "metadata": metadata, "context": {"data": {}, "config": {}, "audit": []}
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let read = |query: String| {
+        client
+            .get(format!("{}/instances?{query}", srv.base_url))
+            .header("X-Tenant-Id", "t1")
+            .send()
+    };
+    let query =
+        format!("release_id={release_id}&release_variant=candidate&metadata.region=test&limit=1");
+    let response = read(query.clone()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let page: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        page["release_filter"],
+        json!({"release_id": release_id, "variant": "candidate"})
+    );
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        page["items"][0]["metadata"]["release"]["variant"],
+        "candidate"
+    );
+    assert_eq!(page["has_more"], false);
+
+    let empty: serde_json::Value = read(format!("{query}&offset=1"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["release_filter"], page["release_filter"]);
+    assert_eq!(empty["items"], json!([]));
+    let all: serde_json::Value = read(format!("release_id={release_id}"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        all["release_filter"],
+        json!({"release_id": release_id, "variant": null})
+    );
+    assert_eq!(all["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        read("release_variant=baseline".into())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        read(format!("release_id={release_id}&metadata.release=literal"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn batch_action_dry_run_and_apply_with_metadata_filter() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

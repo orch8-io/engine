@@ -48,6 +48,7 @@ pub mod lifecycle;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 mod push_outbox_state;
+pub mod release_inventory;
 pub mod restore;
 pub mod sqlite;
 pub mod telemetry_validation;
@@ -104,7 +105,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 164;
+pub const STORAGE_SCHEMA_VERSION: u32 = 165;
 
 /// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
 const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
@@ -361,6 +362,17 @@ pub trait SequenceStore: Send + Sync + 'static {
         tenant_id: Option<&TenantId>,
         limit: u32,
     ) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError>;
+
+    async fn list_release_page(
+        &self,
+        _tenant: &TenantId,
+        _query: &release_inventory::ReleasePageFilter,
+        _limit: u32,
+    ) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError> {
+        Err(StorageError::Unsupported(
+            "release inventory pagination".into(),
+        ))
+    }
 
     /// Compare-and-swap state transition. Returns `false` when the
     /// release was not in `expected` (a concurrent writer won) — the

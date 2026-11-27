@@ -1012,6 +1012,7 @@ CREATE TABLE IF NOT EXISTS workflow_releases (
     target                TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_releases_tenant ON workflow_releases(tenant_id, state);
+CREATE INDEX IF NOT EXISTS idx_releases_inventory ON workflow_releases(tenant_id, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_releases_baseline ON workflow_releases(baseline_sequence_id, state);
 
 CREATE TABLE IF NOT EXISTS release_decisions (
@@ -1834,7 +1835,7 @@ CREATE INDEX IF NOT EXISTS idx_capsule_source_cut_instance
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 89;
+pub(super) const SCHEMA_VERSION: i64 = 90;
 
 pub(super) const WASM_RETIREMENT_TRIGGERS: &str = "
 CREATE TRIGGER IF NOT EXISTS guard_sequence_wasm_artifacts

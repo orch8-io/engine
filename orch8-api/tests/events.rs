@@ -20,6 +20,7 @@ async fn ingest_is_idempotent_by_producer_id() {
     let first = client
         .post(format!("{base}/events"))
         .header("X-Tenant-Id", "t1")
+        .header("X-Orch8-Include-Stored-Event-Id", "true")
         .json(&body)
         .send()
         .await
@@ -27,10 +28,13 @@ async fn ingest_is_idempotent_by_producer_id() {
     assert_eq!(first.status(), StatusCode::CREATED);
     let outcome: Value = first.json().await.unwrap();
     assert_eq!(outcome["duplicate"], false);
+    assert!(outcome["stored_event_id"].is_string());
+    assert_eq!(outcome["stored_event_id"], outcome["event_id"]);
 
     let second = client
         .post(format!("{base}/events"))
         .header("X-Tenant-Id", "t1")
+        .header("X-Orch8-Include-Stored-Event-Id", "true")
         .json(&body)
         .send()
         .await
@@ -38,6 +42,20 @@ async fn ingest_is_idempotent_by_producer_id() {
     assert_eq!(second.status(), StatusCode::OK);
     let outcome2: Value = second.json().await.unwrap();
     assert_eq!(outcome2["duplicate"], true);
+    assert_ne!(outcome2["event_id"], outcome["event_id"]);
+    assert_eq!(outcome2["stored_event_id"], outcome["stored_event_id"]);
+    let legacy: Value = client
+        .post(format!("{base}/events"))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(legacy["duplicate"], true);
+    assert!(legacy.get("stored_event_id").is_none());
 
     // Listing shows one pending event with a REDACTED payload secret.
     let listed: Vec<Value> = client
@@ -50,6 +68,7 @@ async fn ingest_is_idempotent_by_producer_id() {
         .await
         .unwrap();
     assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["id"], outcome2["stored_event_id"]);
     assert_eq!(listed[0]["payload"]["amount"], 100);
     assert_eq!(listed[0]["payload"]["api_key"], "[REDACTED]");
 }
@@ -105,6 +124,67 @@ async fn events_are_tenant_scoped() {
 }
 
 #[tokio::test]
+async fn lookup_resolves_an_exact_producer_identity_in_the_selected_tenant() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = srv.v1_url();
+    let identity = json!({"event_name":" Paid\r\n café ","producer_event_id":" producer + 1 "});
+    let submitted = client
+        .post(format!("{base}/events"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({
+            "tenant_id":"t1", "event_name":identity["event_name"],
+            "producer_event_id":identity["producer_event_id"],
+            "correlation_key":"order-1", "payload":{"api_key":"private"},
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(submitted.status(), StatusCode::CREATED);
+    let receipt: Value = submitted.json().await.unwrap();
+
+    let lookup = |tenant: &str| {
+        client
+            .post(format!("{base}/events/lookup"))
+            .header("X-Tenant-Id", tenant)
+    };
+    let value: Value = lookup("t1")
+        .json(&identity)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(value["tenant_id"], "t1");
+    assert_eq!(value["event_name"], identity["event_name"]);
+    assert_eq!(value["producer_event_id"], identity["producer_event_id"]);
+    assert_eq!(value["event"]["id"], receipt["event_id"]);
+    assert_eq!(value["event"]["payload"]["api_key"], "[REDACTED]");
+    for (tenant, query) in [
+        ("t2", &identity),
+        (
+            "t1",
+            &json!({"event_name":"Paid\r\n café","producer_event_id":identity["producer_event_id"]}),
+        ),
+    ] {
+        let missing: Value = lookup(tenant)
+            .json(query)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(missing["event"].is_null());
+    }
+}
+
+#[tokio::test]
 async fn missing_fields_and_bad_status_are_rejected() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -142,18 +222,29 @@ async fn outbox_batch_is_replay_safe_and_validates_before_writing() {
         {"tenant_id":"t1","event_name":"order.created","producer_event_id":"outbox-1","correlation_key":"order-1","payload":{"n":1}},
         {"tenant_id":"t1","event_name":"order.created","producer_event_id":"outbox-2","correlation_key":"order-2","payload":{"n":2}}
     ]});
-    for expected_duplicates in [[false, false], [true, true]] {
+    let mut stored_ids = Vec::new();
+    for retry in [false, true] {
         let response = client
             .post(format!("{base}/events/batch"))
             .header("X-Tenant-Id", "t1")
+            .header("X-Orch8-Include-Stored-Event-Id", "true")
             .json(&batch)
             .send()
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body: Value = response.json().await.unwrap();
-        assert_eq!(body["outcomes"][0]["duplicate"], expected_duplicates[0]);
-        assert_eq!(body["outcomes"][1]["duplicate"], expected_duplicates[1]);
+        let outcomes = body["outcomes"].as_array().unwrap();
+        assert_eq!(outcomes.len(), 2);
+        for (index, outcome) in outcomes.iter().enumerate() {
+            assert_eq!(outcome["duplicate"], retry);
+            assert!(outcome["stored_event_id"].is_string());
+            if retry {
+                assert_eq!(outcome["stored_event_id"], stored_ids[index]);
+            } else {
+                stored_ids.push(outcome["stored_event_id"].clone());
+            }
+        }
     }
 
     let invalid = json!({"events": [

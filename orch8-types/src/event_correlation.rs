@@ -193,6 +193,10 @@ pub struct IngestOutcome {
     /// ID of the submitted envelope. A duplicate may have a different
     /// transport ID from the canonical event stored in the inbox.
     pub event_id: Uuid,
+    /// Canonical UUID of the event stored under this producer identity.
+    /// The HTTP receipt includes it when X-Orch8-Include-Stored-Event-Id is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stored_event_id: Option<Uuid>,
     /// True when the producer identity was already known. Matching can resume
     /// if the original event is still pending after an earlier attempt.
     pub duplicate: bool,

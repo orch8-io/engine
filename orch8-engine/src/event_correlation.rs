@@ -56,6 +56,7 @@ pub async fn ingest(
         if canonical.status != EventStatus::Pending {
             return Ok(IngestOutcome {
                 event_id: receipt_id,
+                stored_event_id: Some(canonical.id),
                 duplicate: true,
                 matched_wait: None,
                 satisfied: false,
@@ -88,6 +89,7 @@ pub async fn ingest(
         }
         return Ok(IngestOutcome {
             event_id: receipt_id,
+            stored_event_id: Some(envelope.id),
             duplicate: !inserted,
             matched_wait: Some(current.id),
             satisfied,
@@ -96,6 +98,7 @@ pub async fn ingest(
 
     Ok(IngestOutcome {
         event_id: receipt_id,
+        stored_event_id: Some(envelope.id),
         duplicate: !inserted,
         matched_wait: None,
         satisfied: false,
@@ -484,9 +487,12 @@ mod tests {
         .await
         .unwrap();
         assert!(second.duplicate);
+        assert_ne!(first.event_id, second.event_id);
+        assert_eq!(second.stored_event_id, Some(first.event_id));
         // Only one row exists, with the first payload.
         let events = s.list_events("t1", None, 10).await.unwrap();
         assert_eq!(events.len(), 1);
+        assert_eq!(first.stored_event_id, Some(events[0].id));
         assert_eq!(events[0].payload, json!({"n": 1}));
     }
 

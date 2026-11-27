@@ -151,6 +151,7 @@ export interface EventIngestRequest {
 
 export interface EventIngestOutcome {
   event_id: string;
+  stored_event_id?: string;
   duplicate: boolean;
   matched_wait?: string | null;
   satisfied: boolean;

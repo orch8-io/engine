@@ -524,6 +524,7 @@ impl Modify for EmbedSecurity {
         crate::events::ingest_event_batch,
         crate::events::list_events,
         crate::events::get_event,
+        crate::events::lookup_event,
         // Workbench
         crate::workbench::get_workbench,
         crate::workbench::compare_runs,
@@ -845,6 +846,8 @@ impl Modify for EmbedSecurity {
         orch8_types::event_correlation::WaitStatus,
         orch8_types::event_correlation::IngestOutcome,
         crate::events::IngestEventRequest,
+        crate::events::EventIdentityLookup,
+        crate::events::EventIdentityObservation,
         crate::workbench::ExecutionWorkbenchView,
         crate::workbench::WorkbenchEvent,
         crate::workbench::BlockOutputSummary,

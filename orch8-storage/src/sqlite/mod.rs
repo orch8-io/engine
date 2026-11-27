@@ -1089,6 +1089,15 @@ impl crate::SequenceStore for SqliteStorage {
         releases::list(self, tenant_id, limit).await
     }
 
+    async fn list_release_page(
+        &self,
+        tenant: &TenantId,
+        query: &crate::release_inventory::ReleasePageFilter,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError> {
+        releases::page(self, tenant, query, limit).await
+    }
+
     async fn cas_release_state(
         &self,
         id: Uuid,
