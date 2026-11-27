@@ -23,6 +23,7 @@ fault_impl! {
         async fn list_release_terminal_states(&self, release: &orch8_types::release::WorkflowRelease, variant: orch8_types::release::ReleaseVariant, limit: u32) -> Result<Vec<orch8_types::instance::InstanceState>, StorageError>;
         async fn cas_release_state(&self, id: Uuid, expected: orch8_types::release::ReleaseState, next: orch8_types::release::ReleaseState, canary_percent: Option<u8>, canary_started_at: Option<chrono::DateTime<chrono::Utc>>) -> Result<bool, StorageError>;
         async fn cas_release_state_with_executors(&self, release: &orch8_types::release::WorkflowRelease, next: orch8_types::release::ReleaseState, canary_percent: Option<u8>, executors: &[Uuid]) -> Result<bool, StorageError>;
+        async fn cas_release_target(&self, release: &orch8_types::release::WorkflowRelease, target: Option<&orch8_types::release::ReleaseTarget>) -> Result<bool, StorageError>;
         async fn set_release_validation_summary(&self, id: Uuid, summary: &serde_json::Value) -> Result<(), StorageError>;
         async fn record_release_decision(&self, decision: &orch8_types::release::ReleaseDecision) -> Result<(), StorageError>;
         async fn list_release_decisions(&self, release_id: Uuid) -> Result<Vec<orch8_types::release::ReleaseDecision>, StorageError>;

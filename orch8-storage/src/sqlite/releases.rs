@@ -10,10 +10,12 @@ use uuid::Uuid;
 use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
-use orch8_types::release::{ReleaseDecision, ReleaseState, ReleaseVariant, WorkflowRelease};
+use orch8_types::release::{
+    ReleaseDecision, ReleaseState, ReleaseTarget, ReleaseVariant, WorkflowRelease,
+};
 
 use super::SqliteStorage;
-use super::helpers::{parse_ts, ts};
+use super::helpers::{begin_immediate, parse_ts, ts};
 
 pub(super) async fn terminal_states(
     storage: &SqliteStorage,
@@ -228,6 +230,57 @@ pub(super) async fn cas_state(
     Ok(result.rows_affected() == 1)
 }
 
+async fn matches_locked_release(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    release: &WorkflowRelease,
+) -> Result<bool, StorageError> {
+    let current: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT updated_at, target FROM workflow_releases
+         WHERE id = ?1 AND tenant_id = ?2 AND candidate_sequence_id = ?3 AND state = ?4
+           AND canary_percent = ?5",
+    )
+    .bind(release.id.to_string())
+    .bind(release.tenant_id.as_str())
+    .bind(release.candidate_sequence_id.to_string())
+    .bind(release.state.as_str())
+    .bind(i64::from(release.canary_percent))
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some((updated_at, target)) = current else {
+        return Ok(false);
+    };
+    let target: Option<ReleaseTarget> = target.as_deref().map(serde_json::from_str).transpose()?;
+    Ok(parse_ts(&updated_at)? == release.updated_at && target == release.target)
+}
+
+pub(super) async fn cas_target(
+    storage: &SqliteStorage,
+    release: &WorkflowRelease,
+    target: Option<&ReleaseTarget>,
+) -> Result<bool, StorageError> {
+    if matches!(
+        release.state,
+        ReleaseState::Promoted | ReleaseState::RolledBack
+    ) {
+        return Ok(false);
+    }
+    let mut tx = begin_immediate(&storage.pool).await?;
+    if !matches_locked_release(&mut tx, release).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let result =
+        sqlx::query("UPDATE workflow_releases SET target = ?2, updated_at = ?3 WHERE id = ?1")
+            .bind(release.id.to_string())
+            .bind(target.map(serde_json::to_string).transpose()?)
+            .bind(ts(Utc::now()))
+            .execute(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn cas_state_with_executors(
     storage: &SqliteStorage,
     release: &WorkflowRelease,
@@ -235,35 +288,38 @@ pub(super) async fn cas_state_with_executors(
     canary_percent: Option<u8>,
     executors: &[Uuid],
 ) -> Result<bool, StorageError> {
-    // The UPDATE holds SQLite's writer lock while checking current readiness.
+    let mut tx = begin_immediate(&storage.pool).await?;
+    if !matches_locked_release(&mut tx, release).await? {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
     let result = sqlx::query(
         "UPDATE workflow_releases
-         SET state = ?5,
-             canary_percent = COALESCE(?6, canary_percent),
-             canary_started_at = CASE WHEN ?6 IS NOT NULL THEN
+         SET state = ?3,
+             canary_percent = COALESCE(?4, canary_percent),
+             canary_started_at = CASE WHEN ?4 IS NOT NULL THEN
                  strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE canary_started_at END,
              updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
-         WHERE id = ?1 AND tenant_id = ?2 AND candidate_sequence_id = ?3 AND state = ?4
-           AND NOT EXISTS (
-               SELECT 1 FROM json_each(?7) selected
+         WHERE id = ?1 AND NOT EXISTS (
+               SELECT 1 FROM json_each(?5) selected
                WHERE NOT EXISTS (
                    SELECT 1 FROM wasm_revision_readiness r
                    JOIN cluster_nodes n ON n.id = r.node_id
-                   WHERE n.id = selected.value AND r.sequence_id = ?3
+                   WHERE n.id = selected.value AND r.sequence_id = ?2
                      AND julianday(r.ready_until) > julianday('now')
                      AND n.status = 'active' AND n.drain = 0 AND n.capabilities_withdrawn = 0
                )
            )",
     )
     .bind(release.id.to_string())
-    .bind(release.tenant_id.as_str())
     .bind(release.candidate_sequence_id.to_string())
-    .bind(release.state.as_str())
     .bind(next.as_str())
     .bind(canary_percent.map(i64::from))
     .bind(serde_json::to_string(executors)?)
-    .execute(&storage.pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(result.rows_affected() == 1)
 }
 

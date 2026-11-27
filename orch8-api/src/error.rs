@@ -47,6 +47,19 @@ pub enum ApiError {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// The release changed before the routing state could be written.
+    #[error("The release changed before the routing update. Refresh and review it.")]
+    ReleaseRolloutChanged,
+
+    #[error("The release changed before the target was updated. Refresh and review it.")]
+    ReleaseTargetChanged,
+
+    #[error("The release changed before historical validation started. Refresh and review it.")]
+    ReleaseValidationChanged,
+
+    #[error("The release changed during gate evaluation. Refresh and review it.")]
+    ReleaseEvaluationChanged,
+
     #[error("unauthorized")]
     Unauthorized,
 
@@ -90,6 +103,10 @@ impl ApiError {
             Self::InvalidArgument(_) | Self::Validation { .. } => "invalid_argument",
             Self::AlreadyExists(_) => "already_exists",
             Self::Conflict(_) => "conflict",
+            Self::ReleaseRolloutChanged => "release_rollout_not_applied",
+            Self::ReleaseTargetChanged => "release_target_not_applied",
+            Self::ReleaseValidationChanged => "release_validation_not_applied",
+            Self::ReleaseEvaluationChanged => "release_evaluation_not_applied",
             Self::Unauthorized => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::Internal(_) => "internal",
@@ -159,7 +176,12 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) | Self::EmbedScopeDenied(_) => StatusCode::FORBIDDEN,
             Self::InvalidArgument(_) | Self::Validation { .. } => StatusCode::BAD_REQUEST,
-            Self::AlreadyExists(_) | Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::AlreadyExists(_)
+            | Self::Conflict(_)
+            | Self::ReleaseRolloutChanged
+            | Self::ReleaseTargetChanged
+            | Self::ReleaseValidationChanged
+            | Self::ReleaseEvaluationChanged => StatusCode::CONFLICT,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
