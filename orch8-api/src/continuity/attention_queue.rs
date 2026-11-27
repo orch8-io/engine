@@ -69,7 +69,7 @@ pub(crate) async fn list_attention_tasks(
     principal: Option<Extension<PrincipalContext>>,
     Query(query): Query<AttentionQueueQuery>,
 ) -> Result<Json<AttentionQueue>, ApiError> {
-    let tenant_id = operator_tenant(tenant, admin, principal)?;
+    let tenant_id = operator_tenant(tenant, &admin, principal.as_ref().map(|actor| &actor.0))?;
     let limit = query.limit.unwrap_or(50);
     if !(1..=100).contains(&limit) || query.after_deadline.is_some() != query.after_id.is_some() {
         return Err(ApiError::InvalidArgument(
@@ -129,10 +129,10 @@ impl From<AttentionTask> for AttentionQueueRow {
 
 fn operator_tenant(
     tenant: OptionalTenant,
-    admin: OptionalAdmin,
-    principal: Option<Extension<PrincipalContext>>,
+    admin: &OptionalAdmin,
+    principal: Option<&PrincipalContext>,
 ) -> Result<TenantId, ApiError> {
-    if admin.is_none() && !principal_is_operator(principal.as_ref().map(|principal| &principal.0)) {
+    if admin.is_none() && !principal_is_operator(principal) {
         return Err(ApiError::Forbidden(
             "attention inspection requires Operator access".into(),
         ));
@@ -169,7 +169,7 @@ pub(crate) async fn inspect_attention_task(
     principal: Option<Extension<PrincipalContext>>,
     Path(id): Path<AttentionTaskId>,
 ) -> Result<Json<AttentionTaskDetail>, ApiError> {
-    let tenant_id = operator_tenant(tenant, admin, principal)?;
+    let tenant_id = operator_tenant(tenant, &admin, principal.as_ref().map(|actor| &actor.0))?;
     let task = app
         .storage
         .get_attention_task(&tenant_id, id)
