@@ -3,6 +3,8 @@
 //! Walks `Storage::list_waiting_with_trees` and maps each (instance, node)
 //! pair to an `ApprovalItem` iff the matching step has `wait_for_input`.
 
+use std::collections::HashMap;
+
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -11,9 +13,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use orch8_types::execution::ExecutionNode;
 use orch8_types::filter::{InstanceFilter, Pagination};
 use orch8_types::ids::{BlockId, InstanceId, SequenceId};
-use orch8_types::sequence::HumanChoice;
+use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::sequence::{HumanChoice, SequenceDefinition};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -26,6 +30,7 @@ pub fn routes() -> Router<AppState> {
 pub(crate) struct ListApprovalsQuery {
     tenant_id: Option<String>,
     namespace: Option<String>,
+    execution_id: Option<InstanceId>,
     #[serde(default)]
     offset: u64,
     #[serde(default = "default_limit")]
@@ -63,6 +68,9 @@ pub(crate) struct ApprovalsResponse {
     pub scanned_count: u64,
     /// Next waiting-instance offset; null confirms the end of this scan.
     pub next_offset: Option<u64>,
+    /// Present only for an exact execution lookup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<InstanceId>,
 }
 
 async fn next_approval_offset(
@@ -97,6 +105,45 @@ async fn next_approval_offset(
     Ok(next_offset)
 }
 
+async fn exact_waiting_execution(
+    state: &AppState,
+    filter: &InstanceFilter,
+    pagination: &Pagination,
+    execution_id: InstanceId,
+) -> Result<Option<(TaskInstance, Vec<ExecutionNode>)>, ApiError> {
+    let tenant = filter.tenant_id.as_ref().ok_or_else(|| {
+        ApiError::InvalidArgument("An exact approval lookup requires a tenant".into())
+    })?;
+    if pagination.offset != 0 || pagination.limit == 0 {
+        return Err(ApiError::InvalidArgument(
+            "An exact approval lookup starts at offset zero with a positive limit".into(),
+        ));
+    }
+    let instance = state
+        .storage
+        .get_instance(execution_id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "instances"))?;
+    if let Some(instance) = instance.filter(|instance| {
+        instance.id == execution_id
+            && &instance.tenant_id == tenant
+            && filter
+                .namespace
+                .as_ref()
+                .is_none_or(|namespace| &instance.namespace == namespace)
+            && instance.state == InstanceState::Waiting
+    }) {
+        let tree = state
+            .storage
+            .get_execution_tree(execution_id)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "execution tree"))?;
+        Ok(Some((instance, tree)))
+    } else {
+        Ok(None)
+    }
+}
+
 pub(crate) async fn list_approvals(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -126,61 +173,96 @@ pub(crate) async fn list_approvals(
         sort_ascending: false,
     };
 
-    let pairs = state
-        .storage
-        .list_waiting_with_trees(&filter, &pagination)
-        .await
-        .map_err(|e| ApiError::from_storage(e, "instances"))?;
+    let pairs = if let Some(execution_id) = params.execution_id {
+        exact_waiting_execution(&state, &filter, &pagination, execution_id)
+            .await?
+            .into_iter()
+            .collect()
+    } else {
+        state
+            .storage
+            .list_waiting_with_trees(&filter, &pagination)
+            .await
+            .map_err(|error| ApiError::from_storage(error, "instances"))?
+    };
 
     let scanned_count = pairs.len() as u64;
-    let next_offset = next_approval_offset(&state, &filter, &pagination, scanned_count).await?;
+    let next_offset = if params.execution_id.is_some() {
+        None
+    } else {
+        next_approval_offset(&state, &filter, &pagination, scanned_count).await?
+    };
 
-    // Perf: batch-fetch sequences and completed_block_ids concurrently
-    // instead of N+1 sequential round-trips.
-    let sequence_ids: Vec<_> = pairs.iter().map(|(i, _)| i.sequence_id).collect();
-    let instance_ids: Vec<_> = pairs.iter().map(|(i, _)| i.id).collect();
-
-    let (sequences_map, completed_map) = tokio::join!(
-        async {
-            let ids: Vec<_> = sequence_ids
-                .into_iter()
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            match state.storage.get_sequences(&ids).await {
-                Ok(sequences) => sequences.into_iter().map(|seq| (seq.id, seq)).collect(),
-                Err(e) => {
-                    tracing::warn!(error = %e, "approvals: failed to batch fetch sequences");
-                    std::collections::HashMap::new()
-                }
-            }
-        },
-        async {
-            match state
-                .storage
-                .get_completed_block_ids_batch(&instance_ids)
-                .await
-            {
-                Ok(map) => map,
-                Err(e) => {
-                    tracing::warn!(error = %e, "approvals: failed to batch fetch completed blocks");
-                    std::collections::HashMap::new()
-                }
-            }
-        },
+    // Batch-fetch sequences and completed blocks together for both lookup modes.
+    let sequence_ids: Vec<_> = pairs
+        .iter()
+        .map(|(instance, _)| instance.sequence_id)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let instance_ids: Vec<_> = pairs.iter().map(|(instance, _)| instance.id).collect();
+    let (sequences, completed) = tokio::join!(
+        state.storage.get_sequences(&sequence_ids),
+        state.storage.get_completed_block_ids_batch(&instance_ids),
     );
+    let exact = params.execution_id.is_some();
+    let sequences = match sequences {
+        Ok(rows) => rows,
+        Err(error) if exact => return Err(ApiError::from_storage(error, "sequences")),
+        Err(error) => {
+            tracing::warn!(%error, "approvals: failed to batch fetch sequences");
+            Vec::new()
+        }
+    };
+    let sequences_map: HashMap<_, _> = sequences.into_iter().map(|seq| (seq.id, seq)).collect();
+    let completed_map = match completed {
+        Ok(map) => map,
+        Err(error) if exact => return Err(ApiError::from_storage(error, "completed blocks")),
+        Err(error) => {
+            tracing::warn!(%error, "approvals: failed to batch fetch completed blocks");
+            HashMap::new()
+        }
+    };
 
+    let items = build_approval_items(pairs, &sequences_map, &completed_map, exact)?;
+    let total = items.len() as u64;
+    Ok(Json(ApprovalsResponse {
+        items,
+        total,
+        scanned_count,
+        next_offset,
+        execution_id: params.execution_id,
+    }))
+}
+
+fn build_approval_items(
+    pairs: Vec<(TaskInstance, Vec<ExecutionNode>)>,
+    sequences: &HashMap<SequenceId, SequenceDefinition>,
+    completed: &HashMap<InstanceId, Vec<BlockId>>,
+    exact: bool,
+) -> Result<Vec<ApprovalItem>, ApiError> {
     let mut items = Vec::new();
     for (instance, tree) in pairs {
-        let Some(seq) = sequences_map.get(&instance.sequence_id) else {
+        let Some(seq) = sequences.get(&instance.sequence_id) else {
+            if exact {
+                return Err(ApiError::Internal(
+                    "Approval sequence could not be read".into(),
+                ));
+            }
             continue;
         };
+
+        if exact && seq.tenant_id != instance.tenant_id {
+            return Err(ApiError::Internal(
+                "Approval sequence scope could not be verified".into(),
+            ));
+        }
 
         if tree.is_empty() {
             // Flat-path instances have no execution tree nodes. Determine
             // the waiting step by finding the first step with `wait_for_input`
             // that hasn't produced a block output yet.
-            let completed = completed_map.get(&instance.id).cloned().unwrap_or_default();
+            let completed = completed.get(&instance.id).map_or(&[][..], Vec::as_slice);
             for block in &seq.blocks {
                 if let orch8_types::sequence::BlockDefinition::Step(step_def) = block {
                     if completed.contains(&step_def.id) {
@@ -201,13 +283,7 @@ pub(crate) async fn list_approvals(
         }
     }
 
-    let total = items.len() as u64;
-    Ok(Json(ApprovalsResponse {
-        items,
-        total,
-        scanned_count,
-        next_offset,
-    }))
+    Ok(items)
 }
 
 fn default_yes_no_choices() -> Vec<HumanChoice> {
