@@ -80,10 +80,13 @@ export async function withRetry(fn, { deadline, delayMs = 250, label = "request"
 export async function main(runOne, { setup, teardown } = {}) {
   const context = setup ? await setup() : {};
   if (cfg.warmup > 0) {
-    await runPool(cfg.warmup, cfg.concurrency, (i) => runOne(`warmup-${i}`, context, Date.now() + cfg.deadlineMs));
+    await runPool(cfg.warmup, cfg.concurrency, (i, deadline) => runOne(`warmup-${i}`, context, deadline));
   }
   writeFileSync(cfg.samples, "");
   errorSet.clear();
+  if (process.env.BENCH_MEASUREMENT_READY) {
+    writeFileSync(process.env.BENCH_MEASUREMENT_READY, "");
+  }
   const samples = await runPool(cfg.n, cfg.concurrency, (i, deadline) => runOne(i, context, deadline));
   for (const sample of samples) appendFileSync(cfg.samples, `${JSON.stringify(sample)}\n`);
   if (teardown) await teardown(context);

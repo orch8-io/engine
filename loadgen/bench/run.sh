@@ -110,18 +110,43 @@ run_once() {
   fi
   node "$HERE/lib/images.mjs" "$project" "$COMPOSE_FILE" "$out_dir/images.json" || true
 
-  local started ended summary kill_at="" restart_at="" driver_pid
+  local started ended summary kill_at="" restart_at="" driver_pid measurement_ready
+  # The Orch8 driver signals after warmup so the crash timer targets measured work.
+  measurement_ready=""
+  if [ "$SYSTEM" = "orch8" ] && [ "$SCENARIO" = "crash_recovery" ]; then
+    measurement_ready="$out_dir/measurement.ready"
+  fi
   started="$(now_iso)"
   (
     cd "$SYSDIR"
     BENCH_N="$N" BENCH_CONCURRENCY="$CONCURRENCY" BENCH_WARMUP="$WARMUP" \
       BENCH_SAMPLES="$out_dir/samples.jsonl" BENCH_DEADLINE_S="$DEADLINE" \
+      BENCH_MEASUREMENT_READY="$measurement_ready" \
       node driver.mjs > "$out_dir/driver.out"
   ) &
   driver_pid=$!
 
   if [ "$SCENARIO" = "crash_recovery" ]; then
+    if [ -n "$measurement_ready" ]; then
+      while [ ! -f "$measurement_ready" ] && kill -0 "$driver_pid" 2>/dev/null; do
+        sleep 0.1
+      done
+      if [ ! -f "$measurement_ready" ]; then
+        wait "$driver_pid" || true
+        echo "driver exited before the measured crash workload started" >&2
+        teardown
+        trap - EXIT INT TERM
+        return 1
+      fi
+    fi
     sleep "$KILL_AFTER"
+    if ! kill -0 "$driver_pid" 2>/dev/null; then
+      wait "$driver_pid" || true
+      echo "driver exited before the scheduled crash" >&2
+      teardown
+      trap - EXIT INT TERM
+      return 1
+    fi
     kill_at="$(now_iso)"
     $compose kill -s SIGKILL "$KILL_SERVICE"
     sleep "$DOWN_FOR"
