@@ -2844,6 +2844,17 @@ impl crate::AdminStore for PostgresStorage {
         sessions::get_by_key(self, tenant_id, session_key).await
     }
 
+    async fn list_session_summaries(
+        &self,
+        tenant_id: &TenantId,
+        before: Option<Uuid>,
+        search: Option<&str>,
+        state: Option<orch8_types::session::SessionState>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::session::SessionSummary>, StorageError> {
+        sessions::list_summaries(self, tenant_id, before, search, state, limit).await
+    }
+
     async fn update_session_data(
         &self,
         id: Uuid,
@@ -2858,6 +2869,13 @@ impl crate::AdminStore for PostgresStorage {
         state: orch8_types::session::SessionState,
     ) -> Result<(), StorageError> {
         sessions::update_state(self, id, state).await
+    }
+
+    async fn list_session_execution_summaries(
+        &self,
+        filter: &orch8_types::session::SessionExecutionFilter<'_>,
+    ) -> Result<Vec<orch8_types::session::SessionExecutionSummary>, StorageError> {
+        sessions::list_execution_summaries(self, filter).await
     }
 
     async fn list_session_instances(

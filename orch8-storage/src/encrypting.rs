@@ -2706,8 +2706,11 @@ passthrough_impl! {
     async fn create_session(&self, session: &orch8_types::session::Session) -> Result<(), StorageError>;
     async fn get_session(&self, id: Uuid) -> Result<Option<orch8_types::session::Session>, StorageError>;
     async fn get_session_by_key(&self, tenant_id: &orch8_types::ids::TenantId, session_key: &str) -> Result<Option<orch8_types::session::Session>, StorageError>;
+    async fn list_session_summaries(&self, tenant_id: &orch8_types::ids::TenantId, before: Option<Uuid>, search: Option<&str>, state: Option<orch8_types::session::SessionState>, limit: u32) -> Result<Vec<orch8_types::session::SessionSummary>, StorageError>;
     async fn update_session_data(&self, id: Uuid, data: &serde_json::Value) -> Result<(), StorageError>;
     async fn update_session_state(&self, id: Uuid, state: orch8_types::session::SessionState) -> Result<(), StorageError>;
+
+    async fn list_session_execution_summaries(&self, filter: &orch8_types::session::SessionExecutionFilter<'_>) -> Result<Vec<orch8_types::session::SessionExecutionSummary>, StorageError>;
 
     async fn list_session_instances(
         &self,

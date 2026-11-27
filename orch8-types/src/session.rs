@@ -6,6 +6,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::ids::TenantId;
+use crate::ids::{InstanceId, Namespace, SequenceId};
+use crate::instance::{InstanceState, Priority};
 
 /// A session groups related instances and holds shared data across them.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -23,6 +25,42 @@ pub struct Session {
     /// Optional TTL — session expires after this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Stored session metadata for discovery. Shared data is read separately.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SessionSummary {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub session_key: String,
+    pub state: SessionState,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// An associated execution projected without its context or metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct SessionExecutionSummary {
+    pub id: InstanceId,
+    pub sequence_id: SequenceId,
+    pub tenant_id: TenantId,
+    pub session_id: Uuid,
+    pub namespace: Namespace,
+    pub state: InstanceState,
+    pub priority: Priority,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionExecutionFilter<'a> {
+    pub tenant_id: &'a TenantId,
+    pub session_id: Uuid,
+    pub before: Option<InstanceId>,
+    pub terms: &'a [String],
+    pub state: Option<InstanceState>,
+    pub limit: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

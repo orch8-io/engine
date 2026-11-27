@@ -285,6 +285,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT,
     UNIQUE(tenant_id, session_key)
 );
+CREATE INDEX IF NOT EXISTS idx_sessions_tenant_id ON sessions(tenant_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS cluster_nodes (
     id TEXT PRIMARY KEY,
@@ -415,6 +416,7 @@ CREATE INDEX IF NOT EXISTS idx_child_adoption
       AND json_type(metadata, '$._parent_activation') = 'text'
       AND json_type(metadata, '$._superseded') IS NULL AND state <> 'cancelled';
 CREATE INDEX IF NOT EXISTS idx_task_instances_session ON task_instances(session_id);
+CREATE INDEX IF NOT EXISTS idx_task_instances_session_page ON task_instances(tenant_id, session_id, id DESC) WHERE session_id IS NOT NULL;
 -- Scheduler claim (Postgres migration 101): `state = 'scheduled' ORDER BY
 -- priority DESC, next_fire_at ASC` served straight from the index instead of
 -- a temp B-tree sort of every scheduled row under BEGIN IMMEDIATE (L4-01).
