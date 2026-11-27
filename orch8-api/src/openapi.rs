@@ -377,9 +377,34 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         "minimize_disclosure",
     ),
     (
+        "/continuity/federation/inspect",
+        HttpMethod::Post,
+        "inspect_federation",
+    ),
+    (
+        "/continuity/federation/acceptances",
+        HttpMethod::Post,
+        "accept_federation_envelope",
+    ),
+    (
+        "/continuity/federation/acceptances/{id}",
+        HttpMethod::Get,
+        "read_federation_acceptance",
+    ),
+    (
         "/continuity/federation/verify",
         HttpMethod::Post,
         "verify_federation",
+    ),
+    (
+        "/continuity/executions/{id}/federation-signatures/{request_id}",
+        HttpMethod::Get,
+        "read_federation_signature",
+    ),
+    (
+        "/continuity/executions/{id}/federation-signatures/{request_id}",
+        HttpMethod::Put,
+        "record_federation_signature",
     ),
     (
         "/continuity/federation/sign",
