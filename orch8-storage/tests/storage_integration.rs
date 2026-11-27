@@ -4963,6 +4963,58 @@ async fn delete_trigger_removes_poll_state() {
 }
 
 #[tokio::test]
+async fn reviewed_trigger_removal_keeps_changed_triggers_and_poll_state() {
+    use orch8_types::trigger::{TriggerDef, TriggerPollState, TriggerType};
+
+    let s = store().await;
+    let now = Utc::now();
+    let slug = "reviewed-poll-trigger";
+    let tenant = TenantId::unchecked("t1");
+    s.create_trigger(&TriggerDef {
+        slug: slug.into(),
+        sequence_name: "seq".into(),
+        version: None,
+        tenant_id: tenant.clone(),
+        namespace: "default".into(),
+        enabled: true,
+        secret: None,
+        trigger_type: TriggerType::ActivepiecesPoll,
+        config: json!({"piece": "stripe", "trigger": "t"}),
+        created_at: now,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+    s.upsert_trigger_poll_state(&TriggerPollState {
+        slug: slug.into(),
+        state: json!({"cursor": 1}),
+        last_poll_at: None,
+        last_error: None,
+        consecutive_failures: 0,
+        updated_at: now,
+    })
+    .await
+    .unwrap();
+
+    let reviewed = s.get_trigger(Some(&tenant), slug).await.unwrap().unwrap();
+    let mut stale = reviewed.clone();
+    stale.updated_at -= chrono::Duration::nanoseconds(1);
+    assert!(!s.delete_trigger_cas(&stale).await.unwrap());
+    stale = reviewed.clone();
+    stale.created_at -= chrono::Duration::nanoseconds(1);
+    assert!(!s.delete_trigger_cas(&stale).await.unwrap());
+    stale = reviewed.clone();
+    stale.tenant_id = TenantId::unchecked("other");
+    assert!(!s.delete_trigger_cas(&stale).await.unwrap());
+    assert!(s.get_trigger_poll_state(slug).await.unwrap().is_some());
+
+    assert!(s.delete_trigger_cas(&reviewed).await.unwrap());
+    assert!(!s.delete_trigger_cas(&reviewed).await.unwrap());
+    assert!(s.get_trigger(Some(&tenant), slug).await.unwrap().is_none());
+    assert!(s.get_trigger_poll_state(slug).await.unwrap().is_none());
+}
+
+#[tokio::test]
 async fn trigger_round_trips_activepieces_poll_type() {
     use orch8_types::trigger::{TriggerDef, TriggerType};
 

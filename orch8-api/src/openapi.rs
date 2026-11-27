@@ -622,7 +622,10 @@ impl Modify for EmbedSecurity {
         crate::triggers::create_trigger,
         crate::triggers::list_triggers,
         crate::triggers::get_trigger,
+        crate::continuity::list_attention_tasks,
+        crate::continuity::inspect_attention_task,
         crate::triggers::delete_trigger,
+        crate::triggers::remove_reviewed_trigger,
         crate::triggers::fire_trigger,
         crate::triggers::retarget_trigger,
         // Webhooks

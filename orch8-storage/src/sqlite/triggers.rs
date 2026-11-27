@@ -175,6 +175,30 @@ pub(super) async fn update_cas(
     Ok(result.rows_affected() == 1)
 }
 
+pub(super) async fn delete_cas(
+    store: &SqliteStorage,
+    trigger: &TriggerDef,
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let result = sqlx::query(
+        "DELETE FROM triggers WHERE slug=?1 AND tenant_id=?2 AND created_at=?3 AND updated_at=?4",
+    )
+    .bind(&trigger.slug)
+    .bind(trigger.tenant_id.as_str())
+    .bind(trigger.created_at.to_rfc3339())
+    .bind(trigger.updated_at.to_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 1 {
+        sqlx::query("DELETE FROM trigger_poll_state WHERE slug = ?1")
+            .bind(&trigger.slug)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn delete(store: &SqliteStorage, slug: &str) -> Result<(), StorageError> {
     // Remove poll state first so a polling trigger never leaves an orphaned
     // cursor behind (SQLite schema declares no FK cascade for this table).

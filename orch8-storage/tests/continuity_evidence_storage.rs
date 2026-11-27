@@ -116,19 +116,20 @@ async fn invariant_and_evaluation_evidence_is_deduplicated() {
     );
 }
 
-#[tokio::test]
-async fn attention_claim_is_single_winner() {
-    let (storage, tenant, continuity_id, _) = setup().await;
-    let now = Utc::now();
-    let task = AttentionTask {
+fn pending_attention_task(
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    deadline: chrono::DateTime<Utc>,
+) -> AttentionTask {
+    AttentionTask {
         id: AttentionTaskId::new(),
-        tenant_id: tenant.clone(),
+        tenant_id,
         continuity_id,
         required_skills: vec!["fraud".into()],
         classification: orch8_types::continuity::DataClassification::Confidential,
         allowed_regions: vec!["br".into()],
         priority: 2,
-        deadline: now + Duration::minutes(5),
+        deadline,
         estimated_attention_units: 2,
         state: AttentionState::Pending,
         assignee: None,
@@ -136,7 +137,73 @@ async fn attention_claim_is_single_winner() {
         budget_reservation_id: None,
         decision_sha256: None,
         decided_at: None,
-    };
+    }
+}
+
+#[tokio::test]
+async fn attention_queue_pages_by_deadline_and_id_within_tenant_and_state() {
+    let (storage, tenant, continuity_id, _) = setup().await;
+    let task = pending_attention_task(
+        tenant.clone(),
+        continuity_id,
+        Utc::now() + Duration::minutes(5),
+    );
+    storage.create_attention_task(&task).await.unwrap();
+    let mut same_deadline = task.clone();
+    same_deadline.id = AttentionTaskId::new();
+    storage.create_attention_task(&same_deadline).await.unwrap();
+    let mut later = task.clone();
+    later.id = AttentionTaskId::new();
+    later.deadline += Duration::seconds(1);
+    storage.create_attention_task(&later).await.unwrap();
+
+    let mut tied = [task.id, same_deadline.id];
+    tied.sort_by_key(|id| id.into_uuid());
+    let first = storage
+        .list_attention_tasks(&tenant, AttentionState::Pending, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, tied[0]);
+    let next = storage
+        .list_attention_tasks(
+            &tenant,
+            AttentionState::Pending,
+            Some((first[0].deadline, first[0].id)),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [tied[1], later.id]
+    );
+    assert!(
+        storage
+            .list_attention_tasks(
+                &TenantId::unchecked("other"),
+                AttentionState::Pending,
+                None,
+                10
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        storage
+            .list_attention_tasks(&tenant, AttentionState::Assigned, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn attention_claim_is_single_winner() {
+    let (storage, tenant, continuity_id, _) = setup().await;
+    let now = Utc::now();
+    let task = pending_attention_task(tenant.clone(), continuity_id, now + Duration::minutes(5));
     storage.create_attention_task(&task).await.unwrap();
     let mut assigned = task.clone();
     assigned.state = AttentionState::Assigned;

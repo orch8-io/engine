@@ -347,6 +347,7 @@ fault_impl! {
         async fn list_all_triggers(&self, tenant_id: Option<&TenantId>) -> Result<Vec<TriggerDef>, StorageError>;
         async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
         async fn update_trigger_cas(&self, _trigger: &TriggerDef, _expected_updated_at: DateTime<Utc>) -> Result<bool, StorageError>;
+        async fn delete_trigger_cas(&self, trigger: &TriggerDef) -> Result<bool, StorageError>;
         async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
         async fn claim_webhook_nonce(&self, slug: &str, nonce: &str, expires_at: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn create_approval_tokens(&self, tokens: &[orch8_types::approval_link::ApprovalActionToken]) -> Result<(), StorageError>;
@@ -653,6 +654,7 @@ fault_impl! {
     [ATTENTION_STORE_METHODS] impl AttentionStore {
         async fn create_attention_task(&self, task: &AttentionTask) -> Result<(), StorageError>;
         async fn get_attention_task(&self, tenant_id: &TenantId, id: AttentionTaskId) -> Result<Option<AttentionTask>, StorageError>;
+        async fn list_attention_tasks(&self, tenant_id: &orch8_types::ids::TenantId, state: orch8_types::continuity_advanced::AttentionState, after: Option<(DateTime<Utc>, orch8_types::continuity_advanced::AttentionTaskId)>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::AttentionTask>, StorageError>;
         async fn claim_attention_task(&self, tenant_id: &TenantId, expected: &AttentionTask, assigned: &AttentionTask, now: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn reassign_expired_attention_task(&self, expected: &AttentionTask, assigned: &AttentionTask, now: DateTime<Utc>) -> Result<bool, StorageError>;
         async fn decide_attention_task(&self, expected: &AttentionTask, decided: &AttentionTask, now: DateTime<Utc>) -> Result<bool, StorageError>;

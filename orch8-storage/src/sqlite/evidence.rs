@@ -276,6 +276,31 @@ impl crate::AttentionStore for SqliteStorage {
             .transpose()
     }
 
+    async fn list_attention_tasks(
+        &self,
+        tenant_id: &TenantId,
+        state: orch8_types::continuity_advanced::AttentionState,
+        after: Option<(DateTime<Utc>, AttentionTaskId)>,
+        limit: u32,
+    ) -> Result<Vec<AttentionTask>, StorageError> {
+        let deadline = after.map(|(deadline, _)| deadline.to_rfc3339());
+        let rows = sqlx::query(
+            "SELECT record FROM attention_tasks
+             WHERE tenant_id=?1 AND state=?2 AND (?3 IS NULL OR (deadline,id)>(?3,?4))
+             ORDER BY deadline, id LIMIT ?5",
+        )
+        .bind(tenant_id.as_str())
+        .bind(state_name(state)?)
+        .bind(deadline)
+        .bind(after.map(|(_, id)| id.to_string()))
+        .bind(i64::from(limit.min(101)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| decode(&row.get::<String, _>("record")))
+            .collect()
+    }
+
     async fn claim_attention_task(
         &self,
         tenant_id: &TenantId,

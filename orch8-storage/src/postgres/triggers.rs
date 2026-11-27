@@ -170,6 +170,22 @@ pub(super) async fn update_cas(
     Ok(result.rows_affected() == 1)
 }
 
+pub(super) async fn delete_cas(
+    store: &PostgresStorage,
+    trigger: &TriggerDef,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "DELETE FROM triggers WHERE slug=$1 AND tenant_id=$2 AND created_at=$3 AND updated_at=$4",
+    )
+    .bind(&trigger.slug)
+    .bind(trigger.tenant_id.as_str())
+    .bind(trigger.created_at)
+    .bind(trigger.updated_at)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn delete(store: &PostgresStorage, slug: &str) -> Result<(), StorageError> {
     // `trigger_poll_state.slug` has ON DELETE CASCADE in Postgres, so the
     // trigger delete also removes any poll cursor.

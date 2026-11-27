@@ -280,6 +280,34 @@ impl crate::AttentionStore for PostgresStorage {
         row.map(|row| decode(row.get("record"))).transpose()
     }
 
+    async fn list_attention_tasks(
+        &self,
+        tenant_id: &TenantId,
+        state: orch8_types::continuity_advanced::AttentionState,
+        after: Option<(DateTime<Utc>, AttentionTaskId)>,
+        limit: u32,
+    ) -> Result<Vec<AttentionTask>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT record, deadline FROM attention_tasks
+             WHERE tenant_id=$1 AND state=$2 AND ($3::timestamptz IS NULL OR (deadline,id)>($3,$4))
+             ORDER BY deadline, id LIMIT $5",
+        )
+        .bind(tenant_id.as_str())
+        .bind(state_name(state)?)
+        .bind(after.map(|(deadline, _)| deadline))
+        .bind(after.map(|(_, id)| id.into_uuid()))
+        .bind(i64::from(limit.min(101)))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let mut task: AttentionTask = decode(row.get("record"))?;
+                task.deadline = row.get("deadline");
+                Ok(task)
+            })
+            .collect()
+    }
+
     async fn claim_attention_task(
         &self,
         tenant_id: &TenantId,

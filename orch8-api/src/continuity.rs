@@ -1,5 +1,10 @@
 //! Portable-continuity control-plane endpoints.
 
+mod attention_queue;
+pub(crate) use attention_queue::{
+    __path_inspect_attention_task, __path_list_attention_tasks, inspect_attention_task,
+    list_attention_tasks,
+};
 mod delegation;
 mod effect_resolution;
 pub(crate) mod effect_review;
@@ -153,7 +158,11 @@ pub fn routes() -> Router<AppState> {
             "/continuity/executions/{id}/budget-reservations/{reservation_id}/release",
             post(release_execution_budget),
         )
-        .route("/continuity/attention", post(create_attention_task))
+        .route(
+            "/continuity/attention",
+            get(list_attention_tasks).post(create_attention_task),
+        )
+        .route("/continuity/attention/{id}", get(inspect_attention_task))
         .route(
             "/continuity/attention/{id}/assign",
             post(assign_attention_task),

@@ -3270,6 +3270,11 @@ pub trait AdminStore: Send + Sync + 'static {
         Err(StorageError::Unsupported("atomic trigger updates".into()))
     }
 
+    /// Delete the reviewed trigger only if its tenant and timestamps still match.
+    async fn delete_trigger_cas(&self, _trigger: &TriggerDef) -> Result<bool, StorageError> {
+        Err(StorageError::Unsupported("atomic trigger deletion".into()))
+    }
+
     /// Delete a trigger and its associated poll state (if any).
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
 
@@ -5833,6 +5838,17 @@ pub trait AttentionStore: Send + Sync + 'static {
         tenant_id: &TenantId,
         id: AttentionTaskId,
     ) -> Result<Option<AttentionTask>, StorageError>;
+
+    /// List a bounded tenant/state page ordered by (deadline, task UUID).
+    async fn list_attention_tasks(
+        &self,
+        _tenant_id: &TenantId,
+        _state: orch8_types::continuity_advanced::AttentionState,
+        _after: Option<(DateTime<Utc>, AttentionTaskId)>,
+        _limit: u32,
+    ) -> Result<Vec<AttentionTask>, StorageError> {
+        Err(StorageError::Unsupported("attention task inventory".into()))
+    }
 
     async fn claim_attention_task(
         &self,
