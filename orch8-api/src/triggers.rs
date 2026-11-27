@@ -17,7 +17,7 @@ use axum::Router;
 use axum::extract::{Json, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{delete, get, patch, post};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -28,6 +28,8 @@ use orch8_types::trigger::{TriggerDef, TriggerType};
 use crate::AppState;
 use crate::error::ApiError;
 
+mod removal;
+pub(crate) use removal::{__path_remove_reviewed_trigger, remove_reviewed_trigger};
 mod target;
 pub(crate) use target::{__path_retarget_trigger, retarget_trigger};
 
@@ -37,6 +39,7 @@ pub fn routes() -> Router<AppState> {
         .route("/triggers/{slug}", get(get_trigger).delete(delete_trigger))
         .route("/triggers/{slug}/fire", post(fire_trigger))
         .route("/triggers/{slug}/target", patch(retarget_trigger))
+        .route("/triggers/{slug}/reviewed", delete(remove_reviewed_trigger))
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]

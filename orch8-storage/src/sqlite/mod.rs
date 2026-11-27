@@ -3621,6 +3621,13 @@ impl crate::AdminStore for SqliteStorage {
     ) -> Result<bool, StorageError> {
         triggers::update_cas(self, trigger, expected_updated_at).await
     }
+    async fn delete_trigger_cas(
+        &self,
+        trigger: &orch8_types::trigger::TriggerDef,
+    ) -> Result<bool, StorageError> {
+        triggers::delete_cas(self, trigger).await
+    }
+
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError> {
         triggers::delete(self, slug).await
     }

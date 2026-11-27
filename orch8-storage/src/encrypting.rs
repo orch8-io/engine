@@ -1209,6 +1209,7 @@ passthrough_impl! {
     impl crate::AttentionStore for EncryptingStorage {
         async fn create_attention_task(&self, task: &orch8_types::continuity_advanced::AttentionTask) -> Result<(), StorageError>;
         async fn get_attention_task(&self, tenant_id: &orch8_types::ids::TenantId, id: orch8_types::continuity_advanced::AttentionTaskId) -> Result<Option<orch8_types::continuity_advanced::AttentionTask>, StorageError>;
+        async fn list_attention_tasks(&self, tenant_id: &orch8_types::ids::TenantId, state: orch8_types::continuity_advanced::AttentionState, after: Option<(DateTime<Utc>, orch8_types::continuity_advanced::AttentionTaskId)>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::AttentionTask>, StorageError>;
         async fn claim_attention_task(&self, tenant_id: &orch8_types::ids::TenantId, expected: &orch8_types::continuity_advanced::AttentionTask, assigned: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn reassign_expired_attention_task(&self, expected: &orch8_types::continuity_advanced::AttentionTask, assigned: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
         async fn decide_attention_task(&self, expected: &orch8_types::continuity_advanced::AttentionTask, decided: &orch8_types::continuity_advanced::AttentionTask, now: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
@@ -2785,6 +2786,8 @@ passthrough_impl! {
     ) -> Result<bool, StorageError> {
         self.inner.update_trigger_cas(&self.encrypt_trigger(trigger)?, expected_updated_at).await
     }
+    async fn delete_trigger_cas(&self, trigger: &orch8_types::trigger::TriggerDef) -> Result<bool, StorageError>;
+
     async fn delete_trigger(&self, slug: &str) -> Result<(), StorageError>;
     async fn claim_webhook_nonce(&self, slug: &str, nonce: &str, expires_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
     // Approval tokens, progress shares, and alert rules hold hashes and

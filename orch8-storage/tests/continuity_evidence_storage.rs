@@ -138,6 +138,55 @@ async fn attention_claim_is_single_winner() {
         decided_at: None,
     };
     storage.create_attention_task(&task).await.unwrap();
+    let mut same_deadline = task.clone();
+    same_deadline.id = AttentionTaskId::new();
+    storage.create_attention_task(&same_deadline).await.unwrap();
+    let mut later = task.clone();
+    later.id = AttentionTaskId::new();
+    later.deadline += Duration::seconds(1);
+    storage.create_attention_task(&later).await.unwrap();
+
+    let mut tied = [task.id, same_deadline.id];
+    tied.sort_by_key(|id| id.into_uuid());
+    let first = storage
+        .list_attention_tasks(&tenant, AttentionState::Pending, None, 1)
+        .await
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(first[0].id, tied[0]);
+    let next = storage
+        .list_attention_tasks(
+            &tenant,
+            AttentionState::Pending,
+            Some((first[0].deadline, first[0].id)),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next.iter().map(|row| row.id).collect::<Vec<_>>(),
+        [tied[1], later.id]
+    );
+    assert!(
+        storage
+            .list_attention_tasks(
+                &TenantId::unchecked("other"),
+                AttentionState::Pending,
+                None,
+                10
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        storage
+            .list_attention_tasks(&tenant, AttentionState::Assigned, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
     let mut assigned = task.clone();
     assigned.state = AttentionState::Assigned;
     assigned.assignee = Some("reviewer-a".into());
