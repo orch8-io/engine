@@ -4,7 +4,7 @@
 // Latency uses the server's instance created_at -> updated_at at completion.
 // Dependency-free (Node 22 fetch). Contract: ../../lib/driver-common.mjs.
 import { randomUUID } from "node:crypto";
-import { main, recordError, sleep, withRetry } from "../../lib/driver-common.mjs";
+import { cfg, main, recordError, sleep, withRetry } from "../../lib/driver-common.mjs";
 
 const base = process.env.ORCH8_URL ?? "http://127.0.0.1:18080/api/v1";
 const tenant = "bench";
@@ -16,11 +16,14 @@ const headers = {
   "x-tenant-id": tenant,
 };
 
-async function call(method, path, body) {
+async function call(method, path, deadline, body) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) throw new Error("benchmark request deadline exceeded");
   const response = await fetch(`${base}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(remaining),
   });
   const text = await response.text();
   if (!response.ok) throw new Error(`${method} ${path} -> ${response.status} ${text.slice(0, 200)}`);
@@ -31,7 +34,7 @@ const step = (n) => ({ type: "step", id: `s${n}`, handler: "bench_activity", par
 
 async function setup() {
   const runTag = Date.now();
-  const sequence = await call("POST", "/sequences", {
+  const sequence = await call("POST", "/sequences", runTag + cfg.deadlineMs, {
     id: randomUUID(),
     tenant_id: tenant,
     namespace,
@@ -48,7 +51,7 @@ async function runOne(index, { sequenceId, runTag }, deadline) {
   // return the original instance instead of submitting a second workflow.
   const created = await withRetry(
     () =>
-      call("POST", "/instances", {
+      call("POST", "/instances", deadline, {
         sequence_id: sequenceId,
         tenant_id: tenant,
         namespace,
@@ -62,7 +65,7 @@ async function runOne(index, { sequenceId, runTag }, deadline) {
     await sleep(pollMs);
     let instance;
     try {
-      instance = await call("GET", `/instances/${created.id}`);
+      instance = await call("GET", `/instances/${created.id}`, deadline);
     } catch (error) {
       recordError(error); // engine unavailable during the crash window; keep polling
       continue;

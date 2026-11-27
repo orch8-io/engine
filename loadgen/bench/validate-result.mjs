@@ -72,11 +72,17 @@ for (const file of files) {
   }
   if (data !== undefined) {
     validate(data, schema, "$", errors);
+  }
+  if (errors.length === 0) {
     if (data.scenario === "crash_recovery" && !data.crash_recovery) {
       errors.push("$: crash_recovery scenario requires a crash_recovery object");
     }
     if (data.scenario === "throughput" && data.crash_recovery) {
       errors.push("$: throughput scenario must not carry crash_recovery data");
+    }
+    const { completed, failed } = data.results;
+    if (completed + failed !== data.workload.workflows) {
+      errors.push("$.results: completed and failed counts must add up to workload.workflows");
     }
   }
   if (errors.length) {
