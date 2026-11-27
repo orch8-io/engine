@@ -153,11 +153,14 @@ pub(super) async fn update_cas(
     expected_updated_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool, StorageError> {
     let config_str = trigger.config.to_string();
-    let now = chrono::Utc::now().to_rfc3339();
+    let next = expected_updated_at
+        .checked_add_signed(chrono::TimeDelta::microseconds(1))
+        .ok_or_else(|| StorageError::Conflict("trigger revision cannot advance".into()))?;
+    let now = chrono::Utc::now().max(next).to_rfc3339();
     let result = sqlx::query(
         r"UPDATE triggers SET sequence_name=?2, version=?3, tenant_id=?4, namespace=?5,
           enabled=?6, secret=?7, trigger_type=?8, config=?9, updated_at=?10
-          WHERE slug=?1 AND tenant_id=?4 AND updated_at=?11",
+          WHERE slug=?1 AND tenant_id=?4 AND updated_at=?11 AND created_at=?12",
     )
     .bind(&trigger.slug)
     .bind(&trigger.sequence_name)
@@ -170,6 +173,7 @@ pub(super) async fn update_cas(
     .bind(&config_str)
     .bind(&now)
     .bind(expected_updated_at.to_rfc3339())
+    .bind(trigger.created_at.to_rfc3339())
     .execute(&store.pool)
     .await?;
     Ok(result.rows_affected() == 1)

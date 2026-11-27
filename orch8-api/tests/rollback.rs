@@ -33,6 +33,55 @@ async fn settle() {
 }
 
 #[tokio::test]
+async fn failed_minimum_update_leaves_the_existing_policy_intact() {
+    use std::sync::Arc;
+
+    use orch8_api::test_harness::{TestServerOptions, spawn_test_server_with};
+    use orch8_storage::sqlite::SqliteStorage;
+
+    let storage = Arc::new(SqliteStorage::in_memory().await.unwrap());
+    sqlx::query(
+        "CREATE TRIGGER reject_minimum BEFORE UPDATE OF min_samples ON rollback_policies
+         WHEN NEW.min_samples = 140
+         BEGIN SELECT RAISE(ABORT, 'minimum fixture rejected'); END",
+    )
+    .execute(storage.pool())
+    .await
+    .unwrap();
+    let server = spawn_test_server_with(storage, TestServerOptions::default()).await;
+    let client = reqwest::Client::new();
+    let url = format!("{}/rollback-policies", server.base_url);
+    let original = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "sequence_name": "atomic",
+            "error_rate_threshold": 0.25,
+            "time_window_secs": 300,
+            "min_samples": 80,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(original.status(), 201);
+    let original: serde_json::Value = original.json().await.unwrap();
+    let rejected = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "sequence_name": "atomic",
+            "error_rate_threshold": 0.5,
+            "time_window_secs": 600,
+            "min_samples": 140,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(!rejected.status().is_success());
+    let stored = client.get(format!("{url}/atomic")).send().await.unwrap();
+    assert_eq!(stored.status(), 200);
+    assert_eq!(stored.json::<serde_json::Value>().await.unwrap(), original);
+}
+
+#[tokio::test]
 async fn rollback_policy_crud() {
     let server = spawn_test_server().await;
     let client = reqwest::Client::new();

@@ -7,6 +7,20 @@ use uuid::Uuid;
 
 use crate::ids::{Namespace, SequenceId, TenantId};
 
+/// Exact filters applied before selecting a cron inventory page.
+#[derive(Debug, Default, Serialize, ToSchema)]
+pub struct CronInventoryFilter {
+    pub namespace: Option<String>,
+    pub sequence_id: Option<Uuid>,
+    pub enabled: Option<bool>,
+}
+
+impl CronInventoryFilter {
+    pub fn is_empty(&self) -> bool {
+        self.namespace.is_none() && self.sequence_id.is_none() && self.enabled.is_none()
+    }
+}
+
 /// What to do when a schedule fires while a previous run it created is
 /// still active (scheduled / running / waiting / paused).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]

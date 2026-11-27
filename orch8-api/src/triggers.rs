@@ -30,6 +30,8 @@ use crate::error::ApiError;
 
 mod removal;
 pub(crate) use removal::{__path_remove_reviewed_trigger, remove_reviewed_trigger};
+mod settings;
+pub(crate) use settings::{__path_update_trigger_settings, update_trigger_settings};
 mod target;
 pub(crate) use target::{__path_retarget_trigger, retarget_trigger};
 
@@ -39,6 +41,7 @@ pub fn routes() -> Router<AppState> {
         .route("/triggers/{slug}", get(get_trigger).delete(delete_trigger))
         .route("/triggers/{slug}/fire", post(fire_trigger))
         .route("/triggers/{slug}/target", patch(retarget_trigger))
+        .route("/triggers/{slug}/settings", patch(update_trigger_settings))
         .route("/triggers/{slug}/reviewed", delete(remove_reviewed_trigger))
 }
 
@@ -76,6 +79,49 @@ const MAX_TRIGGER_SECRET_BYTES: usize = 256 * 1024;
 fn redact_trigger_config(mut trigger: TriggerDef) -> TriggerDef {
     trigger.config = RedactionPolicy::default().redacted(&trigger.config);
     trigger
+}
+
+fn validate_trigger_config(
+    kind: &TriggerType,
+    config: &serde_json::Value,
+    has_secret: bool,
+) -> Result<(), ApiError> {
+    // Provider signature presets must be well-formed and only make sense on
+    // public webhook triggers.
+    match crate::webhook_verify::VerifyConfig::from_trigger_config(config) {
+        Ok(Some(_)) if *kind != TriggerType::Webhook => {
+            return Err(ApiError::InvalidArgument(
+                "config.verify is only valid on webhook triggers".into(),
+            ));
+        }
+        Ok(Some(cfg)) if cfg.secret_ref.is_none() && !has_secret => {
+            return Err(ApiError::InvalidArgument(
+                "config.verify needs a secret_ref (credentials://id[/field]) or a trigger secret"
+                    .into(),
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(ApiError::InvalidArgument(format!(
+                "invalid config.verify: {e}"
+            )));
+        }
+    }
+    // Polling triggers carry a structured config (piece, trigger, schedule);
+    // reject malformed configs here so the engine's poll loop never sees one.
+    if *kind == TriggerType::ActivepiecesPoll {
+        orch8_engine::ap_poll::parse_config(config).map_err(|e| {
+            ApiError::InvalidArgument(format!("invalid activepieces_poll config: {e}"))
+        })?;
+    }
+
+    // Message-source triggers (kafka, sqs, pubsub, redis_streams,
+    // postgres_rows) carry structured configs; reject malformed ones up front
+    // so the listener never starts against an invalid config.
+    orch8_engine::trigger_sources::validate_config(kind, config)
+        .map_err(|e| ApiError::InvalidArgument(format!("invalid {kind} config: {e}")))?;
+
+    Ok(())
 }
 
 #[utoipa::path(post, path = "/triggers", tag = "triggers",
@@ -120,41 +166,7 @@ pub(crate) async fn create_trigger(
             "trigger secret exceeds 256 KiB".into(),
         ));
     }
-    // Provider signature presets must be well-formed and only make sense on
-    // public webhook triggers.
-    match crate::webhook_verify::VerifyConfig::from_trigger_config(&body.config) {
-        Ok(Some(_)) if body.trigger_type != TriggerType::Webhook => {
-            return Err(ApiError::InvalidArgument(
-                "config.verify is only valid on webhook triggers".into(),
-            ));
-        }
-        Ok(Some(cfg)) if cfg.secret_ref.is_none() && body.secret.is_none() => {
-            return Err(ApiError::InvalidArgument(
-                "config.verify needs a secret_ref (credentials://id[/field]) or a trigger secret"
-                    .into(),
-            ));
-        }
-        Ok(_) => {}
-        Err(e) => {
-            return Err(ApiError::InvalidArgument(format!(
-                "invalid config.verify: {e}"
-            )));
-        }
-    }
-    // Polling triggers carry a structured config (piece, trigger, schedule);
-    // reject malformed configs here so the engine's poll loop never sees one.
-    if body.trigger_type == TriggerType::ActivepiecesPoll {
-        orch8_engine::ap_poll::parse_config(&body.config).map_err(|e| {
-            ApiError::InvalidArgument(format!("invalid activepieces_poll config: {e}"))
-        })?;
-    }
-
-    // Message-source triggers (kafka, sqs, pubsub, redis_streams,
-    // postgres_rows) carry structured configs; reject malformed ones up front
-    // so the listener never starts against an invalid config.
-    orch8_engine::trigger_sources::validate_config(&body.trigger_type, &body.config).map_err(
-        |e| ApiError::InvalidArgument(format!("invalid {} config: {e}", body.trigger_type)),
-    )?;
+    validate_trigger_config(&body.trigger_type, &body.config, body.secret.is_some())?;
 
     let tenant_id = crate::auth::enforce_tenant_create(
         &tenant_ctx,

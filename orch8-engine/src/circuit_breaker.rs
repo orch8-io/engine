@@ -474,23 +474,42 @@ impl CircuitBreakerRegistry {
     /// Reset a tenant+handler's breaker to `Closed`, clearing failures and
     /// removing any persisted row.
     pub fn reset(&self, tenant_id: &TenantId, handler: &str) {
+        self.reset_matching(tenant_id, handler, None);
+    }
+
+    /// Reset only when the current in-memory state still matches the review.
+    /// Comparison and reset share the same breaker lock.
+    pub fn reset_reviewed(&self, expected: &CircuitBreakerState) -> bool {
+        self.reset_matching(&expected.tenant_id, &expected.handler, Some(expected))
+    }
+
+    fn reset_matching(
+        &self,
+        tenant_id: &TenantId,
+        handler: &str,
+        expected: Option<&CircuitBreakerState>,
+    ) -> bool {
         let search = KeyRef(tenant_id, handler);
         let q: &dyn CircuitKey = &search;
-        let delete = if let Some(mut breaker) = self.breakers.get_mut(q) {
-            breaker.state = BreakerState::Closed;
-            breaker.failure_count = 0;
-            breaker.opened_at = None;
-            Some((
-                PersistOp::Delete(breaker.tenant_id.clone(), breaker.handler.clone()),
-                self.next_persist_seq(),
-            ))
-        } else {
-            None
+        let Some(mut breaker) = self.breakers.get_mut(q) else {
+            if expected.is_none() {
+                self.probes.remove(q);
+            }
+            return false;
         };
-        self.probes.remove(q);
-        if let Some((op, seq)) = delete {
-            self.spawn_persist(op, seq);
+        if expected.is_some_and(|expected| breaker.value() != expected) {
+            return false;
         }
+
+        breaker.state = BreakerState::Closed;
+        breaker.failure_count = 0;
+        breaker.opened_at = None;
+        let op = PersistOp::Delete(breaker.tenant_id.clone(), breaker.handler.clone());
+        let seq = self.next_persist_seq();
+        self.probes.remove(q);
+        drop(breaker);
+        self.spawn_persist(op, seq);
+        true
     }
 
     /// Hand out the single `HalfOpen` probe slot for this key, unless a
@@ -668,6 +687,27 @@ mod tests {
         assert!(cb.check(&t, "test_handler").is_err());
         cb.reset(&t, "test_handler");
         assert!(cb.check(&t, "test_handler").is_ok());
+    }
+
+    #[test]
+    fn reviewed_reset_rejects_a_stale_snapshot_and_its_replay() {
+        let cb = CircuitBreakerRegistry::new(2, 30);
+        let tenant = tid("t");
+        let handler = "test_handler";
+        cb.record_failure(&tenant, handler);
+        let stale = cb.get(&tenant, handler).unwrap();
+        cb.record_failure(&tenant, handler);
+        let opened = cb.get(&tenant, handler).unwrap();
+
+        assert!(!cb.reset_reviewed(&stale));
+        assert_eq!(cb.get(&tenant, handler).unwrap(), opened);
+        assert!(cb.reset_reviewed(&opened));
+        let closed = cb.get(&tenant, handler).unwrap();
+        assert_eq!(closed.state, BreakerState::Closed);
+        assert_eq!(closed.failure_count, 0);
+        assert_eq!(closed.opened_at, None);
+        assert!(!cb.reset_reviewed(&opened));
+        assert_eq!(cb.get(&tenant, handler).unwrap(), closed);
     }
 
     #[test]

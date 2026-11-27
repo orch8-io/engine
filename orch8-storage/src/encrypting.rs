@@ -2676,6 +2676,7 @@ passthrough_impl! {
         async fn import_cron_migration(&self, snapshot: &orch8_types::cron::CronMigrationSnapshot, schedule: &orch8_types::cron::CronSchedule, epoch: i64, digest: &str) -> Result<(), StorageError>;
         async fn get_cron_schedule(&self, id: Uuid) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
         async fn list_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>, limit: u32) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn list_cron_schedules_page(&self, tenant_id: Option<&orch8_types::ids::TenantId>, before: Option<Uuid>, filter: &orch8_types::cron::CronInventoryFilter, limit: u32) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
         async fn list_all_cron_schedules(&self, tenant_id: Option<&orch8_types::ids::TenantId>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
         async fn update_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule) -> Result<(), StorageError>;
         async fn delete_cron_schedule(&self, id: Uuid) -> Result<(), StorageError>;
@@ -2940,6 +2941,7 @@ passthrough_impl! {
 
     // --- Rollback policies (pass-through) ---
     async fn create_rollback_policy(&self, tenant_id: &str, sequence_name: &str, error_rate_threshold: f64, time_window_secs: i32, cooldown_secs: Option<i32>, confirmation_window_secs: Option<i32>, webhook_url: Option<&str>) -> Result<(), StorageError>;
+    async fn save_rollback_policy(&self, tenant_id: &str, sequence_name: &str, update: crate::RollbackPolicyUpdate<'_>) -> Result<orch8_types::rollback::RollbackPolicy, StorageError>;
     async fn get_rollback_policy(&self, tenant_id: &str, sequence_name: &str) -> Result<Option<orch8_types::rollback::RollbackPolicy>, StorageError>;
     async fn list_rollback_policies(&self, tenant_id: Option<&str>, limit: u32) -> Result<Vec<orch8_types::rollback::RollbackPolicy>, StorageError>;
     async fn delete_rollback_policy(&self, tenant_id: &str, sequence_name: &str) -> Result<(), StorageError>;

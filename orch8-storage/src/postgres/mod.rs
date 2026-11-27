@@ -2697,6 +2697,16 @@ impl crate::SchedulingStore for PostgresStorage {
         cron::list(self, tenant_id, limit).await
     }
 
+    async fn list_cron_schedules_page(
+        &self,
+        tenant_id: Option<&TenantId>,
+        before: Option<Uuid>,
+        filter: &orch8_types::cron::CronInventoryFilter,
+        limit: u32,
+    ) -> Result<Vec<CronSchedule>, StorageError> {
+        cron::list_page(self, tenant_id, before, filter, limit).await
+    }
+
     async fn update_cron_schedule(&self, schedule: &CronSchedule) -> Result<(), StorageError> {
         cron::update(self, schedule).await
     }
@@ -3358,17 +3368,29 @@ impl crate::AdminStore for PostgresStorage {
         confirmation_window_secs: Option<i32>,
         webhook_url: Option<&str>,
     ) -> Result<(), StorageError> {
-        rollback::create_rollback_policy(
-            self,
+        self.save_rollback_policy(
             tenant_id,
             sequence_name,
-            error_rate_threshold,
-            time_window_secs,
-            cooldown_secs,
-            confirmation_window_secs,
-            webhook_url,
+            crate::RollbackPolicyUpdate {
+                error_rate_threshold,
+                time_window_secs,
+                cooldown_secs,
+                confirmation_window_secs,
+                webhook_url,
+                min_samples: None,
+            },
         )
         .await
+        .map(|_| ())
+    }
+
+    async fn save_rollback_policy(
+        &self,
+        tenant_id: &str,
+        sequence_name: &str,
+        update: crate::RollbackPolicyUpdate<'_>,
+    ) -> Result<orch8_types::rollback::RollbackPolicy, StorageError> {
+        rollback::save_rollback_policy(self, tenant_id, sequence_name, update).await
     }
 
     async fn get_rollback_policy(

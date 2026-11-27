@@ -126,34 +126,22 @@ pub(crate) async fn create_policy(
     )?;
     let tenant = tenant_id.as_str().to_string();
 
-    state
-        .storage
-        .create_rollback_policy(
-            &tenant,
-            &req.sequence_name,
-            req.error_rate_threshold,
-            req.time_window_secs,
-            req.cooldown_secs,
-            req.confirmation_window_secs,
-            req.webhook_url.as_deref(),
-        )
-        .await
-        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
-
-    if let Some(min_samples) = req.min_samples {
-        state
-            .storage
-            .set_rollback_min_samples(&tenant, &req.sequence_name, min_samples)
-            .await
-            .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
-    }
-
     let policy = state
         .storage
-        .get_rollback_policy(&tenant, &req.sequence_name)
+        .save_rollback_policy(
+            &tenant,
+            &req.sequence_name,
+            orch8_storage::RollbackPolicyUpdate {
+                error_rate_threshold: req.error_rate_threshold,
+                time_window_secs: req.time_window_secs,
+                cooldown_secs: req.cooldown_secs,
+                confirmation_window_secs: req.confirmation_window_secs,
+                webhook_url: req.webhook_url.as_deref(),
+                min_samples: req.min_samples,
+            },
+        )
         .await
-        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
-        .ok_or_else(|| ApiError::Internal("Policy not found after creation".into()))?;
+        .map_err(|error| ApiError::from_storage(error, "rollback policy"))?;
 
     Ok((StatusCode::CREATED, Json(policy.into())))
 }

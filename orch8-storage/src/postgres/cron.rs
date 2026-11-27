@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use orch8_types::cron::{CronMigrationSnapshot, CronSchedule};
+use orch8_types::cron::{CronInventoryFilter, CronMigrationSnapshot, CronSchedule};
 use orch8_types::error::StorageError;
 use orch8_types::ids::TenantId;
 
@@ -146,6 +146,42 @@ pub(super) async fn list(
         .fetch_all(&store.pool)
         .await?
     };
+    Ok(rows.into_iter().map(CronRow::into_schedule).collect())
+}
+
+pub(super) async fn list_page(
+    store: &PostgresStorage,
+    tenant_id: Option<&TenantId>,
+    before: Option<Uuid>,
+    filter: &CronInventoryFilter,
+    limit: u32,
+) -> Result<Vec<CronSchedule>, StorageError> {
+    let mut query =
+        sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT * FROM cron_schedules WHERE TRUE");
+    if let Some(tenant_id) = tenant_id {
+        query
+            .push(" AND tenant_id = ")
+            .push_bind(tenant_id.as_str());
+    }
+    if let Some(before) = before {
+        query.push(" AND id < ").push_bind(before);
+    }
+    if let Some(namespace) = &filter.namespace {
+        query.push(" AND namespace = ").push_bind(namespace);
+    }
+    if let Some(sequence_id) = filter.sequence_id {
+        query.push(" AND sequence_id = ").push_bind(sequence_id);
+    }
+    if let Some(enabled) = filter.enabled {
+        query.push(" AND enabled = ").push_bind(enabled);
+    }
+    query
+        .push(" ORDER BY id DESC LIMIT ")
+        .push_bind(i64::from(limit.min(201)));
+    let rows = query
+        .build_query_as::<CronRow>()
+        .fetch_all(&store.pool)
+        .await?;
     Ok(rows.into_iter().map(CronRow::into_schedule).collect())
 }
 
