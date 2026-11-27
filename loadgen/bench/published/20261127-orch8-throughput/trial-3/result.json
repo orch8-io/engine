@@ -1,0 +1,52 @@
+{
+  "system": "orch8",
+  "system_version": {
+    "images": {
+      "bench-orch8-3-postgres-1": "postgres@sha256:ce81150802644ddfac1db4da9e63be6f2a3818aa6ee98a7a28838aeea65dc37a",
+      "bench-orch8-3-engine-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794",
+      "bench-orch8-3-worker-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a"
+    },
+    "sdk": {}
+  },
+  "harness_version": "0.1.0",
+  "git_sha": "2a75c9cfadcdf910099c45b20f293f26aae2f709",
+  "scenario": "throughput",
+  "run_index": 3,
+  "workload": {
+    "workflows": 1000,
+    "steps": 3,
+    "activity_ms": 50,
+    "concurrency": 100,
+    "warmup_workflows": 50
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9V74 80-Core Processor",
+    "cores": 2,
+    "memory_bytes": 8317911040,
+    "os": "Linux 7.0.0-1020-azure x64",
+    "docker_version": "28.0.4",
+    "docker_cpus": 2,
+    "docker_memory_bytes": 8317911040
+  },
+  "timings": {
+    "started_at": "2026-11-27T14:12:55.835Z",
+    "ended_at": "2026-11-27T14:13:26.375Z",
+    "total_duration_ms": 30540
+  },
+  "results": {
+    "completed": 1000,
+    "failed": 0,
+    "throughput_wf_per_s": 36.05,
+    "latency_ms": {
+      "p50": 2632,
+      "p95": 3280,
+      "p99": 3851,
+      "max": 3862
+    },
+    "latency_source": "server",
+    "errors": []
+  },
+  "crash_recovery": null,
+  "raw_samples_file": "samples.jsonl",
+  "activity_log_file": "activity.jsonl"
+}
