@@ -1880,6 +1880,63 @@ async fn t74_list_approvals_namespace_filter() {
 }
 
 #[tokio::test]
+async fn exact_approvals_lookup_limits_reads_to_the_execution_scope() {
+    use orch8_types::instance::InstanceState;
+
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let sequence = Uuid::now_v7();
+    let mut body = mk_sequence_body(sequence, "t1", "ns1", "approval-sequence");
+    body["blocks"][0]["wait_for_input"] = json!({
+        "prompt": "Review this run",
+        "choices": [{"label": "Approve", "value": "yes"}]
+    });
+    let created = client
+        .post(format!("{}/sequences", srv.base_url))
+        .header("X-Tenant-Id", "t1")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let execution = create_inst(&client, &srv.base_url, sequence, "t1").await;
+    let other = create_inst(&client, &srv.base_url, sequence, "t1").await;
+    for id in [&execution, &other] {
+        srv.storage
+            .update_instance_state(
+                InstanceId::from_uuid(Uuid::parse_str(id).unwrap()),
+                InstanceState::Waiting,
+                None,
+            )
+            .await
+            .unwrap();
+    }
+    for (tenant, namespace, count) in [("t1", "ns1", 1), ("t2", "ns1", 0), ("t1", "other", 0)] {
+        let response = client
+            .get(format!("{}/approvals", srv.base_url))
+            .header("X-Tenant-Id", tenant)
+            .query(&[
+                ("execution_id", execution.as_str()),
+                ("namespace", namespace),
+            ])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(page["execution_id"], execution);
+        assert_eq!(page["scanned_count"], count);
+        assert!(page["next_offset"].is_null());
+        let items = page["items"].as_array().unwrap();
+        assert_eq!(items.len(), count);
+        if let Some(item) = items.first() {
+            assert_eq!(item["instance_id"], execution);
+            assert_eq!(item["prompt"], "Review this run");
+        }
+    }
+}
+
+#[tokio::test]
 async fn t75_list_approvals_response_structure() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();
