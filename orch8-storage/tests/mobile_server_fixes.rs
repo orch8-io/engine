@@ -84,7 +84,7 @@ backend_test!(
         };
         let policy = b.storage.save_rollback_policy("t1", "seq", update).await.unwrap();
         assert_eq!(policy.min_samples, 140);
-        assert_eq!(policy.error_rate_threshold, 0.25);
+        assert_eq!(policy.error_rate_threshold.to_bits(), 0.25_f64.to_bits());
         let replacement = b.storage.save_rollback_policy("t1", "seq", RollbackPolicyUpdate {
             error_rate_threshold: 0.5,
             min_samples: None,
@@ -92,7 +92,7 @@ backend_test!(
         }).await.unwrap();
         assert_eq!(replacement.id, policy.id);
         assert_eq!(replacement.min_samples, 140);
-        assert_eq!(replacement.error_rate_threshold, 0.5);
+        assert_eq!(replacement.error_rate_threshold.to_bits(), 0.5_f64.to_bits());
         assert_eq!(b.storage.get_rollback_policy("t1", "seq").await.unwrap().unwrap().min_samples, 140);
     }
 );

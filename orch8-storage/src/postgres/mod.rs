@@ -2919,6 +2919,16 @@ impl crate::AdminStore for PostgresStorage {
         triggers::list(self, tenant_id, limit).await
     }
 
+    async fn list_trigger_inventory(
+        &self,
+        tenant: &TenantId,
+        after: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::trigger::TriggerInventoryEntry>, StorageError> {
+        triggers::list_inventory(self, tenant, after, search, limit).await
+    }
+
     async fn list_all_triggers(
         &self,
         tenant_id: Option<&TenantId>,

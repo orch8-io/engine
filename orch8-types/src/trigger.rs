@@ -151,6 +151,21 @@ pub struct TriggerDef {
     pub updated_at: DateTime<Utc>,
 }
 
+/// A trigger catalogue row without credentials, configuration or poll state.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct TriggerInventoryEntry {
+    pub slug: String,
+    pub sequence_name: String,
+    pub version: Option<i32>,
+    pub tenant_id: TenantId,
+    pub namespace: String,
+    pub enabled: bool,
+    pub trigger_type: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub secret_field_present: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -379,3 +379,92 @@ async fn settings_secret_replacement_and_clear_are_revision_guarded() {
             .is_none()
     );
 }
+
+#[tokio::test]
+async fn trigger_inventory_pages_and_searches_past_the_legacy_ceiling() {
+    let (server, client, _, _) = setup().await;
+    let tenant = TenantId::new("t1").unwrap();
+    let original = server
+        .storage
+        .get_trigger(Some(&tenant), "hook")
+        .await
+        .unwrap()
+        .unwrap();
+    for index in 0..1005 {
+        let mut row = original.clone();
+        row.slug = format!("row-{index:04}");
+        row.config = json!({"private": "PRIVATE-CURSOR"});
+        server.storage.create_trigger(&row).await.unwrap();
+    }
+    let mut other = original;
+    other.slug = "row-other".into();
+    other.tenant_id = TenantId::new("t-other").unwrap();
+    server.storage.create_trigger(&other).await.unwrap();
+
+    let url = format!("{}/triggers", server.base_url);
+    let legacy: Value = client
+        .get(&url)
+        .header("X-Tenant-Id", "t1")
+        .query(&[("limit", "1000")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(legacy.as_array().unwrap().len(), 1000);
+    let mut after = None::<String>;
+    let mut slugs = vec![];
+    for _ in 0..6 {
+        let mut request = client
+            .get(&url)
+            .header("X-Tenant-Id", "t1")
+            .query(&[("view", "page"), ("page_size", "200")]);
+        if let Some(after) = &after {
+            request = request.query(&[("after", after)]);
+        }
+        let page: Value = request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page["after"], json!(after));
+        let rows = page["items"].as_array().unwrap();
+        for row in rows {
+            assert_eq!(row["tenant_id"], "t1");
+            assert_eq!(row["secret_field_present"], true);
+            assert!(row.get("secret").is_none() && row.get("config").is_none());
+            slugs.push(row["slug"].as_str().unwrap().to_owned());
+        }
+        after = page["next_after"].as_str().map(str::to_owned);
+        if after.is_none() {
+            break;
+        }
+        assert_eq!(after.as_ref(), slugs.last());
+    }
+    assert_eq!(after, None);
+    assert_eq!(slugs.len(), 1006);
+    assert!(slugs.windows(2).all(|pair| pair[0] < pair[1]));
+    assert_eq!(slugs.last().unwrap(), "row-1004");
+    let filtered: Value = client
+        .get(&url)
+        .header("X-Tenant-Id", "t1")
+        .query(&[("view", "page"), ("page_size", "1"), ("search", "row-100")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(filtered["search"], "row-100");
+    assert_eq!(filtered["items"][0]["slug"], "row-1000");
+    assert_eq!(filtered["next_after"], "row-1000");
+}

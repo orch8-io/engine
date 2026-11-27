@@ -608,6 +608,18 @@ pub struct DashboardRow {
 #[derive(Debug, Serialize)]
 pub struct DashboardResponse {
     pub rows: Vec<DashboardRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<DashboardReceipt>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardReceipt {
+    version: u8,
+    tenant_id: String,
+    query_type: &'static str,
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
+    coverage: orch8_storage::TelemetryDashboardCoverage,
 }
 
 pub(crate) async fn dashboard_queries(
@@ -637,7 +649,7 @@ pub(crate) async fn dashboard_queries(
         .await
         .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?;
 
-    let total: i64 = raw.iter().map(|(_, c)| c).sum();
+    let total: i128 = raw.iter().map(|(_, count)| i128::from(*count)).sum();
     let rows = raw
         .into_iter()
         .map(|(dim, count)| DashboardRow {
@@ -654,12 +666,67 @@ pub(crate) async fn dashboard_queries(
         })
         .collect();
 
-    Ok(Json(DashboardResponse { rows }))
+    let receipt = state
+        .storage
+        .telemetry_dashboard_coverage()
+        .await
+        .map_err(|e| ApiError::Internal(format!("DB error: {e}")))?
+        .map(|coverage| DashboardReceipt {
+            version: 1,
+            tenant_id: tenant,
+            query_type,
+            start_time: start,
+            end_time: end,
+            coverage,
+        });
+    Ok(Json(DashboardResponse { rows, receipt }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dashboard_receipt_identifies_empty_sqlite_scope_and_effective_window() {
+        let storage = std::sync::Arc::new(
+            orch8_storage::sqlite::SqliteStorage::in_memory()
+                .await
+                .unwrap(),
+        );
+        let state = crate::test_harness::test_state(
+            storage,
+            tokio_util::sync::CancellationToken::new(),
+            false,
+            0,
+            None,
+        );
+        let tenant = axum::Extension(crate::auth::TenantContext {
+            tenant_id: orch8_types::ids::TenantId::unchecked("actual"),
+        });
+        let end = "2026-11-27T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let Json(result) = dashboard_queries(
+            State(state),
+            Some(tenant),
+            axum::extract::Query(DashboardQueryRequest {
+                tenant_id: Some("other".into()),
+                query_type: DashboardQueryType::DeviceOsBreakdown,
+                start_time: Some(end - chrono::TimeDelta::days(32)),
+                end_time: Some(end),
+            }),
+        )
+        .await
+        .unwrap();
+        let wire = serde_json::to_value(result).unwrap();
+        assert_eq!(wire["rows"], serde_json::json!([]));
+        assert_eq!(
+            wire["receipt"],
+            serde_json::json!({
+                "version": 1, "tenant_id": "actual", "query_type": "device_os_breakdown",
+                "start_time": "2026-10-27T12:00:00Z", "end_time": "2026-11-27T12:00:00Z",
+                "coverage": "sqlite_scoped_ingest",
+            })
+        );
+    }
 
     fn device(device_id: &str) -> DeviceContext {
         DeviceContext {

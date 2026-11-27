@@ -21,9 +21,10 @@ use axum::routing::{delete, get, patch, post};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, TenantId};
 use orch8_types::redaction::RedactionPolicy;
-use orch8_types::trigger::{TriggerDef, TriggerType};
+use orch8_types::trigger::{TriggerDef, TriggerInventoryEntry, TriggerType};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -68,6 +69,10 @@ pub struct TriggerQuery {
     pub tenant_id: Option<String>,
     #[serde(default = "default_limit")]
     pub limit: u32,
+    pub view: Option<String>,
+    pub after: Option<String>,
+    pub search: Option<String>,
+    pub page_size: Option<u32>,
 }
 
 fn default_limit() -> u32 {
@@ -216,27 +221,106 @@ pub(crate) async fn create_trigger(
     Ok((StatusCode::CREATED, Json(redact_trigger_config(trigger))))
 }
 
+#[derive(Serialize, ToSchema)]
+pub(crate) struct TriggerInventoryPage {
+    items: Vec<TriggerInventoryEntry>,
+    after: Option<String>,
+    search: Option<String>,
+    page_size: u32,
+    next_after: Option<String>,
+}
+
 #[utoipa::path(get, path = "/triggers", tag = "triggers",
-    params(("tenant_id" = Option<String>, Query, description = "Filter by tenant")),
-    responses((status = 200, description = "Triggers", body = Vec<orch8_types::trigger::TriggerDef>))
+    params(
+        ("tenant_id" = Option<String>, Query, description = "Filter by tenant"),
+        ("view" = Option<String>, Query, description = "Use page for metadata-only cursor paging"),
+        ("after" = Option<String>, Query, description = "Exclusive slug cursor from next_after"),
+        ("search" = Option<String>, Query, description = "Case-sensitive substring across slug, sequence, namespace and type"),
+        ("page_size" = Option<u32>, Query, description = "Number of rows from 1 to 200 for view=page")
+    ),
+    responses(
+        (status = 200, description = "Legacy trigger list or tenant-scoped metadata page", body = inline(TriggerListResponse)),
+        (status = 400, description = "Invalid inventory selectors"),
+    )
 )]
 pub(crate) async fn list_triggers(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Query(query): Query<TriggerQuery>,
-) -> Result<impl IntoResponse, ApiError> {
+) -> Result<Json<TriggerListResponse>, ApiError> {
     let tenant_ref = crate::auth::scoped_tenant_id(&tenant_ctx, query.tenant_id.as_deref());
+    if query.view.as_deref() == Some("page") {
+        let tenant = tenant_ref.as_ref().ok_or_else(|| {
+            ApiError::InvalidArgument("paged trigger inventory requires a tenant".into())
+        })?;
+        let page_size = query.page_size.unwrap_or(50);
+        if !(1..=200).contains(&page_size)
+            || query
+                .after
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 255)
+            || query
+                .search
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 255 || value.contains('\0'))
+        {
+            return Err(ApiError::InvalidArgument(
+                "invalid trigger page or search selectors".into(),
+            ));
+        }
+        let result = state
+            .storage
+            .list_trigger_inventory(
+                tenant,
+                query.after.as_deref(),
+                query.search.as_deref(),
+                page_size + 1,
+            )
+            .await;
+        match result {
+            Ok(mut items) => {
+                let has_more = items.len() > page_size as usize;
+                items.truncate(page_size as usize);
+                let next_after = items
+                    .last()
+                    .filter(|_| has_more)
+                    .map(|item| item.slug.clone());
+                return Ok(Json(TriggerListResponse::Page(TriggerInventoryPage {
+                    items,
+                    after: query.after,
+                    search: query.search,
+                    page_size,
+                    next_after,
+                })));
+            }
+            Err(StorageError::Unsupported(_))
+                if query.after.is_none() && query.search.is_none() => {}
+            Err(error) => return Err(ApiError::from_storage(error, "trigger")),
+        }
+    } else if query.view.is_some()
+        || query.after.is_some()
+        || query.search.is_some()
+        || query.page_size.is_some()
+    {
+        return Err(ApiError::InvalidArgument(
+            "trigger page selectors require view=page".into(),
+        ));
+    }
     let triggers = state
         .storage
         .list_triggers(tenant_ref.as_ref(), query.limit)
         .await
         .map_err(|e| ApiError::from_storage(e, "trigger"))?;
-    Ok(Json(
-        triggers
-            .into_iter()
-            .map(redact_trigger_config)
-            .collect::<Vec<_>>(),
-    ))
+    Ok(Json(TriggerListResponse::Legacy(
+        triggers.into_iter().map(redact_trigger_config).collect(),
+    )))
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+pub(crate) enum TriggerListResponse {
+    Legacy(Vec<TriggerDef>),
+    Page(TriggerInventoryPage),
 }
 
 #[utoipa::path(get, path = "/triggers/{slug}", tag = "triggers",

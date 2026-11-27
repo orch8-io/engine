@@ -345,6 +345,7 @@ fault_impl! {
         async fn create_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
         async fn get_trigger(&self, tenant_id: Option<&TenantId>, slug: &str) -> Result<Option<TriggerDef>, StorageError>;
         async fn list_triggers(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<TriggerDef>, StorageError>;
+        async fn list_trigger_inventory(&self, tenant: &TenantId, after: Option<&str>, search: Option<&str>, limit: u32) -> Result<Vec<orch8_types::trigger::TriggerInventoryEntry>, StorageError>;
         async fn list_all_triggers(&self, tenant_id: Option<&TenantId>) -> Result<Vec<TriggerDef>, StorageError>;
         async fn update_trigger(&self, trigger: &TriggerDef) -> Result<(), StorageError>;
         async fn update_trigger_cas(&self, _trigger: &TriggerDef, _expected_updated_at: DateTime<Utc>) -> Result<bool, StorageError>;
@@ -420,6 +421,7 @@ fault_impl! {
 
 fault_impl! {
     [TELEMETRY_STORE_METHODS] impl TelemetryStore {
+        async fn telemetry_dashboard_coverage(&self) -> Result<Option<crate::TelemetryDashboardCoverage>, StorageError>;
         async fn ingest_telemetry_event(&self, event_type: &str, payload: &str, device_id: &str, os_name: &str, os_version: &str, app_version: &str, sdk_version: &str, tenant_id: &str, created_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn ingest_telemetry_events_batch(&self, events: &[TelemetryEvent]) -> Result<u64, StorageError>;
         async fn ingest_telemetry_error(&self, error_type: &str, message: &str, stack_trace: Option<&str>, device_id: &str, os_name: &str, os_version: &str, app_version: &str, sdk_version: &str, tenant_id: &str, instance_id: Option<&str>, sequence_name: Option<&str>) -> Result<(), StorageError>;
