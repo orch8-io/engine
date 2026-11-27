@@ -4,9 +4,10 @@
 // (type, enum, const, required, properties, additionalProperties, items,
 // minimum, pattern). `format` is checked for date-time only.
 //
-// Usage: node validate-result.mjs results/*.json
-import { readFileSync } from "node:fs";
+// Usage: node validate-result.mjs [--check-samples] results/*.json
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { gunzipSync } from "node:zlib";
 
 const schema = JSON.parse(readFileSync(resolve(dirname(new URL(import.meta.url).pathname), "results.schema.json"), "utf8"));
 
@@ -56,9 +57,36 @@ function validate(value, node, path, errors) {
   }
 }
 
-const files = process.argv.slice(2);
+function checkSamples(file, result) {
+  const raw = resolve(dirname(file), result.raw_samples_file);
+  const stored = existsSync(raw) || raw.endsWith(".gz") ? raw : `${raw}.gz`;
+  const bytes = readFileSync(stored);
+  const lines = (stored.endsWith(".gz") ? gunzipSync(bytes) : bytes).toString("utf8").split(/\r?\n/);
+  const ids = new Set();
+  let completed = 0;
+  for (const [index, line] of lines.entries()) {
+    if (!line.trim()) continue;
+    const sample = JSON.parse(line);
+    if (typeof sample?.id !== "string" || !sample.id || ids.has(sample.id)) {
+      throw new Error(`sample line ${index + 1} has a missing or duplicate workflow ID`);
+    }
+    if (sample.status !== "completed" && sample.status !== "failed") {
+      throw new Error(`sample line ${index + 1} has an unknown outcome`);
+    }
+    ids.add(sample.id);
+    if (sample.status === "completed") completed += 1;
+  }
+  if (ids.size !== result.workload.workflows || completed !== result.results.completed ||
+      ids.size - completed !== result.results.failed) {
+    throw new Error("raw sample counts differ from the workload and result");
+  }
+}
+
+const args = process.argv.slice(2);
+const verifySamples = args[0] === "--check-samples";
+const files = verifySamples ? args.slice(1) : args;
 if (files.length === 0) {
-  console.error("usage: node validate-result.mjs <result.json>...");
+  console.error("usage: node validate-result.mjs [--check-samples] <result.json>...");
   process.exit(2);
 }
 let failed = 0;
@@ -83,6 +111,13 @@ for (const file of files) {
     const { completed, failed } = data.results;
     if (completed + failed !== data.workload.workflows) {
       errors.push("$.results: completed and failed counts must add up to workload.workflows");
+    }
+  }
+  if (verifySamples && errors.length === 0) {
+    try {
+      checkSamples(file, data);
+    } catch (error) {
+      errors.push(`raw samples: ${error.message}`);
     }
   }
   if (errors.length) {

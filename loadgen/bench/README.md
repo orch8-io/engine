@@ -14,6 +14,10 @@ loadgen/bench/run.sh --system orch8 --scenario crash_recovery --n 500 --concurre
 node loadgen/bench/validate-result.mjs loadgen/bench/results/*/result.json
 ```
 
+Add `--check-samples` before the result paths to verify the raw workflow counts
+and unique IDs. The validator accepts both the working JSONL files and gzip
+archives.
+
 | Path                                          | Purpose                                                                       |
 | --------------------------------------------- | ----------------------------------------------------------------------------- |
 | `run.sh`                                      | Fresh stack per run → driver → optional kill/restart → result file → teardown |
