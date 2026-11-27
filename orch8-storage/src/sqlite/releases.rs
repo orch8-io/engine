@@ -228,6 +228,45 @@ pub(super) async fn cas_state(
     Ok(result.rows_affected() == 1)
 }
 
+pub(super) async fn cas_state_with_executors(
+    storage: &SqliteStorage,
+    release: &WorkflowRelease,
+    next: ReleaseState,
+    canary_percent: Option<u8>,
+    executors: &[Uuid],
+) -> Result<bool, StorageError> {
+    // The UPDATE holds SQLite's writer lock while checking current readiness.
+    let result = sqlx::query(
+        "UPDATE workflow_releases
+         SET state = ?5,
+             canary_percent = COALESCE(?6, canary_percent),
+             canary_started_at = CASE WHEN ?6 IS NOT NULL THEN
+                 strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now') ELSE canary_started_at END,
+             updated_at = strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')
+         WHERE id = ?1 AND tenant_id = ?2 AND candidate_sequence_id = ?3 AND state = ?4
+           AND NOT EXISTS (
+               SELECT 1 FROM json_each(?7) selected
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM wasm_revision_readiness r
+                   JOIN cluster_nodes n ON n.id = r.node_id
+                   WHERE n.id = selected.value AND r.sequence_id = ?3
+                     AND julianday(r.ready_until) > julianday('now')
+                     AND n.status = 'active' AND n.drain = 0 AND n.capabilities_withdrawn = 0
+               )
+           )",
+    )
+    .bind(release.id.to_string())
+    .bind(release.tenant_id.as_str())
+    .bind(release.candidate_sequence_id.to_string())
+    .bind(release.state.as_str())
+    .bind(next.as_str())
+    .bind(canary_percent.map(i64::from))
+    .bind(serde_json::to_string(executors)?)
+    .execute(&storage.pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn set_validation_summary(
     storage: &SqliteStorage,
     id: Uuid,

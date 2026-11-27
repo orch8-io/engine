@@ -272,6 +272,7 @@ async fn executor_readiness_inventory_and_checked_transitions_use_the_current_ca
     use orch8_api::test_harness::spawn_test_server_on;
     use orch8_types::cluster::{ClusterNode, NodeStatus};
     use orch8_types::ids::SequenceId;
+    use orch8_types::release::ReleaseState;
 
     let fixture = spawn_test_server().await;
     let server = spawn_test_server_on(fixture.storage.clone(), Some("release-test-root")).await;
@@ -332,7 +333,7 @@ async fn executor_readiness_inventory_and_checked_transitions_use_the_current_ca
     assert_eq!(read["candidate_sequence_id"], json!(versions.candidate_id));
     assert_eq!(
         read["executors"],
-        json!([{"id":executor,"name":"worker-a","ready":false}])
+        json!([{"id":executor,"name":"worker-a","ready":false,"readiness_status":"awaiting_candidate"}])
     );
 
     let start = json!({"action":"canary","percent":23,"ready_executor_ids":[executor]});
@@ -351,6 +352,34 @@ async fn executor_readiness_inventory_and_checked_transitions_use_the_current_ca
         post(&base, &client, &endpoint, start.clone()).await.0,
         StatusCode::CONFLICT
     );
+    let stored = server
+        .storage
+        .get_release(Uuid::parse_str(release["id"].as_str().unwrap()).unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    server
+        .storage
+        .record_wasm_revision_ready(executor, stored.candidate_sequence_id, now)
+        .await
+        .unwrap();
+    assert!(
+        !server
+            .storage
+            .cas_release_state_with_executors(&stored, ReleaseState::Canary, Some(23), &[executor])
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        server
+            .storage
+            .get_release(stored.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        ReleaseState::Ready
+    );
     server
         .storage
         .record_wasm_revision_ready(
@@ -360,11 +389,16 @@ async fn executor_readiness_inventory_and_checked_transitions_use_the_current_ca
         )
         .await
         .unwrap();
+    let read: Value = inspect("t1").await.unwrap().json().await.unwrap();
+    assert_eq!(read["executors"][0]["readiness_status"], "ready");
     let (status, fresh) = post(&base, &client, &endpoint, start).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fresh["canary_percent"], 23);
     assert_eq!(fresh["state"], "canary");
     server.storage.drain_node(executor).await.unwrap();
+    let read: Value = inspect("t1").await.unwrap().json().await.unwrap();
+    assert_eq!(read["executors"][0]["readiness_status"], "draining");
+    assert_eq!(read["executors"][0]["ready"], false);
     assert_eq!(
         post(
             &base,

@@ -41,6 +41,35 @@ pub(super) async fn list_wasm_ready_nodes(
     .await?)
 }
 
+pub(super) async fn list_wasm_executor_readiness(
+    store: &PostgresStorage,
+    revision: SequenceId,
+    now: DateTime<Utc>,
+) -> Result<Vec<crate::WasmExecutorReadiness>, StorageError> {
+    let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
+        "SELECT n.id, n.name, CASE
+            WHEN n.status='stopped' THEN 'stopped'
+            WHEN n.status='draining' OR n.drain THEN 'draining'
+            WHEN n.capabilities_withdrawn THEN 'capabilities_withdrawn'
+            WHEN n.status<>'active' THEN 'unavailable'
+            WHEN r.ready_until IS NULL THEN 'awaiting_candidate'
+            WHEN r.ready_until>$2 THEN 'ready'
+            ELSE 'expired'
+         END
+         FROM cluster_nodes n LEFT JOIN wasm_revision_readiness r
+           ON r.node_id=n.id AND r.sequence_id=$1
+         ORDER BY n.id",
+    )
+    .bind(revision.into_uuid())
+    .bind(now)
+    .fetch_all(&store.pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, status)| crate::WasmExecutorReadiness { id, name, status })
+        .collect())
+}
+
 pub(super) async fn register(
     store: &PostgresStorage,
     node: &orch8_types::cluster::ClusterNode,

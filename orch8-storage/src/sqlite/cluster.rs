@@ -47,6 +47,40 @@ pub(super) async fn list_wasm_ready_nodes(
         .collect()
 }
 
+pub(super) async fn list_wasm_executor_readiness(
+    store: &SqliteStorage,
+    revision: SequenceId,
+    now: DateTime<Utc>,
+) -> Result<Vec<crate::WasmExecutorReadiness>, StorageError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT n.id, n.name, CASE
+            WHEN n.status='stopped' THEN 'stopped'
+            WHEN n.status='draining' OR n.drain=1 THEN 'draining'
+            WHEN n.capabilities_withdrawn=1 THEN 'capabilities_withdrawn'
+            WHEN n.status<>'active' THEN 'unavailable'
+            WHEN r.ready_until IS NULL THEN 'awaiting_candidate'
+            WHEN julianday(r.ready_until)>julianday(?2) THEN 'ready'
+            ELSE 'expired'
+         END
+         FROM cluster_nodes n LEFT JOIN wasm_revision_readiness r
+           ON r.node_id=n.id AND r.sequence_id=?1
+         ORDER BY n.id",
+    )
+    .bind(revision.to_string())
+    .bind(ts(now))
+    .fetch_all(&store.pool)
+    .await?;
+    rows.into_iter()
+        .map(|(id, name, status)| {
+            Ok(crate::WasmExecutorReadiness {
+                id: Uuid::parse_str(&id).map_err(|error| StorageError::Query(error.to_string()))?,
+                name,
+                status,
+            })
+        })
+        .collect()
+}
+
 pub(super) async fn register(
     storage: &SqliteStorage,
     node: &ClusterNode,

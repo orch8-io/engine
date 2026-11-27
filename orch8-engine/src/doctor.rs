@@ -752,6 +752,15 @@ fn rule_open_breaker(
             finding = finding
                 .with_evidence(Evidence::new("opened_at", opened.to_rfc3339()).observed_at(now));
         }
+        finding = finding.with_evidence(
+            Evidence::new("circuit_breaker_target", "Observed open circuit breaker")
+                .with_data(serde_json::json!({
+                    "instance_id": ctx.instance.id,
+                    "tenant_id": breaker.tenant_id,
+                    "handler": breaker.handler,
+                }))
+                .observed_at(now),
+        );
         out.push(Diagnosis {
             category: if directly_involved {
                 DiagnosisCategory::DirectEvidence

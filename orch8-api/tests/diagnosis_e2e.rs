@@ -991,6 +991,16 @@ async fn open_breaker_for_involved_handler_is_direct_evidence() {
     assert_eq!(d["category"], "direct_evidence");
     assert_eq!(d["confidence"], "high");
     assert_eq!(d["health"], "degraded");
+    let target = d["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["label"] == "circuit_breaker_target")
+        .unwrap();
+    assert_eq!(
+        target["data"],
+        serde_json::json!({"instance_id": inst, "tenant_id": TENANT, "handler": "flaky_api"})
+    );
 }
 
 #[tokio::test]

@@ -207,6 +207,78 @@ pub(super) async fn cas_state(
     Ok(result.rows_affected() == 1)
 }
 
+pub(super) async fn cas_state_with_executors(
+    store: &PostgresStorage,
+    release: &WorkflowRelease,
+    next: ReleaseState,
+    canary_percent: Option<u8>,
+    executors: &[Uuid],
+) -> Result<bool, StorageError> {
+    let mut tx = store.pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM workflow_releases
+         WHERE id = $1 AND tenant_id = $2 AND candidate_sequence_id = $3 AND state = $4
+         FOR UPDATE",
+    )
+    .bind(release.id)
+    .bind(release.tenant_id.as_str())
+    .bind(release.candidate_sequence_id.into_uuid())
+    .bind(release.state.as_str())
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    // Keep node state and proof rows stable until the release transaction commits.
+    let locked_executors: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT n.id FROM cluster_nodes n
+         JOIN wasm_revision_readiness r ON r.node_id = n.id AND r.sequence_id = $1
+         WHERE n.id = ANY($2) ORDER BY n.id FOR SHARE OF n, r",
+    )
+    .bind(release.candidate_sequence_id.into_uuid())
+    .bind(executors)
+    .fetch_all(&mut *tx)
+    .await?;
+    if locked_executors.len()
+        != executors
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+
+    let result = sqlx::query(
+        "WITH checked AS MATERIALIZED (SELECT clock_timestamp() AS now)
+         UPDATE workflow_releases
+         SET state = $2,
+             canary_percent = COALESCE($3, canary_percent),
+             canary_started_at = CASE WHEN $3 IS NOT NULL THEN checked.now ELSE canary_started_at END,
+             updated_at = checked.now
+         FROM checked
+         WHERE id = $1 AND NOT EXISTS (
+             SELECT 1 FROM unnest($5::uuid[]) AS selected(node_id)
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM wasm_revision_readiness r JOIN cluster_nodes n ON n.id = r.node_id
+                 WHERE n.id = selected.node_id AND r.sequence_id = $4 AND r.ready_until > checked.now
+                   AND n.status = 'active' AND NOT n.drain AND NOT n.capabilities_withdrawn
+             )
+         )",
+    )
+    .bind(release.id)
+    .bind(next.as_str())
+    .bind(canary_percent.map(i16::from))
+    .bind(release.candidate_sequence_id.into_uuid())
+    .bind(executors)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(result.rows_affected() == 1)
+}
+
 pub(super) async fn set_validation_summary(
     store: &PostgresStorage,
     id: Uuid,

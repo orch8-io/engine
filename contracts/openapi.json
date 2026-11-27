@@ -22138,7 +22138,8 @@
         "required": [
           "id",
           "name",
-          "ready"
+          "ready",
+          "readiness_status"
         ],
         "properties": {
           "id": {
@@ -22146,6 +22147,9 @@
             "format": "uuid"
           },
           "name": {
+            "type": "string"
+          },
+          "readiness_status": {
             "type": "string"
           },
           "ready": {
