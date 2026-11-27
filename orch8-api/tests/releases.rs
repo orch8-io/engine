@@ -461,15 +461,312 @@ async fn executor_readiness_inventory_and_checked_transitions_use_the_current_ca
     )
     .await;
     assert_eq!(rejected, StatusCode::CONFLICT);
+    let (snapshot, _) = read_release_snapshot(&base, &client, &path).await;
     let (status, promoted) = post(
         &base,
         &client,
-        &endpoint,
-        json!({"action":"promote","force":true,"ready_executor_ids":[replacement]}),
+        &format!("{path}/rollout"),
+        json!({
+            "snapshot":snapshot,
+            "transition":{"action":"promote","force":true,"ready_executor_ids":[replacement]}
+        }),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(promoted["state"], "promoted");
+}
+
+async fn read_release_snapshot(
+    base: &str,
+    client: &reqwest::Client,
+    path: &str,
+) -> (String, Value) {
+    let response = client
+        .get(format!("{base}{path}"))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let proof = response.headers()["x-orch8-release-snapshot"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    (proof, response.json().await.unwrap())
+}
+
+#[tokio::test]
+async fn guarded_rollout_rejects_a_snapshot_taken_before_a_target_edit() {
+    let fixture = spawn_test_server().await;
+    let server = orch8_api::test_harness::spawn_test_server_on(
+        fixture.storage.clone(),
+        Some("guarded-rollout-test-root"),
+    )
+    .await;
+    let key = orch8_types::api_key::mint("t1", "rollout-test", None);
+    orch8_storage::AdminStore::create_api_key(server.storage.as_ref(), &key.record)
+        .await
+        .unwrap();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_str(&key.secret).unwrap(),
+        )]))
+        .build()
+        .unwrap();
+    let base = server.v1_url();
+    let versions = publish_versions(&base, &client).await;
+    let release = create_release(&base, &client, &versions, json!([])).await;
+    let path = format!("/releases/{}", release["id"].as_str().unwrap());
+    let guarded = format!("{path}/rollout");
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &format!("{path}/validate"),
+            json!({"skip":true})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let read = || read_release_snapshot(&base, &client, &path);
+    let (snapshot, observed) = read().await;
+    assert_eq!(observed["state"], "ready");
+    assert_eq!(read().await.0, snapshot);
+    let start = json!({"action":"canary","percent":25,"ready_executor_ids":[]});
+    assert_eq!(
+        client
+            .put(format!("{base}{path}/target"))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({"percentage":40}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let (status, conflict) = post(
+        &base,
+        &client,
+        &guarded,
+        json!({"snapshot":snapshot,"transition":start}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(conflict["error"]["code"], "release_rollout_not_applied");
+    let (fresh, still_ready) = read().await;
+    assert_ne!(fresh, snapshot);
+    assert_eq!(still_ready["state"], "ready");
+    let (status, _) = post(
+        &base,
+        &client,
+        &guarded,
+        json!({
+            "snapshot":fresh,
+            "transition":{"action":"canary","percent":25,"ready_executor_ids":[Uuid::now_v7()]}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, canary) = post(
+        &base,
+        &client,
+        &guarded,
+        json!({"snapshot":fresh,"transition":start}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canary["state"], "canary");
+    let (ready_to_promote, _) = read().await;
+    let (status, promoted) = post(&base, &client, &guarded,
+        json!({"snapshot":ready_to_promote,"transition":{"action":"promote","ready_executor_ids":[]}})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(promoted["state"], "promoted");
+    assert_eq!(promoted["target"]["percentage"], 40);
+}
+
+#[tokio::test]
+async fn guarded_target_rejects_a_stale_snapshot_and_requires_an_explicit_target() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = server.v1_url();
+    let versions = publish_versions(&base, &client).await;
+    let release = create_release(&base, &client, &versions, json!([])).await;
+    let path = format!("/releases/{}", release["id"].as_str().unwrap());
+    let (original, _) = read_release_snapshot(&base, &client, &path).await;
+    let put = |body: Value| {
+        client
+            .put(format!("{base}{path}/target/guarded"))
+            .header("X-Tenant-Id", "t1")
+            .json(&body)
+            .send()
+    };
+    assert!(
+        put(json!({"snapshot":original}))
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        put(json!({"snapshot":original,"target":{"percentag":25}}))
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert_eq!(
+        put(json!({"snapshot":original,"target":{"percentage":25}}))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let conflict = put(json!({"snapshot":original,"target":null}))
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        conflict.json::<Value>().await.unwrap()["error"]["code"],
+        "release_target_not_applied"
+    );
+    let (fresh, stored) = read_release_snapshot(&base, &client, &path).await;
+    assert_eq!(stored["target"]["percentage"], 25);
+    assert_eq!(
+        put(json!({"snapshot":fresh,"target":null}))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert!(read_release_snapshot(&base, &client, &path).await.1["target"].is_null());
+}
+
+#[tokio::test]
+async fn guarded_pause_and_rollback_require_the_reviewed_snapshot() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = server.v1_url();
+    let versions = publish_versions(&base, &client).await;
+    let release = create_release(&base, &client, &versions, json!([])).await;
+    let path = format!("/releases/{}", release["id"].as_str().unwrap());
+    let guarded = format!("{path}/rollout");
+    let canary = format!("{path}/canary");
+    let validate = format!("{path}/validate");
+    assert_eq!(
+        post(&base, &client, &validate, json!({"skip":true}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(&base, &client, &canary, json!({"percent":25})).await.0,
+        StatusCode::OK
+    );
+    let (original, _) = read_release_snapshot(&base, &client, &path).await;
+    let update = client
+        .put(format!("{base}{path}/target/guarded"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"snapshot":original,"target":{"percentage":30}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(update.status(), StatusCode::OK);
+
+    let (current, stored) = read_release_snapshot(&base, &client, &path).await;
+    assert_eq!(stored["target"]["percentage"], 30);
+    assert_ne!(original, current);
+    let (status, error) = post(
+        &base,
+        &client,
+        &guarded,
+        json!({"snapshot":original,"transition":{"action":"pause"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "release_rollout_not_applied");
+    let (status, row) = post(
+        &base,
+        &client,
+        &guarded,
+        json!({"snapshot":current,"transition":{"action":"pause"}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row["state"], "paused");
+    let (paused, _) = read_release_snapshot(&base, &client, &path).await;
+    let rollback = json!({"snapshot":paused,"transition":{"action":"rollback"}});
+    let (status, row) = post(&base, &client, &guarded, rollback.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row["state"], "rolled_back");
+    assert_eq!(
+        post(&base, &client, &guarded, rollback).await.0,
+        StatusCode::CONFLICT
+    );
+    let (finished, _) = read_release_snapshot(&base, &client, &path).await;
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &guarded,
+            json!({"snapshot":finished,"transition":{"action":"rollback"}})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
+async fn guarded_validation_only_starts_for_the_reviewed_draft() {
+    let server = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = server.v1_url();
+    for options in [json!({"sample":2}), json!({"skip":true})] {
+        let versions = publish_versions(&base, &client).await;
+        let release = create_release(&base, &client, &versions, json!([])).await;
+        let path = format!("/releases/{}", release["id"].as_str().unwrap());
+        let guarded = format!("{path}/validate/guarded");
+        let (reviewed, _) = read_release_snapshot(&base, &client, &path).await;
+        let response = client
+            .put(format!("{base}{path}/target/guarded"))
+            .header("X-Tenant-Id", "t1")
+            .json(&json!({"snapshot":reviewed,"target":{"percentage":30}}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let (status, error) = post(
+            &base,
+            &client,
+            &guarded,
+            json!({"snapshot":reviewed,"options":options}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(error["error"]["code"], "release_validation_not_applied");
+        let (fresh, draft) = read_release_snapshot(&base, &client, &path).await;
+        assert_eq!(draft["state"], "draft");
+        let (status, report) = post(
+            &base,
+            &client,
+            &guarded,
+            json!({"snapshot":fresh,"options":options}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(report["release_state"], "ready");
+        let (_, ready) = read_release_snapshot(&base, &client, &path).await;
+        assert_eq!(ready["state"], "ready");
+        assert_eq!(ready["target"]["percentage"], 30);
+        assert_eq!(
+            ready["validation_summary"].is_null(),
+            options["skip"] == true
+        );
+    }
 }
 
 #[tokio::test]
@@ -788,15 +1085,25 @@ async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
     assert_eq!(preview["evaluation"]["candidate"]["total"], 3);
     assert_eq!(preview["evaluation"]["candidate"]["failed"], 3);
 
-    // Evaluate: candidate error rate 1.0 vs baseline 0.0 → gate fails →
-    // automatic rollback.
-    let (status, eval) = post(
-        &base,
-        &client,
-        &format!("/releases/{rid}/evaluate"),
-        json!({}),
-    )
-    .await;
+    let path = format!("/releases/{rid}");
+    let guarded = format!("{path}/evaluate/guarded");
+    let (reviewed, _) = read_release_snapshot(&base, &client, &path).await;
+    let edit = client
+        .put(format!("{base}{path}/target/guarded"))
+        .header("X-Tenant-Id", "t1")
+        .json(&json!({"snapshot":reviewed,"target":{"percentage":30}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(edit.status(), StatusCode::OK);
+    let (status, error) = post(&base, &client, &guarded, json!({"snapshot":reviewed})).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(error["error"]["code"], "release_evaluation_not_applied");
+    let (fresh, active) = read_release_snapshot(&base, &client, &path).await;
+    assert_eq!(active["state"], "canary");
+
+    // The current release still has a failing gate and can be rolled back.
+    let (status, eval) = post(&base, &client, &guarded, json!({"snapshot":fresh})).await;
     assert_eq!(status, StatusCode::OK, "{eval}");
     assert_eq!(eval["gates"][0]["verdict"], "fail", "{eval}");
     assert_eq!(eval["auto_rolled_back"], true, "{eval}");

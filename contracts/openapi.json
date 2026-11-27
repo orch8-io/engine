@@ -8185,6 +8185,14 @@
         "responses": {
           "200": {
             "description": "Release",
+            "headers": {
+              "X-Orch8-Release-Snapshot": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Proof for a guarded rollout from this exact release"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -8403,6 +8411,54 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/releases/{id}/evaluate/guarded": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "guarded_evaluate_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuardedEvaluation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Gate evaluation for the reviewed release, with rollback if a gate failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid snapshot"
+          },
+          "409": {
+            "description": "Release snapshot changed before evaluation or automatic rollback"
           }
         }
       }
@@ -8630,6 +8686,54 @@
         }
       }
     },
+    "/releases/{id}/rollout": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "guarded_rollout",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuardedRollout"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Rollout applied to the reviewed release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRelease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid snapshot or executor selection"
+          },
+          "409": {
+            "description": "Release snapshot, gates or executor readiness changed"
+          }
+        }
+      }
+    },
     "/releases/{id}/target": {
       "put": {
         "tags": [
@@ -8685,6 +8789,54 @@
         }
       }
     },
+    "/releases/{id}/target/guarded": {
+      "put": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "guarded_release_target",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuardedReleaseTarget"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Reviewed target replaced",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRelease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid target or snapshot"
+          },
+          "409": {
+            "description": "Release changed or can no longer be retargeted"
+          }
+        }
+      }
+    },
     "/releases/{id}/validate": {
       "post": {
         "tags": [
@@ -8726,6 +8878,54 @@
           },
           "409": {
             "description": "Release is not in draft"
+          }
+        }
+      }
+    },
+    "/releases/{id}/validate/guarded": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "guarded_validate_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GuardedValidation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Validation report for the reviewed release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid snapshot or validation options"
+          },
+          "409": {
+            "description": "Release changed or is no longer a draft"
           }
         }
       }
@@ -18749,6 +18949,88 @@
           }
         }
       },
+      "GuardedEvaluation": {
+        "type": "object",
+        "required": [
+          "snapshot"
+        ],
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "description": "Snapshot from the X-Orch8-Release-Snapshot header on an exact release read."
+          }
+        },
+        "additionalProperties": false
+      },
+      "GuardedReleaseTarget": {
+        "type": "object",
+        "required": [
+          "snapshot",
+          "target"
+        ],
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "description": "Snapshot from the X-Orch8-Release-Snapshot header on an exact release read."
+          },
+          "target": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseTarget",
+                "description": "Explicit null restores per-instance cohorts."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "GuardedRollout": {
+        "type": "object",
+        "required": [
+          "snapshot",
+          "transition"
+        ],
+        "properties": {
+          "snapshot": {
+            "type": "string",
+            "description": "Snapshot from the X-Orch8-Release-Snapshot header on an exact release read."
+          },
+          "transition": {
+            "$ref": "#/components/schemas/GuardedRoutingTransition"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GuardedRoutingTransition": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ExecutorCheckedTransition"
+          },
+          {
+            "$ref": "#/components/schemas/ReleaseHalt"
+          }
+        ]
+      },
+      "GuardedValidation": {
+        "type": "object",
+        "required": [
+          "snapshot",
+          "options"
+        ],
+        "properties": {
+          "options": {
+            "$ref": "#/components/schemas/ValidateRequest"
+          },
+          "snapshot": {
+            "type": "string",
+            "description": "Snapshot from the X-Orch8-Release-Snapshot header on an exact release read."
+          }
+        },
+        "additionalProperties": false
+      },
       "HandlerCatalog": {
         "type": "object",
         "description": "Catalog of every handler name the engine can serve.",
@@ -22466,6 +22748,38 @@
             "minimum": 0
           }
         }
+      },
+      "ReleaseHalt": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "pause"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "rollback"
+                ]
+              }
+            }
+          }
+        ]
       },
       "ReleaseInventoryPage": {
         "type": "object",
