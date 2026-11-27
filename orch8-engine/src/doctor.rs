@@ -46,6 +46,8 @@ pub struct InstanceDiagnosticContext {
     pub pending_signals: Option<Vec<Signal>>,
     /// Worker tasks belonging to this instance.
     pub worker_tasks: Option<Vec<WorkerTask>>,
+    /// More active tasks exist beyond the diagnostic sample.
+    pub worker_tasks_truncated: bool,
     /// Live worker registrations (collector applies the liveness window).
     pub worker_registrations: Option<Vec<WorkerRegistration>>,
     /// Worker version pins for the tenant.
@@ -58,6 +60,8 @@ pub struct InstanceDiagnosticContext {
     pub pending_approval_blocks: Option<Vec<String>>,
     /// Event waits registered by `wait_for_event` blocks of this instance.
     pub event_waits: Option<Vec<orch8_types::event_correlation::EventWait>>,
+    /// Parked blocks whose event wait could not be verified.
+    pub unverified_event_wait_blocks: Vec<String>,
     /// Live runtime capability advertisements of the instance's tenant
     /// (placement satisfiability).
     pub runtime_capabilities: Option<Vec<orch8_types::continuity::RuntimeCapabilities>>,
@@ -72,12 +76,14 @@ impl InstanceDiagnosticContext {
             sequence_exists: None,
             pending_signals: None,
             worker_tasks: None,
+            worker_tasks_truncated: false,
             worker_registrations: None,
             version_pins: None,
             open_breakers: None,
             children: None,
             pending_approval_blocks: None,
             event_waits: None,
+            unverified_event_wait_blocks: Vec::new(),
             runtime_capabilities: None,
         }
     }
@@ -103,6 +109,7 @@ pub fn diagnose(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>) -> Instance
         rule_undelivered_signals(ctx, now, &mut diagnoses);
         rule_state_inconsistencies(instance, now, &mut diagnoses);
         rule_waiting_external(ctx, now, &mut diagnoses);
+        note_incomplete_evidence(ctx, now, &mut diagnoses);
 
         if diagnoses.is_empty() {
             diagnoses.push(Diagnosis {
@@ -118,7 +125,6 @@ pub fn diagnose(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>) -> Instance
                 ),
             });
         }
-        note_incomplete_evidence(ctx, now, &mut diagnoses);
     }
 
     rank_diagnoses(&mut diagnoses);
@@ -274,7 +280,10 @@ fn rule_event_waits(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>, out: &m
         return;
     };
     for wait in waits {
-        if wait.status != orch8_types::event_correlation::WaitStatus::Waiting {
+        if wait.status != orch8_types::event_correlation::WaitStatus::Waiting
+            || wait.instance_id != ctx.instance.id.into_uuid()
+            || wait.tenant_id != ctx.instance.tenant_id.as_str()
+        {
             continue;
         }
         let missing: Vec<&str> = wait
@@ -283,33 +292,49 @@ fn rule_event_waits(ctx: &InstanceDiagnosticContext, now: DateTime<Utc>, out: &m
             .filter(|n| !wait.matched_names.iter().any(|m| m == *n))
             .map(String::as_str)
             .collect();
+        let mut finding = Finding::new(
+            "WAITING_EVENT",
+            FindingSeverity::Info,
+            format!(
+                "block '{}' is waiting for event(s) [{}] with correlation key '{}'{}",
+                wait.block_id,
+                missing.join(", "),
+                wait.correlation_key,
+                if wait.matched_names.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (already matched: {})", wait.matched_names.join(", "))
+                }
+            ),
+            Confidence::Certain,
+            now,
+        )
+        .with_evidence(
+            Evidence::new("correlation_key", wait.correlation_key.clone()).observed_at(now),
+        )
+        .with_remediation(Remediation::new(format!(
+            "deliver the missing event(s) via POST /events with correlation_key '{}'",
+            wait.correlation_key
+        )));
+        if !wait.matched_event_ids.is_empty() {
+            const MATCHED_EVENT_LINK_LIMIT: usize = 10;
+            let total = wait.matched_event_ids.len();
+            let ids = &wait.matched_event_ids[total.saturating_sub(MATCHED_EVENT_LINK_LIMIT)..];
+            finding = finding.with_evidence(
+                Evidence::new("matched_inbox_events", "Stored events matched to this wait")
+                    .with_data(serde_json::json!({
+                        "instance_id": wait.instance_id,
+                        "tenant_id": wait.tenant_id,
+                        "event_ids": ids,
+                        "total": total,
+                    }))
+                    .observed_at(now),
+            );
+        }
         out.push(Diagnosis {
             category: DiagnosisCategory::DirectEvidence,
             health: DiagnosisHealth::Expected,
-            finding: Finding::new(
-                "WAITING_EVENT",
-                FindingSeverity::Info,
-                format!(
-                    "block '{}' is waiting for event(s) [{}] with correlation key '{}'{}",
-                    wait.block_id,
-                    missing.join(", "),
-                    wait.correlation_key,
-                    if wait.matched_names.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" (already matched: {})", wait.matched_names.join(", "))
-                    }
-                ),
-                Confidence::Certain,
-                now,
-            )
-            .with_evidence(
-                Evidence::new("correlation_key", wait.correlation_key.clone()).observed_at(now),
-            )
-            .with_remediation(Remediation::new(format!(
-                "deliver the missing event(s) via POST /events with correlation_key '{}'",
-                wait.correlation_key
-            ))),
+            finding,
         });
     }
 }
@@ -319,17 +344,14 @@ fn rule_pending_approval(
     now: DateTime<Utc>,
     out: &mut Vec<Diagnosis>,
 ) {
-    let Some(blocks) = &ctx.pending_approval_blocks else {
+    let (Some(blocks), Some(event_waits)) = (&ctx.pending_approval_blocks, &ctx.event_waits) else {
         return;
     };
-    let event_wait_blocks: Vec<&str> = ctx
-        .event_waits
-        .as_ref()
-        .map(|ws| ws.iter().map(|w| w.block_id.as_str()).collect())
-        .unwrap_or_default();
     for block in blocks {
-        if event_wait_blocks.contains(&block.as_str()) {
-            continue; // reported as WAITING_EVENT, not an approval
+        if ctx.unverified_event_wait_blocks.contains(block)
+            || event_waits.iter().any(|wait| &wait.block_id == block)
+        {
+            continue;
         }
         out.push(Diagnosis {
             category: DiagnosisCategory::DirectEvidence,
@@ -414,9 +436,20 @@ fn rule_worker_tasks(
     let tenant = ctx.instance.tenant_id.as_str();
 
     for task in tasks {
+        let task_evidence = || {
+            Evidence::new("worker_task_target", "Observed worker task")
+                .with_data(serde_json::json!({
+                    "instance_id": task.instance_id,
+                    "tenant_id": tenant,
+                    "task_id": task.id,
+                    "block_id": task.block_id,
+                }))
+                .observed_at(now)
+        };
         match task.state {
             WorkerTaskState::Pending => {
-                if let Some(diagnosis) = placement_unsatisfied(ctx, task, now) {
+                if let Some(mut diagnosis) = placement_unsatisfied(ctx, task, now) {
+                    diagnosis.finding = diagnosis.finding.with_evidence(task_evidence());
                     out.push(diagnosis);
                     continue;
                 }
@@ -435,7 +468,8 @@ fn rule_worker_tasks(
                             ),
                             Confidence::Low,
                             now,
-                        ),
+                        )
+                        .with_evidence(task_evidence()),
                     });
                     continue;
                 };
@@ -449,7 +483,9 @@ fn rule_worker_tasks(
                     })
                     .collect();
                 if matching.is_empty() {
-                    out.push(no_compatible_worker(task, now));
+                    let mut diagnosis = no_compatible_worker(task, now);
+                    diagnosis.finding = diagnosis.finding.with_evidence(task_evidence());
+                    out.push(diagnosis);
                     continue;
                 }
                 let pin = ctx.version_pins.as_ref().and_then(|pins| {
@@ -490,6 +526,7 @@ fn rule_worker_tasks(
                         .with_evidence(
                             Evidence::new("live_workers", seen.join(", ")).observed_at(now),
                         )
+                        .with_evidence(task_evidence())
                         .with_remediation(Remediation::new(
                             "upgrade the worker or relax the version pin",
                         )),
@@ -520,7 +557,8 @@ fn rule_worker_tasks(
                         .with_evidence(
                             Evidence::new("task_created_at", task.created_at.to_rfc3339())
                                 .observed_at(now),
-                        ),
+                        )
+                        .with_evidence(task_evidence()),
                     });
                 } else {
                     out.push(Diagnosis {
@@ -537,7 +575,8 @@ fn rule_worker_tasks(
                             ),
                             Confidence::Medium,
                             now,
-                        ),
+                        )
+                        .with_evidence(task_evidence()),
                     });
                 }
             }
@@ -565,6 +604,7 @@ fn rule_worker_tasks(
                         .with_evidence(
                             Evidence::new("last_heartbeat", beat.to_rfc3339()).observed_at(now),
                         )
+                        .with_evidence(task_evidence())
                         .with_remediation(
                             Remediation::new(
                                 "requeue stale tasks so another worker can claim them",
@@ -858,6 +898,12 @@ fn rule_waiting_external(
     if ctx.instance.state != InstanceState::Waiting {
         return;
     }
+    let Some(tasks) = &ctx.worker_tasks else {
+        return;
+    };
+    if ctx.worker_tasks_truncated {
+        return;
+    }
     let timer_in_future = ctx.instance.next_fire_at.is_some_and(|t| t > now);
     let has_approval = ctx
         .pending_approval_blocks
@@ -867,10 +913,9 @@ fn rule_waiting_external(
         .children
         .as_ref()
         .is_some_and(|cs| cs.iter().any(|c| !c.state.is_terminal()));
-    let has_open_task = ctx.worker_tasks.as_ref().is_some_and(|ts| {
-        ts.iter()
-            .any(|t| matches!(t.state, WorkerTaskState::Pending | WorkerTaskState::Claimed))
-    });
+    let has_open_task = tasks
+        .iter()
+        .any(|t| matches!(t.state, WorkerTaskState::Pending | WorkerTaskState::Claimed));
     if timer_in_future || has_approval || has_live_child || has_open_task {
         return;
     }
@@ -909,6 +954,8 @@ fn note_incomplete_evidence(
     }
     if ctx.worker_tasks.is_none() {
         missing.push("worker_tasks");
+    } else if ctx.worker_tasks_truncated {
+        missing.push("worker_tasks beyond the diagnostic limit");
     }
     if ctx.worker_registrations.is_none() {
         missing.push("worker_registrations");
@@ -921,6 +968,15 @@ fn note_incomplete_evidence(
     }
     if ctx.pending_approval_blocks.is_none() {
         missing.push("approvals");
+    }
+    if !ctx.unverified_event_wait_blocks.is_empty()
+        || (ctx.event_waits.is_none()
+            && ctx
+                .pending_approval_blocks
+                .as_ref()
+                .is_some_and(|blocks| !blocks.is_empty()))
+    {
+        missing.push("event_waits");
     }
     if missing.is_empty() {
         return;
@@ -1000,12 +1056,14 @@ mod tests {
             sequence_exists: Some(true),
             pending_signals: Some(vec![]),
             worker_tasks: Some(vec![]),
+            worker_tasks_truncated: false,
             worker_registrations: Some(vec![]),
             version_pins: Some(vec![]),
             open_breakers: Some(vec![]),
             children: Some(vec![]),
             pending_approval_blocks: Some(vec![]),
             event_waits: Some(vec![]),
+            unverified_event_wait_blocks: Vec::new(),
             runtime_capabilities: None,
         }
     }
@@ -1130,12 +1188,22 @@ mod tests {
     #[test]
     fn pending_task_without_worker_is_no_compatible_worker() {
         let mut ctx = full_ctx(instance(InstanceState::Waiting));
-        ctx.worker_tasks = Some(vec![task(WorkerTaskState::Pending, "charge_card", 10)]);
+        let mut queued = task(WorkerTaskState::Pending, "charge_card", 10);
+        queued.instance_id = ctx.instance.id;
+        let target = json!({
+            "instance_id": queued.instance_id,
+            "tenant_id": "t1",
+            "task_id": queued.id,
+            "block_id": queued.block_id,
+        });
+        ctx.worker_tasks = Some(vec![queued]);
         let report = diagnose(&ctx, t0());
         let d = &report.diagnoses[0];
         assert_eq!(d.finding.code, "NO_COMPATIBLE_WORKER");
         assert_eq!(d.health, DiagnosisHealth::Degraded);
         assert!(d.finding.summary.contains("charge_card"));
+        assert_eq!(d.finding.evidence[0].label, "worker_task_target");
+        assert_eq!(d.finding.evidence[0].data, Some(target));
     }
 
     #[test]
@@ -1286,6 +1354,7 @@ mod tests {
     fn event_wait_is_reported_as_waiting_event_not_approval() {
         use orch8_types::event_correlation::{EventWait, JoinMode, WaitStatus};
         let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        let ids: Vec<_> = (0..12).map(|_| uuid::Uuid::now_v7()).collect();
         // The gate makes the block look like a pending approval too — the
         // event wait must take precedence.
         ctx.pending_approval_blocks = Some(vec!["await_facts".into()]);
@@ -1299,7 +1368,7 @@ mod tests {
             join_mode: JoinMode::All,
             status: WaitStatus::Waiting,
             matched_names: vec!["inventory_reserved".into()],
-            matched_event_ids: vec![uuid::Uuid::now_v7()],
+            matched_event_ids: ids.clone(),
             created_at: t0(),
         }]);
         let report = diagnose(&ctx, t0());
@@ -1316,11 +1385,29 @@ mod tests {
                 .contains("already matched: inventory_reserved")
         );
         assert!(d.finding.summary.contains("order-42"));
+        let matches = d
+            .finding
+            .evidence
+            .iter()
+            .find(|fact| fact.label == "matched_inbox_events")
+            .unwrap();
+        assert_eq!(
+            matches.data,
+            Some(json!({
+                "instance_id": ctx.instance.id,
+                "tenant_id": "t1",
+                "event_ids": &ids[2..],
+                "total": 12,
+            }))
+        );
         assert!(
             !codes(&report).contains(&"PENDING_APPROVAL"),
             "{:?}",
             codes(&report)
         );
+        let wait = &mut ctx.event_waits.as_mut().unwrap()[0];
+        wait.tenant_id = "other".into();
+        assert!(!codes(&diagnose(&ctx, t0())).contains(&"WAITING_EVENT"));
     }
 
     #[test]
@@ -1342,6 +1429,25 @@ mod tests {
         }]);
         let report = diagnose(&ctx, t0());
         assert!(!codes(&report).contains(&"WAITING_EVENT"));
+    }
+
+    #[test]
+    fn unverified_event_wait_preserves_a_separately_verified_approval() {
+        let mut ctx = full_ctx(instance(InstanceState::Waiting));
+        ctx.pending_approval_blocks = Some(vec!["await_event".into(), "approve_payment".into()]);
+        ctx.unverified_event_wait_blocks = vec!["await_event".into()];
+        let report = diagnose(&ctx, t0());
+        let approvals: Vec<_> = report
+            .diagnoses
+            .iter()
+            .filter(|diagnosis| diagnosis.finding.code == "PENDING_APPROVAL")
+            .collect();
+        assert_eq!(approvals.len(), 1);
+        assert!(approvals[0].finding.summary.contains("approve_payment"));
+        assert!(report.diagnoses.iter().any(|diagnosis| {
+            diagnosis.finding.code == "EVIDENCE_INCOMPLETE"
+                && diagnosis.finding.summary.contains("event_waits")
+        }));
     }
 
     #[test]

@@ -9,9 +9,40 @@ use uuid::Uuid;
 
 use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
-use orch8_types::release::{ReleaseDecision, ReleaseState, WorkflowRelease};
+use orch8_types::instance::InstanceState;
+use orch8_types::release::{ReleaseDecision, ReleaseState, ReleaseVariant, WorkflowRelease};
 
 use super::PostgresStorage;
+
+pub(super) async fn terminal_states(
+    storage: &PostgresStorage,
+    release: &WorkflowRelease,
+    variant: ReleaseVariant,
+    limit: u32,
+) -> Result<Vec<InstanceState>, StorageError> {
+    let sequence = match variant {
+        ReleaseVariant::Baseline => release.baseline_sequence_id,
+        ReleaseVariant::Candidate => release.candidate_sequence_id,
+    };
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT state FROM task_instances
+         WHERE tenant_id = $1 AND sequence_id = $2 AND created_at >= $3
+           AND state IN ('completed', 'failed', 'cancelled')
+           AND metadata @> $4
+         ORDER BY updated_at DESC, id DESC
+         LIMIT $5",
+    )
+    .bind(release.tenant_id.as_str())
+    .bind(sequence.into_uuid())
+    .bind(release.canary_started_at.unwrap_or(release.created_at))
+    .bind(serde_json::json!({"release": {"release_id": release.id, "variant": variant}}))
+    .bind(i64::from(limit))
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.iter()
+        .map(|state| InstanceState::from_str(state).map_err(StorageError::Query))
+        .collect()
+}
 
 fn row_to_release(row: &sqlx::postgres::PgRow) -> Result<WorkflowRelease, StorageError> {
     let state: String = row.get("state");

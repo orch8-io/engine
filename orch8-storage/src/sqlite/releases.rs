@@ -9,10 +9,43 @@ use uuid::Uuid;
 
 use orch8_types::error::StorageError;
 use orch8_types::ids::{Namespace, SequenceId, TenantId};
-use orch8_types::release::{ReleaseDecision, ReleaseState, WorkflowRelease};
+use orch8_types::instance::InstanceState;
+use orch8_types::release::{ReleaseDecision, ReleaseState, ReleaseVariant, WorkflowRelease};
 
 use super::SqliteStorage;
 use super::helpers::{parse_ts, ts};
+
+pub(super) async fn terminal_states(
+    storage: &SqliteStorage,
+    release: &WorkflowRelease,
+    variant: ReleaseVariant,
+    limit: u32,
+) -> Result<Vec<InstanceState>, StorageError> {
+    let (sequence, tag) = match variant {
+        ReleaseVariant::Baseline => (release.baseline_sequence_id, "baseline"),
+        ReleaseVariant::Candidate => (release.candidate_sequence_id, "candidate"),
+    };
+    let rows: Vec<String> = sqlx::query_scalar(
+        "SELECT state FROM task_instances
+         WHERE tenant_id = ?1 AND sequence_id = ?2 AND created_at >= ?3
+           AND state IN ('completed', 'failed', 'cancelled')
+           AND json_extract(metadata, '$.release.release_id') = ?4
+           AND json_extract(metadata, '$.release.variant') = ?5
+         ORDER BY updated_at DESC, id DESC
+         LIMIT ?6",
+    )
+    .bind(release.tenant_id.as_str())
+    .bind(sequence.into_uuid().to_string())
+    .bind(ts(release.canary_started_at.unwrap_or(release.created_at)))
+    .bind(release.id.to_string())
+    .bind(tag)
+    .bind(i64::from(limit))
+    .fetch_all(&storage.pool)
+    .await?;
+    rows.iter()
+        .map(|state| InstanceState::from_str(state).map_err(StorageError::Query))
+        .collect()
+}
 
 fn parse_uuid(s: &str) -> Result<Uuid, StorageError> {
     Uuid::parse_str(s).map_err(|e| StorageError::Query(e.to_string()))

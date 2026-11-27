@@ -267,6 +267,178 @@ async fn canary_requires_each_designated_executor_to_have_current_revision_readi
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // Keep the release and executor lifecycle in one walkthrough.
+async fn executor_readiness_inventory_and_checked_transitions_use_the_current_candidate() {
+    use orch8_api::test_harness::spawn_test_server_on;
+    use orch8_types::cluster::{ClusterNode, NodeStatus};
+    use orch8_types::ids::SequenceId;
+
+    let fixture = spawn_test_server().await;
+    let server = spawn_test_server_on(fixture.storage.clone(), Some("release-test-root")).await;
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-api-key"),
+            reqwest::header::HeaderValue::from_static("release-test-root"),
+        )]))
+        .build()
+        .unwrap();
+    let base = server.v1_url();
+    let versions = publish_versions(&base, &client).await;
+    let release = create_release(
+        &base,
+        &client,
+        &versions,
+        json!([{"metric":"error_rate","max_regression":0.05,"min_sample":1}]),
+    )
+    .await;
+    let path = format!("/releases/{}", release["id"].as_str().unwrap());
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &format!("{path}/validate"),
+            json!({"skip":true})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+
+    let executor = Uuid::now_v7();
+    let now = chrono::Utc::now();
+    let node = ClusterNode {
+        id: executor,
+        name: "worker-a".into(),
+        status: NodeStatus::Active,
+        registered_at: now,
+        last_heartbeat_at: now,
+        drain: false,
+        drain_started_at: None,
+        stopped_at: None,
+        capabilities_withdrawn: false,
+        execution_handoff_evidence: None,
+    };
+    server.storage.register_node(&node).await.unwrap();
+    let endpoint = format!("{path}/executor-readiness");
+    let inspect = |tenant| {
+        client
+            .get(format!("{base}{endpoint}"))
+            .header("X-Tenant-Id", tenant)
+            .send()
+    };
+    assert_eq!(inspect("t2").await.unwrap().status(), StatusCode::NOT_FOUND);
+    let read: Value = inspect("t1").await.unwrap().json().await.unwrap();
+    assert_eq!(read["release_id"], release["id"]);
+    assert_eq!(read["candidate_sequence_id"], json!(versions.candidate_id));
+    assert_eq!(
+        read["executors"],
+        json!([{"id":executor,"name":"worker-a","ready":false}])
+    );
+
+    let start = json!({"action":"canary","percent":23,"ready_executor_ids":[executor]});
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &endpoint,
+            json!({"action":"canary","percent":23,"ready_executor_ids":[]})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        post(&base, &client, &endpoint, start.clone()).await.0,
+        StatusCode::CONFLICT
+    );
+    server
+        .storage
+        .record_wasm_revision_ready(
+            executor,
+            SequenceId::from_uuid(versions.candidate_id),
+            now + chrono::Duration::seconds(90),
+        )
+        .await
+        .unwrap();
+    let (status, fresh) = post(&base, &client, &endpoint, start).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fresh["canary_percent"], 23);
+    assert_eq!(fresh["state"], "canary");
+    server.storage.drain_node(executor).await.unwrap();
+    assert_eq!(
+        post(
+            &base,
+            &client,
+            &endpoint,
+            json!({"action":"promote","force":true,"ready_executor_ids":[executor]})
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let decisions: Vec<Value> = client
+        .get(format!("{base}{path}/decisions"))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let canary: Vec<_> = decisions
+        .iter()
+        .filter(|decision| decision["to_state"] == "canary")
+        .collect();
+    assert_eq!(canary.len(), 1);
+    assert_eq!(
+        canary[0]["reason"],
+        "canary at 23% · readiness verified for 1 executor"
+    );
+    assert!(
+        decisions
+            .iter()
+            .all(|decision| decision["to_state"] != "promoted")
+    );
+    let replacement = Uuid::now_v7();
+    server
+        .storage
+        .register_node(&ClusterNode {
+            id: replacement,
+            ..node
+        })
+        .await
+        .unwrap();
+    server
+        .storage
+        .record_wasm_revision_ready(
+            replacement,
+            SequenceId::from_uuid(versions.candidate_id),
+            now + chrono::Duration::seconds(90),
+        )
+        .await
+        .unwrap();
+    let (rejected, _) = post(
+        &base,
+        &client,
+        &endpoint,
+        json!({"action":"promote","ready_executor_ids":[replacement]}),
+    )
+    .await;
+    assert_eq!(rejected, StatusCode::CONFLICT);
+    let (status, promoted) = post(
+        &base,
+        &client,
+        &endpoint,
+        json!({"action":"promote","force":true,"ready_executor_ids":[replacement]}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(promoted["state"], "promoted");
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // full lifecycle walkthrough reads better linear
 async fn release_lifecycle_validate_canary_promote() {
     let srv = spawn_test_server().await;
@@ -534,6 +706,53 @@ async fn failing_gate_auto_rolls_back_and_traffic_returns_to_baseline() {
             .await
             .unwrap();
     }
+
+    let routed = srv
+        .storage
+        .get_instance(candidate_ids[0])
+        .await
+        .unwrap()
+        .unwrap();
+    let later = chrono::Utc::now() + chrono::Duration::minutes(1);
+    let other_release_id = Uuid::now_v7();
+    let noise: Vec<_> = (0..1_004)
+        .map(|index| {
+            let mut row = routed.clone();
+            row.id = InstanceId::new();
+            row.idempotency_key = None;
+            row.state = InstanceState::Completed;
+            row.updated_at = later;
+            match index % 4 {
+                0 => row.metadata["release"]["release_id"] = json!(other_release_id),
+                1 => row.state = InstanceState::Running,
+                2 => row.created_at -= chrono::Duration::hours(1),
+                _ => row.metadata["release"]["variant"] = json!("baseline"),
+            }
+            row
+        })
+        .collect();
+    assert_eq!(
+        srv.storage.create_instances_batch(&noise).await.unwrap(),
+        1_004
+    );
+
+    let preview = client
+        .get(format!("{base}/releases/{rid}/gate-preview"))
+        .header("X-Tenant-Id", "t1")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(preview["release"]["state"], "canary");
+    assert_eq!(preview["evaluation"]["gates"][0]["verdict"], "fail");
+    assert_eq!(preview["evaluation"]["auto_rolled_back"], false);
+    assert_eq!(preview["evaluation"]["baseline"]["total"], 3);
+    assert_eq!(preview["evaluation"]["candidate"]["total"], 3);
+    assert_eq!(preview["evaluation"]["candidate"]["failed"], 3);
 
     // Evaluate: candidate error rate 1.0 vs baseline 0.0 → gate fails →
     // automatic rollback.

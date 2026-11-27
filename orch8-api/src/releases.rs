@@ -24,7 +24,7 @@ use orch8_types::ids::{SequenceId, TenantId};
 use orch8_types::instance::InstanceState;
 use orch8_types::release::{
     GateEvaluation, GateVerdict, InFlightPolicy, ReleaseDecision, ReleaseGate, ReleaseState,
-    ReleaseTarget, SemanticDiff, VariantStats, WorkflowRelease, evaluate_gates,
+    ReleaseTarget, ReleaseVariant, SemanticDiff, VariantStats, WorkflowRelease, evaluate_gates,
 };
 use orch8_types::sequence::SequenceDefinition;
 
@@ -51,7 +51,12 @@ pub fn routes() -> Router<AppState> {
             post(replay_fixture::export_replay_fixture),
         )
         .route("/releases/{id}/canary", post(start_canary))
+        .route(
+            "/releases/{id}/executor-readiness",
+            get(release_executor_readiness).post(transition_with_executor_readiness),
+        )
         .route("/releases/{id}/evaluate", post(evaluate_release))
+        .route("/releases/{id}/gate-preview", get(preview_release_gates))
         .route("/releases/{id}/promote", post(promote_release))
         .route("/releases/{id}/pause", post(pause_release))
         .route("/releases/{id}/rollback", post(rollback_release))
@@ -871,7 +876,10 @@ pub(crate) async fn start_canary(
         from,
         ReleaseState::Canary,
         "operator",
-        &format!("canary at {}%", req.percent),
+        &describe_executor_check(
+            format!("canary at {}%", req.percent),
+            &req.ready_executor_ids,
+        ),
     )
     .await;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
@@ -886,6 +894,53 @@ pub(crate) struct EvaluationReport {
     /// Applied automatically when a gate fails during canary.
     pub auto_rolled_back: bool,
     pub release_state: ReleaseState,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct ReleaseGatePreview {
+    pub release: WorkflowRelease,
+    pub observed_at: DateTime<Utc>,
+    pub scan_limit_per_version: u32,
+    pub evaluation: EvaluationReport,
+}
+
+#[utoipa::path(get, path = "/releases/{id}/gate-preview", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    responses(
+        (status = 200, description = "Read-only gate preview; never changes routing", body = ReleaseGatePreview),
+        (status = 409, description = "Release changed during observation or is outside canary"),
+    )
+)]
+pub(crate) async fn preview_release_gates(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    if release.state != ReleaseState::Canary {
+        return Err(ApiError::Conflict(
+            "gate preview requires an active canary".into(),
+        ));
+    }
+    let (baseline, candidate) = observe(&state, &release).await?;
+    let gates = evaluate_gates(&release.gates, baseline, candidate);
+    if load_release(&state, &tenant_ctx, id).await? != release {
+        return Err(ApiError::Conflict(
+            "release changed during gate preview".into(),
+        ));
+    }
+    Ok(Json(ReleaseGatePreview {
+        release,
+        observed_at: Utc::now(),
+        scan_limit_per_version: OBSERVATION_SCAN_LIMIT,
+        evaluation: EvaluationReport {
+            baseline,
+            candidate,
+            gates,
+            auto_rolled_back: false,
+            release_state: ReleaseState::Canary,
+        },
+    }))
 }
 
 #[utoipa::path(post, path = "/releases/{id}/evaluate", tag = "releases",
@@ -955,56 +1010,27 @@ async fn observe(
 ) -> Result<(VariantStats, VariantStats), ApiError> {
     let mut baseline = VariantStats::default();
     let mut candidate = VariantStats::default();
-    let since = release.canary_started_at.unwrap_or(release.created_at);
-
-    for (sequence_id, stats) in [
-        (release.baseline_sequence_id, &mut baseline),
-        (release.candidate_sequence_id, &mut candidate),
+    for (variant, stats) in [
+        (ReleaseVariant::Baseline, &mut baseline),
+        (ReleaseVariant::Candidate, &mut candidate),
     ] {
-        let instances = state
+        let states = state
             .storage
-            .list_instances(
-                &InstanceFilter {
-                    sub_tenant: None,
-                    tenant_id: Some(release.tenant_id.clone()),
-                    namespace: None,
-                    sequence_id: Some(sequence_id),
-                    states: None,
-                    metadata_filter: None,
-                    priority: None,
-                },
-                &Pagination {
-                    offset: 0,
-                    limit: OBSERVATION_SCAN_LIMIT,
-                    sort_ascending: false,
-                },
-            )
+            .list_release_terminal_states(release, variant, OBSERVATION_SCAN_LIMIT)
             .await
             .map_err(|e| ApiError::from_storage(e, "instances"))?;
-        for inst in instances {
-            if inst.created_at < since {
-                continue;
-            }
-            // Only instances the release actually routed count.
-            let routed_by_release = inst
-                .metadata
-                .get("release")
-                .and_then(|r| r.get("release_id"))
-                .and_then(serde_json::Value::as_str)
-                == Some(release.id.to_string().as_str());
-            if !routed_by_release {
-                continue;
-            }
-            stats.total += 1;
-            match inst.state {
+        for observed in states {
+            match observed {
                 InstanceState::Completed => stats.completed += 1,
                 InstanceState::Failed => stats.failed += 1,
                 InstanceState::Cancelled => stats.cancelled += 1,
                 _ => {
-                    // Non-terminal instances don't count toward rates.
-                    stats.total -= 1;
+                    return Err(ApiError::Conflict(
+                        "invalid release gate observation".into(),
+                    ));
                 }
             }
+            stats.total += 1;
         }
     }
     Ok((baseline, candidate))
@@ -1045,18 +1071,20 @@ pub(crate) async fn promote_release(
                 bad.gate.metric, bad.verdict
             )));
         }
+        require_candidate_ready_executors(&state, &release, &req.ready_executor_ids).await?;
     }
+    let reason = if req.force {
+        "promoted (forced)"
+    } else {
+        "promoted: all gates pass"
+    };
     transition(
         &state,
         &release,
         ReleaseState::Canary,
         ReleaseState::Promoted,
         "operator",
-        if req.force {
-            "promoted (forced)"
-        } else {
-            "promoted: all gates pass"
-        },
+        &describe_executor_check(reason.to_owned(), &req.ready_executor_ids),
     )
     .await?;
     let fresh = load_release(&state, &tenant_ctx, id).await?;
@@ -1094,6 +1122,157 @@ async fn require_candidate_ready_executors(
         )));
     }
     Ok(())
+}
+
+fn describe_executor_check(reason: String, requested: &[Uuid]) -> String {
+    if requested.is_empty() {
+        return reason;
+    }
+    let count = requested
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    let noun = if count == 1 { "executor" } else { "executors" };
+    format!("{reason} · readiness verified for {count} {noun}")
+}
+
+#[derive(Serialize, ToSchema)]
+struct ReleaseExecutorStatus {
+    id: Uuid,
+    name: String,
+    ready: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ReleaseExecutorReadiness {
+    release_id: Uuid,
+    tenant_id: String,
+    candidate_sequence_id: SequenceId,
+    checked_at: DateTime<Utc>,
+    executors: Vec<ReleaseExecutorStatus>,
+}
+
+#[utoipa::path(get, path = "/releases/{id}/executor-readiness", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    responses((status = 200, body = ReleaseExecutorReadiness), (status = 404, description = "Release not found"))
+)]
+pub(crate) async fn release_executor_readiness(
+    State(state): State<AppState>,
+    admin: crate::auth::OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
+    let release = load_release(&state, &tenant_ctx, id).await?;
+    let nodes = state
+        .storage
+        .list_nodes()
+        .await
+        .map_err(|error| ApiError::from_storage(error, "executor inventory"))?;
+    let checked_at = Utc::now();
+    let ready: std::collections::HashSet<_> = state
+        .storage
+        .list_wasm_ready_nodes(release.candidate_sequence_id, checked_at)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "executor readiness"))?
+        .into_iter()
+        .collect();
+    let mut executors: Vec<_> = nodes
+        .into_iter()
+        .map(|node| ReleaseExecutorStatus {
+            id: node.id,
+            name: node.name,
+            ready: ready.contains(&node.id),
+        })
+        .collect();
+    executors.sort_unstable_by_key(|node| node.id);
+    Ok(Json(ReleaseExecutorReadiness {
+        release_id: id,
+        tenant_id: release.tenant_id.to_string(),
+        candidate_sequence_id: release.candidate_sequence_id,
+        checked_at,
+        executors,
+    }))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ExecutorCheckedTransition {
+    Canary {
+        percent: u8,
+        ready_executor_ids: Vec<Uuid>,
+    },
+    Promote {
+        ready_executor_ids: Vec<Uuid>,
+        /// Override promotion gates while still requiring designated executors.
+        #[serde(default)]
+        force: bool,
+    },
+}
+
+#[utoipa::path(post, path = "/releases/{id}/executor-readiness", tag = "releases",
+    params(("id" = Uuid, Path, description = "Release id")),
+    request_body = ExecutorCheckedTransition,
+    responses(
+        (status = 200, body = WorkflowRelease),
+        (status = 400, description = "Invalid executor selection"),
+        (status = 409, description = "Readiness or release conditions are not satisfied"),
+    )
+)]
+pub(crate) async fn transition_with_executor_readiness(
+    state: State<AppState>,
+    admin: crate::auth::OptionalAdmin,
+    tenant_ctx: crate::auth::OptionalTenant,
+    path: Path<Uuid>,
+    Json(req): Json<ExecutorCheckedTransition>,
+) -> Result<axum::response::Response, ApiError> {
+    crate::api_keys::require_admin(&admin)?;
+    let ids = match &req {
+        ExecutorCheckedTransition::Canary {
+            ready_executor_ids, ..
+        }
+        | ExecutorCheckedTransition::Promote {
+            ready_executor_ids, ..
+        } => ready_executor_ids,
+    };
+    if ids.is_empty()
+        || ids.len() > 64
+        || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len()
+    {
+        return Err(ApiError::InvalidArgument(
+            "select 1–64 distinct designated executors".into(),
+        ));
+    }
+    match req {
+        ExecutorCheckedTransition::Canary {
+            percent,
+            ready_executor_ids,
+        } => Ok(start_canary(
+            state,
+            tenant_ctx,
+            path,
+            Json(CanaryRequest {
+                percent,
+                ready_executor_ids,
+            }),
+        )
+        .await?
+        .into_response()),
+        ExecutorCheckedTransition::Promote {
+            ready_executor_ids,
+            force,
+        } => Ok(promote_release(
+            state,
+            tenant_ctx,
+            path,
+            Json(PromoteRequest {
+                force,
+                ready_executor_ids,
+            }),
+        )
+        .await?
+        .into_response()),
+    }
 }
 
 #[utoipa::path(post, path = "/releases/{id}/pause", tag = "releases",

@@ -19,6 +19,8 @@ fault_impl! {
         async fn create_release(&self, release: &orch8_types::release::WorkflowRelease) -> Result<(), StorageError>;
         async fn get_release(&self, id: Uuid) -> Result<Option<orch8_types::release::WorkflowRelease>, StorageError>;
         async fn list_releases(&self, tenant_id: Option<&TenantId>, limit: u32) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError>;
+        async fn list_release_page(&self, tenant: &TenantId, query: &crate::release_inventory::ReleasePageFilter, limit: u32) -> Result<Vec<orch8_types::release::WorkflowRelease>, StorageError>;
+        async fn list_release_terminal_states(&self, release: &orch8_types::release::WorkflowRelease, variant: orch8_types::release::ReleaseVariant, limit: u32) -> Result<Vec<orch8_types::instance::InstanceState>, StorageError>;
         async fn cas_release_state(&self, id: Uuid, expected: orch8_types::release::ReleaseState, next: orch8_types::release::ReleaseState, canary_percent: Option<u8>, canary_started_at: Option<chrono::DateTime<chrono::Utc>>) -> Result<bool, StorageError>;
         async fn set_release_validation_summary(&self, id: Uuid, summary: &serde_json::Value) -> Result<(), StorageError>;
         async fn record_release_decision(&self, decision: &orch8_types::release::ReleaseDecision) -> Result<(), StorageError>;
@@ -338,6 +340,7 @@ fault_impl! {
         async fn update_session_data(&self, id: Uuid, data: &serde_json::Value) -> Result<(), StorageError>;
         async fn update_session_state(&self, id: Uuid, state: orch8_types::session::SessionState) -> Result<(), StorageError>;
         async fn list_session_instances(&self, session_id: Uuid) -> Result<Vec<TaskInstance>, StorageError>;
+        async fn list_session_execution_summaries(&self, filter: &orch8_types::session::SessionExecutionFilter<'_>) -> Result<Vec<orch8_types::session::SessionExecutionSummary>, StorageError>;
         async fn create_plugin(&self, plugin: &PluginDef) -> Result<(), StorageError>;
         async fn get_plugin(&self, tenant_id: Option<&TenantId>, name: &str) -> Result<Option<PluginDef>, StorageError>;
         async fn list_plugins(&self, tenant_id: Option<&TenantId>) -> Result<Vec<PluginDef>, StorageError>;

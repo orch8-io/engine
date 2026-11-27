@@ -66,12 +66,14 @@ fn full_ctx(inst: TaskInstance) -> InstanceDiagnosticContext {
         sequence_exists: Some(true),
         pending_signals: Some(vec![]),
         worker_tasks: Some(vec![]),
+        worker_tasks_truncated: false,
         worker_registrations: Some(vec![]),
         version_pins: Some(vec![]),
         open_breakers: Some(vec![]),
         children: Some(vec![]),
         pending_approval_blocks: Some(vec![]),
         event_waits: Some(vec![]),
+        unverified_event_wait_blocks: Vec::new(),
         runtime_capabilities: None,
     }
 }
@@ -171,11 +173,17 @@ fn signal(age_secs: i64) -> Signal {
     }
 }
 
-fn wait(block: &str, status: WaitStatus, names: &[&str], matched: &[&str]) -> EventWait {
+fn wait(
+    inst: &TaskInstance,
+    block: &str,
+    status: WaitStatus,
+    names: &[&str],
+    matched: &[&str],
+) -> EventWait {
     EventWait {
         id: uuid::Uuid::now_v7(),
-        tenant_id: "t1".into(),
-        instance_id: uuid::Uuid::now_v7(),
+        tenant_id: inst.tenant_id.to_string(),
+        instance_id: inst.id.into_uuid(),
         block_id: block.into(),
         event_names: names.iter().map(ToString::to_string).collect(),
         correlation_key: "corr-1".into(),
@@ -1383,6 +1391,7 @@ fn scheduled_without_timer_is_not_scheduler_lag() {
 fn waiting_event_reports_only_missing_names() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
         "gate",
         WaitStatus::Waiting,
         &["paid", "shipped"],
@@ -1403,7 +1412,13 @@ fn waiting_event_reports_only_missing_names() {
 #[test]
 fn waiting_event_without_matches_omits_matched_annotation() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Waiting, &["paid"], &[])]);
+    ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
+        "gate",
+        WaitStatus::Waiting,
+        &["paid"],
+        &[],
+    )]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "WAITING_EVENT");
     assert!(
@@ -1417,7 +1432,13 @@ fn waiting_event_without_matches_omits_matched_annotation() {
 #[test]
 fn waiting_event_evidence_and_remediation_carry_correlation_key() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Waiting, &["paid"], &[])]);
+    ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
+        "gate",
+        WaitStatus::Waiting,
+        &["paid"],
+        &[],
+    )]);
     let report = diagnose(&ctx, t0());
     let d = find(&report, "WAITING_EVENT");
     assert_eq!(d.finding.evidence[0].label, "correlation_key");
@@ -1430,6 +1451,7 @@ fn waiting_event_evidence_and_remediation_carry_correlation_key() {
 fn satisfied_event_wait_is_not_reported() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
         "gate",
         WaitStatus::Satisfied,
         &["paid"],
@@ -1442,7 +1464,13 @@ fn satisfied_event_wait_is_not_reported() {
 #[test]
 fn cancelled_event_wait_is_not_reported() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Cancelled, &["paid"], &[])]);
+    ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
+        "gate",
+        WaitStatus::Cancelled,
+        &["paid"],
+        &[],
+    )]);
     let report = diagnose(&ctx, t0());
     assert!(!codes(&report).contains(&"WAITING_EVENT"));
 }
@@ -1451,7 +1479,13 @@ fn cancelled_event_wait_is_not_reported() {
 fn event_wait_takes_precedence_over_pending_approval_for_same_block() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.pending_approval_blocks = Some(vec!["gate".into()]);
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Waiting, &["paid"], &[])]);
+    ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
+        "gate",
+        WaitStatus::Waiting,
+        &["paid"],
+        &[],
+    )]);
     let report = diagnose(&ctx, t0());
     let cs = codes(&report);
     assert!(cs.contains(&"WAITING_EVENT"), "{cs:?}");
@@ -1465,6 +1499,7 @@ fn non_waiting_event_wait_still_masks_approval_for_its_block() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.pending_approval_blocks = Some(vec!["gate".into()]);
     ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
         "gate",
         WaitStatus::Satisfied,
         &["paid"],
@@ -1480,7 +1515,13 @@ fn non_waiting_event_wait_still_masks_approval_for_its_block() {
 fn approval_for_different_block_survives_event_wait() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.pending_approval_blocks = Some(vec!["review".into()]);
-    ctx.event_waits = Some(vec![wait("gate", WaitStatus::Waiting, &["paid"], &[])]);
+    ctx.event_waits = Some(vec![wait(
+        &ctx.instance,
+        "gate",
+        WaitStatus::Waiting,
+        &["paid"],
+        &[],
+    )]);
     let report = diagnose(&ctx, t0());
     let cs = codes(&report);
     assert!(cs.contains(&"WAITING_EVENT"), "{cs:?}");
@@ -1491,8 +1532,8 @@ fn approval_for_different_block_survives_event_wait() {
 fn multiple_waiting_event_waits_each_reported() {
     let mut ctx = full_ctx(instance(InstanceState::Waiting));
     ctx.event_waits = Some(vec![
-        wait("g1", WaitStatus::Waiting, &["a"], &[]),
-        wait("g2", WaitStatus::Waiting, &["b"], &[]),
+        wait(&ctx.instance, "g1", WaitStatus::Waiting, &["a"], &[]),
+        wait(&ctx.instance, "g2", WaitStatus::Waiting, &["b"], &[]),
     ]);
     let report = diagnose(&ctx, t0());
     let n = report
@@ -1873,6 +1914,23 @@ fn healthy_running_instance_reports_no_blockers_only() {
 }
 
 #[test]
+fn bounded_worker_evidence_cannot_report_a_healthy_fallback() {
+    let mut ctx = full_ctx(instance(InstanceState::Running));
+    ctx.worker_tasks_truncated = true;
+    let report = diagnose(&ctx, t0());
+    assert_eq!(codes(&report), vec!["EVIDENCE_INCOMPLETE"]);
+    assert!(report.diagnoses[0].finding.summary.contains("worker_tasks"));
+}
+
+#[test]
+fn unavailable_worker_evidence_cannot_suggest_an_external_signal() {
+    let mut ctx = full_ctx(instance(InstanceState::Waiting));
+    ctx.worker_tasks = None;
+    let report = diagnose(&ctx, t0());
+    assert_eq!(codes(&report), vec!["EVIDENCE_INCOMPLETE"]);
+}
+
+#[test]
 fn just_due_scheduled_instance_reports_no_blockers() {
     let mut inst = instance(InstanceState::Scheduled);
     inst.next_fire_at = Some(t0() - Duration::seconds(1));
@@ -1889,17 +1947,12 @@ fn no_blocker_is_omitted_when_any_diagnosis_exists() {
 }
 
 #[test]
-fn bare_context_reports_no_blocker_plus_incomplete_evidence() {
-    // Rules that need evidence all degrade to nothing; EVIDENCE_INCOMPLETE
-    // is added after NO_BLOCKER_FOUND and outranks it on confidence.
+fn bare_context_reports_incomplete_evidence_before_considering_healthy_fallback() {
     let report = diagnose(
         &InstanceDiagnosticContext::new(instance(InstanceState::Scheduled)),
         t0(),
     );
-    assert_eq!(
-        codes(&report),
-        vec!["EVIDENCE_INCOMPLETE", "NO_BLOCKER_FOUND"]
-    );
+    assert_eq!(codes(&report), vec!["EVIDENCE_INCOMPLETE"]);
 }
 
 // ===========================================================================

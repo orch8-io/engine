@@ -552,6 +552,15 @@ impl crate::SequenceStore for PostgresStorage {
         releases::page(self, tenant, query, limit).await
     }
 
+    async fn list_release_terminal_states(
+        &self,
+        release: &orch8_types::release::WorkflowRelease,
+        variant: orch8_types::release::ReleaseVariant,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::instance::InstanceState>, StorageError> {
+        releases::terminal_states(self, release, variant, limit).await
+    }
+
     async fn cas_release_state(
         &self,
         id: Uuid,

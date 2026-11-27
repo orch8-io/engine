@@ -22,8 +22,9 @@ use orch8_types::diagnosis::{InstanceDiagnosisReport, RemediationAction, Remedia
 use orch8_types::execution::NodeState;
 use orch8_types::explain::InstanceExplanation;
 use orch8_types::filter::Pagination;
-use orch8_types::ids::InstanceId;
+use orch8_types::ids::{BlockId, InstanceId};
 use orch8_types::instance::{InstanceState, TaskInstance};
+use orch8_types::worker::WorkerTaskState;
 use orch8_types::worker_filter::WorkerTaskFilter;
 
 use crate::AppState;
@@ -31,6 +32,7 @@ use crate::error::ApiError;
 
 /// Same liveness window the preflight uses for worker registrations.
 const WORKER_LIVENESS_SECS: i64 = 120;
+const ACTIVE_TASK_DIAGNOSIS_LIMIT: u32 = 100;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -219,11 +221,10 @@ pub(crate) async fn get_explanation(
             .await
             .ok()
             .flatten();
-        let worker_failure = ctx.worker_tasks.as_ref().and_then(|tasks| {
-            tasks
-                .iter()
-                .find(|t| t.state == orch8_types::worker::WorkerTaskState::Failed)
-        });
+        let worker_failure = ctx
+            .worker_tasks
+            .as_ref()
+            .and_then(|tasks| tasks.iter().find(|t| t.state == WorkerTaskState::Failed));
         Some(
             crate::dlq_groups::derive_envelope(
                 &state,
@@ -334,26 +335,47 @@ async fn collect_context(state: &AppState, instance: TaskInstance) -> InstanceDi
 
     ctx.pending_signals = storage.get_pending_signals(instance_id).await.ok();
 
-    ctx.worker_tasks = storage
+    // A diagnosis needs live blockers. The failure explanation needs only
+    // the latest failed task, even when newer attempts ended in other states.
+    let failed = ctx.instance.state == InstanceState::Failed;
+    let states = if failed {
+        vec![WorkerTaskState::Failed]
+    } else {
+        vec![WorkerTaskState::Pending, WorkerTaskState::Claimed]
+    };
+    let observed_tasks = storage
         .list_worker_tasks(
             &WorkerTaskFilter {
                 tenant_id: Some(tenant.clone()),
-                states: None,
+                states: Some(states),
                 handler_name: None,
                 worker_id: None,
                 queue_name: None,
-                instance_id: None,
+                instance_id: Some(instance_id),
             },
-            &Pagination::default(),
+            &Pagination {
+                limit: if failed {
+                    1
+                } else {
+                    ACTIVE_TASK_DIAGNOSIS_LIMIT + 1
+                },
+                // Show the oldest live blockers first. Failure history uses
+                // the newest failed attempt.
+                sort_ascending: !failed,
+                ..Pagination::default()
+            },
         )
         .await
-        .ok()
-        .map(|tasks| {
-            tasks
-                .into_iter()
-                .filter(|t| t.instance_id == instance_id)
-                .collect()
-        });
+        .ok();
+    if let Some(mut tasks) = observed_tasks
+        && tasks.iter().all(|task| task.instance_id == instance_id)
+    {
+        if !failed && tasks.len() > ACTIVE_TASK_DIAGNOSIS_LIMIT as usize {
+            ctx.worker_tasks_truncated = true;
+            tasks.truncate(ACTIVE_TASK_DIAGNOSIS_LIMIT as usize);
+        }
+        ctx.worker_tasks = Some(tasks);
+    }
 
     ctx.worker_registrations = storage
         .list_worker_registrations(Some(WORKER_LIVENESS_SECS))
@@ -371,17 +393,29 @@ async fn collect_context(state: &AppState, instance: TaskInstance) -> InstanceDi
 
     ctx.children = storage.get_child_instances(instance_id).await.ok();
 
-    ctx.pending_approval_blocks =
-        collect_pending_approvals(state, &ctx, sequence.flatten().as_ref()).await;
+    let sequence = sequence.flatten();
+    ctx.pending_approval_blocks = collect_pending_approvals(state, &ctx, sequence.as_ref()).await;
 
     // Event waits: for every block waiting on human input, check whether
     // it is actually a `wait_for_event` registration so the doctor can
     // report WAITING_EVENT with the missing event names.
-    if let Some(blocks) = ctx.pending_approval_blocks.clone() {
+    if let Some(blocks) = &ctx.pending_approval_blocks {
         let mut waits = Vec::new();
-        for block in &blocks {
-            if let Ok(Some(wait)) = state.storage.get_event_wait(instance_id, block).await {
-                waits.push(wait);
+        for block in blocks {
+            let expects_event_wait = sequence
+                .as_ref()
+                .and_then(|seq| crate::approvals::find_step_by_id(seq, &BlockId::new(block)))
+                .is_some_and(|step| step.handler == "wait_for_event");
+            match storage.get_event_wait(instance_id, block).await {
+                Ok(Some(wait))
+                    if wait.instance_id == instance_id.into_uuid()
+                        && wait.tenant_id == tenant.as_str()
+                        && wait.block_id == *block =>
+                {
+                    waits.push(wait);
+                }
+                Ok(None) if !expects_event_wait => {}
+                _ => ctx.unverified_event_wait_blocks.push(block.clone()),
             }
         }
         ctx.event_waits = Some(waits);

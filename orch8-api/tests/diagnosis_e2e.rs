@@ -593,6 +593,134 @@ async fn pending_task_without_any_worker_is_no_compatible_worker() {
 }
 
 #[tokio::test]
+async fn diagnosis_finds_a_live_task_behind_other_runs_and_completed_history() {
+    let env = setup().await;
+    let seq = env.simple_sequence().await;
+    let selected = env.create_instance(&seq, json!({})).await;
+    let neighbor = env.create_instance(&seq, json!({})).await;
+    env.set_state(&selected, InstanceState::Waiting, None).await;
+    let now = Utc::now();
+    let mut blocker = mk_task(
+        &selected,
+        "selected",
+        "selected_handler",
+        WorkerTaskState::Pending,
+    );
+    blocker.created_at = now - Duration::hours(2);
+    env.srv.storage.create_worker_task(&blocker).await.unwrap();
+
+    for index in 0..101 {
+        let mut completed = mk_task(
+            &selected,
+            &format!("finished-{index}"),
+            "history_handler",
+            WorkerTaskState::Completed,
+        );
+        completed.created_at = now - Duration::minutes(10);
+        env.srv
+            .storage
+            .create_worker_task(&completed)
+            .await
+            .unwrap();
+        let mut unrelated = mk_task(
+            &neighbor,
+            &format!("queued-{index}"),
+            "other_handler",
+            WorkerTaskState::Pending,
+        );
+        unrelated.created_at = now - Duration::minutes(5);
+        env.srv
+            .storage
+            .create_worker_task(&unrelated)
+            .await
+            .unwrap();
+    }
+
+    let report = env.diagnose(&selected).await;
+    let finding = find(&report, "NO_COMPATIBLE_WORKER");
+    assert!(
+        finding["summary"]
+            .as_str()
+            .unwrap()
+            .contains("selected_handler")
+    );
+    assert_eq!(finding["evidence"][0]["label"], "worker_task_target");
+    assert_eq!(
+        finding["evidence"][0]["data"],
+        json!({
+            "instance_id": selected,
+            "tenant_id": TENANT,
+            "task_id": blocker.id,
+            "block_id": "selected",
+        })
+    );
+    assert!(!report.to_string().contains("other_handler"));
+    assert!(
+        !codes(&report)
+            .iter()
+            .any(|code| code == "WAITING_EXTERNAL_EVENT")
+    );
+
+    env.set_state(&selected, InstanceState::Failed, None).await;
+    for (block, age) in [("prior-failure", 50), ("latest-failure", 30)] {
+        let mut failure = mk_task(&selected, block, "failed_handler", WorkerTaskState::Failed);
+        failure.created_at = now - Duration::minutes(age);
+        failure.error_message = Some("worker call failed".into());
+        env.srv.storage.create_worker_task(&failure).await.unwrap();
+    }
+    let explanation: Value = env
+        .client
+        .get(format!("{}/instances/{selected}/explain", env.base))
+        .header("X-Tenant-Id", TENANT)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explanation["failure"]["block_id"], "latest-failure");
+    assert_eq!(explanation["failure"]["handler"], "failed_handler");
+}
+
+#[tokio::test]
+async fn diagnosis_reports_an_incomplete_sample_when_more_live_tasks_exist() {
+    let env = setup().await;
+    let seq = env.simple_sequence().await;
+    let inst = env.create_instance(&seq, json!({})).await;
+    env.set_state(&inst, InstanceState::Waiting, None).await;
+    let first = Utc::now() - Duration::minutes(10);
+    for index in 0..101 {
+        let mut task = mk_task(
+            &inst,
+            &format!("queued-{index:03}"),
+            "worker_handler",
+            WorkerTaskState::Pending,
+        );
+        task.created_at = first + Duration::seconds(index);
+        env.srv.storage.create_worker_task(&task).await.unwrap();
+    }
+    let report = env.diagnose(&inst).await;
+    assert_eq!(
+        codes(&report)
+            .iter()
+            .filter(|code| *code == "NO_COMPATIBLE_WORKER")
+            .count(),
+        100
+    );
+    assert!(
+        find(&report, "EVIDENCE_INCOMPLETE")["summary"]
+            .as_str()
+            .unwrap()
+            .contains("worker_tasks beyond the diagnostic limit")
+    );
+    let report = report.to_string();
+    assert!(report.contains("queued-000"));
+    assert!(!report.contains("queued-100"));
+}
+
+#[tokio::test]
 async fn pending_task_with_live_worker_expects_pickup() {
     let env = setup().await;
     let inst = waiting_with_pending_task(&env, "charge_card").await;
@@ -1156,16 +1284,35 @@ async fn non_waiting_gated_instance_reports_no_approval() {
 }
 
 #[tokio::test]
-async fn registered_event_wait_reports_waiting_event_with_missing_names() {
+async fn partially_matched_wait_reports_missing_names_and_stored_event() {
     let env = setup().await;
     let seq = env.gated_sequence().await;
     let inst = env.create_instance(&seq, json!({})).await;
     env.set_state(&inst, InstanceState::Waiting, None).await;
-    env.srv
-        .storage
-        .upsert_event_wait(&mk_event_wait(&inst, "gate", WaitStatus::Waiting))
+    let mut wait = mk_event_wait(&inst, "gate", WaitStatus::Waiting);
+    wait.matched_names.clear();
+    wait.matched_event_ids.clear();
+    env.srv.storage.upsert_event_wait(&wait).await.unwrap();
+    let response = env
+        .client
+        .post(format!("{}/events", env.base))
+        .header("X-Tenant-Id", TENANT)
+        .header("X-Orch8-Include-Stored-Event-Id", "true")
+        .json(&json!({
+            "tenant_id": TENANT,
+            "event_name": "inventory_reserved",
+            "producer_event_id": "reserve-42",
+            "correlation_key": "order-42",
+            "payload": {"warehouse": "private-fixture"},
+        }))
+        .send()
         .await
         .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let outcome: Value = response.json().await.unwrap();
+    assert_eq!(outcome["matched_wait"], json!(wait.id));
+    assert_eq!(outcome["satisfied"], false);
+    let event = outcome["stored_event_id"].as_str().unwrap();
     let report = env.diagnose(&inst).await;
     let d = find(&report, "WAITING_EVENT");
     let summary = d["summary"].as_str().unwrap();
@@ -1176,6 +1323,40 @@ async fn registered_event_wait_reports_waiting_event_with_missing_names() {
     );
     assert!(summary.contains("order-42"), "{summary}");
     assert_eq!(d["evidence"][0]["label"], "correlation_key");
+    assert_eq!(d["evidence"][1]["label"], "matched_inbox_events");
+    assert_eq!(
+        d["evidence"][1]["data"],
+        json!({"instance_id": inst, "tenant_id": TENANT, "event_ids": [event], "total": 1})
+    );
+    assert!(!report.to_string().contains("private-fixture"));
+
+    let url = format!("{}/events/{event}", env.base);
+    let stored: Value = env
+        .client
+        .get(&url)
+        .header("X-Tenant-Id", TENANT)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["id"], event);
+    assert_eq!(stored["event_name"], "inventory_reserved");
+    assert_eq!(stored["status"], "consumed");
+    assert_eq!(stored["consumed_by"], inst);
+    assert_eq!(
+        env.client
+            .get(&url)
+            .header("X-Tenant-Id", "other")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -1193,6 +1374,82 @@ async fn event_wait_takes_precedence_over_pending_approval() {
     let cs = codes(&report);
     assert!(cs.contains(&"WAITING_EVENT".to_string()), "{cs:?}");
     assert!(!cs.contains(&"PENDING_APPROVAL".to_string()), "{cs:?}");
+}
+
+#[tokio::test]
+async fn missing_registration_for_a_declared_event_wait_is_incomplete() {
+    let env = setup().await;
+    let seq = env
+        .create_sequence(json!([{
+            "type": "step",
+            "id": "await_order",
+            "handler": "wait_for_event",
+            "params": {"events": ["order_received"], "correlation_key": "order-42", "join": "all"},
+            "wait_for_input": {"prompt": "Waiting for order"},
+        }]))
+        .await;
+    let inst = env.create_instance(&seq, json!({})).await;
+    env.set_state(&inst, InstanceState::Waiting, None).await;
+    let report = env.diagnose(&inst).await;
+    assert!(
+        find(&report, "EVIDENCE_INCOMPLETE")["summary"]
+            .as_str()
+            .unwrap()
+            .contains("event_waits")
+    );
+    assert!(!codes(&report).iter().any(|code| code == "PENDING_APPROVAL"));
+}
+
+#[tokio::test]
+async fn failed_wait_lookup_withholds_the_approval_until_a_verified_read() {
+    use orch8_api::test_harness::{TestServerOptions, spawn_test_server_with};
+    use orch8_storage::testing::faulty::FaultStorage;
+
+    let env = setup().await;
+    let seq = env.gated_sequence().await;
+    let inst = env.create_instance(&seq, json!({})).await;
+    env.set_state(&inst, InstanceState::Waiting, None).await;
+    let (storage, faults) = FaultStorage::wrap(env.srv.storage.clone());
+    faults.on("get_event_wait").times(1).fail_transient();
+    let server = spawn_test_server_with(storage, TestServerOptions::default()).await;
+    let read = || async {
+        env.client
+            .get(format!("{}/instances/{inst}/diagnosis", server.v1_url()))
+            .header("X-Tenant-Id", TENANT)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    let incomplete = read().await;
+    assert_eq!(faults.injected("get_event_wait"), 1);
+    assert!(
+        find(&incomplete, "EVIDENCE_INCOMPLETE")["summary"]
+            .as_str()
+            .unwrap()
+            .contains("event_waits")
+    );
+    assert!(
+        !codes(&incomplete)
+            .iter()
+            .any(|code| code == "PENDING_APPROVAL")
+    );
+    let verified = read().await;
+    assert!(
+        find(&verified, "PENDING_APPROVAL")["summary"]
+            .as_str()
+            .unwrap()
+            .contains("gate")
+    );
+    assert!(
+        !codes(&verified)
+            .iter()
+            .any(|code| code == "EVIDENCE_INCOMPLETE")
+    );
 }
 
 #[tokio::test]

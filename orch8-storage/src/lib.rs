@@ -374,6 +374,19 @@ pub trait SequenceStore: Send + Sync + 'static {
         ))
     }
 
+    /// Read the newest eligible terminal states for one release variant.
+    /// The cohort, sequence and canary start time apply before the limit.
+    async fn list_release_terminal_states(
+        &self,
+        _release: &orch8_types::release::WorkflowRelease,
+        _variant: orch8_types::release::ReleaseVariant,
+        _limit: u32,
+    ) -> Result<Vec<orch8_types::instance::InstanceState>, StorageError> {
+        Err(StorageError::Unsupported(
+            "release terminal observations".into(),
+        ))
+    }
+
     /// Compare-and-swap state transition. Returns `false` when the
     /// release was not in `expected` (a concurrent writer won) — the
     /// caller must NOT treat that as success. Optionally updates
