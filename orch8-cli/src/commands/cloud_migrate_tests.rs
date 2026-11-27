@@ -64,6 +64,7 @@ fn args(target: &str, source: &std::path::Path) -> MigrateToArgs {
         idle_timeout_secs: 1,
         migration_id: None,
         dry_run: false,
+        stage_only: false,
         include_terminal_history: false,
         include_cron_schedules: false,
     }
@@ -809,8 +810,7 @@ async fn staged_migration_checks_ordered_chunks_before_importing_and_isolates_te
         instances: Vec::new(),
     })
     .unwrap();
-    let digest =
-        orch8_types::plugin::WasmArtifactDigest::from_sha256(Sha256::digest(&payload).into());
+    let digest = orch8_types::plugin::WasmArtifactDigest::for_bytes(&payload);
     let path = format!(
         "{}/migrations/uploads/v1/{}",
         target.v1_url(),
@@ -1074,4 +1074,286 @@ fn migration_batches_measure_the_encoded_wire_length() {
         serde_json::to_vec(&value).unwrap().len()
     );
     assert!(count_encoded_bytes(&value).unwrap() > value["data"].as_str().unwrap().len());
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // Covers the upload, lost commit reply, and both receipt outcomes.
+async fn chunked_import_recovers_only_a_matching_receipt_after_a_lost_response() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let sequence = sequence("acme");
+    let run = instance(&sequence, InstanceState::Waiting);
+    let owner = ContinuityExecution {
+        continuity_id: orch8_types::continuity::ContinuityId::new(),
+        current_instance_id: run.id,
+        owner_runtime_id: RuntimeId::new(),
+        tenant_id: run.tenant_id.clone(),
+        epoch: orch8_types::continuity::ExecutionEpoch::initial(),
+        state: OwnershipState::Transferring,
+        updated_at: run.updated_at,
+    };
+    let request = MigrationImportRequest {
+        migration_id: uuid::Uuid::new_v4(),
+        source_engine_id: "fixture".into(),
+        sequences: vec![sequence],
+        instances: vec![
+            serde_json::from_value(json!({ "instance": run, "continuity": owner })).unwrap(),
+        ],
+    };
+    let payload = serde_json::to_vec(&request).unwrap();
+    let tenant = TenantId::new("acme").unwrap();
+    let receipt = StagedMigrationImportReceipt {
+        tenant_id: tenant.clone(),
+        digest: orch8_types::plugin::WasmArtifactDigest::for_bytes(&payload)
+            .as_str()
+            .to_owned(),
+        length: payload.len(),
+        completed_at: Utc::now(),
+        result: MigrationImportResponse {
+            migration_id: request.migration_id,
+            target_runtime_id: target_runtime_id(request.migration_id),
+            sequences: orch8_types::migration::SequenceImportCounts {
+                created: 1,
+                existing: 0,
+            },
+            instances: vec![orch8_types::migration::ImportedInstance {
+                instance_id: run.id,
+                status: ImportStatus::Imported,
+                epoch: owner.epoch.checked_next().unwrap().get(),
+                domain_digests: None,
+            }],
+        },
+    };
+    let commits = Arc::new(AtomicUsize::new(0));
+    let commit_calls = commits.clone();
+    let lookups = Arc::new(AtomicUsize::new(0));
+    let receipt_calls = lookups.clone();
+    let expected_epoch = receipt.result.instances[0].epoch;
+    let digest = receipt.digest.clone();
+    let expected_length = receipt.length;
+    let router =
+        axum::Router::new()
+            .route(
+                "/migrations/uploads/v1/{digest}/chunks/{index}",
+                axum::routing::put(|| async { axum::http::StatusCode::NO_CONTENT }),
+            )
+            .route(
+                "/migrations/uploads/v1/{digest}/commit",
+                axum::routing::post(move || {
+                    let calls = commit_calls.clone();
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        // Simulate a gateway losing the reply after the target already saved a receipt.
+                        axum::http::StatusCode::BAD_GATEWAY
+                    }
+                }),
+            )
+            .route(
+                "/migrations/uploads/v1/{digest}/receipt",
+                axum::routing::get(
+                    move |axum::extract::Path(path): axum::extract::Path<String>,
+                          axum::extract::Query(upload): axum::extract::Query<
+                        MigrationUploadCommit,
+                    >| {
+                        let mut result = receipt.clone();
+                        let calls = receipt_calls.clone();
+                        async move {
+                            assert_eq!(path, result.digest);
+                            assert_eq!(upload.tenant_id, result.tenant_id);
+                            assert_eq!(upload.length, result.length);
+                            if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                                result.result.instances[0].epoch += 1;
+                            }
+                            axum::Json(result)
+                        }
+                    },
+                ),
+            );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let client = reqwest::Client::new();
+    let destination = MigrationDestination {
+        client: &client,
+        base: &base,
+        tenant: &tenant,
+        chunked: true,
+    };
+    let first = destination.send_chunks(&request).await.unwrap();
+    assert_eq!(first.instances[0].epoch, expected_epoch);
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+    assert_eq!(lookups.load(Ordering::SeqCst), 1);
+
+    let error = destination
+        .send_chunks(&request)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("saved import receipt does not match the submitted batch"));
+    assert!(error.contains(&digest));
+    assert!(error.contains(&format!("{expected_length} bytes")));
+    assert_eq!(commits.load(Ordering::SeqCst), 2);
+    assert_eq!(lookups.load(Ordering::SeqCst), 2);
+    server.abort();
+}
+
+#[tokio::test]
+async fn staged_only_migration_keeps_the_source_fenced_until_target_import() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.db");
+    let storage = SqliteStorage::file(path.to_str().unwrap()).await.unwrap();
+    let sequence = sequence("acme");
+    storage.create_sequence(&sequence).await.unwrap();
+    let run = instance(&sequence, InstanceState::Waiting);
+    storage.create_instance(&run).await.unwrap();
+
+    let target = orch8_api::test_harness::spawn_test_server().await;
+    let mut arguments = args(&target.base_url, &path);
+    arguments.stage_only = true;
+    let staged = migrate(&arguments, None).await.unwrap();
+    assert!(staged.staging_error.is_none(), "{:?}", staged.staging_error);
+    assert!(staged.refused.is_empty());
+    assert!(staged.migrated.is_empty());
+    assert_eq!(staged.sequences_sent, 1);
+    assert_eq!(staged.sequences_created, 0);
+    assert_eq!(staged.staged_uploads.len(), 2);
+    assert_eq!(staged.staged_uploads[0].sequences, 1);
+    assert!(staged.staged_uploads[0].execution_ids.is_empty());
+    assert_eq!(staged.staged_uploads[1].sequences, 0);
+    assert_eq!(staged.staged_uploads[1].execution_ids, vec![run.id]);
+    assert!(
+        target
+            .storage
+            .get_sequence(sequence.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(target.storage.get_instance(run.id).await.unwrap().is_none());
+
+    let fenced = storage.get_instance(run.id).await.unwrap().unwrap();
+    assert_eq!(
+        phase(&fenced, &staged.migration_id).as_deref(),
+        Some("fenced")
+    );
+    assert_eq!(
+        storage
+            .get_continuity_execution_by_instance(&run.tenant_id, run.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        OwnershipState::Transferring
+    );
+
+    let repeated = migrate(&arguments, None).await.unwrap();
+    assert!(repeated.staging_error.is_none());
+    assert_eq!(
+        repeated
+            .staged_uploads
+            .iter()
+            .map(|upload| (&upload.digest, upload.length))
+            .collect::<Vec<_>>(),
+        staged
+            .staged_uploads
+            .iter()
+            .map(|upload| (&upload.digest, upload.length))
+            .collect::<Vec<_>>()
+    );
+
+    let client = crate::build_client(None, Some("acme")).unwrap();
+    for upload in &staged.staged_uploads {
+        let endpoint = format!("/migrations/uploads/v1/{}/commit", upload.digest);
+        let _: MigrationImportResponse = send_json(
+            &client,
+            &target.v1_url(),
+            &endpoint,
+            &MigrationUploadCommit {
+                tenant_id: run.tenant_id.clone(),
+                length: upload.length,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert!(target.storage.get_instance(run.id).await.unwrap().is_some());
+    assert_eq!(
+        phase(
+            &storage.get_instance(run.id).await.unwrap().unwrap(),
+            &staged.migration_id
+        )
+        .as_deref(),
+        Some("fenced")
+    );
+
+    arguments.stage_only = false;
+    let finalized = migrate(&arguments, None).await.unwrap();
+    assert!(finalized.refused.is_empty());
+    assert_eq!(finalized.migrated, vec![run.id.to_string()]);
+    let source = storage.get_instance(run.id).await.unwrap().unwrap();
+    assert_eq!(source.state, InstanceState::Paused);
+    assert_eq!(
+        phase(&source, &staged.migration_id).as_deref(),
+        Some("committed")
+    );
+}
+
+#[tokio::test]
+async fn stage_only_keeps_verified_coordinates_when_a_later_batch_fails() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("source.db");
+    let storage = SqliteStorage::file(path.to_str().unwrap()).await.unwrap();
+    let sequence = sequence("acme");
+    storage.create_sequence(&sequence).await.unwrap();
+    let run = instance(&sequence, InstanceState::Waiting);
+    storage.create_instance(&run).await.unwrap();
+    let count = Arc::new(AtomicUsize::new(0));
+    let uploads = count.clone();
+    let app = axum::Router::new()
+        .route(
+            "/api/v1/migrations/capabilities",
+            axum::routing::get(|| async { axum::Json(MigrationCapabilities::current()) }),
+        )
+        .route(
+            "/api/v1/migrations/uploads/v1/{digest}/chunks/{index}",
+            axum::routing::put(move || {
+                let uploads = uploads.clone();
+                async move {
+                    if uploads.fetch_add(1, Ordering::SeqCst) == 0 {
+                        axum::http::StatusCode::NO_CONTENT
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    }
+                }
+            }),
+        )
+        .route(
+            "/api/v1/migrations/uploads/v1/{digest}/verify",
+            axum::routing::get(|| async { axum::http::StatusCode::NO_CONTENT }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let mut arguments = args(&base, &path);
+    arguments.stage_only = true;
+    let report = migrate(&arguments, None).await.unwrap();
+    assert!(report.staging_error.unwrap().contains("503"));
+    assert_eq!(report.staged_uploads.len(), 1);
+    assert_eq!(report.staged_uploads[0].sequences, 1);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    let source = storage.get_instance(run.id).await.unwrap().unwrap();
+    assert_eq!(
+        phase(&source, &report.migration_id).as_deref(),
+        Some("fenced")
+    );
+    server.abort();
 }

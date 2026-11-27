@@ -1097,6 +1097,13 @@ CREATE TABLE IF NOT EXISTS migration_import_chunks (
 );
 CREATE INDEX IF NOT EXISTS migration_import_chunks_expiry ON migration_import_chunks (tenant_id, expires_at);
 
+CREATE TABLE IF NOT EXISTS migration_import_receipts (
+    tenant_id TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    receipt TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, digest)
+);
+
 CREATE TABLE IF NOT EXISTS readonly_instance_history (
     instance_id TEXT PRIMARY KEY REFERENCES task_instances(id) ON DELETE CASCADE,
     migration_id TEXT NOT NULL

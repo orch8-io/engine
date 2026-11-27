@@ -541,3 +541,99 @@ orch8_storage::backend_test!(artifacts = true, async fn reads_only_the_exact_com
     assert_eq!(storage.get_handoff(&owner.tenant_id, handoff.id).await.unwrap().unwrap(), handoff);
     assert_eq!(storage.get_continuity_execution(&owner.tenant_id, owner.continuity_id).await.unwrap().unwrap(), owner);
 });
+
+orch8_storage::backend_test!(artifacts = true, async fn staged_import_preview_and_receipt_match_exact_batch(b) {
+    use orch8_types::plugin::WasmArtifactDigest;
+
+    let storage = b.storage.clone();
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let client = reqwest::Client::new();
+    let sequence = SequenceBuilder::new("staged-preview").step("work", "noop").build();
+    let mut instance = InstanceBuilder::for_sequence(&sequence).state(InstanceState::Running).build();
+    instance.context.data = json!({"private": "preview-must-not-return-context"});
+    let owner = ContinuityExecution {
+        continuity_id: ContinuityId::new(),
+        current_instance_id: instance.id,
+        owner_runtime_id: RuntimeId::new(),
+        tenant_id: instance.tenant_id.clone(),
+        epoch: ExecutionEpoch::initial(),
+        state: OwnershipState::Transferring,
+        updated_at: instance.updated_at,
+    };
+    let migration_id = uuid::Uuid::new_v4();
+    let batch = json!({
+        "migration_id": migration_id,
+        "source_engine_id": "fixture",
+        "sequences": [sequence],
+        "instances": [{"instance": instance, "continuity": owner}],
+    });
+    let stage = async |value: &serde_json::Value| {
+        let bytes = serde_json::to_vec(value).unwrap();
+        let digest = WasmArtifactDigest::for_bytes(&bytes);
+        let base = format!("{}/migrations/uploads/v1/{}", server.v1_url(), digest.as_str());
+        let length = bytes.len();
+        let response = client.put(format!("{base}/chunks/0"))
+            .query(&[("tenant_id", instance.tenant_id.as_str())])
+            .body(bytes).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        (base, length, digest)
+    };
+    let (base, length, digest) = stage(&batch).await;
+    let read = async |path: String, tenant: &str, length: usize| {
+        client.get(path).query(&[("tenant_id", tenant.to_owned()), ("length", length.to_string())])
+            .send().await.unwrap()
+    };
+    let url = format!("{base}/preview");
+    let tenant = instance.tenant_id.as_str();
+    let first = read(url.clone(), tenant, length).await.error_for_status().unwrap();
+    let body: serde_json::Value = first.json().await.unwrap();
+    assert_eq!(body, json!({
+        "tenant_id": tenant, "digest": digest.as_str(), "length": length,
+        "migration_id": migration_id, "source_engine_id": "fixture",
+        "target_runtime_id": orch8_types::migration::target_runtime_id(migration_id),
+        "sequence_ids": [sequence.id],
+        "instances": [{"instance_id": instance.id, "continuity_id": owner.continuity_id,
+            "sequence_id": sequence.id, "target_epoch": owner.epoch.checked_next().unwrap().get(),
+            "target_state": "scheduled"}],
+    }));
+    assert_eq!(read(url, "foreign", length).await.status(), StatusCode::CONFLICT);
+    assert_eq!(read(format!("{base}/verify"), tenant, length).await.status(), StatusCode::NO_CONTENT);
+    assert!(storage.get_instance(instance.id).await.unwrap().is_none());
+    assert!(storage.get_sequence(sequence.id).await.unwrap().is_none());
+    assert!(storage.get_continuity_execution(&owner.tenant_id, owner.continuity_id).await.unwrap().is_none());
+
+    let mut foreign = batch.clone();
+    foreign["instances"][0]["instance"]["tenant_id"] = json!("foreign");
+    let (base, length, _) = stage(&foreign).await;
+    assert_eq!(read(format!("{base}/preview"), tenant, length).await.status(), StatusCode::FORBIDDEN);
+
+    let mut duplicate = batch.clone();
+    let first = duplicate["instances"][0].clone();
+    duplicate["instances"].as_array_mut().unwrap().push(first);
+    let (base, length, _) = stage(&duplicate).await;
+    assert_eq!(read(format!("{base}/preview"), tenant, length).await.status(), StatusCode::BAD_REQUEST);
+
+    let (base, length, digest) = stage(&batch).await;
+    let receipt_url = format!("{base}/receipt");
+    assert_eq!(read(receipt_url.clone(), tenant, length).await.status(), StatusCode::NOT_FOUND);
+    let commit = async || {
+        client.post(format!("{base}/commit")).json(&json!({"tenant_id": tenant, "length": length}))
+            .send().await.unwrap().error_for_status().unwrap().json::<serde_json::Value>().await.unwrap()
+    };
+    let completed = commit().await;
+    let recorded = read(receipt_url.clone(), tenant, length).await.error_for_status().unwrap();
+    let receipt: serde_json::Value = recorded.json().await.unwrap();
+    assert_eq!(receipt["result"], completed);
+    assert_eq!(receipt["tenant_id"], tenant);
+    assert_eq!(receipt["digest"], digest.as_str());
+    assert_eq!(receipt["length"], length);
+    assert_eq!(receipt["result"]["instances"][0]["status"], "imported");
+    assert_eq!(read(format!("{base}/verify"), tenant, length).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(read(receipt_url.clone(), "foreign", length).await.status(), StatusCode::NOT_FOUND);
+    assert_eq!(read(receipt_url.clone(), tenant, length + 1).await.status(), StatusCode::NOT_FOUND);
+
+    stage(&batch).await;
+    assert_eq!(commit().await["instances"][0]["status"], "already_present");
+    let replay: serde_json::Value = read(receipt_url, tenant, length).await.error_for_status().unwrap().json().await.unwrap();
+    assert_eq!(replay, receipt);
+});

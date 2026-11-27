@@ -636,6 +636,8 @@ fault_impl! {
         async fn stage_migration_chunk(&self, tenant: &TenantId, digest: &str, index: u32, payload: &[u8]) -> Result<bool, StorageError>;
         async fn read_migration_chunk(&self, tenant: &TenantId, digest: &str, index: u32) -> Result<Option<Vec<u8>>, StorageError>;
         async fn clear_migration_chunks(&self, tenant: &TenantId, digest: &str) -> Result<(), StorageError>;
+        async fn complete_migration_upload(&self, receipt: &orch8_types::migration::StagedMigrationImportReceipt) -> Result<(), StorageError>;
+        async fn get_migration_upload_receipt(&self, tenant: &TenantId, digest: &str) -> Result<Option<orch8_types::migration::StagedMigrationImportReceipt>, StorageError>;
         async fn save_live_migration(&self, record: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<(), StorageError>;
         async fn get_live_migration(&self, tenant_id: &TenantId, id: orch8_types::continuity_advanced::MigrationPlanId) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError>;
         async fn list_live_migrations(&self, tenant_id: &TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<orch8_types::continuity_advanced::MigrationPlanId>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::LiveMigrationSummary>, StorageError>;

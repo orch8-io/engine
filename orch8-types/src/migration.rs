@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -224,7 +225,7 @@ pub struct MigrationImportRequest {
     pub instances: Vec<MigratedInstance>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportStatus {
     /// Created by this request.
@@ -233,7 +234,7 @@ pub enum ImportStatus {
     AlreadyPresent,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ImportedInstance {
     pub instance_id: crate::ids::InstanceId,
     pub status: ImportStatus,
@@ -243,7 +244,7 @@ pub struct ImportedInstance {
     pub domain_digests: Option<MigrationDomainDigests>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MigrationDomainDigests {
     pub execution_tree: String,
     pub block_outputs: String,
@@ -344,13 +345,13 @@ fn digest_rows<T: Serialize, K: Ord>(
     Ok(hex)
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct SequenceImportCounts {
     pub created: u64,
     pub existing: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct MigrationImportResponse {
     pub migration_id: Uuid,
     /// Runtime identity that now owns the imported executions. The source
@@ -358,6 +359,16 @@ pub struct MigrationImportResponse {
     pub target_runtime_id: Uuid,
     pub sequences: SequenceImportCounts,
     pub instances: Vec<ImportedInstance>,
+}
+
+/// First completed result for an exact tenant and staged upload.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StagedMigrationImportReceipt {
+    pub tenant_id: crate::ids::TenantId,
+    pub digest: String,
+    pub length: usize,
+    pub completed_at: DateTime<Utc>,
+    pub result: MigrationImportResponse,
 }
 
 /// Deterministic owner runtime for a migration, so retries converge.

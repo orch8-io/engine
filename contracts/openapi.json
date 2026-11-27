@@ -689,6 +689,70 @@
       }
     },
     "/continuity/attention": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "operationId": "list_attention_tasks",
+        "parameters": [
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Task state (default pending)",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/AttentionState"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum tasks (1–100, default 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "after_deadline",
+            "in": "query",
+            "description": "Deadline of the previous page's last task",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after_id",
+            "in": "query",
+            "description": "UUID of the previous page's last task",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scoped metadata page",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionQueue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing tenant or invalid pagination"
+          },
+          "403": {
+            "description": "Operator capability required"
+          }
+        }
+      },
       "post": {
         "tags": [
           "continuity"
@@ -697,6 +761,43 @@
         "responses": {
           "default": {
             "description": "Continuity API response"
+          }
+        }
+      }
+    },
+    "/continuity/attention/{id}": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "operationId": "inspect_attention_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Exact attention task UUID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Scoped task metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttentionTaskDetail"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Operator capability required"
+          },
+          "404": {
+            "description": "Exact task not found in the selected tenant"
           }
         }
       }
@@ -1418,66 +1519,66 @@
     },
     "/continuity/executions/{id}/handoffs": {
       "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "List saved handoffs for a continuity execution, newest first.",
         "operationId": "list_handoffs",
         "parameters": [
           {
-            "description": "Continuity execution ID",
-            "in": "path",
             "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ContinuityId"
             }
           },
           {
-            "description": "Tenant ID",
-            "in": "query",
             "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
             "required": true,
             "schema": {
               "type": "string"
             }
           },
           {
-            "description": "Cursor from the previous page",
-            "in": "query",
             "name": "before",
+            "in": "query",
+            "description": "Cursor from the previous page",
             "required": false,
             "schema": {
               "$ref": "#/components/schemas/HandoffId"
             }
           },
           {
-            "description": "Handoffs per page (1–50, default 25)",
-            "in": "query",
             "name": "limit",
+            "in": "query",
+            "description": "Handoffs per page (1–50, default 25)",
             "required": false,
             "schema": {
+              "type": "integer",
               "format": "int32",
-              "minimum": 0,
-              "type": "integer"
+              "minimum": 0
             }
           }
         ],
         "responses": {
           "200": {
+            "description": "Saved handoffs",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HandoffPage"
                 }
               }
-            },
-            "description": "Saved handoffs"
+            }
           },
           "404": {
             "description": "Continuity execution or cursor not found"
           }
-        },
-        "summary": "List saved handoffs for a continuity execution, newest first.",
-        "tags": [
-          "continuity"
-        ]
+        }
       }
     },
     "/continuity/executions/{id}/invariants/evaluate": {
@@ -1860,6 +1961,10 @@
     },
     "/continuity/federation/acceptances": {
       "post": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Accept a verified message once and store replay protection and provenance atomically.",
         "operationId": "accept_federation_envelope",
         "requestBody": {
           "content": {
@@ -1873,14 +1978,14 @@
         },
         "responses": {
           "200": {
+            "description": "Exact acceptance stored or already recorded",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RecordedFederationAcceptance"
                 }
               }
-            },
-            "description": "Exact acceptance stored or already recorded"
+            }
           },
           "404": {
             "description": "Envelope or continuity execution not found"
@@ -1888,57 +1993,57 @@
           "409": {
             "description": "Verification failed or the message could not be accepted"
           }
-        },
-        "summary": "Accept a verified message once and store replay protection and provenance atomically.",
-        "tags": [
-          "continuity"
-        ]
+        }
       }
     },
     "/continuity/federation/acceptances/{id}": {
       "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Read exact acceptance evidence independently of the replay receipt's retention window.",
         "operationId": "read_federation_acceptance",
         "parameters": [
           {
-            "description": "Signed message ID",
-            "in": "path",
             "name": "id",
+            "in": "path",
+            "description": "Signed message ID",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/FederationMessageId"
             }
           },
           {
-            "description": "Tenant ID",
-            "in": "query",
             "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
             "required": true,
             "schema": {
               "type": "string"
             }
           },
           {
-            "description": "Continuity execution ID",
-            "in": "query",
             "name": "continuity_id",
+            "in": "query",
+            "description": "Continuity execution ID",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/ContinuityId"
             }
           },
           {
-            "description": "Configured peer ID",
-            "in": "query",
             "name": "peer_id",
+            "in": "query",
+            "description": "Configured peer ID",
             "required": true,
             "schema": {
               "$ref": "#/components/schemas/FederationPeerId"
             }
           },
           {
-            "description": "SHA-256 returned by inspection",
-            "in": "query",
             "name": "envelope_sha256",
+            "in": "query",
+            "description": "SHA-256 returned by inspection",
             "required": true,
             "schema": {
               "type": "string"
@@ -1947,23 +2052,19 @@
         ],
         "responses": {
           "200": {
+            "description": "Exact stored acceptance and provenance",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RecordedFederationAcceptance"
                 }
               }
-            },
-            "description": "Exact stored acceptance and provenance"
+            }
           },
           "404": {
             "description": "No stored acceptance matches the selected envelope"
           }
-        },
-        "summary": "Read exact acceptance evidence independently of the replay receipt's retention window.",
-        "tags": [
-          "continuity"
-        ]
+        }
       }
     },
     "/continuity/federation/inspect": {
@@ -2690,18 +2791,83 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Limit, default 100. Page view clamps to 1–200.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "Use page for a live window in descending UUID order.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Use the previous page's next_cursor.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "namespace",
+            "in": "query",
+            "description": "Exact namespace in the page view.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "sequence_id",
+            "in": "query",
+            "description": "Exact stored sequence UUID in the page view.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "enabled",
+            "in": "query",
+            "description": "Filter by enabled state in the page view.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "List of cron schedules",
+            "description": "Cron schedules or, with view=page, a CronSchedulePage",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/CronSchedule"
-                  }
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/CronSchedule"
+                      }
+                    },
+                    {
+                      "$ref": "#/components/schemas/CronSchedulePage"
+                    }
+                  ]
                 }
               }
             }
@@ -3561,6 +3727,53 @@
         }
       }
     },
+    "/events/lookup": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "lookup_event",
+        "parameters": [
+          {
+            "name": "X-Tenant-Id",
+            "in": "header",
+            "description": "Tenant scope for a root key",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventIdentityLookup"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Exact producer identity and optional stored event with a redacted payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventIdentityObservation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing tenant scope or invalid identity"
+          }
+        }
+      }
+    },
     "/events/{id}": {
       "get": {
         "tags": [
@@ -4016,6 +4229,25 @@
             }
           },
           {
+            "name": "release_id",
+            "in": "query",
+            "description": "Match a stored release routing tag",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "release_variant",
+            "in": "query",
+            "description": "Match the stored baseline or candidate tag with release_id",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReleaseVariant"
+            }
+          },
+          {
             "name": "sub_tenant",
             "in": "query",
             "description": "Filter by sub-tenant (X-Orch8-Sub-Tenant overrides)",
@@ -4049,11 +4281,11 @@
         ],
         "responses": {
           "200": {
-            "description": "Page of instances",
+            "description": "Page of instances and applied release filter when requested",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Page_TaskInstance"
+                  "$ref": "#/components/schemas/InstanceListPage"
                 }
               }
             }
@@ -5870,6 +6102,15 @@
             }
           },
           {
+            "name": "queue",
+            "in": "query",
+            "description": "Exact named queue, case and whitespace preserved",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "status",
             "in": "query",
             "description": "scheduled | running | completed | failed | cancelled | dead_lettered",
@@ -5919,17 +6160,17 @@
         ],
         "responses": {
           "200": {
-            "description": "Page of jobs",
+            "description": "Page of jobs with the applied queue when requested",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobPage"
+                  "$ref": "#/components/schemas/JobInventoryPage"
                 }
               }
             }
           },
           "400": {
-            "description": "Invalid status or cursor"
+            "description": "Invalid queue, status or cursor"
           }
         }
       },
@@ -6209,6 +6450,125 @@
           },
           "409": {
             "description": "An instance id exists but was not created by this migration"
+          }
+        }
+      }
+    },
+    "/migrations/uploads/v1/{digest}/preview": {
+      "get": {
+        "tags": [
+          "migrations"
+        ],
+        "summary": "Inspect the import manifest of a staged batch without importing it.",
+        "operationId": "preview",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "description": "SHA-256 of the staged bytes",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Upload tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "length",
+            "in": "query",
+            "description": "Exact staged byte length",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Validated, tenant-scoped import manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StagedMigrationImportPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid migration batch or upload coordinates"
+          },
+          "403": {
+            "description": "Batch contains records from another tenant"
+          },
+          "409": {
+            "description": "Staged bytes missing or inconsistent"
+          }
+        }
+      }
+    },
+    "/migrations/uploads/v1/{digest}/receipt": {
+      "get": {
+        "tags": [
+          "migrations"
+        ],
+        "summary": "Read the completed result of an exact staged import after its chunks are cleared.",
+        "operationId": "read_staged_migration_import_receipt",
+        "parameters": [
+          {
+            "name": "digest",
+            "in": "path",
+            "description": "SHA-256 of the staged bytes",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Upload tenant",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "length",
+            "in": "query",
+            "description": "Exact staged byte length",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The first completed result for the exact upload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StagedMigrationImportReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid upload coordinates"
+          },
+          "404": {
+            "description": "No completed receipt matches this tenant, digest and length"
           }
         }
       }
@@ -7437,6 +7797,64 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "Use page for tenant-scoped cursor pagination",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "description": "Page size for page view (default 25, maximum 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Whitespace-separated literal terms, ignoring ASCII letter case",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "release_state",
+            "in": "query",
+            "description": "Filter page view by release state",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ReleaseState"
+            }
+          },
+          {
+            "name": "before_created_at",
+            "in": "query",
+            "description": "Creation timestamp from next_before",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "before_id",
+            "in": "query",
+            "description": "Release UUID from next_before",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
           }
         ],
         "responses": {
@@ -7445,10 +7863,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/WorkflowRelease"
-                  }
+                  "$ref": "#/components/schemas/ReleaseListResponse"
                 }
               }
             }
@@ -7729,6 +8144,120 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/releases/{id}/executor-readiness": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "release_executor_readiness",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseExecutorReadiness"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Release not found"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "transition_with_executor_readiness",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExecutorCheckedTransition"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkflowRelease"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid executor selection"
+          },
+          "409": {
+            "description": "Readiness or release conditions are not satisfied"
+          }
+        }
+      }
+    },
+    "/releases/{id}/gate-preview": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "operationId": "preview_release_gates",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Release id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read-only gate preview; never changes routing",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseGatePreview"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Release changed during observation or is outside canary"
           }
         }
       }
@@ -8732,6 +9261,59 @@
       }
     },
     "/sessions": {
+      "get": {
+        "tags": [
+          "crate::sessions"
+        ],
+        "operationId": "list_sessions",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Exclusive cursor from the previous page",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Literal case-sensitive substring of the session key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Exact stored session state",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SessionState"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionInventoryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid inventory filters"
+          },
+          "403": {
+            "description": "Tenant scope required"
+          }
+        }
+      },
       "post": {
         "tags": [
           "crate::sessions"
@@ -8881,6 +9463,43 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "page returns metadata in descending execution UUID order",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Exclusive cursor for the page view",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "ASCII-case-insensitive terms in execution UUID, sequence UUID or namespace",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Exact stored execution state for the page view",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/InstanceState"
+            }
           }
         ],
         "responses": {
@@ -8888,10 +9507,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TaskInstance"
-                  }
+                  "$ref": "#/components/schemas/SessionRunsResponse"
                 }
               }
             }
@@ -9172,6 +9788,55 @@
         }
       }
     },
+    "/tenants/{tenant_id}/circuit-breakers/{handler}/reset-reviewed": {
+      "post": {
+        "tags": [
+          "crate::circuit_breakers"
+        ],
+        "operationId": "reset_reviewed_breaker",
+        "parameters": [
+          {
+            "name": "tenant_id",
+            "in": "path",
+            "description": "Tenant id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "handler",
+            "in": "path",
+            "description": "Handler name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CircuitBreakerState"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The reviewed breaker was reset"
+          },
+          "400": {
+            "description": "The supplied state targets a different breaker"
+          },
+          "409": {
+            "description": "The reviewed breaker changed or disappeared"
+          }
+        }
+      }
+    },
     "/triggers": {
       "get": {
         "tags": [
@@ -9187,21 +9852,69 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "view",
+            "in": "query",
+            "description": "Use page for metadata-only cursor paging",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Exclusive slug cursor from next_after",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Case-sensitive substring across slug, sequence, namespace and type",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "description": "Number of rows from 1 to 200 for view=page",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Triggers",
+            "description": "Legacy trigger list or tenant-scoped metadata page",
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/TriggerDef"
-                  }
+                  "oneOf": [
+                    {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/TriggerDef"
+                      }
+                    },
+                    {
+                      "$ref": "#/components/schemas/TriggerInventoryPage"
+                    }
+                  ]
                 }
               }
             }
+          },
+          "400": {
+            "description": "Invalid inventory selectors"
           }
         }
       },
@@ -9332,6 +10045,102 @@
           },
           "404": {
             "description": "Not found"
+          }
+        }
+      }
+    },
+    "/triggers/{slug}/reviewed": {
+      "delete": {
+        "tags": [
+          "triggers"
+        ],
+        "operationId": "remove_reviewed_trigger",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Exact trigger slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewedTriggerRemoval"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Reviewed trigger removed"
+          },
+          "403": {
+            "description": "Operator capability required"
+          },
+          "404": {
+            "description": "Trigger not found in the selected tenant"
+          },
+          "409": {
+            "description": "Trigger was edited or replaced"
+          }
+        }
+      }
+    },
+    "/triggers/{slug}/settings": {
+      "patch": {
+        "tags": [
+          "triggers"
+        ],
+        "operationId": "update_trigger_settings",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Exact trigger slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TriggerSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored trigger settings verified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TriggerSettingsReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid trigger settings"
+          },
+          "403": {
+            "description": "Operator capability required"
+          },
+          "404": {
+            "description": "Trigger not found in the selected tenant"
+          },
+          "409": {
+            "description": "Trigger was edited or replaced"
           }
         }
       }
@@ -10801,6 +11610,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "List one tenant's commands. The authenticated tenant takes precedence when present.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -11544,6 +12362,154 @@
             "$ref": "#/components/schemas/ExecutionHandoff"
           }
         }
+      },
+      "AttentionQueue": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "state",
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttentionQueueRow"
+            }
+          },
+          "next": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AttentionQueuePosition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "$ref": "#/components/schemas/AttentionState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "AttentionQueuePosition": {
+        "type": "object",
+        "required": [
+          "deadline",
+          "id"
+        ],
+        "properties": {
+          "deadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/AttentionTaskId"
+          }
+        }
+      },
+      "AttentionQueueRow": {
+        "type": "object",
+        "required": [
+          "id",
+          "continuity_id",
+          "state",
+          "priority",
+          "deadline"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "deadline": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/AttentionTaskId"
+          },
+          "lease_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "priority": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "state": {
+            "$ref": "#/components/schemas/AttentionState"
+          }
+        }
+      },
+      "AttentionState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "assigned",
+          "decided",
+          "expired"
+        ]
+      },
+      "AttentionTaskDetail": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "task",
+          "classification",
+          "required_skills",
+          "allowed_regions",
+          "decision_recorded"
+        ],
+        "properties": {
+          "allowed_regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "assignee": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "classification": {
+            "$ref": "#/components/schemas/DataClassification"
+          },
+          "decided_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "decision_recorded": {
+            "type": "boolean"
+          },
+          "required_skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "task": {
+            "$ref": "#/components/schemas/AttentionQueueRow"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "AttentionTaskId": {
+        "type": "string",
+        "format": "uuid"
       },
       "AuditEntry": {
         "type": "object",
@@ -14320,6 +15286,31 @@
           }
         }
       },
+      "CronInventoryFilter": {
+        "type": "object",
+        "description": "Exact filters applied before selecting a cron inventory page.",
+        "properties": {
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "namespace": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sequence_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        }
+      },
       "CronSchedule": {
         "type": "object",
         "description": "A cron schedule that periodically creates instances of a sequence.",
@@ -14399,6 +15390,35 @@
           "updated_at": {
             "type": "string",
             "format": "date-time"
+          }
+        }
+      },
+      "CronSchedulePage": {
+        "type": "object",
+        "required": [
+          "items",
+          "has_more",
+          "filter"
+        ],
+        "properties": {
+          "filter": {
+            "$ref": "#/components/schemas/CronInventoryFilter"
+          },
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CronSchedule"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
           }
         }
       },
@@ -15908,6 +16928,51 @@
           }
         }
       },
+      "EventIdentityLookup": {
+        "type": "object",
+        "required": [
+          "event_name",
+          "producer_event_id"
+        ],
+        "properties": {
+          "event_name": {
+            "type": "string"
+          },
+          "producer_event_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "EventIdentityObservation": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "event_name",
+          "producer_event_id"
+        ],
+        "properties": {
+          "event": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/EventEnvelope"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "producer_event_id": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        }
+      },
       "EventListResponse": {
         "oneOf": [
           {
@@ -16454,6 +17519,64 @@
             "type": "string"
           }
         }
+      },
+      "ExecutorCheckedTransition": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "percent",
+              "ready_executor_ids",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "canary"
+                ]
+              },
+              "percent": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "ready_executor_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "ready_executor_ids",
+              "action"
+            ],
+            "properties": {
+              "action": {
+                "type": "string",
+                "enum": [
+                  "promote"
+                ]
+              },
+              "force": {
+                "type": "boolean",
+                "description": "Override promotion gates while still requiring designated executors."
+              },
+              "ready_executor_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          }
+        ]
       },
       "Expectations": {
         "type": "object",
@@ -17396,15 +18519,21 @@
         "format": "uuid"
       },
       "HandoffPage": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "continuity_id",
+          "handoffs"
+        ],
         "properties": {
           "continuity_id": {
             "$ref": "#/components/schemas/ContinuityId"
           },
           "handoffs": {
+            "type": "array",
             "items": {
               "$ref": "#/components/schemas/HandoffSummary"
-            },
-            "type": "array"
+            }
           },
           "next_before": {
             "oneOf": [
@@ -17419,13 +18548,7 @@
           "tenant_id": {
             "$ref": "#/components/schemas/TenantId"
           }
-        },
-        "required": [
-          "tenant_id",
-          "continuity_id",
-          "handoffs"
-        ],
-        "type": "object"
+        }
       },
       "HandoffState": {
         "type": "string",
@@ -17444,14 +18567,25 @@
         ]
       },
       "HandoffSummary": {
+        "type": "object",
         "description": "A saved handoff's identity, route, and most recently stored state.",
+        "required": [
+          "id",
+          "continuity_id",
+          "tenant_id",
+          "source_runtime_id",
+          "destination_runtime_id",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
         "properties": {
           "continuity_id": {
             "$ref": "#/components/schemas/ContinuityId"
           },
           "created_at": {
-            "format": "date-time",
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           },
           "destination_runtime_id": {
             "$ref": "#/components/schemas/RuntimeId"
@@ -17469,21 +18603,10 @@
             "$ref": "#/components/schemas/TenantId"
           },
           "updated_at": {
-            "format": "date-time",
-            "type": "string"
+            "type": "string",
+            "format": "date-time"
           }
-        },
-        "required": [
-          "id",
-          "continuity_id",
-          "tenant_id",
-          "source_runtime_id",
-          "destination_runtime_id",
-          "state",
-          "created_at",
-          "updated_at"
-        ],
-        "type": "object"
+        }
       },
       "HeartbeatRequest": {
         "type": "object",
@@ -17587,6 +18710,45 @@
           }
         }
       },
+      "ImportStatus": {
+        "type": "string",
+        "enum": [
+          "imported",
+          "already_present"
+        ]
+      },
+      "ImportedInstance": {
+        "type": "object",
+        "required": [
+          "instance_id",
+          "status",
+          "epoch"
+        ],
+        "properties": {
+          "domain_digests": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MigrationDomainDigests"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "epoch": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ownership epoch now held by the target.",
+            "minimum": 0
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ImportStatus"
+          }
+        }
+      },
       "InFlightPolicy": {
         "type": "string",
         "description": "How in-flight instances are treated when a release promotes.",
@@ -17648,6 +18810,14 @@
           "satisfied": {
             "type": "boolean",
             "description": "True when the match satisfied the wait's join and resumed the\nwaiting instance."
+          },
+          "stored_event_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Canonical UUID of the event stored under this producer identity.\nThe HTTP receipt includes it when X-Orch8-Include-Stored-Event-Id is true."
           }
         }
       },
@@ -17873,6 +19043,62 @@
         "format": "uuid",
         "description": "Newtype wrappers prevent mixing up UUIDs at compile time.\nZero cost at runtime (transparent newtypes)."
       },
+      "InstanceListPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskInstance"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "release_filter": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InstanceReleaseFilter"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "InstanceReleaseFilter": {
+        "type": "object",
+        "required": [
+          "release_id"
+        ],
+        "properties": {
+          "release_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "variant": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseVariant"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
       "InstanceState": {
         "type": "string",
         "description": "Instance states form a strict state machine.\nTransitions are validated at runtime via `can_transition_to`.",
@@ -18092,6 +19318,24 @@
             "$ref": "#/components/schemas/JobStatus"
           }
         }
+      },
+      "JobInventoryPage": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/JobPage"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "queue_filter": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        ]
       },
       "JobPage": {
         "type": "object",
@@ -18601,6 +19845,58 @@
           "incompatible"
         ]
       },
+      "MigrationDomainDigests": {
+        "type": "object",
+        "required": [
+          "execution_tree",
+          "block_outputs",
+          "effect_receipts",
+          "pending_signals"
+        ],
+        "properties": {
+          "block_outputs": {
+            "type": "string"
+          },
+          "effect_receipts": {
+            "type": "string"
+          },
+          "execution_tree": {
+            "type": "string"
+          },
+          "pending_signals": {
+            "type": "string"
+          }
+        }
+      },
+      "MigrationImportResponse": {
+        "type": "object",
+        "required": [
+          "migration_id",
+          "target_runtime_id",
+          "sequences",
+          "instances"
+        ],
+        "properties": {
+          "instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImportedInstance"
+            }
+          },
+          "migration_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sequences": {
+            "$ref": "#/components/schemas/SequenceImportCounts"
+          },
+          "target_runtime_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Runtime identity that now owns the imported executions. The source\nrecords it when fencing its copy."
+          }
+        }
+      },
       "MigrationPlanId": {
         "type": "string",
         "format": "uuid"
@@ -18821,146 +20117,6 @@
           "buffer_one",
           "cancel_previous"
         ]
-      },
-      "Page_TaskInstance": {
-        "type": "object",
-        "description": "Canonical cursor-capable response envelope for list endpoints.",
-        "required": [
-          "items",
-          "has_more"
-        ],
-        "properties": {
-          "has_more": {
-            "type": "boolean"
-          },
-          "items": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": [
-                "id",
-                "sequence_id",
-                "tenant_id",
-                "namespace",
-                "state",
-                "priority",
-                "timezone",
-                "metadata",
-                "context",
-                "created_at",
-                "updated_at"
-              ],
-              "properties": {
-                "budget": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/Budget",
-                      "description": "Optional resource budget enforced by the scheduler (see [`Budget`])."
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "concurrency_key": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Optional concurrency key for limiting parallel executions."
-                },
-                "context": {
-                  "$ref": "#/components/schemas/ExecutionContext"
-                },
-                "created_at": {
-                  "type": "string",
-                  "format": "date-time"
-                },
-                "id": {
-                  "$ref": "#/components/schemas/InstanceId"
-                },
-                "idempotency_key": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "Optional idempotency key for deduplication at creation time."
-                },
-                "max_concurrency": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ],
-                  "format": "int32",
-                  "description": "Max concurrent running instances with the same concurrency key.",
-                  "minimum": 0
-                },
-                "metadata": {},
-                "namespace": {
-                  "$ref": "#/components/schemas/Namespace"
-                },
-                "next_fire_at": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "format": "date-time"
-                },
-                "parent_instance_id": {
-                  "oneOf": [
-                    {
-                      "$ref": "#/components/schemas/InstanceId",
-                      "description": "Parent instance ID (set when this instance is a sub-sequence child)."
-                    },
-                    {
-                      "type": "null"
-                    }
-                  ]
-                },
-                "priority": {
-                  "$ref": "#/components/schemas/Priority"
-                },
-                "sequence_id": {
-                  "$ref": "#/components/schemas/SequenceId"
-                },
-                "session_id": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "format": "uuid",
-                  "description": "Session ID for cross-instance shared state."
-                },
-                "state": {
-                  "$ref": "#/components/schemas/InstanceState"
-                },
-                "sub_tenant": {
-                  "type": [
-                    "string",
-                    "null"
-                  ],
-                  "description": "End customer (sub-tenant) inside `tenant_id`; `None` = tenant-level."
-                },
-                "tenant_id": {
-                  "$ref": "#/components/schemas/TenantId"
-                },
-                "timezone": {
-                  "type": "string"
-                },
-                "updated_at": {
-                  "type": "string",
-                  "format": "date-time"
-                }
-              }
-            }
-          },
-          "next_cursor": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        }
       },
       "ParallelDef": {
         "type": "object",
@@ -20887,6 +22043,23 @@
           "oem_embedded"
         ]
       },
+      "ReleaseCursor": {
+        "type": "object",
+        "required": [
+          "created_at",
+          "id"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "ReleaseDecision": {
         "type": "object",
         "description": "Immutable audit record of one state transition (or attempted one).",
@@ -20928,6 +22101,58 @@
           }
         }
       },
+      "ReleaseExecutorReadiness": {
+        "type": "object",
+        "required": [
+          "release_id",
+          "tenant_id",
+          "candidate_sequence_id",
+          "checked_at",
+          "executors"
+        ],
+        "properties": {
+          "candidate_sequence_id": {
+            "$ref": "#/components/schemas/SequenceId"
+          },
+          "checked_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "executors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseExecutorStatus"
+            }
+          },
+          "release_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "type": "string"
+          }
+        }
+      },
+      "ReleaseExecutorStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "ready"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ready": {
+            "type": "boolean"
+          }
+        }
+      },
       "ReleaseGate": {
         "type": "object",
         "description": "One release gate: the candidate may regress at most\n`max_regression` (absolute difference, e.g. `0.05` = five\npercentage points) versus the baseline, evaluated only once both\nvariants have at least `min_sample` terminal observations.",
@@ -20952,6 +22177,109 @@
             "minimum": 0
           }
         }
+      },
+      "ReleaseGatePreview": {
+        "type": "object",
+        "required": [
+          "release",
+          "observed_at",
+          "scan_limit_per_version",
+          "evaluation"
+        ],
+        "properties": {
+          "evaluation": {
+            "$ref": "#/components/schemas/EvaluationReport"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "release": {
+            "$ref": "#/components/schemas/WorkflowRelease"
+          },
+          "scan_limit_per_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ReleaseInventoryPage": {
+        "type": "object",
+        "required": [
+          "view",
+          "tenant_id",
+          "page_size",
+          "items"
+        ],
+        "properties": {
+          "before": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRelease"
+            }
+          },
+          "next_before": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "page_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "release_state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "search": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "type": "string"
+          },
+          "view": {
+            "type": "string"
+          }
+        }
+      },
+      "ReleaseListResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ReleaseInventoryPage"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRelease"
+            }
+          }
+        ]
       },
       "ReleaseRequest": {
         "type": "object",
@@ -21012,6 +22340,14 @@
             "description": "Sub-tenants that always receive the candidate."
           }
         }
+      },
+      "ReleaseVariant": {
+        "type": "string",
+        "description": "Which variant of a release an instance was routed to.",
+        "enum": [
+          "baseline",
+          "candidate"
+        ]
       },
       "Remediation": {
         "type": "object",
@@ -21595,6 +22931,24 @@
             "description": "Ordered error-specific policies. The first matching rule owns the\nresult even when its budget is exhausted."
           }
         }
+      },
+      "ReviewedTriggerRemoval": {
+        "type": "object",
+        "required": [
+          "expected_created_at",
+          "expected_updated_at"
+        ],
+        "properties": {
+          "expected_created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
       },
       "RotationStrategy": {
         "type": "string",
@@ -22320,6 +23674,25 @@
         "type": "string",
         "format": "uuid"
       },
+      "SequenceImportCounts": {
+        "type": "object",
+        "required": [
+          "created",
+          "existing"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "existing": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "SequenceStatus": {
         "type": "string",
         "description": "Lifecycle status for sequences: Draft → Staging → Production → Unpublished.",
@@ -22377,6 +23750,170 @@
           }
         }
       },
+      "SessionExecutionSummary": {
+        "type": "object",
+        "description": "An associated execution projected without its context or metadata.",
+        "required": [
+          "id",
+          "sequence_id",
+          "tenant_id",
+          "session_id",
+          "namespace",
+          "state",
+          "priority",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "namespace": {
+            "$ref": "#/components/schemas/Namespace"
+          },
+          "priority": {
+            "$ref": "#/components/schemas/Priority"
+          },
+          "sequence_id": {
+            "$ref": "#/components/schemas/SequenceId"
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "$ref": "#/components/schemas/InstanceState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SessionInventoryPage": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "items"
+        ],
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionSummary"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "search": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SessionState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "SessionRunsPage": {
+        "type": "object",
+        "required": [
+          "session_id",
+          "tenant_id",
+          "items"
+        ],
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionExecutionSummary"
+            }
+          },
+          "next_cursor": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InstanceId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "search": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "session_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InstanceState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "SessionRunsResponse": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionRunsPage"
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TaskInstance"
+            }
+          }
+        ]
+      },
       "SessionState": {
         "type": "string",
         "enum": [
@@ -22385,6 +23922,48 @@
           "completed",
           "expired"
         ]
+      },
+      "SessionSummary": {
+        "type": "object",
+        "description": "Stored session metadata for discovery. Shared data is read separately.",
+        "required": [
+          "id",
+          "tenant_id",
+          "session_key",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "session_key": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SessionState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
       },
       "SetDispatchRequest": {
         "type": "object",
@@ -22639,6 +24218,113 @@
           },
           "tenant_id": {
             "type": "string"
+          }
+        }
+      },
+      "StagedMigrationExecutionPreview": {
+        "type": "object",
+        "required": [
+          "instance_id",
+          "continuity_id",
+          "sequence_id",
+          "target_epoch",
+          "target_state"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "instance_id": {
+            "$ref": "#/components/schemas/InstanceId"
+          },
+          "sequence_id": {
+            "$ref": "#/components/schemas/SequenceId"
+          },
+          "target_epoch": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "target_state": {
+            "$ref": "#/components/schemas/InstanceState"
+          }
+        }
+      },
+      "StagedMigrationImportPreview": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "digest",
+          "length",
+          "migration_id",
+          "source_engine_id",
+          "target_runtime_id",
+          "sequence_ids",
+          "instances"
+        ],
+        "properties": {
+          "digest": {
+            "type": "string"
+          },
+          "instances": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StagedMigrationExecutionPreview"
+            }
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "migration_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sequence_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SequenceId"
+            }
+          },
+          "source_engine_id": {
+            "type": "string"
+          },
+          "target_runtime_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "StagedMigrationImportReceipt": {
+        "type": "object",
+        "description": "First completed result for an exact tenant and staged upload.",
+        "required": [
+          "tenant_id",
+          "digest",
+          "length",
+          "completed_at",
+          "result"
+        ],
+        "properties": {
+          "completed_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "digest": {
+            "type": "string"
+          },
+          "length": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "result": {
+            "$ref": "#/components/schemas/MigrationImportResponse"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
           }
         }
       },
@@ -23785,6 +25471,97 @@
           }
         }
       },
+      "TriggerInventoryEntry": {
+        "type": "object",
+        "description": "A trigger catalogue row without credentials, configuration or poll state.",
+        "required": [
+          "slug",
+          "sequence_name",
+          "tenant_id",
+          "namespace",
+          "enabled",
+          "trigger_type",
+          "created_at",
+          "updated_at",
+          "secret_field_present"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "secret_field_present": {
+            "type": "boolean"
+          },
+          "sequence_name": {
+            "type": "string"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "trigger_type": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
+      "TriggerInventoryPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "page_size"
+        ],
+        "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TriggerInventoryEntry"
+            }
+          },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "page_size": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "search": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "TriggerPollState": {
         "type": "object",
         "description": "Runtime state for a polling trigger (`TriggerType::ActivepiecesPoll`).\n\nStored separately from [`TriggerDef`] so the poll loop can persist its\ncursor and failure bookkeeping without rewriting the user-authored\ntrigger definition (avoiding lost-update races with API edits).",
@@ -23825,6 +25602,89 @@
             "format": "date-time"
           }
         }
+      },
+      "TriggerSecretChange": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "value",
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "replace"
+                ]
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "mode"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "clear"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "TriggerSettingsReceipt": {
+        "type": "object",
+        "required": [
+          "updated_at"
+        ],
+        "properties": {
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "TriggerSettingsRequest": {
+        "type": "object",
+        "required": [
+          "expected_created_at",
+          "expected_updated_at"
+        ],
+        "properties": {
+          "config_patch": {},
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "expected_created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expected_updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "secret_change": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/TriggerSecretChange"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "TriggerType": {
         "type": "string",

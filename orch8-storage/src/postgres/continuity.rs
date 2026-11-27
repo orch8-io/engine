@@ -2446,6 +2446,44 @@ impl crate::ContinuityStore for PostgresStorage {
             .await?;
         Ok(())
     }
+    async fn complete_migration_upload(
+        &self,
+        receipt: &orch8_types::migration::StagedMigrationImportReceipt,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO migration_import_receipts (tenant_id,digest,receipt)
+             VALUES ($1,$2,$3) ON CONFLICT (tenant_id,digest) DO NOTHING",
+        )
+        .bind(receipt.tenant_id.as_str())
+        .bind(&receipt.digest)
+        .bind(encode(receipt)?)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM migration_import_chunks WHERE tenant_id=$1 AND digest=$2")
+            .bind(receipt.tenant_id.as_str())
+            .bind(&receipt.digest)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn get_migration_upload_receipt(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+    ) -> Result<Option<orch8_types::migration::StagedMigrationImportReceipt>, StorageError> {
+        let encoded: Option<serde_json::Value> = sqlx::query_scalar(
+            "SELECT receipt FROM migration_import_receipts WHERE tenant_id=$1 AND digest=$2",
+        )
+        .bind(tenant.as_str())
+        .bind(digest)
+        .fetch_optional(&self.pool)
+        .await?;
+        encoded.map(decode).transpose()
+    }
+
     async fn save_live_migration(&self, record: &LiveMigrationRecord) -> Result<(), StorageError> {
         sqlx::query(
             "INSERT INTO live_migrations
