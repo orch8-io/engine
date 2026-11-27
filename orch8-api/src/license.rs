@@ -30,6 +30,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use utoipa::ToSchema;
 
 use crate::AppState;
+use crate::continuity::hex_sha256;
 use crate::error::ApiError;
 
 pub const LICENSE_PREFIX: &str = "o8l1";
@@ -102,6 +103,7 @@ fn flexible_ts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<DateTime<Ut
 #[derive(Debug, Clone, Default)]
 pub struct License {
     payload: Option<LicensePayload>,
+    key_sha256: Option<String>,
     /// Set when a key was configured but failed verification.
     invalid: bool,
 }
@@ -123,11 +125,12 @@ impl License {
         match decode_and_verify(key, public_key) {
             Some(payload) => Self {
                 payload: Some(payload),
+                key_sha256: Some(hex_sha256(key.as_bytes())),
                 invalid: false,
             },
             None => Self {
-                payload: None,
                 invalid: true,
+                ..Self::default()
             },
         }
     }
@@ -153,8 +156,8 @@ impl License {
             Err(error) => {
                 tracing::error!(%error, "license verification key is unusable");
                 Self {
-                    payload: None,
                     invalid: true,
+                    ..Self::default()
                 }
             }
         }
@@ -195,6 +198,7 @@ impl License {
                 Vec::new()
             },
             max_sub_tenants: payload.and_then(|p| p.max_sub_tenants),
+            key_sha256: self.key_sha256.clone(),
         }
     }
 
@@ -269,6 +273,9 @@ pub struct LicenseInfo {
     pub features: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_sub_tenants: Option<u64>,
+    /// Lowercase SHA-256 of the verified token as loaded, without surrounding whitespace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_sha256: Option<String>,
 }
 
 pub fn routes() -> Router<AppState> {
@@ -476,7 +483,8 @@ mod tests {
     #[test]
     fn valid_license_verifies_offline() {
         let (signing, verifying) = keypair();
-        let license = License::verify(&sign(&signing, &payload(30)), &verifying);
+        let token = sign(&signing, &payload(30));
+        let license = License::verify(&format!("  {token}\n"), &verifying);
         let now = Utc::now();
         assert_eq!(license.status(now), LicenseStatus::Licensed);
         assert!(license.has_feature("white_label", now));
@@ -484,6 +492,25 @@ mod tests {
         assert_eq!(info.edition.as_deref(), Some("embedded"));
         assert_eq!(info.licensee.as_deref(), Some("Acme"));
         assert_eq!(info.max_sub_tenants, Some(100));
+        assert_eq!(info.key_sha256, Some(hex_sha256(token.as_bytes())));
+    }
+
+    #[test]
+    fn license_hash_distinguishes_replacements_with_the_same_expiry() {
+        let (signing, verifying) = keypair();
+        let mut claims = payload(30);
+        let before = License::verify(&sign(&signing, &claims), &verifying).info(Utc::now());
+        claims["issued_at"] = serde_json::json!(0);
+        let after = License::verify(&sign(&signing, &claims), &verifying).info(Utc::now());
+        assert_eq!(before.expires_at, after.expires_at);
+        assert!(before.key_sha256.is_some());
+        assert!(after.key_sha256.is_some());
+        assert_ne!(before.key_sha256, after.key_sha256);
+        for key in ["", "invalid"] {
+            let response =
+                serde_json::to_value(License::verify(key, &verifying).info(Utc::now())).unwrap();
+            assert!(response.get("key_sha256").is_none());
+        }
     }
 
     #[test]
