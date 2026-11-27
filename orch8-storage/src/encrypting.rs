@@ -2706,6 +2706,7 @@ passthrough_impl! {
         async fn update_reviewed_cron_schedule(&self, schedule: &orch8_types::cron::CronSchedule, revision: &str) -> Result<Option<orch8_types::cron::CronSchedule>, StorageError>;
         async fn delete_reviewed_cron_schedule(&self, id: Uuid, tenant_id: &orch8_types::ids::TenantId, revision: &str) -> Result<bool, StorageError>;
         async fn claim_due_cron_schedules(&self, now: DateTime<Utc>) -> Result<Vec<orch8_types::cron::CronSchedule>, StorageError>;
+        async fn advance_claimed_cron_schedule(&self, claimed: &orch8_types::cron::CronSchedule, finished_at: DateTime<Utc>, next_fire_at: DateTime<Utc>, skipped: bool) -> Result<bool, StorageError>;
         async fn update_cron_fire_times(&self, id: Uuid, last_triggered_at: DateTime<Utc>, next_fire_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn record_cron_skip(&self, id: Uuid, now: DateTime<Utc>, next_fire_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn active_instance_ids_for_cron(&self, cron_id: Uuid, limit: u32) -> Result<Vec<orch8_types::ids::InstanceId>, StorageError>;

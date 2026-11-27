@@ -158,7 +158,7 @@ pub(super) async fn list_page(
 }
 
 pub(super) async fn update(storage: &SqliteStorage, s: &CronSchedule) -> Result<(), StorageError> {
-    sqlx::query("UPDATE cron_schedules SET cron_expr=?2, timezone=?3, enabled=?4, metadata=?5, next_fire_at=?6, overlap_policy=?7, updated_at=?8 WHERE id=?1")
+    sqlx::query("UPDATE cron_schedules SET cron_expr=?2, timezone=?3, enabled=?4, metadata=?5, next_fire_at=?6, overlap_policy=?7, claimed_until=NULL, updated_at=?8 WHERE id=?1")
         .bind(s.id.to_string())
         .bind(&s.cron_expr)
         .bind(&s.timezone)
@@ -209,7 +209,7 @@ pub(super) async fn update_reviewed(
     let row = sqlx::query(
         "UPDATE cron_schedules
          SET cron_expr=?2, timezone=?3, enabled=?4, metadata=?5, next_fire_at=?6,
-             overlap_policy=?7, updated_at=?8
+             overlap_policy=?7, claimed_until=NULL, updated_at=?8
          WHERE id=?1 RETURNING *",
     )
     .bind(s.id.to_string())
@@ -297,6 +297,35 @@ pub(super) async fn claim_due(
     let schedules = claim_due_inner(&mut conn, &now_str, &lease_until_str).await?;
     conn.commit().await?;
     Ok(schedules)
+}
+
+/// A newer claim advances its timestamp. Configuration writes clear the
+/// lease and recalculate the next fire together.
+pub(super) async fn advance_claimed(
+    storage: &SqliteStorage,
+    claimed: &CronSchedule,
+    finished_at: DateTime<Utc>,
+    next_fire_at: DateTime<Utc>,
+    skipped: bool,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "UPDATE cron_schedules
+         SET last_triggered_at=?5, next_fire_at=?6, claimed_until=NULL, updated_at=?5,
+             skipped_fires=skipped_fires + CASE WHEN ?7 THEN 1 ELSE 0 END,
+             last_skipped_at=CASE WHEN ?7 THEN ?5 ELSE last_skipped_at END
+         WHERE id=?1 AND tenant_id=?2 AND next_fire_at=?3 AND updated_at=?4
+           AND enabled=1 AND claimed_until IS NOT NULL",
+    )
+    .bind(claimed.id.to_string())
+    .bind(claimed.tenant_id.as_str())
+    .bind(claimed.next_fire_at.map(ts))
+    .bind(ts(claimed.updated_at))
+    .bind(ts(finished_at))
+    .bind(ts(next_fire_at))
+    .bind(skipped)
+    .execute(&storage.pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(super) async fn update_fire_times(

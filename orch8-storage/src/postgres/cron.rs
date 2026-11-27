@@ -189,7 +189,7 @@ pub(super) async fn update(store: &PostgresStorage, s: &CronSchedule) -> Result<
     sqlx::query(
         r"UPDATE cron_schedules
           SET cron_expr=$2, timezone=$3, enabled=$4, metadata=$5, next_fire_at=$6,
-              overlap_policy=$7, updated_at=NOW()
+              overlap_policy=$7, claimed_until=NULL, updated_at=NOW()
           WHERE id=$1",
     )
     .bind(s.id)
@@ -244,7 +244,7 @@ pub(super) async fn update_reviewed(
     let row = sqlx::query_as::<_, CronRow>(
         "UPDATE cron_schedules
          SET cron_expr=$2, timezone=$3, enabled=$4, metadata=$5, next_fire_at=$6,
-             overlap_policy=$7, updated_at=NOW()
+             overlap_policy=$7, claimed_until=NULL, updated_at=NOW()
          WHERE id=$1 RETURNING *",
     )
     .bind(s.id)
@@ -322,6 +322,35 @@ pub(super) async fn claim_due(
     .fetch_all(&store.pool)
     .await?;
     Ok(rows.into_iter().map(CronRow::into_schedule).collect())
+}
+
+/// A newer claim advances its timestamp. Configuration writes clear the
+/// lease and recalculate the next fire together.
+pub(super) async fn advance_claimed(
+    store: &PostgresStorage,
+    claimed: &CronSchedule,
+    finished_at: DateTime<Utc>,
+    next_fire_at: DateTime<Utc>,
+    skipped: bool,
+) -> Result<bool, StorageError> {
+    let result = sqlx::query(
+        "UPDATE cron_schedules
+         SET last_triggered_at=$5, next_fire_at=$6, claimed_until=NULL, updated_at=NOW(),
+             skipped_fires=skipped_fires + CASE WHEN $7 THEN 1 ELSE 0 END,
+             last_skipped_at=CASE WHEN $7 THEN $5 ELSE last_skipped_at END
+         WHERE id=$1 AND tenant_id=$2 AND next_fire_at=$3 AND updated_at=$4
+           AND enabled=TRUE AND claimed_until IS NOT NULL",
+    )
+    .bind(claimed.id)
+    .bind(claimed.tenant_id.as_str())
+    .bind(claimed.next_fire_at)
+    .bind(claimed.updated_at)
+    .bind(finished_at)
+    .bind(next_fire_at)
+    .bind(skipped)
+    .execute(&store.pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
 }
 
 pub(super) async fn update_fire_times(
