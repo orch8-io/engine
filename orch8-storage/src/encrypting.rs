@@ -2600,6 +2600,7 @@ passthrough_impl! {
     async fn delete_queue_routing_rule(&self, id: Uuid) -> Result<(), StorageError>;
     async fn enqueue_worker_command(&self, command: &orch8_types::worker::WorkerCommand) -> Result<(), StorageError>;
     async fn list_worker_commands(&self, worker_id: &str) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError>;
+    async fn list_scoped_worker_commands(&self, worker_id: &str, tenant_id: &str) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError>;
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError>;
     async fn list_worker_version_rollouts(&self, tenant_id: Option<&str>) -> Result<Vec<orch8_types::worker::WorkerVersionRollout>, StorageError>;
     async fn stage_worker_version_pin(&self, tenant_id: &str, handler_name: &str, min_version: &str) -> Result<orch8_types::worker::WorkerVersionRollout, StorageError>;

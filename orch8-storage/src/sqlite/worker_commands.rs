@@ -45,11 +45,13 @@ pub(super) async fn enqueue(
 pub(super) async fn list(
     storage: &SqliteStorage,
     worker_id: &str,
+    tenant_id: Option<&str>,
 ) -> Result<Vec<WorkerCommand>, StorageError> {
     let rows = sqlx::query(
-        "SELECT id, worker_id, tenant_id, command, payload, created_at FROM worker_commands WHERE worker_id = ?1 ORDER BY created_at ASC",
+        "SELECT id, worker_id, tenant_id, command, payload, created_at FROM worker_commands WHERE worker_id = ?1 AND (?2 IS NULL OR tenant_id = ?2) ORDER BY created_at ASC",
     )
     .bind(worker_id)
+    .bind(tenant_id)
     .fetch_all(&storage.pool)
     .await?;
     rows.iter().map(row_to_command).collect()

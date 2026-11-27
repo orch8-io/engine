@@ -2533,7 +2533,15 @@ impl crate::WorkerStore for PostgresStorage {
         &self,
         worker_id: &str,
     ) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError> {
-        worker_commands::list(self, worker_id).await
+        worker_commands::list(self, worker_id, None).await
+    }
+
+    async fn list_scoped_worker_commands(
+        &self,
+        worker_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError> {
+        worker_commands::list(self, worker_id, Some(tenant_id)).await
     }
 
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError> {

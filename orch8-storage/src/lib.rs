@@ -2911,6 +2911,17 @@ pub trait WorkerStore: Send + Sync + 'static {
         worker_id: &str,
     ) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError>;
 
+    /// List one tenant's pending commands for an exact worker, oldest first.
+    async fn list_scoped_worker_commands(
+        &self,
+        worker_id: &str,
+        tenant_id: &str,
+    ) -> Result<Vec<orch8_types::worker::WorkerCommand>, StorageError> {
+        let mut commands = self.list_worker_commands(worker_id).await?;
+        commands.retain(|command| command.tenant_id == tenant_id);
+        Ok(commands)
+    }
+
     /// Acknowledge (delete) a delivered command.
     async fn delete_worker_command(&self, id: Uuid) -> Result<(), StorageError>;
 

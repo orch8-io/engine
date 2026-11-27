@@ -544,6 +544,7 @@ async fn register_device_runtime(
 #[derive(Deserialize)]
 struct ListDevicesQuery {
     tenant_id: Option<String>,
+    device_id: Option<String>,
     #[serde(default = "default_limit")]
     limit: u32,
 }
@@ -557,6 +558,43 @@ async fn list_devices(
         .as_ref()
         .map(|axum::Extension(ctx)| ctx.tenant_id.to_string())
         .or(params.tenant_id);
+
+    if let Some(device_id) = params.device_id {
+        let tenant = tenant_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| ApiError::InvalidArgument("Device lookup requires a tenant".into()))?;
+        if device_id.trim().is_empty()
+            || device_id.contains('\0')
+            || device_id.encode_utf16().count() > 512
+        {
+            return Err(ApiError::InvalidArgument("Invalid exact device ID".into()));
+        }
+        let item = state
+            .storage
+            .get_mobile_device(&device_id)
+            .await
+            .map_err(|e| ApiError::from_storage(e, "mobile_device"))?
+            .filter(|device| device.tenant_id == tenant && device.device_id == device_id)
+            .map(|device| {
+                serde_json::json!({
+                    "device_id": device.device_id,
+                    "tenant_id": device.tenant_id,
+                    "platform": device.platform,
+                    "app_version": device.app_version,
+                    "active": device.active,
+                    "last_sync_at": device.last_sync_at,
+                    "registered_at": device.registered_at,
+                    "has_push_token": device.push_token.is_some_and(|token| !token.is_empty()),
+                })
+            });
+        let items: Vec<_> = item.into_iter().collect();
+        return Ok(Json(serde_json::json!({
+            "selection": { "tenant_id": tenant, "device_id": device_id },
+            "total": items.len(),
+            "items": items,
+        })));
+    }
 
     let items = state
         .storage

@@ -104,3 +104,57 @@ async fn enqueue_command_rejects_unknown_command() {
         resp.status()
     );
 }
+
+#[tokio::test]
+async fn inspection_filters_a_shared_worker_without_changing_delivery() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    for tenant in ["alpha", "beta", ""] {
+        let response = client
+            .post(format!("{}/workers/commands", srv.base_url))
+            .json(&json!({"worker_id":"shared", "tenant_id":tenant, "command":"ping"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+    }
+
+    let url = format!("{}/workers/shared/commands", srv.base_url);
+    let delivery: serde_json::Value = client
+        .get(&url)
+        .header("X-Tenant-Id", "alpha")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(delivery.as_array().unwrap().len(), 3);
+
+    for (query, caller, expected) in [("alpha", None, "alpha"), ("beta", Some("alpha"), "alpha")] {
+        let mut request = client.get(&url).query(&[("tenant_id", query)]);
+        if let Some(caller) = caller {
+            request = request.header("X-Tenant-Id", caller);
+        }
+        let page: serde_json::Value = request
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(page.as_array().unwrap().len(), 1);
+        assert_eq!(page[0]["tenant_id"], expected);
+    }
+    let invalid = client
+        .get(&url)
+        .query(&[("tenant_id", "")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
