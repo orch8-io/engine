@@ -1058,6 +1058,8 @@ passthrough_impl! {
             }).transpose()
         }
         async fn clear_migration_chunks(&self, tenant: &TenantId, digest: &str) -> Result<(), StorageError>;
+        async fn complete_migration_upload(&self, receipt: &orch8_types::migration::StagedMigrationImportReceipt) -> Result<(), StorageError>;
+        async fn get_migration_upload_receipt(&self, tenant: &TenantId, digest: &str) -> Result<Option<orch8_types::migration::StagedMigrationImportReceipt>, StorageError>;
         async fn save_live_migration(&self, record: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<(), StorageError> {
             let encrypted = self.encrypt_live_migration(record)?;
             self.inner.save_live_migration(&encrypted).await

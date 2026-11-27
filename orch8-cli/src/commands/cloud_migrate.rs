@@ -38,12 +38,12 @@ use orch8_types::migration::{
     MIGRATION_EXTERNALIZED_DOMAIN, MIGRATION_KV_DOMAIN, MIGRATION_MANIFEST_VERSION,
     MIGRATION_MAX_UPLOAD_BYTES, MIGRATION_METADATA_KEY, MIGRATION_TERMINAL_HISTORY_DOMAIN,
     MigratedInstance, MigratedInstanceState, MigrationCapabilities, MigrationDomainDigests,
-    MigrationImportRequest, MigrationImportResponse, MigrationUploadCommit, TerminalHistoryImport,
-    TerminalInstanceHistory, cron_schedule_digest,
+    MigrationImportRequest, MigrationImportResponse, MigrationUploadCommit,
+    StagedMigrationImportReceipt, TerminalHistoryImport, TerminalInstanceHistory,
+    cron_schedule_digest, target_runtime_id,
 };
 use serde::Serialize;
 use serde_json::json;
-use sha2::{Digest as _, Sha256};
 
 use crate::OutputFormat;
 
@@ -89,6 +89,10 @@ pub struct MigrateToArgs {
     /// Report what would move without fencing or sending anything.
     #[arg(long)]
     pub dry_run: bool,
+    /// Fence source executions and upload batches for separate target import.
+    /// Leaves the source fenced until the migration is resumed.
+    #[arg(long, requires = "to", conflicts_with_all = ["dry_run", "include_terminal_history", "include_cron_schedules"])]
+    pub stage_only: bool,
     /// Copy completed, failed and cancelled runs as read-only history.
     #[arg(long)]
     pub include_terminal_history: bool,
@@ -103,6 +107,11 @@ pub struct MigrationReport {
     pub target: String,
     pub tenant: String,
     pub dry_run: bool,
+    pub stage_only: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub staged_uploads: Vec<StagedUploadReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub staging_error: Option<String>,
     pub sequences_sent: usize,
     pub sequences_created: u64,
     pub migrated: Vec<String>,
@@ -123,6 +132,14 @@ pub struct MigrationReport {
 pub struct Refusal {
     pub instance_id: String,
     pub reason: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StagedUploadReport {
+    pub digest: String,
+    pub length: usize,
+    pub sequences: usize,
+    pub execution_ids: Vec<orch8_types::ids::InstanceId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,6 +208,9 @@ pub async fn run(
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
         OutputFormat::Table => print_report(&report),
     }
+    if report.staging_error.is_some() {
+        bail!("migration staging stopped; resume with the same source, target and migration ID");
+    }
     if !report.refused.is_empty() || !report.cron_refused.is_empty() {
         bail!(
             "{} instance(s) and {} schedule(s) were refused. Re-run to resume",
@@ -204,6 +224,11 @@ pub async fn run(
 #[allow(clippy::too_many_lines)]
 pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Result<MigrationReport> {
     let to = args.to.as_deref().context("--to is required")?;
+    if args.stage_only
+        && (args.dry_run || args.include_terminal_history || args.include_cron_schedules)
+    {
+        bail!("staging only supports in-flight execution and sequence batches");
+    }
     let source = source_path(args.source.as_deref().context("--source is required")?);
     if !std::path::Path::new(&source).is_file() {
         bail!("source SQLite database {source} does not exist");
@@ -271,17 +296,24 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
         tenant: &tenant,
         chunked: capabilities.supports(MIGRATION_CHUNKS_DOMAIN, 1),
     };
+    if args.stage_only && !destination.chunked {
+        bail!("target does not support migration chunk staging");
+    }
 
     let mut report = MigrationReport {
         migration_id: mid.clone(),
         target: base.clone(),
         tenant: tenant.to_string(),
         dry_run: args.dry_run,
+        stage_only: args.stage_only,
         ..MigrationReport::default()
     };
     report
         .warnings
         .push("Audit history and step logs stay on the source".into());
+    if args.stage_only {
+        report.warnings.push("Import staged uploads in report order, then resume this migration without --stage-only. The source keeps staged executions fenced and their signal windows closed until the migration completes.".into());
+    }
 
     // 1. Sequences (all versions of the tenant's sequences).
     let mut sequences = Vec::new();
@@ -298,18 +330,25 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
         }
         offset += PAGE;
     }
-    report.sequences_sent = sequences.len();
+    if !args.stage_only {
+        report.sequences_sent = sequences.len();
+    }
     if !args.dry_run {
         for chunk in sequences.chunks(MAX_SEQUENCES_PER_IMPORT) {
-            let response = destination
-                .send(&MigrationImportRequest {
-                    migration_id,
-                    source_engine_id: source_engine_id.clone(),
-                    sequences: chunk.to_vec(),
-                    instances: Vec::new(),
-                })
-                .await?;
-            report.sequences_created += response.sequences.created;
+            let request = MigrationImportRequest {
+                migration_id,
+                source_engine_id: source_engine_id.clone(),
+                sequences: chunk.to_vec(),
+                instances: Vec::new(),
+            };
+            if args.stage_only {
+                if !stage_for_review(&destination, &request, &mut report).await {
+                    return Ok(report);
+                }
+            } else {
+                let response = destination.send(&request).await?;
+                report.sequences_created += response.sequences.created;
+            }
         }
     }
     let mut history = TerminalHistoryTransfer {
@@ -387,7 +426,7 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
             }
             continue;
         }
-        match fence(
+        let fenced = fence(
             native.as_ref(),
             storage.as_ref(),
             &instance,
@@ -396,8 +435,15 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
             &capabilities,
             &destination,
         )
-        .await?
-        {
+        .await;
+        let fenced = match fenced {
+            Err(error) if args.stage_only => {
+                report.staging_error = Some(error.to_string());
+                return Ok(report);
+            }
+            result => result?,
+        };
+        match fenced {
             Ok(migrated) => {
                 let encoded_bytes = count_encoded_bytes(&migrated)?;
                 if !batch.is_empty()
@@ -412,6 +458,9 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
                         &mut report,
                     )
                     .await?;
+                    if report.staging_error.is_some() {
+                        return Ok(report);
+                    }
                     batch_bytes = 0;
                 }
                 batch_bytes = batch_bytes.saturating_add(encoded_bytes);
@@ -432,6 +481,9 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
                 &mut report,
             )
             .await?;
+            if report.staging_error.is_some() {
+                return Ok(report);
+            }
             batch_bytes = 0;
         }
     }
@@ -444,6 +496,9 @@ pub async fn migrate(args: &MigrateToArgs, global_tenant: Option<&str>) -> Resul
         &mut report,
     )
     .await?;
+    if args.stage_only {
+        return Ok(report);
+    }
     for instance in deferred_history {
         let _ = history.copy_lineage(instance, false, &mut report).await?;
     }
@@ -1051,21 +1106,145 @@ impl MigrationDestination<'_> {
         &self,
         request: &MigrationImportRequest,
     ) -> Result<MigrationImportResponse> {
-        let payload = serde_json::to_vec(request)?;
-        let digest =
-            orch8_types::plugin::WasmArtifactDigest::from_sha256(Sha256::digest(&payload).into());
-        let path = format!("/migrations/uploads/v1/{}", digest.as_str());
-        self.stage_bytes(&path, &payload).await?;
-        send_json(
+        let (digest, upload) = self.upload_batch(request).await?;
+        let committed = send_json(
             self.client,
             self.base,
-            &format!("{path}/commit"),
-            &MigrationUploadCommit {
+            &format!("/migrations/uploads/v1/{}/commit", digest.as_str()),
+            &upload,
+        )
+        .await;
+        match committed {
+            Ok(response) => Ok(response),
+            Err(error) => self
+                .read_chunk_receipt(digest.as_str(), &upload, request)
+                .await
+                .map_err(|receipt_error| {
+                    error.context(format!(
+                        "staged import remains unconfirmed (SHA-256 {}, {} bytes): {receipt_error}",
+                        digest.as_str(),
+                        upload.length
+                    ))
+                }),
+        }
+    }
+
+    async fn upload_batch(
+        &self,
+        request: &MigrationImportRequest,
+    ) -> Result<(
+        orch8_types::plugin::WasmArtifactDigest,
+        MigrationUploadCommit,
+    )> {
+        if count_encoded_bytes(request)? > MIGRATION_MAX_UPLOAD_BYTES {
+            bail!("migration batch exceeds {MIGRATION_MAX_UPLOAD_BYTES} encoded bytes");
+        }
+        let payload = serde_json::to_vec(request)?;
+        let digest = orch8_types::plugin::WasmArtifactDigest::for_bytes(&payload);
+        self.stage_bytes(
+            &format!("/migrations/uploads/v1/{}", digest.as_str()),
+            &payload,
+        )
+        .await?;
+        Ok((
+            digest,
+            MigrationUploadCommit {
                 tenant_id: self.tenant.clone(),
                 length: payload.len(),
             },
-        )
-        .await
+        ))
+    }
+
+    async fn stage_batch(&self, request: &MigrationImportRequest) -> Result<StagedUploadReport> {
+        let (digest, upload) = self.upload_batch(request).await?;
+        let response = self
+            .client
+            .get(format!(
+                "{}/migrations/uploads/v1/{}/verify",
+                self.base,
+                digest.as_str()
+            ))
+            .query(&upload)
+            .send()
+            .await
+            .context("verify the staged migration batch")?;
+        if response.status() != reqwest::StatusCode::NO_CONTENT {
+            bail!(
+                "target did not verify the staged migration batch ({})",
+                response.status()
+            );
+        }
+        Ok(StagedUploadReport {
+            digest: digest.as_str().to_owned(),
+            length: upload.length,
+            sequences: request.sequences.len(),
+            execution_ids: request
+                .instances
+                .iter()
+                .map(|entry| entry.instance.id)
+                .collect(),
+        })
+    }
+
+    async fn read_chunk_receipt(
+        &self,
+        digest: &str,
+        upload: &MigrationUploadCommit,
+        request: &MigrationImportRequest,
+    ) -> Result<MigrationImportResponse> {
+        const MAX_RECEIPT_BYTES: usize = 128 * 1024;
+        let mut response = self
+            .client
+            .get(format!(
+                "{}/migrations/uploads/v1/{digest}/receipt",
+                self.base
+            ))
+            .query(upload)
+            .send()
+            .await
+            .context("read the saved import receipt")?;
+        if response.status() != reqwest::StatusCode::OK {
+            bail!("saved receipt lookup returned HTTP {}", response.status());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.context("read receipt bytes")? {
+            if chunk.len() > MAX_RECEIPT_BYTES - body.len() {
+                bail!("saved import receipt exceeds {MAX_RECEIPT_BYTES} bytes");
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let receipt: StagedMigrationImportReceipt =
+            serde_json::from_slice(&body).context("decode saved import receipt")?;
+        let result = &receipt.result;
+        let entries_match = result.instances.len() == request.instances.len()
+            && request
+                .instances
+                .iter()
+                .zip(&result.instances)
+                .all(|(sent, found)| {
+                    sent.instance.id == found.instance_id
+                        && sent.domain_digests == found.domain_digests
+                        && sent
+                            .continuity
+                            .epoch
+                            .checked_next()
+                            .is_ok_and(|epoch| epoch.get() == found.epoch)
+                });
+        if receipt.tenant_id != upload.tenant_id
+            || receipt.digest != digest
+            || receipt.length != upload.length
+            || result.migration_id != request.migration_id
+            || result.target_runtime_id != target_runtime_id(request.migration_id)
+            || result
+                .sequences
+                .created
+                .checked_add(result.sequences.existing)
+                != Some(request.sequences.len() as u64)
+            || !entries_match
+        {
+            bail!("saved import receipt does not match the submitted batch");
+        }
+        Ok(receipt.result)
     }
     async fn stage_artifact(&self, digest: &str, bytes: &[u8]) -> Result<()> {
         let path = format!("/migrations/uploads/v1/{digest}");
@@ -1134,7 +1313,25 @@ async fn send_json<R: serde::de::DeserializeOwned>(
     serde_json::from_str(&text).context("target returned an unexpected import response")
 }
 
-/// Import the batch, then commit (fence for good) every acknowledged instance.
+async fn stage_for_review(
+    destination: &MigrationDestination<'_>,
+    request: &MigrationImportRequest,
+    report: &mut MigrationReport,
+) -> bool {
+    match destination.stage_batch(request).await {
+        Ok(upload) => {
+            report.sequences_sent += upload.sequences;
+            report.staged_uploads.push(upload);
+            true
+        }
+        Err(error) => {
+            report.staging_error = Some(error.to_string());
+            false
+        }
+    }
+}
+
+/// Stage the batch or import it and finalize acknowledged source executions.
 async fn flush(
     destination: &MigrationDestination<'_>,
     storage: &dyn StorageBackend,
@@ -1152,6 +1349,10 @@ async fn flush(
         sequences: Vec::new(),
         instances: std::mem::take(batch),
     };
+    if report.stage_only {
+        stage_for_review(destination, &request, report).await;
+        return Ok(());
+    }
     let response = destination.send(&request).await?;
     if response.migration_id != migration_id
         || response.target_runtime_id != orch8_types::migration::target_runtime_id(migration_id)
@@ -1240,7 +1441,13 @@ fn print_report(report: &MigrationReport) {
         report.migration_id,
         report.target,
         report.tenant,
-        if report.dry_run { " [dry run]" } else { "" }
+        if report.dry_run {
+            " [dry run]"
+        } else if report.stage_only {
+            " [staged]"
+        } else {
+            ""
+        }
     );
     println!(
         "  sequences:        {} sent, {} created on target",
@@ -1252,6 +1459,19 @@ fn print_report(report: &MigrationReport) {
         if report.dry_run { " (would move)" } else { "" }
     );
     println!("  already moved:    {}", report.already_migrated.len());
+    for (index, upload) in report.staged_uploads.iter().enumerate() {
+        println!(
+            "  upload {}: SHA-256 {} · {} bytes · {} sequences · {} executions",
+            index + 1,
+            upload.digest,
+            upload.length,
+            upload.sequences,
+            upload.execution_ids.len()
+        );
+    }
+    if let Some(error) = &report.staging_error {
+        println!("  staging interrupted: {error}");
+    }
     if !report.history_imported.is_empty() || !report.history_already_present.is_empty() {
         println!(
             "  terminal history: {}{}, {} already present",

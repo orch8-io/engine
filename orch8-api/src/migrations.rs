@@ -277,26 +277,7 @@ pub async fn import(
     tenant_ctx: OptionalTenant,
     Json(request): Json<MigrationImportRequest>,
 ) -> Result<Json<MigrationImportResponse>, ApiError> {
-    if request.instances.len() > MAX_INSTANCES_PER_IMPORT
-        || request.sequences.len() > MAX_SEQUENCES_PER_IMPORT
-    {
-        return Err(ApiError::InvalidArgument(format!(
-            "at most {MAX_INSTANCES_PER_IMPORT} instances and {MAX_SEQUENCES_PER_IMPORT} sequences per import request"
-        )));
-    }
-    if request.source_engine_id.len() > 256 {
-        return Err(ApiError::InvalidArgument(
-            "source_engine_id is too long".into(),
-        ));
-    }
-    // Every record must belong to the caller's tenant.
-    for sequence in &request.sequences {
-        crate::auth::enforce_tenant_create(&tenant_ctx, &sequence.tenant_id)?;
-    }
-    for migrated in &request.instances {
-        crate::auth::enforce_tenant_create(&tenant_ctx, &migrated.instance.tenant_id)?;
-        validate_consistency(migrated)?;
-    }
+    validate_import_request(&tenant_ctx, &request)?;
 
     let mut counts = SequenceImportCounts::default();
     for sequence in &request.sequences {
@@ -334,6 +315,34 @@ pub async fn import(
         sequences: counts,
         instances: results,
     }))
+}
+
+pub(crate) fn validate_import_request(
+    tenant_ctx: &OptionalTenant,
+    request: &MigrationImportRequest,
+) -> Result<(), ApiError> {
+    if request.instances.len() > MAX_INSTANCES_PER_IMPORT
+        || request.sequences.len() > MAX_SEQUENCES_PER_IMPORT
+    {
+        return Err(ApiError::InvalidArgument(format!(
+            "at most {MAX_INSTANCES_PER_IMPORT} instances and {MAX_SEQUENCES_PER_IMPORT} sequences per import request"
+        )));
+    }
+    if request.source_engine_id.len() > 256 {
+        return Err(ApiError::InvalidArgument(
+            "source_engine_id is too long".into(),
+        ));
+    }
+    // Every record must belong to the caller's tenant.
+    for sequence in &request.sequences {
+        crate::auth::enforce_tenant_create(tenant_ctx, &sequence.tenant_id)?;
+    }
+    for migrated in &request.instances {
+        crate::auth::enforce_tenant_create(tenant_ctx, &migrated.instance.tenant_id)?;
+        validate_consistency(migrated)?;
+    }
+
+    Ok(())
 }
 
 async fn import_legacy(
@@ -583,6 +592,9 @@ async fn import_instance(
         .await
         .map_err(|e| storage_error(e, "instance"))?;
     if let Some(existing) = existing {
+        if existing.tenant_id != source.tenant_id {
+            return Err(ApiError::NotFound("instance".into()));
+        }
         match migration_phase(&existing) {
             Some((mid, phase)) if mid == migration && phase == "imported" => {
                 if !check_requested_digests(&existing, digests)? && digests.is_some() {
@@ -748,12 +760,11 @@ async fn import_instance(
     }
 
     // Release: original state (a mid-step `running` resumes as `scheduled`).
-    let (state_after, fire_at) = match source.state {
-        InstanceState::Running | InstanceState::Scheduled => (
-            InstanceState::Scheduled,
-            Some(source.next_fire_at.unwrap_or_else(Utc::now)),
-        ),
-        other => (other, source.next_fire_at),
+    let state_after = imported_state(source.state);
+    let fire_at = if state_after == InstanceState::Scheduled {
+        Some(source.next_fire_at.unwrap_or_else(Utc::now))
+    } else {
+        source.next_fire_at
     };
     storage
         .update_instance_state(id, state_after, fire_at)
@@ -766,4 +777,12 @@ async fn import_instance(
         epoch: epoch.get(),
         domain_digests: digests.cloned(),
     })
+}
+
+pub(crate) fn imported_state(source: InstanceState) -> InstanceState {
+    if source == InstanceState::Running {
+        InstanceState::Scheduled
+    } else {
+        source
+    }
 }

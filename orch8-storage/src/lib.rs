@@ -105,7 +105,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 167;
+pub const STORAGE_SCHEMA_VERSION: u32 = 168;
 
 /// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
 const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
@@ -5918,6 +5918,28 @@ pub trait ContinuityStore: Send + Sync + 'static {
         let _ = (tenant, digest);
         Err(StorageError::Unsupported(
             "chunked migration imports".into(),
+        ))
+    }
+
+    /// Store the first successful receipt and remove staged bytes in one transaction.
+    async fn complete_migration_upload(
+        &self,
+        receipt: &orch8_types::migration::StagedMigrationImportReceipt,
+    ) -> Result<(), StorageError> {
+        let _ = receipt;
+        Err(StorageError::Unsupported(
+            "staged migration import receipts".into(),
+        ))
+    }
+
+    async fn get_migration_upload_receipt(
+        &self,
+        tenant: &TenantId,
+        digest: &str,
+    ) -> Result<Option<orch8_types::migration::StagedMigrationImportReceipt>, StorageError> {
+        let _ = (tenant, digest);
+        Err(StorageError::Unsupported(
+            "staged migration import receipts".into(),
         ))
     }
 

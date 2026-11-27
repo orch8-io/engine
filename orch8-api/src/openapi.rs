@@ -729,6 +729,8 @@ impl Modify for EmbedSecurity {
         crate::receipts::signing_key,
         // Embedded -> remote migration
         crate::migrations::import,
+        crate::migration_chunks::preview,
+        crate::migration_chunks::read_receipt,
         crate::migrations::capabilities,
         crate::migrations::import_terminal_history,
         crate::migrations::import_cron_schedule,
