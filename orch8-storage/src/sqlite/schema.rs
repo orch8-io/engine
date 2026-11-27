@@ -362,6 +362,8 @@ CREATE INDEX IF NOT EXISTS idx_webhook_replay_nonces_expiry
 -- Runtime state for polling triggers (trigger_type = 'activepieces_poll'):
 -- opaque dedupe cursor returned by the sidecar plus failure bookkeeping.
 -- Rows are deleted explicitly alongside their trigger (see triggers::delete).
+CREATE INDEX IF NOT EXISTS idx_triggers_tenant_slug ON triggers (tenant_id, slug COLLATE BINARY);
+
 CREATE TABLE IF NOT EXISTS trigger_poll_state (
     slug TEXT PRIMARY KEY,
     state TEXT NOT NULL DEFAULT 'null',
@@ -535,9 +537,16 @@ CREATE TABLE IF NOT EXISTS telemetry_events (
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     -- Server receive time (Postgres migration 118); `created_at` is the
     -- client-supplied event time and must not drive rollback windows.
-    received_at TEXT
+    received_at TEXT,
+    -- Scope comes from the ingest call. Legacy rows cannot prove their tenant.
+    dashboard_tenant_id TEXT,
+    dashboard_received_at_us INTEGER,
+    dashboard_os_name TEXT,
+    dashboard_is_error INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_telemetry_created_at ON telemetry_events(created_at);
+CREATE INDEX IF NOT EXISTS idx_telemetry_dashboard_scope
+    ON telemetry_events(dashboard_tenant_id, dashboard_received_at_us);
 
 CREATE TABLE IF NOT EXISTS usage_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1823,7 +1832,7 @@ CREATE INDEX IF NOT EXISTS idx_capsule_source_cut_instance
 /// Current bundled schema version. Bump when the `SCHEMA` string above is
 /// edited in a non-idempotent way (e.g. adding a new column whose default
 /// matters for code that reads the column).
-pub(super) const SCHEMA_VERSION: i64 = 88;
+pub(super) const SCHEMA_VERSION: i64 = 89;
 
 pub(super) const WASM_RETIREMENT_TRIGGERS: &str = "
 CREATE TRIGGER IF NOT EXISTS guard_sequence_wasm_artifacts

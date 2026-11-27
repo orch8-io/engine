@@ -13,27 +13,52 @@ use tracing::{debug, error, info, warn};
 
 use orch8_storage::StorageBackend;
 use orch8_types::context::ExecutionContext;
-#[cfg(test)]
-use orch8_types::ids::TenantId;
-use orch8_types::ids::{InstanceId, Namespace};
+use orch8_types::ids::{InstanceId, Namespace, TenantId};
 use orch8_types::instance::{InstanceState, Priority, TaskInstance};
 use orch8_types::trigger::{TriggerDef, TriggerType};
 
-/// A running listener's cancel token plus the config it was started with, so
-/// `sync_triggers` can detect an in-place config edit (same slug, different
-/// `trigger_type`/`config`) and restart the listener instead of leaving it
-/// running against stale configuration.
+/// The running listener and the definition fields it uses for delivery.
 struct ActiveListener {
-    /// Unique per spawned listener task — lets the task deregister itself on
-    /// exit WITHOUT removing a newer registration for the same slug (config
-    /// edit → cancel old → spawn new before the old task notices).
+    /// Unique per spawned listener task, used to deregister its own entry.
     id: uuid::Uuid,
     cancel: CancellationToken,
     trigger_type: TriggerType,
     config: serde_json::Value,
+    tenant_id: TenantId,
+    namespace: String,
+    sequence_name: String,
+    version: Option<i32>,
+    created_at: chrono::DateTime<chrono::Utc>,
     /// When this listener task was spawned (to tell a crash loop from a
     /// listener that ran healthily for a while before exiting).
     started: std::time::Instant,
+}
+
+impl ActiveListener {
+    fn new(id: uuid::Uuid, cancel: CancellationToken, trigger: &TriggerDef) -> Self {
+        Self {
+            id,
+            cancel,
+            trigger_type: trigger.trigger_type.clone(),
+            config: trigger.config.clone(),
+            tenant_id: trigger.tenant_id.clone(),
+            namespace: trigger.namespace.clone(),
+            sequence_name: trigger.sequence_name.clone(),
+            version: trigger.version,
+            created_at: trigger.created_at,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn matches(&self, trigger: &TriggerDef) -> bool {
+        self.trigger_type == trigger.trigger_type
+            && self.config == trigger.config
+            && self.tenant_id == trigger.tenant_id
+            && self.namespace == trigger.namespace
+            && self.sequence_name == trigger.sequence_name
+            && self.version == trigger.version
+            && self.created_at == trigger.created_at
+    }
 }
 
 /// Crash-loop bookkeeping for a slug whose listener keeps exiting on its own.
@@ -116,9 +141,7 @@ pub async fn run_trigger_loop(
     }
 }
 
-/// Spawn a trigger listener that deregisters its slug from `active` when it
-/// exits. The id guard keeps a cancelled OLD task from removing a NEWER
-/// registration for the same slug (config-edit restart race).
+/// Spawn a trigger listener that deregisters its own entry when it exits.
 fn spawn_deregistering_listener<F>(
     listener_tasks: &mut JoinSet<()>,
     active: Arc<RwLock<ActiveTriggers>>,
@@ -158,13 +181,18 @@ fn spawn_deregistering_listener<F>(
                 listener = kind,
                 "trigger listener exited, deregistering"
             );
-            let ran = active.listeners.remove(&slug).map(|l| l.started.elapsed());
+            let Some(listener) = active.listeners.remove(&slug) else {
+                return;
+            };
+            if listener.cancel.is_cancelled() {
+                return;
+            }
             let now = std::time::Instant::now();
             let state = active.restarts.entry(slug.clone()).or_insert(RestartState {
                 count: 0,
                 next_allowed: now,
             });
-            if ran.is_some_and(|r| r >= LISTENER_HEALTHY_RUN) {
+            if listener.started.elapsed() >= LISTENER_HEALTHY_RUN {
                 state.count = 0;
             }
             state.count = state.count.saturating_add(1);
@@ -242,27 +270,26 @@ async fn sync_triggers(
             .map(|t| (t.slug.clone(), t))
             .collect();
 
-        // Stop listeners for triggers that were removed, disabled, or whose
-        // trigger_type/config changed in place — a config edit under the same
-        // slug must restart the listener rather than keep running the old one.
+        // Stop listeners for removed, disabled, or changed definitions.
+        // Listener bodies retain the delivery target they were started with.
         let to_remove: Vec<String> = active
             .listeners
             .iter()
-            .filter(|(slug, existing)| match desired.get(*slug) {
-                None => true,
-                Some(trigger) => {
-                    existing.trigger_type != trigger.trigger_type
-                        || existing.config != trigger.config
-                }
+            .filter(|(slug, existing)| {
+                !existing.cancel.is_cancelled()
+                    && desired
+                        .get(*slug)
+                        .is_none_or(|trigger| !existing.matches(trigger))
             })
             .map(|(slug, _)| slug.clone())
             .collect();
         for slug in to_remove {
-            if let Some(listener) = active.listeners.remove(&slug) {
+            if let Some(listener) = active.listeners.get(&slug) {
                 info!(slug, "stopping trigger listener");
                 listener.cancel.cancel();
             }
-            // A deliberate stop/config edit is a fresh start.
+            // Keep the entry until the task exits so the replacement cannot
+            // consume from the same source while the old listener drains.
             active.restarts.remove(&slug);
         }
         active.restarts.retain(|slug, _| desired.contains_key(slug));
@@ -285,22 +312,14 @@ async fn sync_triggers(
             let listener_id = uuid::Uuid::now_v7();
             active.listeners.insert(
                 slug.clone(),
-                ActiveListener {
-                    id: listener_id,
-                    cancel: child_cancel.clone(),
-                    trigger_type: trigger.trigger_type.clone(),
-                    config: trigger.config.clone(),
-                    started: std::time::Instant::now(),
-                },
+                ActiveListener::new(listener_id, child_cancel.clone(), trigger),
             );
 
             // Every spawned listener deregisters itself on exit: a listener
             // that fails at startup (NATS broker down, watch path missing)
             // must not linger in `active.listeners` — subsequent syncs would
             // see the slug as active and never restart it, leaving the
-            // trigger silently dead until its config is edited. The id guard
-            // keeps a cancelled OLD task from removing a NEWER registration
-            // for the same slug (config-edit restart race).
+            // trigger silently dead until its config is edited.
             macro_rules! spawn_listener {
                 ($run:expr, $kind:literal) => {{
                     spawn_deregistering_listener(
@@ -854,13 +873,11 @@ mod tests {
         let active = Arc::new(RwLock::new(ActiveTriggers {
             listeners: HashMap::from([(
                 "slug-a".to_string(),
-                ActiveListener {
-                    id: listener_id,
-                    cancel: CancellationToken::new(),
-                    trigger_type: TriggerType::ActivepiecesPoll,
-                    config: serde_json::Value::Null,
-                    started: std::time::Instant::now(),
-                },
+                ActiveListener::new(
+                    listener_id,
+                    CancellationToken::new(),
+                    &mk_trigger("slug-a", "seq", TriggerType::ActivepiecesPoll),
+                ),
             )]),
             ..ActiveTriggers::default()
         }));
@@ -938,6 +955,73 @@ mod tests {
         assert!(active.read().await.listeners.contains_key("t-backoff"));
         cancel.cancel();
         listener_tasks.abort_all();
+    }
+
+    #[tokio::test]
+    async fn sync_replaces_a_listener_when_only_its_target_changes() {
+        let storage: Arc<dyn StorageBackend> = Arc::new(SqliteStorage::in_memory().await.unwrap());
+        let mut trigger = mk_trigger("target-change", "seq", TriggerType::ActivepiecesPoll);
+        storage.create_trigger(&trigger).await.unwrap();
+        let cancel = CancellationToken::new();
+        let original_token = cancel.child_token();
+        let original_id = uuid::Uuid::now_v7();
+        let active = Arc::new(RwLock::new(ActiveTriggers {
+            listeners: HashMap::from([(
+                trigger.slug.clone(),
+                ActiveListener::new(original_id, original_token.clone(), &trigger),
+            )]),
+            ..ActiveTriggers::default()
+        }));
+        let mut tasks = JoinSet::new();
+
+        let (allow_drain, draining) = tokio::sync::oneshot::channel();
+        let listener_token = original_token.clone();
+        spawn_deregistering_listener(
+            &mut tasks,
+            Arc::clone(&active),
+            trigger.slug.clone(),
+            original_id,
+            "test",
+            async move {
+                listener_token.cancelled().await;
+                draining.await.unwrap();
+            },
+        );
+
+        // An update that leaves the delivery fields unchanged keeps the listener.
+        storage.update_trigger(&trigger).await.unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut tasks)
+            .await
+            .unwrap();
+        assert!(!original_token.is_cancelled());
+        assert_eq!(active.read().await.listeners[&trigger.slug].id, original_id);
+
+        trigger.version = Some(2);
+        storage.update_trigger(&trigger).await.unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut tasks)
+            .await
+            .unwrap();
+        assert!(original_token.is_cancelled());
+        sync_triggers(&storage, &active, &cancel, &mut tasks)
+            .await
+            .unwrap();
+        assert_eq!(active.read().await.listeners[&trigger.slug].id, original_id);
+        assert_eq!(tasks.len(), 1);
+        allow_drain.send(()).unwrap();
+        tasks.join_next().await.unwrap().unwrap();
+        assert!(active.read().await.restarts.is_empty());
+        sync_triggers(&storage, &active, &cancel, &mut tasks)
+            .await
+            .unwrap();
+        {
+            let current = active.read().await;
+            let replacement = &current.listeners[&trigger.slug];
+            assert_ne!(replacement.id, original_id);
+            assert!(replacement.matches(&trigger));
+        }
+
+        cancel.cancel();
+        stop_listener_tasks(&active, &mut tasks).await;
     }
 
     fn mk_trigger(slug: &str, seq_name: &str, tt: TriggerType) -> TriggerDef {
@@ -1372,6 +1456,10 @@ mod tests {
             token_v1.is_cancelled(),
             "M-8: the old listener must be cancelled when its config changes in place"
         );
+        listener_tasks.join_next().await.unwrap().unwrap();
+        sync_triggers(&storage, &active, &cancel, &mut listener_tasks)
+            .await
+            .unwrap();
         let token_v2 = {
             let active = active.read().await;
             active.listeners.get("t-m8").unwrap().cancel.clone()

@@ -3610,6 +3610,16 @@ impl crate::AdminStore for SqliteStorage {
         triggers::list(self, tenant_id, limit).await
     }
 
+    async fn list_trigger_inventory(
+        &self,
+        tenant: &TenantId,
+        after: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::trigger::TriggerInventoryEntry>, StorageError> {
+        triggers::list_inventory(self, tenant, after, search, limit).await
+    }
+
     async fn list_all_triggers(
         &self,
         tenant_id: Option<&TenantId>,
@@ -4188,6 +4198,12 @@ impl crate::AdminStore for SqliteStorage {
 
 #[async_trait]
 impl crate::TelemetryStore for SqliteStorage {
+    async fn telemetry_dashboard_coverage(
+        &self,
+    ) -> Result<Option<crate::TelemetryDashboardCoverage>, StorageError> {
+        Ok(Some(crate::TelemetryDashboardCoverage::SqliteScopedIngest))
+    }
+
     async fn ingest_telemetry_event(
         &self,
         event_type: &str,
@@ -4280,9 +4296,7 @@ impl crate::TelemetryStore for SqliteStorage {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> Result<Vec<(String, i64)>, StorageError> {
-        Ok(telemetry::query_telemetry_dashboard(
-            self, query_type, tenant_id, start, end,
-        ))
+        telemetry::query_telemetry_dashboard(self, query_type, tenant_id, start, end).await
     }
 
     async fn delete_old_telemetry_events(

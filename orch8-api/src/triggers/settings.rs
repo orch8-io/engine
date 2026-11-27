@@ -1,7 +1,7 @@
 use axum::Extension;
 use axum::extract::{Json, Path, State};
 use chrono::{DateTime, Utc};
-use orch8_types::config::SecretString;
+use orch8_types::{config::SecretString, trigger::TriggerDef};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use utoipa::ToSchema;
@@ -58,48 +58,10 @@ fn merge_config(config: &mut Value, patch: Map<String, Value>) {
     }
 }
 
-#[utoipa::path(patch, path = "/triggers/{slug}/settings", tag = "triggers",
-    params(("slug" = String, Path, description = "Exact trigger slug")),
-    request_body = TriggerSettingsRequest,
-    responses(
-        (status = 200, description = "Stored trigger settings verified", body = TriggerSettingsReceipt),
-        (status = 400, description = "Invalid trigger settings"),
-        (status = 403, description = "Operator capability required"),
-        (status = 404, description = "Trigger not found in the selected tenant"),
-        (status = 409, description = "Trigger was edited or replaced"),
-    )
-)]
-pub(crate) async fn update_trigger_settings(
-    State(state): State<AppState>,
-    tenant: OptionalTenant,
-    admin: OptionalAdmin,
-    principal: Option<Extension<PrincipalContext>>,
-    Path(slug): Path<String>,
-    Json(request): Json<TriggerSettingsRequest>,
-) -> Result<Json<TriggerSettingsReceipt>, ApiError> {
-    if admin.is_none() && !principal_is_operator(principal.as_ref().map(|principal| &principal.0)) {
-        return Err(ApiError::Forbidden(
-            "trigger settings require Operator access".into(),
-        ));
-    }
-    let Some(Extension(tenant)) = tenant else {
-        return Err(ApiError::InvalidArgument(
-            "trigger settings require a tenant".into(),
-        ));
-    };
-    let stale = || ApiError::Conflict("trigger changed; inspect it again before editing".into());
-    let mut trigger = state
-        .storage
-        .get_trigger(Some(&tenant.tenant_id), &slug)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "trigger"))?
-        .filter(|trigger| trigger.tenant_id == tenant.tenant_id && trigger.slug == slug)
-        .ok_or_else(|| ApiError::NotFound("trigger".into()))?;
-    if trigger.created_at != request.expected_created_at
-        || trigger.updated_at != request.expected_updated_at
-    {
-        return Err(stale());
-    }
+fn apply_settings(
+    trigger: &mut TriggerDef,
+    request: TriggerSettingsRequest,
+) -> Result<(), ApiError> {
     if request.enabled.is_none()
         && request.config_patch.is_none()
         && request.secret_change.is_none()
@@ -156,13 +118,60 @@ pub(crate) async fn update_trigger_settings(
             ApiError::InvalidArgument("the resulting trigger configuration is invalid".into())
         })?;
     }
+    Ok(())
+}
+
+#[utoipa::path(patch, path = "/triggers/{slug}/settings", tag = "triggers",
+    params(("slug" = String, Path, description = "Exact trigger slug")),
+    request_body = TriggerSettingsRequest,
+    responses(
+        (status = 200, description = "Stored trigger settings verified", body = TriggerSettingsReceipt),
+        (status = 400, description = "Invalid trigger settings"),
+        (status = 403, description = "Operator capability required"),
+        (status = 404, description = "Trigger not found in the selected tenant"),
+        (status = 409, description = "Trigger was edited or replaced"),
+    )
+)]
+pub(crate) async fn update_trigger_settings(
+    State(state): State<AppState>,
+    tenant: OptionalTenant,
+    admin: OptionalAdmin,
+    principal: Option<Extension<PrincipalContext>>,
+    Path(slug): Path<String>,
+    Json(request): Json<TriggerSettingsRequest>,
+) -> Result<Json<TriggerSettingsReceipt>, ApiError> {
+    if admin.is_none() && !principal_is_operator(principal.as_ref().map(|principal| &principal.0)) {
+        return Err(ApiError::Forbidden(
+            "trigger settings require Operator access".into(),
+        ));
+    }
+    let Some(Extension(tenant)) = tenant else {
+        return Err(ApiError::InvalidArgument(
+            "trigger settings require a tenant".into(),
+        ));
+    };
+    let changed = || ApiError::Conflict("trigger changed; inspect it again before editing".into());
+    let mut trigger = state
+        .storage
+        .get_trigger(Some(&tenant.tenant_id), &slug)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "trigger"))?
+        .filter(|trigger| trigger.tenant_id == tenant.tenant_id && trigger.slug == slug)
+        .ok_or_else(|| ApiError::NotFound("trigger".into()))?;
+    if trigger.created_at != request.expected_created_at
+        || trigger.updated_at != request.expected_updated_at
+    {
+        return Err(changed());
+    }
+    let expected_revision = request.expected_updated_at;
+    apply_settings(&mut trigger, request)?;
     if !state
         .storage
-        .update_trigger_cas(&trigger, request.expected_updated_at)
+        .update_trigger_cas(&trigger, expected_revision)
         .await
         .map_err(|error| ApiError::from_storage(error, "trigger"))?
     {
-        return Err(stale());
+        return Err(changed());
     }
     let uncertain =
         || ApiError::Internal("trigger settings may have changed; inspect again".into());

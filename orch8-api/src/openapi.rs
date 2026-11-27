@@ -1041,6 +1041,8 @@ impl Modify for EmbedSecurity {
         orch8_types::job::JobPage,
         // Triggers
         orch8_types::trigger::TriggerDef,
+        orch8_types::trigger::TriggerInventoryEntry,
+        crate::triggers::TriggerInventoryPage,
         orch8_types::trigger::TriggerType,
         orch8_types::trigger::TriggerPollState,
         crate::triggers::CreateTriggerRequest,

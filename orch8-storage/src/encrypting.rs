@@ -2762,6 +2762,16 @@ passthrough_impl! {
         }
         Ok(triggers)
     }
+    async fn list_trigger_inventory(
+        &self,
+        tenant: &TenantId,
+        after: Option<&str>,
+        search: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::trigger::TriggerInventoryEntry>, StorageError> {
+        self.inner.list_trigger_inventory(tenant, after, search, limit).await
+    }
+
     async fn list_all_triggers(
         &self,
         tenant_id: Option<&orch8_types::ids::TenantId>,
@@ -2965,6 +2975,7 @@ passthrough_impl! {
 
 passthrough_impl! {
     impl crate::TelemetryStore for EncryptingStorage {
+        async fn telemetry_dashboard_coverage(&self) -> Result<Option<crate::TelemetryDashboardCoverage>, StorageError>;
         async fn ingest_telemetry_event(&self, event_type: &str, payload: &str, device_id: &str, os_name: &str, os_version: &str, app_version: &str, sdk_version: &str, tenant_id: &str, created_at: DateTime<Utc>) -> Result<(), StorageError>;
         async fn ingest_telemetry_events_batch(&self, events: &[crate::TelemetryEvent]) -> Result<u64, StorageError>;
         async fn ingest_telemetry_error(&self, error_type: &str, message: &str, stack_trace: Option<&str>, device_id: &str, os_name: &str, os_version: &str, app_version: &str, sdk_version: &str, tenant_id: &str, instance_id: Option<&str>, sequence_name: Option<&str>) -> Result<(), StorageError>;

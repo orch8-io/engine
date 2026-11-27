@@ -3191,6 +3191,37 @@ pub struct RollbackPolicyUpdate<'a> {
     pub min_samples: Option<i32>,
 }
 
+#[derive(sqlx::FromRow)]
+struct TriggerInventoryRow {
+    slug: String,
+    sequence_name: String,
+    version: Option<i32>,
+    tenant_id: String,
+    namespace: String,
+    enabled: bool,
+    trigger_type: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    secret_field_present: bool,
+}
+
+impl From<TriggerInventoryRow> for orch8_types::trigger::TriggerInventoryEntry {
+    fn from(row: TriggerInventoryRow) -> Self {
+        Self {
+            slug: row.slug,
+            sequence_name: row.sequence_name,
+            version: row.version,
+            tenant_id: TenantId::unchecked(row.tenant_id),
+            namespace: row.namespace,
+            enabled: row.enabled,
+            trigger_type: row.trigger_type,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            secret_field_present: row.secret_field_present,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait AdminStore: Send + Sync + 'static {
@@ -3274,6 +3305,17 @@ pub trait AdminStore: Send + Sync + 'static {
         tenant_id: Option<&TenantId>,
         limit: u32,
     ) -> Result<Vec<TriggerDef>, StorageError>;
+
+    /// Page one tenant's trigger metadata in UTF-8 slug order.
+    async fn list_trigger_inventory(
+        &self,
+        _tenant: &TenantId,
+        _after: Option<&str>,
+        _search: Option<&str>,
+        _limit: u32,
+    ) -> Result<Vec<orch8_types::trigger::TriggerInventoryEntry>, StorageError> {
+        Err(StorageError::Unsupported("paged trigger inventory".into()))
+    }
 
     /// List every trigger for runtime reconciliation. Unlike the public API
     /// list operation, this must not silently cap the result because omitted
@@ -3804,9 +3846,23 @@ pub trait AdminStore: Send + Sync + 'static {
 // Sub-trait 9: TelemetryStore
 // ============================================================================
 
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelemetryDashboardCoverage {
+    SqliteScopedIngest,
+    PostgresRetainedEvents,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait TelemetryStore: Send + Sync + 'static {
+    /// Coverage the backend can qualify after a successful dashboard read.
+    async fn telemetry_dashboard_coverage(
+        &self,
+    ) -> Result<Option<TelemetryDashboardCoverage>, StorageError> {
+        Ok(None)
+    }
+
     async fn ingest_telemetry_event(
         &self,
         event_type: &str,

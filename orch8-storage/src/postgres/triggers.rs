@@ -94,6 +94,31 @@ pub(super) async fn list(
         .collect::<Result<Vec<_>, _>>()
 }
 
+pub(super) async fn list_inventory(
+    store: &PostgresStorage,
+    tenant: &TenantId,
+    after: Option<&str>,
+    search: Option<&str>,
+    limit: u32,
+) -> Result<Vec<orch8_types::trigger::TriggerInventoryEntry>, StorageError> {
+    let rows = sqlx::query_as::<_, crate::TriggerInventoryRow>(
+        r#"SELECT slug, sequence_name, version, tenant_id, namespace, enabled, trigger_type,
+                  created_at, updated_at, secret IS NOT NULL AS secret_field_present
+                  FROM triggers
+                  WHERE tenant_id = $1 AND slug COLLATE "C" > $2
+                  AND ($3::text IS NULL OR strpos(slug, $3) > 0 OR strpos(sequence_name, $3) > 0
+                       OR strpos(namespace, $3) > 0 OR strpos(trigger_type, $3) > 0)
+                  ORDER BY slug COLLATE "C" LIMIT $4"#,
+    )
+    .bind(tenant.as_str())
+    .bind(after.unwrap_or_default())
+    .bind(search)
+    .bind(i64::from(limit.min(201)))
+    .fetch_all(&store.pool)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
 pub(super) async fn list_all(
     store: &PostgresStorage,
     tenant_id: Option<&TenantId>,

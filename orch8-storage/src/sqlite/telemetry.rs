@@ -16,7 +16,7 @@ pub(super) async fn ingest_telemetry_event(
     event_type: &str,
     payload: &str,
     _device_id: &str,
-    _os_name: &str,
+    os_name: &str,
     _os_version: &str,
     _app_version: &str,
     _sdk_version: &str,
@@ -33,13 +33,19 @@ pub(super) async fn ingest_telemetry_event(
         }
         Err(_) => payload.to_string(),
     };
+    let received_at = Utc::now();
     sqlx::query(
-        "INSERT INTO telemetry_events (event_type, payload, created_at, received_at) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO telemetry_events (event_type, payload, created_at, received_at,
+            dashboard_tenant_id, dashboard_received_at_us, dashboard_os_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
     )
     .bind(event_type)
     .bind(&enriched)
     .bind(created_at.to_rfc3339())
-    .bind(Utc::now().to_rfc3339())
+    .bind(received_at.to_rfc3339())
+    .bind(tenant_id)
+    .bind(received_at.timestamp_micros())
+    .bind(os_name)
     .execute(storage.pool())
     .await?;
     Ok(())
@@ -124,12 +130,14 @@ pub(super) async fn ingest_telemetry_events_batch(
         return Ok(0);
     }
     let mut total = 0u64;
-    // SQLite has a variable limit of 999 by default; 4 params per row -> batch <= 249.
-    for chunk in events.chunks(249) {
+    // Keep each 7-parameter row within SQLite's legacy 999-parameter limit.
+    for chunk in events.chunks(142) {
         let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
-            "INSERT INTO telemetry_events (event_type, payload, created_at, received_at) ",
+            "INSERT INTO telemetry_events (event_type, payload, created_at, received_at,
+                dashboard_tenant_id, dashboard_received_at_us, dashboard_os_name) ",
         );
-        let received_at = Utc::now().to_rfc3339();
+        let received_at = Utc::now();
+        let received_at_text = received_at.to_rfc3339();
         qb.push_values(chunk, |mut b, event| {
             let enriched = match serde_json::from_str::<serde_json::Value>(&event.payload) {
                 Ok(mut v) => {
@@ -144,7 +152,10 @@ pub(super) async fn ingest_telemetry_events_batch(
             b.push_bind(&event.event_type);
             b.push_bind(enriched);
             b.push_bind(event.created_at.to_rfc3339());
-            b.push_bind(received_at.clone());
+            b.push_bind(received_at_text.clone());
+            b.push_bind(&event.tenant_id);
+            b.push_bind(received_at.timestamp_micros());
+            b.push_bind(&event.os_name);
         });
         let result = qb.build().execute(storage.pool()).await?;
         total += result.rows_affected();
@@ -173,26 +184,63 @@ pub(super) async fn ingest_telemetry_error(
         "sequence_name": sequence_name,
         "tenant_id": tenant_id,
     });
+    let received_at = Utc::now();
     sqlx::query(
-        "INSERT INTO telemetry_events (event_type, payload, created_at, received_at) VALUES (?1, ?2, ?3, ?3)",
+        "INSERT INTO telemetry_events (event_type, payload, created_at, received_at,
+            dashboard_tenant_id, dashboard_received_at_us, dashboard_is_error)
+         VALUES (?1, ?2, ?3, ?3, ?4, ?5, 1)",
     )
     .bind("InstanceFailed")
     .bind(payload.to_string())
-    .bind(chrono::Utc::now().to_rfc3339())
+    .bind(received_at.to_rfc3339())
+    .bind(tenant_id)
+    .bind(received_at.timestamp_micros())
     .execute(storage.pool())
     .await?;
     Ok(())
 }
 
-pub(super) fn query_telemetry_dashboard(
-    _storage: &SqliteStorage,
-    _query_type: &str,
-    _tenant_id: &str,
-    _start: DateTime<Utc>,
-    _end: DateTime<Utc>,
-) -> Vec<(String, i64)> {
-    // Dashboard queries are server-side (Postgres) only.
-    Vec::new()
+pub(super) async fn query_telemetry_dashboard(
+    storage: &SqliteStorage,
+    query_type: &str,
+    tenant_id: &str,
+    start: DateTime<Utc>,
+    end: DateTime<Utc>,
+) -> Result<Vec<(String, i64)>, StorageError> {
+    let (event_type, dimension_path, is_error) = match query_type {
+        "sync_completed_versions" => (Some("SyncCompleted"), Some("$.version"), false),
+        "error_rate_per_sequence" => (None, Some("$.sequence_name"), true),
+        "top_failing_steps" => (Some("InstanceFailed"), Some("$.step_name"), false),
+        "device_os_breakdown" => (None, None, false),
+        _ => return Ok(Vec::new()),
+    };
+
+    let rows = sqlx::query_as(
+        r"WITH dimensions AS (
+            SELECT CASE
+                WHEN ?6 IS NULL THEN dashboard_os_name
+                WHEN json_valid(payload) THEN CASE json_type(payload, ?6)
+                    WHEN 'null' THEN NULL
+                    WHEN 'text' THEN json_extract(payload, ?6)
+                    ELSE payload -> ?6
+                END
+            END AS dimension
+            FROM telemetry_events
+            WHERE dashboard_tenant_id = ?1 AND dashboard_received_at_us BETWEEN ?2 AND ?3
+              AND dashboard_is_error = ?4 AND (?5 IS NULL OR event_type = ?5)
+         )
+         SELECT COALESCE(dimension, 'unknown'), COUNT(*) AS count
+         FROM dimensions GROUP BY dimension ORDER BY count DESC, dimension LIMIT 50",
+    )
+    .bind(tenant_id)
+    .bind(start.timestamp_micros())
+    .bind(end.timestamp_micros())
+    .bind(is_error)
+    .bind(event_type)
+    .bind(dimension_path)
+    .fetch_all(storage.pool())
+    .await?;
+    Ok(rows)
 }
 
 pub(super) async fn delete_old_telemetry_events(
@@ -210,4 +258,113 @@ pub(super) async fn delete_old_telemetry_events(
     .execute(storage.pool())
     .await?;
     Ok(result.rows_affected())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::TelemetryStore as _;
+
+    #[tokio::test]
+    async fn mobile_dashboard_aggregates_trusted_scope_and_receive_time() {
+        let store = SqliteStorage::in_memory().await.unwrap();
+        let start = Utc::now() - chrono::TimeDelta::seconds(1);
+        let client_time = start - chrono::TimeDelta::days(30);
+        store
+            .ingest_telemetry_event(
+                "SyncCompleted",
+                r#"{"version":"1.2","tenant_id":"foreign"}"#,
+                "device",
+                "iOS",
+                "17",
+                "1",
+                "1",
+                "reviewed",
+                client_time,
+            )
+            .await
+            .unwrap();
+        store
+            .ingest_telemetry_events_batch(&[
+                crate::TelemetryEvent {
+                    event_type: "InstanceFailed".into(),
+                    payload: r#"{"step_name":"read"}"#.into(),
+                    device_id: "device".into(),
+                    os_name: "Android".into(),
+                    os_version: "14".into(),
+                    app_version: "1".into(),
+                    sdk_version: "1".into(),
+                    tenant_id: "reviewed".into(),
+                    created_at: client_time,
+                },
+                crate::TelemetryEvent {
+                    event_type: "SyncCompleted".into(),
+                    payload: r#"{"version":"foreign","tenant_id":"reviewed"}"#.into(),
+                    device_id: "foreign".into(),
+                    os_name: "foreign".into(),
+                    os_version: "1".into(),
+                    app_version: "1".into(),
+                    sdk_version: "1".into(),
+                    tenant_id: "foreign".into(),
+                    created_at: client_time,
+                },
+            ])
+            .await
+            .unwrap();
+        store
+            .ingest_telemetry_error(
+                "fault",
+                "message",
+                None,
+                "device",
+                "iOS",
+                "17",
+                "1",
+                "1",
+                "reviewed",
+                None,
+                Some("checkout"),
+            )
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"INSERT INTO telemetry_events (event_type, payload, received_at)
+            VALUES ('SyncCompleted', '{"tenant_id":"reviewed","version":"legacy"}', ?1)"#,
+        )
+        .bind(Utc::now().to_rfc3339())
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let end = Utc::now() + chrono::TimeDelta::seconds(1);
+        for (query, expected) in [
+            ("sync_completed_versions", vec![("1.2".into(), 1)]),
+            ("error_rate_per_sequence", vec![("checkout".into(), 1)]),
+            ("top_failing_steps", vec![("read".into(), 1)]),
+            (
+                "device_os_breakdown",
+                vec![("Android".into(), 1), ("iOS".into(), 1)],
+            ),
+        ] {
+            assert_eq!(
+                store
+                    .query_telemetry_dashboard(query, "reviewed", start, end)
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
+        assert!(
+            store
+                .query_telemetry_dashboard(
+                    "sync_completed_versions",
+                    "reviewed",
+                    client_time,
+                    start
+                )
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

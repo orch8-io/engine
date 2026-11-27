@@ -239,6 +239,29 @@ async fn list_cron_filters_by_tenant() {
     assert_eq!(list.len(), 0);
 }
 
+async fn create_disabled_cron(
+    client: &reqwest::Client,
+    base_url: &str,
+    tenant: &str,
+    sequence_id: Uuid,
+) -> serde_json::Value {
+    client
+        .post(format!("{base_url}/cron"))
+        .header("X-Tenant-Id", tenant)
+        .json(&json!({
+            "tenant_id": tenant, "namespace": "ns1", "sequence_id": sequence_id,
+            "cron_expr": "0 * * * *", "enabled": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
 #[tokio::test]
 async fn paged_cron_inventory_resumes_after_one_scoped_row() {
     let srv = spawn_test_server().await;
@@ -246,21 +269,7 @@ async fn paged_cron_inventory_resumes_after_one_scoped_row() {
     let seq_id = create_sequence(&client, &srv.base_url).await;
     let mut ids = Vec::new();
     for _ in 0..3 {
-        let created: serde_json::Value = client
-            .post(format!("{}/cron", srv.base_url))
-            .header("X-Tenant-Id", "t1")
-            .json(
-                &json!({"tenant_id":"t1","namespace":"ns1","sequence_id":seq_id,
-                "cron_expr":"0 * * * *","enabled":false}),
-            )
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
+        let created = create_disabled_cron(&client, &srv.base_url, "t1", seq_id).await;
         ids.push(created["id"].as_str().unwrap().to_owned());
     }
     ids.sort_unstable_by(|a, b| b.cmp(a));
@@ -276,18 +285,7 @@ async fn paged_cron_inventory_resumes_after_one_scoped_row() {
         .unwrap()
         .error_for_status()
         .unwrap();
-    client
-        .post(format!("{}/cron", srv.base_url))
-        .header("X-Tenant-Id", "t2")
-        .json(
-            &json!({"tenant_id":"t2","namespace":"ns1","sequence_id":foreign_id,
-            "cron_expr":"0 * * * *","enabled":false}),
-        )
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    create_disabled_cron(&client, &srv.base_url, "t2", foreign_id).await;
     let mut cursor = None;
     for (index, id) in ids.iter().enumerate() {
         let mut request = client

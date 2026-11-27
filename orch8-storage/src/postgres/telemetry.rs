@@ -31,6 +31,14 @@ fn payload_json(payload: &str) -> serde_json::Value {
 
 #[async_trait]
 impl crate::TelemetryStore for PostgresStorage {
+    async fn telemetry_dashboard_coverage(
+        &self,
+    ) -> Result<Option<crate::TelemetryDashboardCoverage>, StorageError> {
+        Ok(Some(
+            crate::TelemetryDashboardCoverage::PostgresRetainedEvents,
+        ))
+    }
+
     async fn ingest_telemetry_event(
         &self,
         event_type: &str,
