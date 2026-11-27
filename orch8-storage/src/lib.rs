@@ -5601,6 +5601,46 @@ pub trait ContinuityStore: Send + Sync + 'static {
 
     async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError>;
 
+    /// Append the report and its provenance atomically while the observed owner and epoch match.
+    /// Returns false on a changed owner or a concurrent append.
+    async fn commit_residency_evaluation(
+        &self,
+        record: &orch8_types::continuity_advanced::RecordedResidencyEvaluation,
+    ) -> Result<bool, StorageError> {
+        let _ = record;
+        Err(StorageError::Unsupported(
+            "stored residency evaluations".into(),
+        ))
+    }
+
+    async fn get_residency_evaluation(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        evaluation_id: uuid::Uuid,
+    ) -> Result<Option<orch8_types::continuity_advanced::RecordedResidencyEvaluation>, StorageError>
+    {
+        let _ = (tenant_id, continuity_id, evaluation_id);
+        Err(StorageError::Unsupported(
+            "stored residency evaluations".into(),
+        ))
+    }
+
+    /// Page typed residency reports newest first using a scoped evaluation ID as the cursor.
+    async fn list_residency_evaluations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        before: Option<uuid::Uuid>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::ResidencyEvaluationSummary>, StorageError>
+    {
+        let _ = (tenant_id, continuity_id, before, limit);
+        Err(StorageError::Unsupported(
+            "stored residency evaluation inventory".into(),
+        ))
+    }
+
     /// Return the current chain head without loading the retained history.
     async fn get_provenance_head(
         &self,
@@ -5831,6 +5871,18 @@ pub trait ContinuityStore: Send + Sync + 'static {
         tenant_id: &TenantId,
         id: orch8_types::continuity_advanced::MigrationPlanId,
     ) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError>;
+
+    /// Newest saved plans first. The cursor is a plan ID in the same tenant and execution.
+    async fn list_live_migrations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: orch8_types::continuity::ContinuityId,
+        before: Option<orch8_types::continuity_advanced::MigrationPlanId>,
+        limit: u32,
+    ) -> Result<Vec<orch8_types::continuity_advanced::LiveMigrationSummary>, StorageError> {
+        let _ = (tenant_id, continuity_id, before, limit);
+        Err(StorageError::Unsupported("live migration history".into()))
+    }
 
     async fn cas_live_migration(
         &self,

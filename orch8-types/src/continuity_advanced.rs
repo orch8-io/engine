@@ -233,6 +233,44 @@ pub enum LiveMigrationState {
     RolledBack,
 }
 
+/// Stored migration metadata for browsing plans without their captured execution data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct LiveMigrationSummary {
+    pub id: MigrationPlanId,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub from_sequence_id: SequenceId,
+    pub from_version: i32,
+    pub to_sequence_id: SequenceId,
+    pub to_version: i32,
+    pub disposition: MigrationDisposition,
+    pub state: LiveMigrationState,
+    pub created_at: DateTime<Utc>,
+    pub rollback_expires_at: DateTime<Utc>,
+}
+
+impl LiveMigrationSummary {
+    pub fn from_plan(
+        plan: LiveMigrationPlan,
+        state: LiveMigrationState,
+        rollback_expires_at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            id: plan.id,
+            tenant_id: plan.tenant_id,
+            continuity_id: plan.continuity_id,
+            from_sequence_id: plan.from_sequence_id,
+            from_version: plan.from_version,
+            to_sequence_id: plan.to_sequence_id,
+            to_version: plan.to_version,
+            disposition: plan.disposition,
+            state,
+            created_at: plan.created_at,
+            rollback_expires_at,
+        }
+    }
+}
+
 /// Signed, encrypted pre-migration capsule retained for independent recovery.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MigrationRollbackCapsule {
@@ -640,6 +678,38 @@ pub struct DisclosureResult {
     pub disclosed: serde_json::Value,
     pub withheld_sha256: Vec<String>,
     pub classification: DataClassification,
+}
+
+/// Metadata for finding a stored residency evaluation without reading its full evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ResidencyEvaluationSummary {
+    pub id: Uuid,
+    pub tenant_id: TenantId,
+    pub continuity_id: ContinuityId,
+    pub epoch: crate::continuity::ExecutionEpoch,
+    pub created_at: DateTime<Utc>,
+    pub destination_runtime_id: RuntimeId,
+    pub classification: DataClassification,
+    pub operation: String,
+    pub outcome: EvidenceStatus,
+}
+
+/// Runtime evidence and request binding retained with an attributed residency evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ResidencyEvaluationDetails {
+    pub request_sha256: String,
+    pub source_runtime_id: RuntimeId,
+    pub destination_runtime_id: RuntimeId,
+    pub allowed_regions: std::collections::BTreeSet<String>,
+    pub evidence: ResidencyEvidence,
+}
+
+/// Stored as one provenance row, so the report and chain entry commit together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RecordedResidencyEvaluation {
+    #[serde(flatten)]
+    pub provenance: crate::continuity::ProvenanceEntry,
+    pub residency_evaluation: ResidencyEvaluationDetails,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

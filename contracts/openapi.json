@@ -1345,6 +1345,70 @@
         }
       }
     },
+    "/continuity/executions/{id}/migrations": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "List saved migration plans newest first, without captured context or checkpoints.",
+        "operationId": "list_live_migrations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Cursor from the previous page",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/MigrationPlanId"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Plans per page (1–50, default 25)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved migration plans",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveMigrationPage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Continuity execution not found"
+          }
+        }
+      }
+    },
     "/continuity/executions/{id}/placement": {
       "post": {
         "tags": [
@@ -1391,6 +1455,181 @@
         "responses": {
           "default": {
             "description": "Continuity API response"
+          }
+        }
+      }
+    },
+    "/continuity/executions/{id}/residency-evaluations": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Browse saved residency evaluations for a continuity execution.",
+        "operationId": "list_residency_evaluations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Cursor returned by the prior page",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Evaluations per page (1–50, default 25)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Saved evaluation summaries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResidencyEvaluationPage"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Continuity execution not found"
+          }
+        }
+      }
+    },
+    "/continuity/executions/{id}/residency-evaluations/{evaluation_id}": {
+      "get": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Retrieve one saved evaluation and its provenance entry.",
+        "operationId": "read_residency_evaluation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "name": "evaluation_id",
+            "in": "path",
+            "description": "Evaluation ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "tenant_id",
+            "in": "query",
+            "description": "Tenant ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored evaluation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordedResidencyEvaluation"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Evaluation not found"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "continuity"
+        ],
+        "summary": "Record a residency evaluation once for an ID and retrieve the original result on replay.",
+        "operationId": "record_residency_evaluation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Continuity execution ID",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/ContinuityId"
+            }
+          },
+          {
+            "name": "evaluation_id",
+            "in": "path",
+            "description": "Caller-generated evaluation ID",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordResidencyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored evaluation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecordedResidencyEvaluation"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Continuity execution not found"
+          },
+          "409": {
+            "description": "The reviewed owner changed or the ID is unavailable for this request"
           }
         }
       }
@@ -15409,6 +15648,15 @@
           }
         }
       },
+      "EvidenceStatus": {
+        "type": "string",
+        "enum": [
+          "pass",
+          "fail",
+          "unknown",
+          "inconclusive"
+        ]
+      },
       "ExecutionContext": {
         "type": "object",
         "description": "Multi-section execution context with different permission semantics.",
@@ -17355,6 +17603,102 @@
           "invalid"
         ]
       },
+      "LiveMigrationPage": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "continuity_id",
+          "plans"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "next_before": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MigrationPlanId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LiveMigrationSummary"
+            }
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "LiveMigrationState": {
+        "type": "string",
+        "enum": [
+          "planned",
+          "applied",
+          "rolled_back"
+        ]
+      },
+      "LiveMigrationSummary": {
+        "type": "object",
+        "description": "Stored migration metadata for browsing plans without their captured execution data.",
+        "required": [
+          "id",
+          "tenant_id",
+          "continuity_id",
+          "from_sequence_id",
+          "from_version",
+          "to_sequence_id",
+          "to_version",
+          "disposition",
+          "state",
+          "created_at",
+          "rollback_expires_at"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "disposition": {
+            "$ref": "#/components/schemas/MigrationDisposition"
+          },
+          "from_sequence_id": {
+            "$ref": "#/components/schemas/SequenceId"
+          },
+          "from_version": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "$ref": "#/components/schemas/MigrationPlanId"
+          },
+          "rollback_expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "$ref": "#/components/schemas/LiveMigrationState"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          },
+          "to_sequence_id": {
+            "$ref": "#/components/schemas/SequenceId"
+          },
+          "to_version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "LlmNarrative": {
         "type": "object",
         "description": "Optional LLM narrative. The prompt contained only redacted evidence.",
@@ -17579,6 +17923,19 @@
             "minimum": 0
           }
         }
+      },
+      "MigrationDisposition": {
+        "type": "string",
+        "enum": [
+          "pin",
+          "automatic",
+          "approval_required",
+          "incompatible"
+        ]
+      },
+      "MigrationPlanId": {
+        "type": "string",
+        "format": "uuid"
       },
       "MockDef": {
         "allOf": [
@@ -19114,6 +19471,73 @@
           }
         }
       },
+      "ProvenanceEntry": {
+        "type": "object",
+        "description": "One immutable link in the execution provenance hash chain.",
+        "required": [
+          "id",
+          "continuity_id",
+          "tenant_id",
+          "epoch",
+          "kind",
+          "payload_sha256",
+          "entry_sha256",
+          "created_at"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "entry_sha256": {
+            "type": "string"
+          },
+          "epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "payload_sha256": {
+            "type": "string"
+          },
+          "previous_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "redacted_summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Bounded operator-safe description. Never contains raw event payloads."
+          },
+          "signature": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "signing_key_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
       "PruneCheckpointsRequest": {
         "type": "object",
         "required": [
@@ -19587,6 +20011,63 @@
           }
         }
       },
+      "RecordResidencyRequest": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "expected_owner_runtime_id",
+          "expected_epoch",
+          "destination_runtime_id",
+          "classification",
+          "operation"
+        ],
+        "properties": {
+          "allowed_regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "classification": {
+            "$ref": "#/components/schemas/DataClassification"
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "expected_epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "expected_owner_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "RecordedResidencyEvaluation": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ProvenanceEntry"
+          },
+          {
+            "type": "object",
+            "required": [
+              "residency_evaluation"
+            ],
+            "properties": {
+              "residency_evaluation": {
+                "$ref": "#/components/schemas/ResidencyEvaluationDetails"
+              }
+            }
+          }
+        ],
+        "description": "Stored as one provenance row, so the report and chain entry commit together."
+      },
       "RedeliverPreview": {
         "type": "object",
         "description": "What a redelivery *would* send, without sending it. Secrets never\nappear: the signature is described, not exposed.",
@@ -19956,6 +20437,151 @@
             "propertyNames": {
               "type": "string"
             }
+          }
+        }
+      },
+      "ResidencyEvaluationDetails": {
+        "type": "object",
+        "description": "Runtime evidence and request binding retained with an attributed residency evaluation.",
+        "required": [
+          "request_sha256",
+          "source_runtime_id",
+          "destination_runtime_id",
+          "allowed_regions",
+          "evidence"
+        ],
+        "properties": {
+          "allowed_regions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "evidence": {
+            "$ref": "#/components/schemas/ResidencyEvidence"
+          },
+          "request_sha256": {
+            "type": "string"
+          },
+          "source_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          }
+        }
+      },
+      "ResidencyEvaluationPage": {
+        "type": "object",
+        "required": [
+          "tenant_id",
+          "continuity_id",
+          "evaluations"
+        ],
+        "properties": {
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "evaluations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResidencyEvaluationSummary"
+            }
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "ResidencyEvaluationSummary": {
+        "type": "object",
+        "description": "Metadata for finding a stored residency evaluation without reading its full evidence.",
+        "required": [
+          "id",
+          "tenant_id",
+          "continuity_id",
+          "epoch",
+          "created_at",
+          "destination_runtime_id",
+          "classification",
+          "operation",
+          "outcome"
+        ],
+        "properties": {
+          "classification": {
+            "$ref": "#/components/schemas/DataClassification"
+          },
+          "continuity_id": {
+            "$ref": "#/components/schemas/ContinuityId"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "destination_runtime_id": {
+            "$ref": "#/components/schemas/RuntimeId"
+          },
+          "epoch": {
+            "$ref": "#/components/schemas/ExecutionEpoch"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/EvidenceStatus"
+          },
+          "tenant_id": {
+            "$ref": "#/components/schemas/TenantId"
+          }
+        }
+      },
+      "ResidencyEvidence": {
+        "type": "object",
+        "required": [
+          "classification",
+          "operation",
+          "outcome",
+          "finding_codes"
+        ],
+        "properties": {
+          "classification": {
+            "$ref": "#/components/schemas/DataClassification"
+          },
+          "destination_region": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "finding_codes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "operation": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/EvidenceStatus"
+          },
+          "source_region": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },

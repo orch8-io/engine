@@ -13,7 +13,7 @@ use orch8_types::continuity::{
 };
 use orch8_types::continuity_advanced::{
     CompensationRunId, CompensationRunRecord, FederationEnvelope, LiveMigrationRecord,
-    MigrationPlanId,
+    LiveMigrationSummary, MigrationPlanId, RecordedResidencyEvaluation, ResidencyEvaluationSummary,
 };
 use orch8_types::dlq::DlqIncidentReproduction;
 use orch8_types::error::StorageError;
@@ -1699,6 +1699,93 @@ impl crate::ContinuityStore for SqliteStorage {
         Ok(())
     }
 
+    async fn commit_residency_evaluation(
+        &self,
+        record: &RecordedResidencyEvaluation,
+    ) -> Result<bool, StorageError> {
+        let entry = &record.provenance;
+        let result = sqlx::query(
+            "INSERT INTO provenance_entries
+             (id, continuity_id, tenant_id, epoch, entry_sha256, previous_sha256, record, created_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+             FROM continuity_executions
+             WHERE continuity_id = ?2 AND tenant_id = ?3 AND epoch = ?4 AND owner_runtime_id = ?9
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(entry.id.to_string())
+        .bind(entry.continuity_id.to_string())
+        .bind(entry.tenant_id.as_str())
+        .bind(to_i64(entry.epoch.get(), "provenance epoch")?)
+        .bind(&entry.entry_sha256)
+        .bind(&entry.previous_sha256)
+        .bind(encode(record)?)
+        .bind(entry.created_at.to_rfc3339())
+        .bind(record.residency_evaluation.source_runtime_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn get_residency_evaluation(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        evaluation_id: uuid::Uuid,
+    ) -> Result<Option<RecordedResidencyEvaluation>, StorageError> {
+        let row = sqlx::query(
+            "SELECT record FROM provenance_entries WHERE tenant_id = ? AND continuity_id = ? AND id = ?
+             AND json_type(record, '$.residency_evaluation') = 'object'",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.to_string())
+        .bind(evaluation_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| decode(row.get("record"))).transpose()
+    }
+
+    async fn list_residency_evaluations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        before: Option<uuid::Uuid>,
+        limit: u32,
+    ) -> Result<Vec<ResidencyEvaluationSummary>, StorageError> {
+        let cursor_filter = if before.is_some() {
+            "AND (created_at, id) < (
+                SELECT created_at, id FROM provenance_entries
+                WHERE tenant_id = ?1 AND continuity_id = ?2 AND id = ?3
+                  AND json_type(record, '$.residency_evaluation') = 'object'
+             )"
+        } else {
+            "AND ?3 IS NULL"
+        };
+        let query = format!(
+            "SELECT json_object(
+                 'id', id, 'tenant_id', tenant_id, 'continuity_id', continuity_id,
+                 'epoch', epoch, 'created_at', created_at,
+                 'destination_runtime_id', json_extract(record, '$.residency_evaluation.destination_runtime_id'),
+                 'classification', json_extract(record, '$.residency_evaluation.evidence.classification'),
+                 'operation', json_extract(record, '$.residency_evaluation.evidence.operation'),
+                 'outcome', json_extract(record, '$.residency_evaluation.evidence.outcome')
+             ) AS summary
+             FROM provenance_entries
+             WHERE tenant_id = ?1 AND continuity_id = ?2 AND json_type(record, '$.residency_evaluation') = 'object'
+             {cursor_filter}
+             ORDER BY created_at DESC, id DESC LIMIT ?4"
+        );
+        let rows = sqlx::query(sqlx::AssertSqlSafe(query))
+            .bind(tenant_id.as_str())
+            .bind(continuity_id.to_string())
+            .bind(before.map(|id| id.to_string()))
+            .bind(i64::from(limit))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| decode(&row.try_get::<String, _>("summary")?))
+            .collect()
+    }
+
     async fn get_provenance_head(
         &self,
         tenant_id: &TenantId,
@@ -2317,6 +2404,45 @@ impl crate::ContinuityStore for SqliteStorage {
             .map_err(|error| StorageError::Query(error.to_string()))?;
         row.map(|row| decode(&row.get::<String, _>("record")))
             .transpose()
+    }
+
+    async fn list_live_migrations(
+        &self,
+        tenant_id: &TenantId,
+        continuity_id: ContinuityId,
+        before: Option<MigrationPlanId>,
+        limit: u32,
+    ) -> Result<Vec<LiveMigrationSummary>, StorageError> {
+        let rows = sqlx::query(
+            "SELECT json_extract(record, '$.plan') AS plan, state,
+                    json_extract(record, '$.rollback_expires_at') AS expires
+             FROM live_migrations
+             WHERE tenant_id=?1 AND continuity_id=?2
+               AND (?3 IS NULL OR (created_at, id) < (
+                 SELECT created_at, id FROM live_migrations
+                 WHERE tenant_id=?1 AND continuity_id=?2 AND id=?3
+               ))
+             ORDER BY created_at DESC, id DESC LIMIT ?4",
+        )
+        .bind(tenant_id.as_str())
+        .bind(continuity_id.to_string())
+        .bind(before.map(|id| id.to_string()))
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let plan = decode(&row.try_get::<String, _>("plan")?)?;
+                let state =
+                    serde_json::from_value(serde_json::Value::String(row.try_get("state")?))
+                        .map_err(StorageError::Serialization)?;
+                let expires = row
+                    .try_get::<String, _>("expires")?
+                    .parse::<DateTime<Utc>>()
+                    .map_err(|error| StorageError::Query(error.to_string()))?;
+                Ok(LiveMigrationSummary::from_plan(plan, state, expires))
+            })
+            .collect()
     }
 
     async fn cas_live_migration(

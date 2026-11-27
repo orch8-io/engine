@@ -598,6 +598,9 @@ fault_impl! {
         async fn load_effect_guards(&self, tenant: &orch8_types::ids::TenantId, continuity: orch8_types::continuity::ContinuityId, sequence: orch8_types::ids::SequenceId, version: i32, kind: Option<orch8_types::continuity::EffectKind>) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError>;
         async fn list_instance_effect_receipts(&self, tenant_id: &TenantId, instance_id: InstanceId, limit: u32) -> Result<Vec<EffectReceipt>, StorageError>;
         async fn append_provenance(&self, entry: &ProvenanceEntry) -> Result<(), StorageError>;
+        async fn commit_residency_evaluation(&self, record: &orch8_types::continuity_advanced::RecordedResidencyEvaluation) -> Result<bool, StorageError>;
+        async fn get_residency_evaluation(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, evaluation_id: uuid::Uuid) -> Result<Option<orch8_types::continuity_advanced::RecordedResidencyEvaluation>, StorageError>;
+        async fn list_residency_evaluations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<uuid::Uuid>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::ResidencyEvaluationSummary>, StorageError>;
         async fn get_provenance_head(&self, tenant_id: &TenantId, continuity_id: ContinuityId) -> Result<Option<ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &TenantId, continuity_id: ContinuityId, limit: u32) -> Result<Vec<ProvenanceEntry>, StorageError>;
         async fn accept_federation_message(&self, envelope: &FederationEnvelope, envelope_sha256: &str, accepted_at: DateTime<Utc>) -> Result<bool, StorageError>;
@@ -630,6 +633,7 @@ fault_impl! {
         async fn clear_migration_chunks(&self, tenant: &TenantId, digest: &str) -> Result<(), StorageError>;
         async fn save_live_migration(&self, record: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<(), StorageError>;
         async fn get_live_migration(&self, tenant_id: &TenantId, id: orch8_types::continuity_advanced::MigrationPlanId) -> Result<Option<orch8_types::continuity_advanced::LiveMigrationRecord>, StorageError>;
+        async fn list_live_migrations(&self, tenant_id: &TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<orch8_types::continuity_advanced::MigrationPlanId>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::LiveMigrationSummary>, StorageError>;
         async fn cas_live_migration(&self, tenant_id: &TenantId, expected: &orch8_types::continuity_advanced::LiveMigrationRecord, next: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<bool, StorageError>;
         async fn commit_live_migration_transition(&self, transition: LiveMigrationTransition<'_>) -> Result<bool, StorageError>;
         async fn begin_compensation_run(&self, start: crate::CompensationStart<'_>) -> Result<bool, StorageError>;

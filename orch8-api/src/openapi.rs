@@ -242,6 +242,26 @@ pub(crate) const CONTINUITY_OPERATIONS: &[(&str, HttpMethod, &str)] = &[
         "extract_test_fixture",
     ),
     (
+        "/continuity/executions/{id}/migrations",
+        HttpMethod::Get,
+        "list_live_migrations",
+    ),
+    (
+        "/continuity/executions/{id}/residency-evaluations",
+        HttpMethod::Get,
+        "list_residency_evaluations",
+    ),
+    (
+        "/continuity/executions/{id}/residency-evaluations/{evaluation_id}",
+        HttpMethod::Get,
+        "read_residency_evaluation",
+    ),
+    (
+        "/continuity/executions/{id}/residency-evaluations/{evaluation_id}",
+        HttpMethod::Put,
+        "record_residency_evaluation",
+    ),
+    (
         "/continuity/migrations/plan",
         HttpMethod::Post,
         "plan_live_migration",
@@ -456,6 +476,10 @@ impl Modify for EmbedSecurity {
         (url = "/", description = "Unversioned (deprecated, backward-compat)"),
     ),
     paths(
+        crate::continuity::residency::list,
+        crate::continuity::residency::read,
+        crate::continuity::residency::record,
+        crate::continuity::list_live_migrations,
         crate::continuity::create_compensation_run,
         crate::continuity::get_active_compensation_run,
         // Health

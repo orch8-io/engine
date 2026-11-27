@@ -10,6 +10,7 @@ mod effect_resolution;
 pub(crate) mod effect_review;
 use delegation::claim_delegation;
 mod local_recovery;
+pub(crate) mod residency;
 
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -46,10 +47,10 @@ use orch8_types::continuity_advanced::{
     ExtractedEffectMock, ExtractedTestFixture, FaultInjection, FaultKind, FaultLabRun,
     FaultProfile, FederationEnvelope, FederationPeerId, ForkEffectMode, GeneratedScenario,
     InvariantId, InvariantResult, InvariantRule, LiveMigrationPlan, LiveMigrationRecord,
-    LiveMigrationState, MigrationDisposition, MigrationPlanId, OptimizationRecommendation,
-    OwnershipTransition, ProviderCandidate, RecommendationId, ReservationState, ResidencyEvidence,
-    ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId, StateTransform, WhatIfRunRecord,
-    WhatIfScenario, WorkflowInvariant,
+    LiveMigrationState, LiveMigrationSummary, MigrationDisposition, MigrationPlanId,
+    OptimizationRecommendation, OwnershipTransition, ProviderCandidate, RecommendationId,
+    ReservationState, ResidencyEvidence, ReviewerCapabilities, ScenarioGenerationSpec, ScenarioId,
+    StateTransform, WhatIfRunRecord, WhatIfScenario, WorkflowInvariant,
 };
 use orch8_types::ids::{InstanceId, SequenceId, TenantId};
 use orch8_types::release::{InFlightPolicy, ReleaseDecision, ReleaseState, WorkflowRelease};
@@ -187,6 +188,10 @@ pub fn routes() -> Router<AppState> {
             "/continuity/executions/{id}/test-fixture",
             post(extract_test_fixture),
         )
+        .route(
+            "/continuity/executions/{id}/migrations",
+            get(list_live_migrations),
+        )
         .route("/continuity/migrations/plan", post(plan_live_migration))
         .route("/continuity/migrations/{id}", get(get_live_migration))
         .route(
@@ -244,6 +249,14 @@ pub fn routes() -> Router<AppState> {
             post(evaluate_stored_gate),
         )
         .route("/continuity/residency/evaluate", post(evaluate_residency))
+        .route(
+            "/continuity/executions/{id}/residency-evaluations",
+            get(residency::list),
+        )
+        .route(
+            "/continuity/executions/{id}/residency-evaluations/{evaluation_id}",
+            get(residency::read).put(residency::record),
+        )
         .route("/continuity/disclosure/minimize", post(minimize_disclosure))
         .route("/continuity/federation/verify", post(verify_federation))
         .route("/continuity/federation/sign", post(sign_federation))
@@ -4947,6 +4960,69 @@ async fn plan_live_migration(
     Ok(Json(plan))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct LiveMigrationListQuery {
+    tenant_id: String,
+    before: Option<MigrationPlanId>,
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct LiveMigrationPage {
+    tenant_id: TenantId,
+    continuity_id: ContinuityId,
+    plans: Vec<LiveMigrationSummary>,
+    next_before: Option<MigrationPlanId>,
+}
+
+/// List saved migration plans newest first, without captured context or checkpoints.
+#[utoipa::path(
+    get,
+    path = "/continuity/executions/{id}/migrations",
+    tag = "continuity",
+    params(
+        ("id" = ContinuityId, Path, description = "Continuity execution ID"),
+        ("tenant_id" = String, Query, description = "Tenant ID"),
+        ("before" = Option<MigrationPlanId>, Query, description = "Cursor from the previous page"),
+        ("limit" = Option<u32>, Query, description = "Plans per page (1–50, default 25)")
+    ),
+    responses(
+        (status = 200, description = "Saved migration plans", body = LiveMigrationPage),
+        (status = 404, description = "Continuity execution not found")
+    )
+)]
+pub(crate) async fn list_live_migrations(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Path(id): Path<ContinuityId>,
+    Query(query): Query<LiveMigrationListQuery>,
+) -> Result<Json<LiveMigrationPage>, ApiError> {
+    let tenant_id = query_tenant(&tenant_ctx, &query.tenant_id)?;
+    state
+        .storage
+        .get_continuity_execution(&tenant_id, id)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
+        .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
+    let limit = query.limit.unwrap_or(25).clamp(1, 50);
+    let mut plans = state
+        .storage
+        .list_live_migrations(&tenant_id, id, query.before, limit + 1)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "migration plans"))?;
+    let mut next_before = None;
+    if plans.len() > limit as usize {
+        plans.truncate(limit as usize);
+        next_before = plans.last().map(|plan| plan.id);
+    }
+    Ok(Json(LiveMigrationPage {
+        tenant_id,
+        continuity_id: id,
+        plans,
+        next_before,
+    }))
+}
+
 async fn get_live_migration(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
@@ -6716,32 +6792,15 @@ async fn evaluate_residency(
         .await
         .map_err(|error| ApiError::from_storage(error, "continuity execution"))?
         .ok_or_else(|| ApiError::NotFound("continuity execution".into()))?;
-    let residency_now = Utc::now();
-    let source_capability = state
-        .storage
-        .get_runtime_capability(&tenant_id, execution.owner_runtime_id, residency_now)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
-    let destination_capability = state
-        .storage
-        .get_runtime_capability(&tenant_id, body.destination_runtime_id, residency_now)
-        .await
-        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
-    let source = source_capability.as_ref();
-    let destination = destination_capability.as_ref();
-    let single_region = |capability: Option<&RuntimeCapabilities>| {
-        capability.and_then(|capability| {
-            (capability.regions.len() == 1).then(|| capability.regions[0].clone())
-        })
-    };
-    let report = orch8_engine::continuity_advanced::evaluate_residency(
+    let report = residency_report(
+        &state,
+        &execution,
         body.classification,
         body.operation,
-        single_region(source),
-        single_region(destination),
+        body.destination_runtime_id,
         &body.allowed_regions,
-        destination.map(|capability| capability.trust),
-    );
+    )
+    .await?;
     append_provenance_boundary(
         &state,
         &execution,
@@ -6751,6 +6810,46 @@ async fn evaluate_residency(
     )
     .await?;
     Ok(Json(report))
+}
+
+async fn residency_report(
+    state: &AppState,
+    execution: &ContinuityExecution,
+    classification: DataClassification,
+    operation: String,
+    destination_runtime_id: RuntimeId,
+    allowed_regions: &std::collections::BTreeSet<String>,
+) -> Result<ResidencyEvidence, ApiError> {
+    let residency_now = Utc::now();
+    let source_capability = state
+        .storage
+        .get_runtime_capability(
+            &execution.tenant_id,
+            execution.owner_runtime_id,
+            residency_now,
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let destination_capability = state
+        .storage
+        .get_runtime_capability(&execution.tenant_id, destination_runtime_id, residency_now)
+        .await
+        .map_err(|error| ApiError::from_storage(error, "runtime capabilities"))?;
+    let source = source_capability.as_ref();
+    let destination = destination_capability.as_ref();
+    let single_region = |capability: Option<&RuntimeCapabilities>| {
+        capability.and_then(|capability| {
+            (capability.regions.len() == 1).then(|| capability.regions[0].clone())
+        })
+    };
+    Ok(orch8_engine::continuity_advanced::evaluate_residency(
+        classification,
+        operation,
+        single_region(source),
+        single_region(destination),
+        allowed_regions,
+        destination.map(|capability| capability.trust),
+    ))
 }
 
 #[derive(Debug, Deserialize)]

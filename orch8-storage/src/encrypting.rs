@@ -990,6 +990,9 @@ passthrough_impl! {
         async fn export_effect_attempts(&self, owner: &orch8_types::continuity::ContinuityExecution) -> Result<(Vec<orch8_types::continuity::CapsuleEffectBinding>, Vec<orch8_types::ids::BlockId>), StorageError>;
         async fn load_effect_guards(&self, tenant: &orch8_types::ids::TenantId, continuity: orch8_types::continuity::ContinuityId, sequence: orch8_types::ids::SequenceId, version: i32, kind: Option<orch8_types::continuity::EffectKind>) -> Result<Vec<orch8_types::continuity_advanced::WorkflowInvariant>, StorageError>;
         async fn append_provenance(&self, entry: &orch8_types::continuity::ProvenanceEntry) -> Result<(), StorageError>;
+        async fn commit_residency_evaluation(&self, record: &orch8_types::continuity_advanced::RecordedResidencyEvaluation) -> Result<bool, StorageError>;
+        async fn get_residency_evaluation(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, evaluation_id: uuid::Uuid) -> Result<Option<orch8_types::continuity_advanced::RecordedResidencyEvaluation>, StorageError>;
+        async fn list_residency_evaluations(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<uuid::Uuid>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::ResidencyEvaluationSummary>, StorageError>;
         async fn get_provenance_head(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId) -> Result<Option<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn list_provenance(&self, tenant_id: &orch8_types::ids::TenantId, continuity_id: orch8_types::continuity::ContinuityId, limit: u32) -> Result<Vec<orch8_types::continuity::ProvenanceEntry>, StorageError>;
         async fn accept_federation_message(&self, envelope: &orch8_types::continuity_advanced::FederationEnvelope, envelope_sha256: &str, accepted_at: chrono::DateTime<chrono::Utc>) -> Result<bool, StorageError>;
@@ -1061,6 +1064,7 @@ passthrough_impl! {
                 .map(|record| self.decrypt_live_migration(record))
                 .transpose()
         }
+        async fn list_live_migrations(&self, tenant_id: &TenantId, continuity_id: orch8_types::continuity::ContinuityId, before: Option<orch8_types::continuity_advanced::MigrationPlanId>, limit: u32) -> Result<Vec<orch8_types::continuity_advanced::LiveMigrationSummary>, StorageError>;
         async fn cas_live_migration(&self, tenant_id: &orch8_types::ids::TenantId, expected: &orch8_types::continuity_advanced::LiveMigrationRecord, next: &orch8_types::continuity_advanced::LiveMigrationRecord) -> Result<bool, StorageError> {
             let encrypted_expected = self.encrypt_live_migration(expected)?;
             let encrypted_next = self.encrypt_live_migration(next)?;

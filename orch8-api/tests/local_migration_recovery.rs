@@ -281,3 +281,138 @@ orch8_storage::backend_test!(artifacts = true, async fn migration_planning_repor
         assert_eq!(storage.get_continuity_execution(&owner.tenant_id,owner.continuity_id).await.unwrap().unwrap(),owner,"planning must not change authority");
     }
 });
+
+orch8_storage::backend_test!(artifacts = true, async fn saved_migration_history_pages_scoped_summaries(b) {
+    let storage = b.storage.clone();
+    let (record, owner) = fixture(storage.as_ref()).await;
+    let mut older = record.clone();
+    older.plan.id = MigrationPlanId::from_uuid(uuid::Uuid::nil());
+    // An equal timestamp exercises the UUID tie-break under both storage backends.
+    storage.save_live_migration(&older).await.unwrap();
+    let server = spawn_test_server_on(storage, None).await;
+    let endpoint = format!(
+        "{}/continuity/executions/{}/migrations",
+        server.v1_url(), owner.continuity_id,
+    );
+    let client = reqwest::Client::new();
+    let tenant = owner.tenant_id.as_str();
+    let response = client.get(&endpoint).query(&[("tenant_id", tenant), ("limit", "1")])
+        .send().await.unwrap().error_for_status().unwrap();
+    let first: serde_json::Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(first["tenant_id"], tenant);
+    assert_eq!(first["continuity_id"], owner.continuity_id.to_string());
+    assert_eq!(first["plans"].as_array().unwrap().len(), 1);
+    assert_eq!(first["plans"][0]["id"], record.plan.id.to_string());
+    assert_eq!(first["plans"][0]["state"], "planned");
+    assert_eq!(first["next_before"], record.plan.id.to_string());
+    let row = first["plans"][0].as_object().unwrap();
+    assert_eq!(row.len(), 11);
+    for private in ["source_context", "source_checkpoint", "transforms", "rollback_capsule"] {
+        assert!(!row.contains_key(private));
+    }
+    let cursor = first["next_before"].as_str().unwrap();
+    let response = client.get(&endpoint).query(&[("tenant_id", tenant), ("limit", "1"), ("before", cursor)])
+        .send().await.unwrap().error_for_status().unwrap();
+    let second: serde_json::Value = serde_json::from_str(&response.text().await.unwrap()).unwrap();
+    assert_eq!(second["plans"].as_array().unwrap().len(), 1);
+    assert_eq!(second["plans"][0]["id"], older.plan.id.to_string());
+    assert!(second["next_before"].is_null());
+    let foreign = client.get(&endpoint).query(&[("tenant_id", "another-tenant")])
+        .send().await.unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+});
+
+orch8_storage::backend_test!(artifacts = true, async fn recorded_residency_survives_concurrent_retry_and_scoped_lookup(b) {
+    let storage = b.storage.clone();
+    let (_, owner) = fixture(storage.as_ref()).await;
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let id = uuid::Uuid::new_v4();
+    let endpoint = format!("{}/continuity/executions/{}/residency-evaluations/{id}", server.v1_url(), owner.continuity_id);
+    let client = reqwest::Client::new();
+    let destination = RuntimeId::new();
+    let mut input = json!({
+        "tenant_id": owner.tenant_id,
+        "expected_owner_runtime_id": owner.owner_runtime_id,
+        "expected_epoch": owner.epoch,
+        "destination_runtime_id": destination,
+        "classification": "restricted",
+        "operation": "backup_export",
+        "allowed_regions": ["region-a"]
+    });
+    let (left, right) = tokio::join!(
+        client.put(&endpoint).json(&input).send(),
+        client.put(&endpoint).json(&input).send(),
+    );
+    let body = async |response: reqwest::Response| {
+        serde_json::from_str::<serde_json::Value>(&response.error_for_status().unwrap().text().await.unwrap()).unwrap()
+    };
+    let left = body(left.unwrap()).await;
+    assert_eq!(left, body(right.unwrap()).await);
+    assert_eq!(left["id"], id.to_string());
+    assert_eq!(left["residency_evaluation"]["evidence"]["outcome"], "fail");
+    assert_eq!(left["residency_evaluation"]["allowed_regions"], json!(["region-a"]));
+    let scope = [("tenant_id", owner.tenant_id.as_str())];
+    assert_eq!(left, body(client.get(&endpoint).query(&scope).send().await.unwrap()).await);
+    let chain = storage.list_provenance(&owner.tenant_id, owner.continuity_id, 10).await.unwrap();
+    assert_eq!(chain.len(), 1);
+    assert_eq!(chain[0].id, id);
+    assert_eq!(client.get(&endpoint).query(&[("tenant_id", "foreign")]).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+    input["operation"] = json!("logging");
+    assert_eq!(client.put(&endpoint).json(&input).send().await.unwrap().status(), StatusCode::CONFLICT);
+    input["expected_owner_runtime_id"] = json!(RuntimeId::new());
+    let new_id = uuid::Uuid::new_v4();
+    let new_endpoint = endpoint.replace(&id.to_string(), &new_id.to_string());
+    assert_eq!(client.put(&new_endpoint).json(&input).send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(client.get(&new_endpoint).query(&scope).send().await.unwrap().status(), StatusCode::NOT_FOUND);
+});
+
+orch8_storage::backend_test!(artifacts = true, async fn residency_history_pages_typed_summaries_only(b) {
+    let storage = b.storage.clone();
+    let (_, owner) = fixture(storage.as_ref()).await;
+    let server = spawn_test_server_on(storage.clone(), None).await;
+    let endpoint = format!("{}/continuity/executions/{}/residency-evaluations", server.v1_url(), owner.continuity_id);
+    let client = reqwest::Client::new();
+    let tenant = owner.tenant_id.as_str();
+    let scope = [("tenant_id", tenant), ("limit", "1")];
+    let body = async |response: reqwest::Response| {
+        serde_json::from_str::<serde_json::Value>(&response.error_for_status().unwrap().text().await.unwrap()).unwrap()
+    };
+    let empty = body(client.get(&endpoint).query(&scope).send().await.unwrap()).await;
+    assert_eq!(empty["evaluations"], json!([]));
+    assert!(empty["next_before"].is_null());
+
+    let old = uuid::Uuid::from_u128(1).to_string();
+    let newer = uuid::Uuid::from_u128(2).to_string();
+    let mut input = json!({
+        "tenant_id": tenant, "expected_owner_runtime_id": owner.owner_runtime_id,
+        "expected_epoch": owner.epoch, "destination_runtime_id": RuntimeId::new(),
+        "classification": "restricted", "operation": "backup_export", "allowed_regions": ["test-region"]
+    });
+    for id in [&old, &newer] {
+        let response = client.put(format!("{endpoint}/{id}")).json(&input).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{}", response.text().await.unwrap());
+        input["operation"] = json!("logging");
+    }
+    input["continuity_id"] = json!(owner.continuity_id);
+    let legacy = client.post(format!("{}/continuity/residency/evaluate", server.v1_url()))
+        .json(&input).send().await.unwrap();
+    assert_eq!(legacy.status(), StatusCode::OK);
+    let chain = storage.list_provenance(&owner.tenant_id, owner.continuity_id, 10).await.unwrap();
+    assert_eq!(chain.len(), 3);
+
+    let first = body(client.get(&endpoint).query(&scope).send().await.unwrap()).await;
+    assert_eq!(first["next_before"], newer);
+    assert_eq!(first["evaluations"][0]["id"], newer);
+    assert_eq!(first["evaluations"][0]["operation"], "logging");
+    assert_eq!(first["evaluations"][0]["outcome"], "fail");
+    assert_eq!(first["evaluations"][0].as_object().unwrap().len(), 9);
+    let second = body(client.get(&endpoint).query(&scope).query(&[("before", &newer)])
+        .send().await.unwrap()).await;
+    assert_eq!(second["evaluations"][0]["id"], old);
+    assert!(second["next_before"].is_null());
+    let foreign = client.get(&endpoint).query(&[("tenant_id", "foreign")]).send().await.unwrap();
+    assert_eq!(foreign.status(), StatusCode::NOT_FOUND);
+    let excluded = body(client.get(&endpoint).query(&scope).query(&[("before", chain[2].id.to_string())])
+        .send().await.unwrap()).await;
+    assert_eq!(excluded["evaluations"], json!([]));
+});

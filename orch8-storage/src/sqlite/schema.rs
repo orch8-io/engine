@@ -1257,6 +1257,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_provenance_chain_predecessor
     ON provenance_entries(tenant_id, continuity_id, COALESCE(previous_sha256, ''));
 CREATE INDEX IF NOT EXISTS idx_provenance_chain_predecessor_lookup
     ON provenance_entries(tenant_id, continuity_id, previous_sha256);
+CREATE INDEX IF NOT EXISTS idx_residency_evaluation_inventory
+    ON provenance_entries (tenant_id, continuity_id, created_at DESC, id DESC)
+    WHERE json_type(record, '$.residency_evaluation') = 'object';
 
 CREATE TABLE IF NOT EXISTS incident_reproductions (
     id TEXT PRIMARY KEY,
