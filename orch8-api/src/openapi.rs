@@ -702,6 +702,7 @@ impl Modify for EmbedSecurity {
         crate::cluster::drain_node,
         // Sessions
         crate::sessions::create_session,
+        crate::sessions::list_sessions,
         crate::sessions::get_session,
         crate::sessions::get_session_by_key,
         crate::sessions::update_session_data,
@@ -948,6 +949,11 @@ impl Modify for EmbedSecurity {
         // Session
         orch8_types::session::Session,
         orch8_types::session::SessionState,
+        orch8_types::session::SessionSummary,
+        crate::sessions::SessionInventoryPage,
+        crate::sessions::SessionRunsPage,
+        crate::sessions::SessionRunsResponse,
+        orch8_types::session::SessionExecutionSummary,
         // Circuit breaker
         orch8_types::circuit_breaker::CircuitBreakerState,
         orch8_types::circuit_breaker::BreakerState,
@@ -1039,6 +1045,7 @@ impl Modify for EmbedSecurity {
         orch8_types::job::JobStatus,
         orch8_types::job::Job,
         orch8_types::job::JobPage,
+        crate::jobs::JobInventoryPage,
         // Triggers
         orch8_types::trigger::TriggerDef,
         orch8_types::trigger::TriggerInventoryEntry,

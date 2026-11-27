@@ -334,6 +334,7 @@ fault_impl! {
         async fn create_session(&self, session: &Session) -> Result<(), StorageError>;
         async fn get_session(&self, id: Uuid) -> Result<Option<Session>, StorageError>;
         async fn get_session_by_key(&self, tenant_id: &TenantId, session_key: &str) -> Result<Option<Session>, StorageError>;
+        async fn list_session_summaries(&self, tenant_id: &TenantId, before: Option<Uuid>, search: Option<&str>, state: Option<orch8_types::session::SessionState>, limit: u32) -> Result<Vec<orch8_types::session::SessionSummary>, StorageError>;
         async fn update_session_data(&self, id: Uuid, data: &serde_json::Value) -> Result<(), StorageError>;
         async fn update_session_state(&self, id: Uuid, state: orch8_types::session::SessionState) -> Result<(), StorageError>;
         async fn list_session_instances(&self, session_id: Uuid) -> Result<Vec<TaskInstance>, StorageError>;

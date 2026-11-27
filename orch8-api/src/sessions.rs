@@ -1,21 +1,25 @@
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use orch8_types::ids::TenantId;
-use orch8_types::session::{Session, SessionState};
+use orch8_types::error::StorageError;
+use orch8_types::ids::{InstanceId, TenantId};
+use orch8_types::instance::InstanceState;
+use orch8_types::session::{
+    Session, SessionExecutionFilter, SessionExecutionSummary, SessionState, SessionSummary,
+};
 
 use crate::AppState;
 use crate::error::ApiError;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/sessions", post(create_session))
+        .route("/sessions", get(list_sessions).post(create_session))
         .route("/sessions/{id}", get(get_session))
         .route(
             "/sessions/by-key/{tenant_id}/{key}",
@@ -24,6 +28,75 @@ pub fn routes() -> Router<AppState> {
         .route("/sessions/{id}/data", patch(update_session_data))
         .route("/sessions/{id}/state", patch(update_session_state))
         .route("/sessions/{id}/instances", get(list_session_instances))
+}
+
+const SESSION_PAGE_SIZE: u16 = 40;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionInventoryQuery {
+    cursor: Option<Uuid>,
+    search: Option<String>,
+    state: Option<SessionState>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SessionInventoryPage {
+    tenant_id: TenantId,
+    cursor: Option<Uuid>,
+    search: Option<String>,
+    state: Option<SessionState>,
+    items: Vec<SessionSummary>,
+    next_cursor: Option<Uuid>,
+}
+
+#[utoipa::path(get, path = "/sessions",
+    params(
+        ("cursor" = Option<Uuid>, Query, description = "Exclusive cursor from the previous page"),
+        ("search" = Option<String>, Query, description = "Literal case-sensitive substring of the session key"),
+        ("state" = Option<SessionState>, Query, description = "Exact stored session state"),
+    ),
+    responses((status = 200, body = SessionInventoryPage), (status = 400, description = "Invalid inventory filters"), (status = 403, description = "Tenant scope required"))
+)]
+async fn list_sessions(
+    State(state): State<AppState>,
+    tenant_ctx: crate::auth::OptionalTenant,
+    Query(query): Query<SessionInventoryQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let tenant = tenant_ctx
+        .ok_or_else(|| ApiError::Forbidden("session inventory requires a tenant scope".into()))?;
+    if query
+        .search
+        .as_ref()
+        .is_some_and(|search| search.is_empty() || search.len() > 512 || search.contains('\0'))
+    {
+        return Err(ApiError::InvalidArgument(
+            "session key search must be 1–512 UTF-8 bytes without NUL".into(),
+        ));
+    }
+    let mut items = state
+        .storage
+        .list_session_summaries(
+            &tenant.tenant_id,
+            query.cursor,
+            query.search.as_deref(),
+            query.state,
+            u32::from(SESSION_PAGE_SIZE) + 1,
+        )
+        .await
+        .map_err(|error| ApiError::from_storage(error, "session inventory"))?;
+    let page_size = usize::from(SESSION_PAGE_SIZE);
+    let has_more = items.len() > page_size;
+    items.truncate(page_size);
+    let next_cursor = items.last().filter(|_| has_more).map(|item| item.id);
+    Ok(Json(SessionInventoryPage {
+        tenant_id: tenant.tenant_id.clone(),
+        cursor: query.cursor,
+        search: query.search,
+        state: query.state,
+        items,
+        next_cursor,
+    }))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -217,16 +290,49 @@ async fn update_session_state(
     Ok(StatusCode::OK)
 }
 
+#[derive(Deserialize)]
+struct SessionRunsQuery {
+    view: Option<String>,
+    cursor: Option<String>,
+    search: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct SessionRunsPage {
+    session_id: Uuid,
+    tenant_id: TenantId,
+    cursor: Option<Uuid>,
+    search: Option<String>,
+    state: Option<InstanceState>,
+    next_cursor: Option<InstanceId>,
+    items: Vec<SessionExecutionSummary>,
+}
+
+#[derive(Serialize, ToSchema)]
+#[serde(untagged)]
+pub(crate) enum SessionRunsResponse {
+    Page(SessionRunsPage),
+    Full(Vec<orch8_types::instance::TaskInstance>),
+}
+
+const SESSION_RUNS_PAGE_SIZE: u16 = 50;
+
 #[utoipa::path(
     get,
     path = "/sessions/{id}/instances",
-    params(("id" = Uuid, Path, description = "Session ID")),
-    responses((status = 200, body = Vec<orch8_types::instance::TaskInstance>))
+    params(("id" = Uuid, Path, description = "Session ID"),
+        ("view" = Option<String>, Query, description = "page returns metadata in descending execution UUID order"),
+        ("cursor" = Option<Uuid>, Query, description = "Exclusive cursor for the page view"),
+        ("search" = Option<String>, Query, description = "ASCII-case-insensitive terms in execution UUID, sequence UUID or namespace"),
+        ("state" = Option<InstanceState>, Query, description = "Exact stored execution state for the page view")),
+    responses((status = 200, body = SessionRunsResponse))
 )]
 async fn list_session_instances(
     State(state): State<AppState>,
     tenant_ctx: crate::auth::OptionalTenant,
     Path(id): Path<Uuid>,
+    Query(query): Query<SessionRunsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = state
         .storage
@@ -235,10 +341,69 @@ async fn list_session_instances(
         .map_err(|e| ApiError::from_storage(e, "session"))?
         .ok_or_else(|| ApiError::NotFound("session not found".into()))?;
     crate::auth::enforce_tenant_access(&tenant_ctx, &session.tenant_id, &format!("session {id}"))?;
+    if query.view.as_deref() == Some("page") {
+        let cursor = query
+            .cursor
+            .as_deref()
+            .map(Uuid::parse_str)
+            .transpose()
+            .map_err(|_| ApiError::InvalidArgument("invalid associated execution cursor".into()))?;
+        let execution_state = query
+            .state
+            .as_deref()
+            .map(str::parse::<InstanceState>)
+            .transpose()
+            .map_err(ApiError::InvalidArgument)?;
+        let mut terms = Vec::new();
+        if let Some(search) = &query.search {
+            if search.len() > 512 || search.contains('\0') {
+                return Err(ApiError::InvalidArgument(
+                    "invalid associated execution search".into(),
+                ));
+            }
+            terms.extend(search.split_ascii_whitespace().map(str::to_ascii_lowercase));
+            if terms.is_empty() || terms.len() > 12 {
+                return Err(ApiError::InvalidArgument(
+                    "use 1–12 associated execution search terms".into(),
+                ));
+            }
+        }
+        let filter = SessionExecutionFilter {
+            tenant_id: &session.tenant_id,
+            session_id: id,
+            before: cursor.map(InstanceId::from_uuid),
+            terms: &terms,
+            state: execution_state,
+            limit: u32::from(SESSION_RUNS_PAGE_SIZE) + 1,
+        };
+        match state
+            .storage
+            .list_session_execution_summaries(&filter)
+            .await
+        {
+            Ok(mut items) => {
+                let page_size = usize::from(SESSION_RUNS_PAGE_SIZE);
+                let has_more = items.len() > page_size;
+                items.truncate(page_size);
+                let next_cursor = items.last().filter(|_| has_more).map(|row| row.id);
+                return Ok(Json(SessionRunsResponse::Page(SessionRunsPage {
+                    session_id: id,
+                    tenant_id: session.tenant_id,
+                    cursor,
+                    search: query.search,
+                    state: execution_state,
+                    next_cursor,
+                    items,
+                })));
+            }
+            Err(StorageError::Unsupported(_)) => {}
+            Err(error) => return Err(ApiError::from_storage(error, "associated executions")),
+        }
+    }
     let instances = state
         .storage
         .list_session_instances(id)
         .await
         .map_err(|e| ApiError::from_storage(e, "session"))?;
-    Ok(Json(instances))
+    Ok(Json(SessionRunsResponse::Full(instances)))
 }

@@ -104,7 +104,7 @@ use orch8_types::worker::{WorkerClaim, WorkerTask, WorkerTaskAttemptEvent};
 pub const CRON_CLAIM_LEASE_SECS: i64 = 300;
 
 /// Latest durable schema migration compiled into this release.
-pub const STORAGE_SCHEMA_VERSION: u32 = 161;
+pub const STORAGE_SCHEMA_VERSION: u32 = 164;
 
 /// Keep interrupted migration uploads bounded per tenant, including encrypted framing.
 const MAX_MIGRATION_STAGING_BYTES: i64 = 512 * 1024 * 1024;
@@ -3248,6 +3248,18 @@ pub trait AdminStore: Send + Sync + 'static {
         session_key: &str,
     ) -> Result<Option<Session>, StorageError>;
 
+    /// List tenant session metadata in descending UUID order, without fetching shared data.
+    async fn list_session_summaries(
+        &self,
+        _tenant_id: &TenantId,
+        _before: Option<Uuid>,
+        _search: Option<&str>,
+        _state: Option<orch8_types::session::SessionState>,
+        _limit: u32,
+    ) -> Result<Vec<orch8_types::session::SessionSummary>, StorageError> {
+        Err(StorageError::Unsupported("session inventory".into()))
+    }
+
     async fn update_session_data(
         &self,
         id: Uuid,
@@ -3265,6 +3277,15 @@ pub trait AdminStore: Send + Sync + 'static {
         &self,
         session_id: Uuid,
     ) -> Result<Vec<TaskInstance>, StorageError>;
+
+    async fn list_session_execution_summaries(
+        &self,
+        _filter: &orch8_types::session::SessionExecutionFilter<'_>,
+    ) -> Result<Vec<orch8_types::session::SessionExecutionSummary>, StorageError> {
+        Err(StorageError::Unsupported(
+            "session execution pagination".into(),
+        ))
+    }
 
     // === Plugins ===
 

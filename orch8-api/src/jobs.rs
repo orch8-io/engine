@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use chrono::Utc;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use orch8_engine::jobs::{JobSpec, NewJob};
@@ -24,7 +24,10 @@ use orch8_types::error::StorageError;
 use orch8_types::filter::InstanceFilter;
 use orch8_types::ids::{InstanceId, Namespace, TenantId};
 use orch8_types::instance::{Priority, TaskInstance};
-use orch8_types::job::{EnqueueJobRequest, JOB_IDEMPOTENCY_PREFIX, Job, JobPage, JobStatus};
+use orch8_types::job::{
+    EnqueueJobRequest, JOB_IDEMPOTENCY_PREFIX, JOB_METADATA_KEY, Job, JobPage, JobStatus,
+    MAX_QUEUE_LEN,
+};
 
 use crate::AppState;
 use crate::error::ApiError;
@@ -204,12 +207,21 @@ pub async fn get_job(
 #[derive(Debug, Deserialize)]
 pub struct ListJobsQuery {
     pub handler: Option<String>,
+    pub queue: Option<String>,
     pub status: Option<String>,
     #[serde(default = "default_list_limit")]
     pub limit: u32,
     pub cursor: Option<String>,
     pub tenant_id: Option<String>,
     pub namespace: Option<String>,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(crate) struct JobInventoryPage {
+    #[serde(flatten)]
+    page: JobPage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_filter: Option<String>,
 }
 
 const fn default_list_limit() -> u32 {
@@ -220,6 +232,7 @@ const fn default_list_limit() -> u32 {
 #[utoipa::path(get, path = "/jobs", tag = "jobs",
     params(
         ("handler" = Option<String>, Query, description = "Only jobs for this handler"),
+        ("queue" = Option<String>, Query, description = "Exact named queue, case and whitespace preserved"),
         ("status" = Option<String>, Query, description = "scheduled | running | completed | failed | cancelled | dead_lettered"),
         ("limit" = Option<u32>, Query, description = "Page size (default 50, max 500)"),
         ("cursor" = Option<String>, Query, description = "Opaque `next_cursor` from the previous page"),
@@ -227,8 +240,8 @@ const fn default_list_limit() -> u32 {
         ("namespace" = Option<String>, Query, description = "Namespace filter"),
     ),
     responses(
-        (status = 200, description = "Page of jobs", body = JobPage),
-        (status = 400, description = "Invalid status or cursor"),
+        (status = 200, description = "Page of jobs with the applied queue when requested", body = JobInventoryPage),
+        (status = 400, description = "Invalid queue, status or cursor"),
     )
 )]
 pub async fn list_jobs(
@@ -274,16 +287,29 @@ pub async fn list_jobs(
         .transpose()?;
     let limit = q.limit.clamp(1, 500);
 
+    if q.queue
+        .as_ref()
+        .is_some_and(|queue| queue.trim().is_empty() || queue.len() > MAX_QUEUE_LEN)
+    {
+        return Err(ApiError::InvalidArgument(
+            "use a nonblank queue of at most 200 bytes".into(),
+        ));
+    }
+    let mut metadata_filter = orch8_engine::jobs::job_metadata_filter(
+        q.handler.as_deref().filter(|h| !h.is_empty()),
+        retries,
+    );
+    if let Some(queue) = &q.queue {
+        metadata_filter[JOB_METADATA_KEY]["queue"] = serde_json::Value::String(queue.clone());
+    }
+
     let filter = InstanceFilter {
         sub_tenant: None,
         tenant_id,
         namespace: q.namespace.filter(|n| !n.is_empty()).map(Namespace::new),
         sequence_id: None,
         states: status.map(JobStatus::instance_states),
-        metadata_filter: Some(orch8_engine::jobs::job_metadata_filter(
-            q.handler.as_deref().filter(|h| !h.is_empty()),
-            retries,
-        )),
+        metadata_filter: Some(metadata_filter),
         priority: None,
     };
 
@@ -300,10 +326,13 @@ pub async fn list_jobs(
         None
     };
     let items = orch8_engine::jobs::load_jobs(state.storage.as_ref(), &instances).await?;
-    Ok(Json(JobPage {
-        items,
-        next_cursor,
-        has_more,
+    Ok(Json(JobInventoryPage {
+        page: JobPage {
+            items,
+            next_cursor,
+            has_more,
+        },
+        queue_filter: q.queue,
     }))
 }
 

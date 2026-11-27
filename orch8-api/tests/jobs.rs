@@ -280,6 +280,89 @@ async fn non_job_instances_are_not_jobs() {
 }
 
 #[tokio::test]
+async fn exact_queue_filters_before_paging_and_confirms_empty_results() {
+    let srv = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let base = srv.v1_url();
+    let queue = " Équipe ops ";
+    let mut matching = Vec::new();
+    for (tenant, handler, job_queue) in [
+        ("t1", "a", Some(queue)),
+        ("t1", "a", Some(queue)),
+        ("t1", "a", Some("équipe ops")),
+        ("t1", "b", Some(queue)),
+        ("t1", "a", None),
+        ("t2", "a", Some(queue)),
+    ] {
+        let (status, job) = post_job(
+            &client,
+            &base,
+            tenant,
+            json!({"handler": handler, "queue": job_queue}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        if tenant == "t1" && handler == "a" && job_queue == Some(queue) {
+            matching.push(job["id"].as_str().unwrap().to_owned());
+        }
+    }
+    let listing = || {
+        client
+            .get(format!("{base}/jobs"))
+            .header("X-Tenant-Id", "t1")
+    };
+    let first: Value = listing()
+        .query(&[("queue", queue), ("handler", "a"), ("limit", "1")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["queue_filter"], queue);
+    assert_eq!(first["has_more"], true);
+    assert_eq!(first["items"][0]["id"], matching[1]);
+    let second: Value = listing()
+        .query(&[
+            ("queue", queue),
+            ("handler", "a"),
+            ("limit", "1"),
+            ("cursor", first["next_cursor"].as_str().unwrap()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(second["queue_filter"], queue);
+    assert_eq!(second["has_more"], false);
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert_eq!(second["items"][0]["id"], matching[0]);
+    let empty: Value = listing()
+        .query(&[("queue", "Unknown")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(empty["queue_filter"], "Unknown");
+    assert_eq!(empty["items"], json!([]));
+    let all: Value = listing().send().await.unwrap().json().await.unwrap();
+    assert!(all.get("queue_filter").is_none());
+    assert_eq!(
+        listing()
+            .query(&[("queue", " ")])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
 async fn list_filters_and_keyset_pagination() {
     let srv = spawn_test_server().await;
     let client = reqwest::Client::new();

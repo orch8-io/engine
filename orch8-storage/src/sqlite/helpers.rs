@@ -100,7 +100,7 @@ pub(super) fn parse_ts_opt(s: Option<String>) -> Result<Option<DateTime<Utc>>, S
     }
 }
 
-fn parse_uuid(s: &str) -> Result<Uuid, StorageError> {
+pub(super) fn parse_uuid(s: &str) -> Result<Uuid, StorageError> {
     Uuid::parse_str(s).map_err(|e| StorageError::Query(format!("invalid UUID '{s}': {e}")))
 }
 
