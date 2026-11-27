@@ -1,0 +1,111 @@
+{
+  "system": "orch8",
+  "system_version": {
+    "images": {
+      "bench-dist-2-postgres-1": "postgres@sha256:ce81150802644ddfac1db4da9e63be6f2a3818aa6ee98a7a28838aeea65dc37a",
+      "bench-dist-2-worker-4-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-executor-1-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794",
+      "bench-dist-2-worker-2-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-worker-1-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-worker-3-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-control-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794"
+    },
+    "sdk": {}
+  },
+  "harness_version": "0.1.0",
+  "git_sha": "d553d5159d1028d00fb45a85f8770c1d9e7e6e98",
+  "scenario": "throughput",
+  "run_index": 2,
+  "workload": {
+    "workflows": 1000,
+    "steps": 3,
+    "activity_ms": 50,
+    "concurrency": 100,
+    "warmup_workflows": 50
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9V45 96-Core Processor",
+    "cores": 2,
+    "memory_bytes": 8317911040,
+    "os": "Linux 7.0.0-1020-azure x64",
+    "docker_version": "28.0.4",
+    "docker_cpus": 2,
+    "docker_memory_bytes": 8317911040
+  },
+  "timings": {
+    "started_at": "2026-11-27T15:16:32.161Z",
+    "ended_at": "2026-11-27T15:21:43.866Z",
+    "total_duration_ms": 311705
+  },
+  "results": {
+    "completed": 976,
+    "failed": 24,
+    "throughput_wf_per_s": 9.45,
+    "latency_ms": {
+      "p50": 1786,
+      "p95": 2756,
+      "p99": 12371,
+      "max": 83380
+    },
+    "latency_source": "server",
+    "errors": [
+      "GET /instances/01a21d94-b1b1-7880-8948-a6c1b9ace611 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21d94-b1d5-7093-b943-cc12bfd830c4 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "benchmark request deadline exceeded (x14)",
+      "instance did not finish before the driver deadline (x14)"
+    ]
+  },
+  "crash_recovery": null,
+  "raw_samples_file": "samples.jsonl",
+  "activity_log_file": "activity.jsonl.all",
+  "topology": {
+    "mode": "compose",
+    "single_host": true,
+    "label": "single-host-executors-1",
+    "executors": 1,
+    "workers": 4,
+    "worker_slots": 100,
+    "engine_build": "ghcr.io/orch8-io/engine:0.7.1",
+    "database": {
+      "host": "runnervm0j63q",
+      "os": "Linux 7.0.0-1020-azure x86_64",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "cores": 2,
+      "memory_bytes": 8317911040,
+      "hw_model": "Virtual Machine",
+      "processes": 1
+    },
+    "control": {
+      "host": "runnervm0j63q",
+      "os": "Linux 7.0.0-1020-azure x86_64",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "cores": 2,
+      "memory_bytes": 8317911040,
+      "hw_model": "Virtual Machine",
+      "processes": 1
+    },
+    "executor_hosts": [
+      {
+        "host": "runnervm0j63q",
+        "os": "Linux 7.0.0-1020-azure x86_64",
+        "cpu": "AMD EPYC 9V45 96-Core Processor",
+        "cores": 2,
+        "memory_bytes": 8317911040,
+        "hw_model": "Virtual Machine",
+        "processes": 1
+      }
+    ],
+    "worker_hosts": [
+      {
+        "host": "runnervm0j63q",
+        "os": "Linux 7.0.0-1020-azure x86_64",
+        "cpu": "AMD EPYC 9V45 96-Core Processor",
+        "cores": 2,
+        "memory_bytes": 8317911040,
+        "hw_model": "Virtual Machine",
+        "processes": 4
+      }
+    ]
+  },
+  "notes": "compose mode: all containers on one Docker host (single-host, not a distributed result)"
+}

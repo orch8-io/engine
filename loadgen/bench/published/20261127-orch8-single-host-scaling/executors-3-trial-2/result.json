@@ -1,0 +1,133 @@
+{
+  "system": "orch8",
+  "system_version": {
+    "images": {
+      "bench-dist-2-worker-4-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-worker-1-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-worker-3-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-executor-3-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794",
+      "bench-dist-2-postgres-1": "postgres@sha256:ce81150802644ddfac1db4da9e63be6f2a3818aa6ee98a7a28838aeea65dc37a",
+      "bench-dist-2-executor-1-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794",
+      "bench-dist-2-worker-2-1": "node@sha256:1314fb30ec37592d5845e5a160d522c0e680972aa534549940b8d73bde88481a",
+      "bench-dist-2-executor-2-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794",
+      "bench-dist-2-control-1": "ghcr.io/orch8-io/engine@sha256:9cdc529a6732a26e071cffd6f97457a25ece8d7a14493b0e1a05b2b4f9cd1794"
+    },
+    "sdk": {}
+  },
+  "harness_version": "0.1.0",
+  "git_sha": "d553d5159d1028d00fb45a85f8770c1d9e7e6e98",
+  "scenario": "throughput",
+  "run_index": 2,
+  "workload": {
+    "workflows": 1000,
+    "steps": 3,
+    "activity_ms": 50,
+    "concurrency": 100,
+    "warmup_workflows": 50
+  },
+  "hardware": {
+    "cpu": "AMD EPYC 9V45 96-Core Processor",
+    "cores": 2,
+    "memory_bytes": 8317911040,
+    "os": "Linux 7.0.0-1020-azure x64",
+    "docker_version": "28.0.4",
+    "docker_cpus": 2,
+    "docker_memory_bytes": 8317911040
+  },
+  "timings": {
+    "started_at": "2026-11-27T15:38:14.382Z",
+    "ended_at": "2026-11-27T15:48:14.724Z",
+    "total_duration_ms": 600342
+  },
+  "results": {
+    "completed": 920,
+    "failed": 80,
+    "throughput_wf_per_s": 7.22,
+    "latency_ms": {
+      "p50": 630,
+      "p95": 20719,
+      "p99": 48538,
+      "max": 71231
+    },
+    "latency_source": "server",
+    "errors": [
+      "GET /instances/01a21dac-d110-7652-ab07-d67417e9d8d8 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d099-7bd3-b2b5-2737d25d074e -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0dd-72f0-aad6-0693f6be42c3 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0c8-79e3-97dd-e7018d0beae5 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d098-7391-8772-09a75db38040 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d09a-7401-9c0b-b5eb4a671bb6 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0a2-7180-a282-75290735f9a7 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x2)",
+      "GET /instances/01a21dac-d0cb-75f2-80fa-c289b55ea96d -> 503 {\"error\":\"unavailable: pool exhausted\"} (x2)",
+      "GET /instances/01a21dac-f8e5-7f02-85b7-0df6c7d69cae -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0d8-7670-94f1-4e23e4b1edeb -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dad-27ff-7662-a5d3-c320cff66cc3 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dad-777b-79f0-8398-2b676f6dc0ce -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0c2-7242-b261-0898622d4516 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d101-7e23-898f-dc89d1fb46b4 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d10b-7cf3-817a-ed4a983457e3 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x3)",
+      "GET /instances/01a21dac-d0e6-7833-b8ca-f9134b72ec4a -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dae-4629-7cb1-b786-163dfcb8316e -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0f7-7360-a86b-bf204c0d9597 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dac-d0cd-70b3-a424-be85b9098eae -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dae-779e-7170-8b94-9ec1a208ea52 -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dad-4775-7ed3-9f6f-da890829fcdd -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "GET /instances/01a21dae-7598-7bb2-a509-34816246db3f -> 503 {\"error\":\"unavailable: pool exhausted\"} (x1)",
+      "benchmark request deadline exceeded (x73)",
+      "instance did not finish before the driver deadline (x73)"
+    ]
+  },
+  "crash_recovery": null,
+  "raw_samples_file": "samples.jsonl",
+  "activity_log_file": "activity.jsonl.all",
+  "topology": {
+    "mode": "compose",
+    "single_host": true,
+    "label": "single-host-executors-3",
+    "executors": 3,
+    "workers": 4,
+    "worker_slots": 100,
+    "engine_build": "ghcr.io/orch8-io/engine:0.7.1",
+    "database": {
+      "host": "runnervm0j63q",
+      "os": "Linux 7.0.0-1020-azure x86_64",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "cores": 2,
+      "memory_bytes": 8317911040,
+      "hw_model": "Virtual Machine",
+      "processes": 1
+    },
+    "control": {
+      "host": "runnervm0j63q",
+      "os": "Linux 7.0.0-1020-azure x86_64",
+      "cpu": "AMD EPYC 9V45 96-Core Processor",
+      "cores": 2,
+      "memory_bytes": 8317911040,
+      "hw_model": "Virtual Machine",
+      "processes": 1
+    },
+    "executor_hosts": [
+      {
+        "host": "runnervm0j63q",
+        "os": "Linux 7.0.0-1020-azure x86_64",
+        "cpu": "AMD EPYC 9V45 96-Core Processor",
+        "cores": 2,
+        "memory_bytes": 8317911040,
+        "hw_model": "Virtual Machine",
+        "processes": 3
+      }
+    ],
+    "worker_hosts": [
+      {
+        "host": "runnervm0j63q",
+        "os": "Linux 7.0.0-1020-azure x86_64",
+        "cpu": "AMD EPYC 9V45 96-Core Processor",
+        "cores": 2,
+        "memory_bytes": 8317911040,
+        "hw_model": "Virtual Machine",
+        "processes": 4
+      }
+    ]
+  },
+  "notes": "compose mode: all containers on one Docker host (single-host, not a distributed result)"
+}
