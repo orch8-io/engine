@@ -810,8 +810,7 @@ async fn staged_migration_checks_ordered_chunks_before_importing_and_isolates_te
         instances: Vec::new(),
     })
     .unwrap();
-    let digest =
-        orch8_types::plugin::WasmArtifactDigest::from_sha256(Sha256::digest(&payload).into());
+    let digest = orch8_types::plugin::WasmArtifactDigest::for_bytes(&payload);
     let path = format!(
         "{}/migrations/uploads/v1/{}",
         target.v1_url(),
