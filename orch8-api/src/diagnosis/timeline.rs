@@ -37,6 +37,8 @@ pub(crate) enum TimelineEvent {
         task_id: Uuid,
         instance_id: InstanceId,
         block_id: String,
+        /// The queue stored on this task after routing, if a queue was named.
+        queue_name: Option<String>,
     },
     WorkerAttempt {
         at: DateTime<Utc>,
@@ -170,6 +172,7 @@ pub(crate) async fn get_timeline(
             task_id: task.id,
             instance_id: task.instance_id,
             block_id: block_id.clone(),
+            queue_name: task.queue_name,
         });
         result.truncated |= attempts.len() == LIMIT as usize;
         result.events.extend(

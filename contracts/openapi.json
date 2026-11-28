@@ -25807,6 +25807,13 @@
                   "task_queued"
                 ]
               },
+              "queue_name": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The queue stored on this task after routing, if a queue was named."
+              },
               "task_id": {
                 "type": "string",
                 "format": "uuid"
