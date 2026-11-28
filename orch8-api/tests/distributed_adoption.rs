@@ -3,6 +3,7 @@
 use chrono::Utc;
 use orch8_storage::{ContinuityStore, InstanceStore, SequenceStore, WorkerStore};
 use orch8_types::continuity::{ContinuityExecution, EffectReceipt, RuntimeCapabilities};
+use orch8_types::ids::BlockId;
 use orch8_types::instance::TaskInstance;
 use orch8_types::queue_routing::QueueRoutingRule;
 use orch8_types::sequence::SequenceDefinition;
@@ -63,6 +64,7 @@ async fn timeline_and_effect_review_are_tenant_scoped_and_redacted() {
         "instance_id": instance.id,
         "block_id": "work",
         "handler_name": "private_compute",
+        "queue_name": "  routed:EU / batch  ",
         "params": { "private": PRIVATE },
         "context": { "private": PRIVATE },
         "attempt": 0,
@@ -72,6 +74,11 @@ async fn timeline_and_effect_review_are_tenant_scoped_and_redacted() {
     }))
     .unwrap();
     server.storage.create_worker_task(&task).await.unwrap();
+    let mut unnamed = task.clone();
+    unnamed.id = Uuid::now_v7();
+    unnamed.block_id = BlockId::new("other");
+    unnamed.queue_name = None;
+    server.storage.create_worker_task(&unnamed).await.unwrap();
     let attempt: WorkerTaskAttemptEvent = serde_json::from_value(json!({
         "id": Uuid::now_v7(),
         "task_id": task.id,
@@ -129,7 +136,17 @@ async fn timeline_and_effect_review_are_tenant_scoped_and_redacted() {
         .map(|event| event["kind"].as_str().unwrap())
         .collect();
     assert!(kinds.contains(&"runtime_owner"));
-    assert!(kinds.contains(&"task_queued"));
+    let queued = |id: Uuid| {
+        let id = id.to_string();
+        trace["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["kind"] == "task_queued" && event["task_id"] == id)
+            .unwrap()
+    };
+    assert_eq!(queued(task.id)["queue_name"], "  routed:EU / batch  ");
+    assert_eq!(queued(unnamed.id).get("queue_name"), Some(&Value::Null));
     assert!(kinds.contains(&"worker_attempt"));
     assert!(!trace.to_string().contains(PRIVATE));
     let foreign = client
